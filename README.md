@@ -11,6 +11,7 @@ Current scope:
   Export refuses to overwrite an existing destination; replace-import requires explicit confirmation.
 - first-class profile controls for identity-file paths, ProxyJump, authentication-method policy, GSSAPI delegation policy, `IdentitiesOnly`, agent/X11 forwarding, compression, connect timeout, keepalive, remote auto-command, and local/remote/dynamic port forwarding;
 - multiple SSH/SFTP terminal tabs, explicit disconnect by closing a tab, and explicit reconnect after a remote/session exit;
+- host-key trust tools that resolve the effective OpenSSH host identity with `ssh -G`, inspect trusted entries with `ssh-keygen -F`, and require explicit confirmation before `ssh-keygen -R` removal;
 - OpenSSH configuration, key material, agent, authentication prompts, host-key database, proxy transport, and forwarding implementation remain owned by OpenSSH.
 
 ## Verification status
@@ -49,7 +50,7 @@ Early artifacts are unsigned prereleases because no code-signing or notarization
 ## Requirements
 
 - a graphical desktop;
-- the system `ssh` command from OpenSSH on `PATH`; interactive SFTP tabs also require the matching `sftp` command on `PATH`;
+- the system `ssh` command from OpenSSH on `PATH`; interactive SFTP tabs also require the matching `sftp` command on `PATH`, and host-key inspection/removal requires `ssh-keygen`;
 - Rust 1.95.0 to match CI (the package uses edition 2024);
 - on Linux, the normal X11/Wayland development packages needed by `eframe`.
 
@@ -70,7 +71,7 @@ inspirum-terminal [--profiles PATH] [--ssh-config PATH]
 
 `--profiles` changes the JSON profile location. `--ssh-config` passes one explicit configuration file to OpenSSH. Otherwise OpenSSH uses its normal configuration and identity discovery. The SFTP button opens an interactive OpenSSH `sftp` tab using the same host-trust, config, identity, ProxyJump and connection-policy inputs; the graphical file browser and transfer queue are not implemented yet.
 
-Keep the pointer over the terminal while typing; this is a current `egui_term` interaction limitation. Verify new host-key fingerprints through an independent trusted channel before accepting them.
+Keep the pointer over the terminal while typing; this is a current `egui_term` interaction limitation. Verify new host-key fingerprints through an independent trusted channel before accepting them. The Host key trust panel can inspect/remove entries from the default user `known_hosts` file or an explicitly selected file; it never auto-accepts a replacement key. If your SSH config uses a custom `UserKnownHostsFile`, select that file explicitly before inspecting or removing entries.
 
 ## Testing
 
