@@ -20,7 +20,10 @@ pub fn check_openssh(program: &Path) -> Result<()> {
     Ok(())
 }
 pub fn check_sftp(program: &Path) -> Result<()> {
-    let output = Command::new(program).arg("-h").output().context(SFTP_HELP)?;
+    let output = Command::new(program)
+        .arg("-h")
+        .output()
+        .context(SFTP_HELP)?;
     let usage = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
