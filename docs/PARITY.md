@@ -39,8 +39,9 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] System OpenSSH process in a native PTY.
 - [x] Host/config alias, username, port, and optional config path.
 - [x] Delegate identity/agent/authentication prompts to OpenSSH (not a claim every method is tested).
-- [ ] Password, encrypted private keys, keyboard-interactive/MFA and agent authentication acceptance tests.
-- [ ] GSSAPI authentication and credential-delegation policy, with explicit platform capability checks.
+- [x] Public-key, password, keyboard-interactive/MFA and `IdentitiesOnly` profile policy controls with Inherit/Enable/Disable semantics. Authentication prompts and secrets remain inside OpenSSH; method-specific acceptance tests are still pending.
+- [x] GSSAPI authentication and credential-delegation profile policy controls with Inherit/Enable/Disable semantics and an explicit delegation risk warning. Runtime support is platform/OpenSSH-build dependent and capability acceptance remains pending.
+- [ ] Password, encrypted-private-key, keyboard-interactive/MFA, agent and GSSAPI authentication acceptance tests across applicable platforms.
 - [ ] ControlMaster/multiplexing workflow and platform limitations.
 - [ ] HTTP and SOCKS proxy workflows and no-direct-fallback verification.
 - [x] Optional per-profile remote command executed by OpenSSH after authentication; it is stored as profile metadata, passed after the SSH destination, and never invoked through a local shell. Remote-command acceptance remains pending.
