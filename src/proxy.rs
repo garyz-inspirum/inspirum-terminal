@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail, ensure};
 use std::{
     io::{self, Read, Write},
     net::{IpAddr, Shutdown, TcpStream, ToSocketAddrs},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -38,7 +38,25 @@ fn authority(host: &str, port: u16) -> String {
     }
 }
 
-fn http_connect(mut stream: TcpStream, target_host: &str, target_port: u16) -> Result<TcpStream> {
+fn read_exact_before(
+    stream: &mut TcpStream,
+    buffer: &mut [u8],
+    deadline: Instant,
+    label: &'static str,
+) -> Result<()> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .context("proxy handshake timed out")?;
+    stream.set_read_timeout(Some(remaining))?;
+    stream.read_exact(buffer).with_context(|| label)
+}
+
+fn http_connect(
+    mut stream: TcpStream,
+    target_host: &str,
+    target_port: u16,
+    deadline: Instant,
+) -> Result<TcpStream> {
     let destination = authority(target_host, target_port);
     write!(
         stream,
@@ -54,9 +72,12 @@ fn http_connect(mut stream: TcpStream, target_host: &str, target_port: u16) -> R
             header.len() < MAX_HTTP_HEADER,
             "HTTP proxy response headers exceeded 16 KiB"
         );
-        stream
-            .read_exact(&mut one)
-            .context("read HTTP CONNECT response")?;
+        read_exact_before(
+            &mut stream,
+            &mut one,
+            deadline,
+            "read HTTP CONNECT response",
+        )?;
         header.push(one[0]);
     }
     let text = std::str::from_utf8(&header).context("HTTP proxy response was not UTF-8")?;
@@ -74,14 +95,22 @@ fn http_connect(mut stream: TcpStream, target_host: &str, target_port: u16) -> R
     Ok(stream)
 }
 
-fn socks5_connect(mut stream: TcpStream, target_host: &str, target_port: u16) -> Result<TcpStream> {
+fn socks5_connect(
+    mut stream: TcpStream,
+    target_host: &str,
+    target_port: u16,
+    deadline: Instant,
+) -> Result<TcpStream> {
     stream
         .write_all(&[0x05, 0x01, 0x00])
         .context("write SOCKS5 greeting")?;
     let mut greeting = [0_u8; 2];
-    stream
-        .read_exact(&mut greeting)
-        .context("read SOCKS5 greeting")?;
+    read_exact_before(
+        &mut stream,
+        &mut greeting,
+        deadline,
+        "read SOCKS5 greeting",
+    )?;
     ensure!(
         greeting == [0x05, 0x00],
         "SOCKS5 proxy does not allow unauthenticated tunnelling"
@@ -114,9 +143,12 @@ fn socks5_connect(mut stream: TcpStream, target_host: &str, target_port: u16) ->
         .context("write SOCKS5 CONNECT request")?;
 
     let mut response = [0_u8; 4];
-    stream
-        .read_exact(&mut response)
-        .context("read SOCKS5 CONNECT response")?;
+    read_exact_before(
+        &mut stream,
+        &mut response,
+        deadline,
+        "read SOCKS5 CONNECT response",
+    )?;
     ensure!(
         response[0] == 0x05 && response[1] == 0x00,
         "SOCKS5 proxy denied the tunnel"
@@ -126,15 +158,23 @@ fn socks5_connect(mut stream: TcpStream, target_host: &str, target_port: u16) ->
         0x04 => 16,
         0x03 => {
             let mut length = [0_u8; 1];
-            stream.read_exact(&mut length)?;
+            read_exact_before(
+                &mut stream,
+                &mut length,
+                deadline,
+                "read SOCKS5 address length",
+            )?;
             usize::from(length[0])
         }
         _ => bail!("SOCKS5 proxy returned an invalid address type"),
     };
     let mut ignored = vec![0_u8; address_len + 2];
-    stream
-        .read_exact(&mut ignored)
-        .context("read SOCKS5 bound address")?;
+    read_exact_before(
+        &mut stream,
+        &mut ignored,
+        deadline,
+        "read SOCKS5 bound address",
+    )?;
     Ok(stream)
 }
 
@@ -150,9 +190,10 @@ pub fn connect_tunnel(
     let stream = connect_tcp(proxy_host, proxy_port)?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     let stream = match kind {
-        ProxyKind::HttpConnect => http_connect(stream, target_host, target_port)?,
-        ProxyKind::Socks5 => socks5_connect(stream, target_host, target_port)?,
+        ProxyKind::HttpConnect => http_connect(stream, target_host, target_port, deadline)?,
+        ProxyKind::Socks5 => socks5_connect(stream, target_host, target_port, deadline)?,
         ProxyKind::None => bail!("proxy helper requires HTTP CONNECT or SOCKS5 mode"),
     };
     stream.set_read_timeout(None)?;
