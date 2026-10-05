@@ -2,7 +2,9 @@
 use egui_term::{BackendCommand, PtyEvent, TerminalBackend};
 use inspirum_terminal::{
     ControlMasterMode, ProxyKind, Session, SshOptions,
-    terminal::{connect, connect_sftp, control_master_operation, launch_args, launch_args_with_proxy_helper},
+    terminal::{
+        connect, connect_sftp, control_master_operation, launch_args, launch_args_with_proxy_helper,
+    },
 };
 use std::{
     fs,
@@ -806,7 +808,6 @@ fn structured_proxy_denial_never_falls_back_to_direct_ssh() {
     println!("PASS proxy denial terminated SSH without direct-transport fallback");
 }
 
-
 #[test]
 #[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
 fn controlmaster_lifecycle_check_and_explicit_close() {
@@ -834,7 +835,11 @@ fn controlmaster_lifecycle_check_and_explicit_close() {
         .unwrap();
     child.stdin.take().unwrap().write_all(b"exit\n").unwrap();
     let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     control_master_operation(&session, Some(&p.join("config")), "check")
         .expect("persisted master should be active");
@@ -846,7 +851,10 @@ fn controlmaster_lifecycle_check_and_explicit_close() {
         if control_master_operation(&session, Some(&p.join("config")), "check").is_err() {
             break;
         }
-        assert!(Instant::now() < deadline, "ControlMaster survived explicit close");
+        assert!(
+            Instant::now() < deadline,
+            "ControlMaster survived explicit close"
+        );
         thread::sleep(Duration::from_millis(50));
     }
 }
