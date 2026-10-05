@@ -71,8 +71,8 @@ impl SshOptions {
                 "ProxyJump and structured HTTP/SOCKS proxy transport are mutually exclusive"
             );
             ensure!(
-                valid_token(&self.proxy_host, true),
-                "proxy host must be a hostname or IPv4/IPv6 address without spaces, username, options or shell syntax"
+                valid_proxy_endpoint(&self.proxy_host),
+                "proxy host must be a hostname or IPv4/IPv6 address without spaces, zone identifiers, options or shell syntax"
             );
             ensure!(
                 self.proxy_port.is_some_and(|port| port > 0),
@@ -237,6 +237,15 @@ fn append_boolean_option(args: &mut Vec<String>, name: &str, value: Option<bool>
 
 fn valid_single_argument(value: &str, max_len: usize) -> bool {
     !value.is_empty() && value.len() <= max_len && !value.chars().any(char::is_control)
+}
+
+fn valid_proxy_endpoint(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && !value.starts_with('-')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-:".contains(&byte))
 }
 
 fn valid_proxy_jump(value: &str) -> bool {
