@@ -572,6 +572,7 @@ pub mod scp;
 pub mod scp_panel;
 pub mod sftp;
 pub mod sftp_browser;
+pub mod support;
 pub mod terminal;
 pub mod tmux;
 
