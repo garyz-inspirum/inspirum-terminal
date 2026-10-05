@@ -63,7 +63,8 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Non-secret JSON profiles with atomic replacement.
 - [x] Saved profile selection and update by profile name.
 - [x] Multiple terminal tabs and explicit close/disconnect.
-- [ ] Delete, duplicate, rename, group, tag, search, and import/export profiles.
+- [x] Search, rename-on-save, editable duplicate, and confirmed delete for saved profiles; operations preserve atomic persistence and do not disconnect already-open tabs.
+- [ ] Group, tag, and import/export profiles.
 - [ ] Split panes and flexible layouts.
 - [ ] Restore selected layouts with opt-in reconnect.
 - [ ] Tab search, tab color, close-right/others, and bulk actions.
