@@ -10,6 +10,7 @@ use crate::{
     terminal,
     terminal_ux::{self, PasteDecision, PastePolicy},
     tmux::{self, TmuxSession},
+    workspace::{self, SplitAxis, SyncInputState, WorkspaceLayout},
 };
 use eframe::egui;
 use egui_term::{BackendCommand, PtyEvent, TerminalBackend, TerminalView};
@@ -72,6 +73,83 @@ fn terminal_screen_text(terminal: &mut TerminalBackend) -> String {
     }
 
     result.trim_end_matches(&[' ', '\n'][..]).to_owned()
+}
+
+fn synchronized_event_bytes(event: &egui::Event) -> Option<Vec<u8>> {
+    match event {
+        egui::Event::Text(text) if !text.is_empty() && !terminal_ux::is_multiline_paste(text) => {
+            Some(text.as_bytes().to_vec())
+        }
+        egui::Event::Paste(text)
+            if terminal_ux::classify_paste(PastePolicy::ConfirmMultiline, text)
+                == PasteDecision::Send =>
+        {
+            Some(text.as_bytes().to_vec())
+        }
+        egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } if !modifiers.command && !modifiers.ctrl => match key {
+            egui::Key::Enter => Some(vec![b'\r']),
+            egui::Key::Tab => Some(vec![b'\t']),
+            egui::Key::Backspace => Some(vec![0x7f]),
+            egui::Key::ArrowUp => Some(b"\x1b[A".to_vec()),
+            egui::Key::ArrowDown => Some(b"\x1b[B".to_vec()),
+            egui::Key::ArrowRight => Some(b"\x1b[C".to_vec()),
+            egui::Key::ArrowLeft => Some(b"\x1b[D".to_vec()),
+            egui::Key::Home => Some(b"\x1b[H".to_vec()),
+            egui::Key::End => Some(b"\x1b[F".to_vec()),
+            egui::Key::Delete => Some(b"\x1b[3~".to_vec()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn render_terminal_tab(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    tab: &mut Tab,
+    terminal_focus: Option<u64>,
+    copy_selected: bool,
+    show_pane_header: bool,
+) -> (Option<(u64, TabKind, Session)>, bool, bool) {
+    let mut reconnect = None;
+    let mut focus = false;
+    let mut close = false;
+
+    if show_pane_header {
+        ui.horizontal(|ui| {
+            ui.strong(&tab.name);
+            if ui.small_button("Close pane").clicked() {
+                close = true;
+            }
+        });
+    }
+    if tab.exited {
+        ui.horizontal(|ui| {
+            ui.strong("Session exited.");
+            if ui.button("Reconnect").clicked() {
+                reconnect = Some((tab.id, tab.kind, tab.session.clone()));
+            }
+        });
+        ui.separator();
+    }
+    let view = TerminalView::new(ui, &mut tab.terminal)
+        .set_focus(terminal_accepts_keyboard(terminal_focus, tab.id, tab.exited));
+    let response = ui.add(view);
+    if copy_selected {
+        let selected = tab.terminal.selectable_content();
+        if !selected.is_empty() {
+            ctx.copy_text(selected);
+        }
+    }
+    if response.clicked() && !tab.exited {
+        focus = true;
+    }
+    (reconnect, focus, close)
 }
 
 fn parse_optional_u16(value: &str, label: &str) -> anyhow::Result<Option<u16>> {
@@ -180,6 +258,13 @@ pub struct App {
     session_log_path: String,
     last_logged_screen: String,
     log_notice: String,
+    workspace_panes: Vec<u64>,
+    workspace_axis: SplitAxis,
+    workspace_path: String,
+    workspace_reconnect_on_restore: bool,
+    workspace_loaded: Option<WorkspaceLayout>,
+    workspace_notice: String,
+    sync_input: SyncInputState,
     next_id: u64,
     tx: Sender<(u64, PtyEvent)>,
     rx: Receiver<(u64, PtyEvent)>,
@@ -247,6 +332,13 @@ impl App {
             session_log_path: String::new(),
             last_logged_screen: String::new(),
             log_notice: String::new(),
+            workspace_panes: Vec::new(),
+            workspace_axis: SplitAxis::Horizontal,
+            workspace_path: String::new(),
+            workspace_reconnect_on_restore: false,
+            workspace_loaded: None,
+            workspace_notice: String::new(),
+            sync_input: SyncInputState::default(),
             next_id: 1,
             tx,
             rx,
