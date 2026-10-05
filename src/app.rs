@@ -1,8 +1,8 @@
 //! Small native connection/profile interface; terminal mechanics stay upstream.
 use crate::{
-    ProxyKind, Session, SessionImportMode, delete_session, duplicate_session_draft, export_sessions,
-    import_sessions, load_sessions, save_session_edit, save_sessions, session_matches_query,
-    terminal,
+    ProxyKind, Session, SessionImportMode, delete_session, duplicate_session_draft,
+    export_sessions, import_sessions, load_sessions, save_session_edit, save_sessions,
+    session_matches_query, terminal,
 };
 use eframe::egui;
 use egui_term::{PtyEvent, TerminalBackend, TerminalView};
