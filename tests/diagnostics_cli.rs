@@ -97,3 +97,15 @@ fn diagnostic_only_options_require_the_diagnostics_flag() {
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("require --diagnostics"));
 }
+
+
+#[test]
+fn support_report_is_deterministic_for_the_same_local_state() {
+    let first = command().arg("--diagnostics").output().unwrap();
+    let second = command().arg("--diagnostics").output().unwrap();
+    assert!(first.status.success() && second.status.success());
+    assert_eq!(first.stdout, second.stdout);
+    let text = String::from_utf8(first.stdout).unwrap();
+    assert!(!text.contains("ENVIRONMENT_SECRET_CANARY"));
+    assert!(text.contains("arbitrary environment variables"));
+}
