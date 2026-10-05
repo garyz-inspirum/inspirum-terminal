@@ -276,6 +276,7 @@ fn ssh_keygen_inspection_and_removal_use_exact_known_hosts_target() {
     };
     let found = inspect_known_host(&target, Some(&known_hosts)).unwrap();
     assert!(found.contains("[example.test]:2222"), "{found}");
+    assert!(found.contains("SHA256:"), "{found}");
 
     let removal = remove_known_host(&target, Some(&known_hosts)).unwrap();
     assert!(
@@ -289,6 +290,22 @@ fn ssh_keygen_inspection_and_removal_use_exact_known_hosts_target() {
             .trim()
             .is_empty()
     );
+}
+
+#[test]
+fn explicit_missing_known_hosts_file_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = HostKeyTarget {
+        hostname: "example.test".into(),
+        port: 22,
+        host_key_alias: None,
+        lookup: "example.test".into(),
+    };
+    let missing = dir.path().join("missing-known-hosts");
+    let error = inspect_known_host(&target, Some(&missing))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("does not exist"), "{error}");
 }
 
 #[test]
