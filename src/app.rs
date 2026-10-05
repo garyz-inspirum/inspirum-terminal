@@ -2213,9 +2213,16 @@ impl App {
             cancel |= ctx.input(|input| input.key_pressed(egui::Key::Escape));
             if confirm {
                 let bytes = text.into_bytes();
-                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id && !tab.exited) {
+                let source_exists = if let Some(tab) =
+                    self.tabs.iter_mut().find(|tab| tab.id == id && !tab.exited)
+                {
                     tab.terminal
                         .process_command(BackendCommand::Write(bytes.clone()));
+                    true
+                } else {
+                    false
+                };
+                if source_exists {
                     for destination in self.sync_input.destinations(id) {
                         if let Some(target) = self
                             .tabs
