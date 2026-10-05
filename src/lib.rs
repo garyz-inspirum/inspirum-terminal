@@ -12,9 +12,12 @@ pub struct SshOptions {
     pub identity_file: String,
     /// OpenSSH ProxyJump route, for example `bastion` or `user@bastion:2222,target-hop`.
     pub proxy_jump: String,
-    pub agent_forwarding: bool,
-    pub x11_forwarding: bool,
-    pub compression: bool,
+    /// None inherits OpenSSH config; Some(true/false) explicitly enables/disables.
+    pub agent_forwarding: Option<bool>,
+    /// None inherits OpenSSH config; Some(true/false) explicitly enables/disables.
+    pub x11_forwarding: Option<bool>,
+    /// None inherits OpenSSH config; Some(true/false) explicitly enables/disables.
+    pub compression: Option<bool>,
     pub connect_timeout_seconds: Option<u16>,
     pub server_alive_interval_seconds: Option<u16>,
     /// OpenSSH -L specifications. Each entry is passed as one argv token.
@@ -61,14 +64,20 @@ impl SshOptions {
         if !self.proxy_jump.is_empty() {
             args.extend(["-J".into(), self.proxy_jump.clone()]);
         }
-        if self.agent_forwarding {
-            args.push("-A".into());
+        match self.agent_forwarding {
+            Some(true) => args.push("-A".into()),
+            Some(false) => args.push("-a".into()),
+            None => {}
         }
-        if self.x11_forwarding {
-            args.push("-X".into());
+        match self.x11_forwarding {
+            Some(true) => args.push("-X".into()),
+            Some(false) => args.push("-x".into()),
+            None => {}
         }
-        if self.compression {
-            args.push("-C".into());
+        match self.compression {
+            Some(true) => args.push("-C".into()),
+            Some(false) => args.extend(["-o".into(), "Compression=no".into()]),
+            None => {}
         }
         if let Some(seconds) = self.connect_timeout_seconds {
             args.extend(["-o".into(), format!("ConnectTimeout={seconds}")]);
