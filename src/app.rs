@@ -98,6 +98,9 @@ pub struct App {
     local_forwards: String,
     remote_forwards: String,
     dynamic_forwards: String,
+    forward_risk_ack: bool,
+    tunnel_process: Option<terminal::TunnelProcess>,
+    tunnel_notice: String,
     known_hosts_path: String,
     host_key_notice: String,
     host_key_remove_confirm: Option<(terminal::HostKeyTarget, Option<PathBuf>)>,
@@ -142,6 +145,9 @@ impl App {
             local_forwards: String::new(),
             remote_forwards: String::new(),
             dynamic_forwards: String::new(),
+            forward_risk_ack: false,
+            tunnel_process: None,
+            tunnel_notice: String::new(),
             known_hosts_path: String::new(),
             host_key_notice: String::new(),
             host_key_remove_confirm: None,
@@ -185,6 +191,8 @@ impl App {
         self.local_forwards = session.ssh.local_forwards.join("\n");
         self.remote_forwards = session.ssh.remote_forwards.join("\n");
         self.dynamic_forwards = session.ssh.dynamic_forwards.join("\n");
+        self.forward_risk_ack = false;
+        self.tunnel_notice.clear();
         self.draft = session;
     }
 
@@ -933,6 +941,78 @@ impl App {
                                 .has_focus()
                             {
                                 self.terminal_focus = None;
+                            }
+
+                            let preview = self.validated_draft().ok();
+                            let exposed = preview
+                                .as_ref()
+                                .is_some_and(crate::session_requires_forward_risk_ack);
+                            if exposed {
+                                ui.checkbox(
+                                    &mut self.forward_risk_ack,
+                                    "I understand one or more listeners bind beyond loopback",
+                                );
+                                ui.small(
+                                    "Non-loopback listeners may expose local or remote services to other hosts. This acknowledgement is required each time the tunnel manager is started.",
+                                );
+                            }
+
+                            ui.horizontal(|ui| {
+                                let running = self
+                                    .tunnel_process
+                                    .as_mut()
+                                    .is_some_and(|process| process.is_running().unwrap_or(false));
+                                if ui
+                                    .add_enabled(!running, egui::Button::new("Start tunnels"))
+                                    .clicked()
+                                {
+                                    let result = self.validated_draft().and_then(|session| {
+                                        anyhow::ensure!(
+                                            !crate::session_requires_forward_risk_ack(&session)
+                                                || self.forward_risk_ack,
+                                            "non-loopback tunnel binds require explicit risk acknowledgement"
+                                        );
+                                        let process = terminal::start_tunnels(
+                                            &session,
+                                            self.config.as_deref(),
+                                        )?;
+                                        let count = session.ssh.local_forwards.len()
+                                            + session.ssh.remote_forwards.len()
+                                            + session.ssh.dynamic_forwards.len();
+                                        self.tunnel_notice = format!(
+                                            "{count} tunnel(s) running in SSH process {}",
+                                            process.id()
+                                        );
+                                        self.tunnel_process = Some(process);
+                                        Ok(())
+                                    });
+                                    self.error =
+                                        result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+                                }
+                                if ui
+                                    .add_enabled(running, egui::Button::new("Stop tunnels"))
+                                    .clicked()
+                                    && let Some(mut process) = self.tunnel_process.take()
+                                {
+                                    match process.stop() {
+                                        Ok(()) => self.tunnel_notice = "Tunnels stopped; listeners closed.".into(),
+                                        Err(error) => self.error = format!("{error:#}"),
+                                    }
+                                }
+                            });
+                            if !self.tunnel_notice.is_empty() {
+                                ui.small(&self.tunnel_notice);
+                            }
+                            if let Some(session) = preview {
+                                for spec in &session.ssh.local_forwards {
+                                    ui.small(format!("Local  {spec}  • {}", if self.tunnel_process.is_some() { "managed" } else { "stopped" }));
+                                }
+                                for spec in &session.ssh.remote_forwards {
+                                    ui.small(format!("Remote {spec}  • {}", if self.tunnel_process.is_some() { "managed" } else { "stopped" }));
+                                }
+                                for spec in &session.ssh.dynamic_forwards {
+                                    ui.small(format!("SOCKS  {spec}  • {}", if self.tunnel_process.is_some() { "managed" } else { "stopped" }));
+                                }
                             }
                         });
 
