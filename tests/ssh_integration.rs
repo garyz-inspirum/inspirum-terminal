@@ -749,6 +749,7 @@ fn structured_proxy_ssh_output(p: &std::path::Path, proxy_port: u16) -> std::pro
             proxy_kind: ProxyKind::HttpConnect,
             proxy_host: "127.0.0.1".into(),
             proxy_port: Some(proxy_port),
+            remote_command: "exit".into(),
             ..SshOptions::default()
         },
         ..Session::default()
