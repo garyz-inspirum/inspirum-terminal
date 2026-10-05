@@ -9,7 +9,7 @@ Current scope:
 - SSH sessions launched as argument vectors through the system OpenSSH client;
 - saved, non-secret connection profiles;
 - first-class profile controls for identity-file paths, ProxyJump, agent/X11 forwarding, compression, connect timeout, keepalive, and local/remote/dynamic port forwarding;
-- multiple terminal tabs and explicit disconnect by closing a tab;
+- multiple terminal tabs, explicit disconnect by closing a tab, and explicit reconnect after a remote/session exit;
 - OpenSSH configuration, key material, agent, authentication prompts, host-key database, proxy transport, and forwarding implementation remain owned by OpenSSH.
 
 ## Verification status
