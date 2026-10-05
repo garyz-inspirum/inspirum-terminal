@@ -1,6 +1,9 @@
 use inspirum_terminal::{
     Session,
-    terminal::{check_openssh, check_sftp, connect, launch_args, sftp_launch_args},
+    terminal::{
+        HostKeyTarget, check_openssh, check_sftp, connect, inspect_known_host, launch_args,
+        parse_host_key_target, remove_known_host, resolve_host_key_target, sftp_launch_args,
+    },
 };
 #[cfg(unix)]
 use std::thread;
@@ -192,6 +195,99 @@ fn sftp_args_reuse_auth_routing_and_connection_policy() {
             "2222",
             "work-alias"
         ]
+    );
+}
+
+#[test]
+fn host_key_target_matches_openssh_known_hosts_identity_rules() {
+    assert_eq!(
+        parse_host_key_target("hostname example.test\nport 22\nhostkeyalias none\n").unwrap(),
+        HostKeyTarget {
+            hostname: "example.test".into(),
+            port: 22,
+            host_key_alias: None,
+            lookup: "example.test".into(),
+        }
+    );
+    assert_eq!(
+        parse_host_key_target("hostname example.test\nport 2222\n").unwrap().lookup,
+        "[example.test]:2222"
+    );
+    assert_eq!(
+        parse_host_key_target("hostname 2001:db8::7\nport 2200\n").unwrap().lookup,
+        "[2001:db8::7]:2200"
+    );
+    let alias =
+        parse_host_key_target("hostname 2001:db8::7\nport 2200\nhostkeyalias pinned-name\n")
+            .unwrap();
+    assert_eq!(alias.host_key_alias.as_deref(), Some("pinned-name"));
+    assert_eq!(alias.lookup, "pinned-name");
+    assert!(parse_host_key_target("port 22\n").is_err());
+    assert!(parse_host_key_target("hostname host\nport 0\n").is_err());
+}
+
+#[test]
+fn ssh_g_resolves_config_alias_for_known_hosts_target_without_connecting() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    std::fs::write(
+        &config,
+        "Host trust-alias\n HostName 2001:db8::9\n Port 2201\n HostKeyAlias pinned-via-config\n",
+    )
+    .unwrap();
+    let session = Session {
+        host: "trust-alias".into(),
+        ..Session::default()
+    };
+    let target = resolve_host_key_target(&session, Some(&config)).unwrap();
+    assert_eq!(target.hostname, "2001:db8::9");
+    assert_eq!(target.port, 2201);
+    assert_eq!(target.host_key_alias.as_deref(), Some("pinned-via-config"));
+    assert_eq!(target.lookup, "pinned-via-config");
+}
+
+#[test]
+fn ssh_keygen_inspection_and_removal_use_exact_known_hosts_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("host-key");
+    let status = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&key)
+        .status()
+        .unwrap();
+    assert!(status.success(), "ssh-keygen test key generation failed");
+
+    let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+    let mut fields = public.split_whitespace();
+    let key_type = fields.next().unwrap();
+    let key_body = fields.next().unwrap();
+    let known_hosts = dir.path().join("known_hosts");
+    std::fs::write(
+        &known_hosts,
+        format!("[example.test]:2222 {key_type} {key_body}\n"),
+    )
+    .unwrap();
+
+    let target = HostKeyTarget {
+        hostname: "example.test".into(),
+        port: 2222,
+        host_key_alias: None,
+        lookup: "[example.test]:2222".into(),
+    };
+    let found = inspect_known_host(&target, Some(&known_hosts)).unwrap();
+    assert!(found.contains("[example.test]:2222"), "{found}");
+
+    let removal = remove_known_host(&target, Some(&known_hosts)).unwrap();
+    assert!(
+        removal.contains("known_hosts") || removal.contains("found"),
+        "{removal}"
+    );
+    assert_eq!(inspect_known_host(&target, Some(&known_hosts)).unwrap(), "");
+    assert!(
+        std::fs::read_to_string(&known_hosts)
+            .unwrap()
+            .trim()
+            .is_empty()
     );
 }
 
