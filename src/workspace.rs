@@ -2,12 +2,7 @@
 use crate::Session;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeSet,
-    fs,
-    io::Read,
-    path::Path,
-};
+use std::{collections::BTreeSet, fs, io::Read, path::Path};
 
 const MAX_WORKSPACE_BYTES: usize = 1_048_576;
 pub const MAX_WORKSPACE_PANES: usize = 2;
