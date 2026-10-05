@@ -5,8 +5,11 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
 };
 use tempfile::TempPath;
+
+static UPLOAD_ID: AtomicU64 = AtomicU64::new(1);
 
 const SCP_HELP: &str = "OpenSSH scp client unavailable. Install OpenSSH Client and ensure scp is on PATH, then restart Inspirum.";
 
@@ -114,14 +117,6 @@ fn common_args_with_proxy_helper(
     Ok(args)
 }
 
-fn common_args(session: &Session, config: Option<&Path>) -> Result<Vec<String>> {
-    if session.ssh.proxy_kind == ProxyKind::None {
-        return common_args_with_proxy_helper(session, config, Path::new(""));
-    }
-    let helper = std::env::current_exe().context("locate Inspirum proxy helper executable")?;
-    common_args_with_proxy_helper(session, config, &helper)
-}
-
 fn remote_spec(session: &Session, path: &str) -> Result<String> {
     let path = remote_path(path)?;
     let host = if session.host.contains(':') {
@@ -178,6 +173,10 @@ pub struct Transfer {
     destination: Option<PathBuf>,
     overwrite: bool,
     total: u64,
+    session: Session,
+    config: Option<PathBuf>,
+    remote_staging: Option<String>,
+    remote_destination: Option<String>,
 }
 
 impl Transfer {
@@ -207,6 +206,14 @@ impl Transfer {
         }
         let _ = self.child.wait();
         self.staging.take();
+        if let Some(staging) = self.remote_staging.take() {
+            let _ = sftp::delete_remote(
+                &self.session,
+                self.config.as_deref(),
+                &staging,
+                false,
+            );
+        }
         Ok(())
     }
 
@@ -219,31 +226,88 @@ impl Transfer {
             std::io::Read::read_to_end(&mut pipe, &mut stderr)?;
         }
         ensure_success(status, &stderr)?;
-        if self.direction == Direction::Download {
-            let staging = self
-                .staging
-                .take()
-                .context("SCP download staging file is missing")?;
-            let actual = fs::metadata(&staging)?.len();
-            ensure!(
-                actual == self.total,
-                "SCP download size verification failed: expected {} bytes, received {actual}",
-                self.total
-            );
-            let destination = self
-                .destination
-                .as_ref()
-                .context("SCP download destination is missing")?;
-            if self.overwrite {
-                staging
-                    .persist(destination)
-                    .map_err(|error| error.error)
-                    .context("commit completed SCP download")?;
-            } else {
-                staging
-                    .persist_noclobber(destination)
-                    .map_err(|error| error.error)
-                    .context("commit completed SCP download without overwriting destination")?;
+        match self.direction {
+            Direction::Download => {
+                let staging = self
+                    .staging
+                    .take()
+                    .context("SCP download staging file is missing")?;
+                let actual = fs::metadata(&staging)?.len();
+                ensure!(
+                    actual == self.total,
+                    "SCP download size verification failed: expected {} bytes, received {actual}",
+                    self.total
+                );
+                let destination = self
+                    .destination
+                    .as_ref()
+                    .context("SCP download destination is missing")?;
+                if self.overwrite {
+                    staging
+                        .persist(destination)
+                        .map_err(|error| error.error)
+                        .context("commit completed SCP download")?;
+                } else {
+                    staging
+                        .persist_noclobber(destination)
+                        .map_err(|error| error.error)
+                        .context("commit completed SCP download without overwriting destination")?;
+                }
+            }
+            Direction::Upload => {
+                let staging = self
+                    .remote_staging
+                    .take()
+                    .context("SCP remote staging path is missing")?;
+                let destination = self
+                    .remote_destination
+                    .as_ref()
+                    .context("SCP remote destination is missing")?;
+                let actual = sftp::remote_size(&self.session, self.config.as_deref(), &staging)?;
+                if actual != self.total {
+                    let _ = sftp::delete_remote(
+                        &self.session,
+                        self.config.as_deref(),
+                        &staging,
+                        false,
+                    );
+                    anyhow::bail!(
+                        "SCP upload size verification failed: expected {} bytes, found {actual}",
+                        self.total
+                    );
+                }
+                if !self.overwrite {
+                    let parent = destination.rsplit_once('/').map(|(p, _)| p).unwrap_or(".");
+                    let name = destination.rsplit('/').next().unwrap_or(destination);
+                    if sftp::list_remote(&self.session, self.config.as_deref(), parent)?
+                        .iter()
+                        .any(|entry| entry.name == name)
+                    {
+                        let _ = sftp::delete_remote(
+                            &self.session,
+                            self.config.as_deref(),
+                            &staging,
+                            false,
+                        );
+                        anyhow::bail!(
+                            "remote destination appeared during transfer; explicit overwrite is required"
+                        );
+                    }
+                }
+                if let Err(error) = sftp::rename_remote(
+                    &self.session,
+                    self.config.as_deref(),
+                    &staging,
+                    destination,
+                ) {
+                    let _ = sftp::delete_remote(
+                        &self.session,
+                        self.config.as_deref(),
+                        &staging,
+                        false,
+                    );
+                    return Err(error).context("commit verified SCP upload");
+                }
             }
         }
         Ok(Some(()))
@@ -257,6 +321,14 @@ impl Drop for Transfer {
             let _ = self.child.wait();
         }
         self.staging.take();
+        if let Some(staging) = self.remote_staging.take() {
+            let _ = sftp::delete_remote(
+                &self.session,
+                self.config.as_deref(),
+                &staging,
+                false,
+            );
+        }
     }
 }
 
@@ -287,6 +359,7 @@ pub fn start_upload(
     remote: &str,
     overwrite: bool,
 ) -> Result<Transfer> {
+    remote_path(remote)?;
     if !overwrite {
         let parent = remote.rsplit_once('/').map(|(p, _)| p).unwrap_or(".");
         let name = remote.rsplit('/').next().unwrap_or(remote);
@@ -298,12 +371,14 @@ pub fn start_upload(
         }
     }
     let total = fs::metadata(local)?.len();
+    let suffix = UPLOAD_ID.fetch_add(1, Ordering::Relaxed);
+    let staging = format!("{remote}.inspirum-scp-{}-{suffix}", std::process::id());
     let helper = if session.ssh.proxy_kind == ProxyKind::None {
         PathBuf::new()
     } else {
         std::env::current_exe().context("locate Inspirum proxy helper executable")?
     };
-    let args = upload_args_with_proxy_helper(session, config, &helper, local, remote)?;
+    let args = upload_args_with_proxy_helper(session, config, &helper, local, &staging)?;
     Ok(Transfer {
         child: spawn(args)?,
         direction: Direction::Upload,
@@ -311,6 +386,10 @@ pub fn start_upload(
         destination: None,
         overwrite,
         total,
+        session: session.clone(),
+        config: config.map(Path::to_owned),
+        remote_staging: Some(staging),
+        remote_destination: Some(remote.to_owned()),
     })
 }
 
@@ -345,6 +424,10 @@ pub fn start_download(
         destination: Some(local.to_owned()),
         overwrite,
         total,
+        session: session.clone(),
+        config: config.map(Path::to_owned),
+        remote_staging: None,
+        remote_destination: None,
     })
 }
 
