@@ -1,0 +1,204 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing vMAJOR.MINOR.PATCH tag to release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Check out requested tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      - name: Validate tag and package version
+        id: release
+        shell: bash
+        env:
+          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="$REQUESTED_TAG"
+          [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo "tag must be exactly vMAJOR.MINOR.PATCH: $tag" >&2
+            exit 1
+          }
+          version="${tag#v}"
+          manifest_version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          test "$version" = "$manifest_version" || {
+            echo "tag $tag does not match Cargo.toml version $manifest_version" >&2
+            exit 1
+          }
+          git show-ref --verify --quiet "refs/tags/$tag" || {
+            echo "tag does not exist in the repository: $tag" >&2
+            exit 1
+          }
+          test "$(git rev-list -n 1 "$tag")" = "$(git rev-parse HEAD)" || {
+            echo "checked-out commit is not the tagged commit" >&2
+            exit 1
+          }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: validate
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - os: macos-15
+            target: aarch64-apple-darwin
+            archive: tar
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.tag }}
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+        with:
+          toolchain: 1.95.0
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - name: Assert native architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(rustc -vV | sed -n 's/^host: //p')"
+          test "$actual" = "${{ matrix.target }}" || {
+            echo "expected native host ${{ matrix.target }}, got $actual" >&2
+            exit 1
+          }
+      - name: Quality gates
+        run: |
+          cargo fmt --all -- --check
+          cargo check --locked --target ${{ matrix.target }}
+          cargo clippy --locked --target ${{ matrix.target }} --all-targets -- -D warnings
+          cargo test --locked --target ${{ matrix.target }}
+        shell: bash
+      - name: Test workflow helper scripts
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: python3 -B -m unittest discover -s scripts/tests -p 'test_*.py'
+      - name: Install isolated SSH test prerequisites
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes openssh-server
+          sudo mkdir -p /run/sshd
+      - name: Run isolated SSH integration test
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: scripts/test-ssh-integration.sh
+        shell: bash
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Collect target dependency notices
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          python3 scripts/collect-third-party-notices.py \
+            --target "$TARGET" \
+            --output "dist/notices/$TARGET/THIRD_PARTY_NOTICES"
+      - name: Package Unix archive
+        if: matrix.archive == 'tar'
+        shell: bash
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          name="inspirum-terminal-${TAG}-${TARGET}"
+          mkdir -p "dist/$name"
+          cp "target/$TARGET/release/inspirum-terminal" LICENSE README.md "dist/$name/"
+          cp -R "dist/notices/$TARGET/THIRD_PARTY_NOTICES" "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          rm -rf "dist/$name"
+      - name: Package Windows archive
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = "inspirum-terminal-$env:TAG-$env:TARGET"
+          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
+          Copy-Item "target/$env:TARGET/release/inspirum-terminal.exe", LICENSE, README.md "dist/$name/"
+          Copy-Item -Recurse "dist/notices/$env:TARGET/THIRD_PARTY_NOTICES" "dist/$name/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+          Remove-Item -Recurse -Force "dist/$name"
+      - name: Upload packaged binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/inspirum-terminal-*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Create SHA-256 manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          mapfile -t files < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -printf '%f\n' | LC_ALL=C sort)
+          test "${#files[@]}" -eq 3 || {
+            echo "expected 3 release archives, found ${#files[@]}" >&2
+            exit 1
+          }
+          sha256sum "${files[@]}" > SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - name: Publish unsigned prerelease
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          tag_name: ${{ needs.validate.outputs.tag }}
+          prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: true
+          body: |
+            Early unsigned prerelease. These binaries are not code-signed or notarized.
+
+            Linux unit/headless PTY coverage exists. Check the release notes and README for current native-platform validation status. Verify archive hashes against SHA256SUMS.
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS

@@ -1,0 +1,121 @@
+# SSH-first roadmap
+
+This checklist is a roadmap for the current early SSH terminal. It is not a WindTerm parity claim, and it is not a claim of full WindTerm parity. A checked item means only the limited statement in that item. Unchecked items are planned, blocked, or not yet run. SSH and terminal correctness come before additional protocols. The project remains Apache-2.0.
+
+Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, blocked, or not yet run.
+
+## Evidence recorded with this docs snapshot
+
+- [x] Source review of the implementation passed.
+- [x] Linux: 17 normal Rust tests and 3 ignored fixture tests verified by a worker. The Windows-only PTY child-argument test is outside those 17 and has not been executed.
+- [x] Collector: 11 tests parent-verified.
+- [x] License closure for Linux and Windows passed worker evidence.
+- [x] CI and release workflows pin Rust 1.95.0. Their gates are unchanged by this documentation.
+- [ ] Windows native execution. Not yet run.
+- [ ] macOS native execution. Not yet run.
+- [ ] macOS distribution. The active `dispatch 0.2.0` notice still blocks distribution, not compilation. The defined macOS artifact is a bare unsigned, unnotarized executable, not an app bundle.
+- [ ] Full WindTerm parity. Not claimed.
+
+
+## Foundation and release engineering
+
+- [x] Native Rust/egui application shell.
+- [x] Apache-2.0 repository license metadata and license text.
+- [x] Locked dependency graph.
+- [x] CI definitions for Linux x64, Windows x64, and macOS Apple Silicon, pinned to Rust 1.95.0. Definitions are not successful runs.
+- [x] Release workflow definition for archives, README, full Apache-2.0 license, notices, and SHA-256 manifest. The macOS path packages a bare executable, not an app bundle.
+- [ ] Successful native CI and release runs, downloaded artifact verification.
+- [ ] Native Windows x64 execution. Not yet run.
+- [ ] Native macOS Apple Silicon execution. Not yet run.
+- [ ] macOS distribution while the `dispatch 0.2.0` notice remains unresolved. Compilation is not blocked.
+- [ ] Code signing, Windows reputation, macOS signing, and notarization.
+- [ ] Installer packages and automated update policy.
+- [ ] Accessibility and localization audits.
+
+## SSH connection core
+
+- [x] System OpenSSH process in a native PTY.
+- [x] Host/config alias, username, port, and optional config path.
+- [x] Delegate identity/agent/authentication prompts to OpenSSH (not a claim every method is tested).
+- [ ] Password, encrypted private keys, keyboard-interactive/MFA and agent authentication acceptance tests.
+- [ ] GSSAPI authentication and credential-delegation policy, with explicit platform capability checks.
+- [ ] ControlMaster/multiplexing workflow and platform limitations.
+- [ ] HTTP and SOCKS proxy workflows and no-direct-fallback verification.
+- [ ] SSH auto-execution after authentication, with explicit user opt-in.
+- [ ] Tmux-aware integration (SSH-first scope; ordinary tmux inside a terminal is not equivalent).
+- [x] Ask-before-trusting and already-trusted-only host-key modes.
+- [x] Separate argv construction without a shell.
+- [x] Disposable Linux sshd fixture: 3 ignored tests verified for public-key session I/O, resize, changed-host-key rejection, exit, and disconnect cleanup. Not password, MFA, or Windows/macOS acceptance.
+- [ ] Friendly editor for identity files and common OpenSSH options.
+- [ ] ProxyJump and ProxyCommand UI with safe preview (OpenSSH config may already provide these; app UI is absent).
+- [ ] Local, remote, and dynamic forwarding UI and lifecycle controls.
+- [ ] Agent forwarding and X11 forwarding UI with risk explanations.
+- [ ] Connection timeout, keepalive, compression, and cipher policy UI.
+- [ ] Reconnect behavior with explicit user control.
+- [ ] Connection diagnostics and sanitized support bundle.
+- [ ] Native Windows and macOS OpenSSH/PTY integration tests.
+
+## Sessions and workspace
+
+- [x] Non-secret JSON profiles with atomic replacement.
+- [x] Saved profile selection and update by profile name.
+- [x] Multiple terminal tabs and explicit close/disconnect.
+- [ ] Delete, duplicate, rename, group, tag, search, and import/export profiles.
+- [ ] Split panes and flexible layouts.
+- [ ] Restore selected layouts with opt-in reconnect.
+- [ ] Tab search, tab color, close-right/others, and bulk actions.
+- [ ] Sync input with prominent target and safety controls.
+- [ ] Startup session selection.
+
+## Terminal experience
+
+- [x] `egui_term` terminal rendering backed by the Alacritty parser.
+- [x] PTY resize propagation exercised on Linux by the fixture. Not Windows or macOS execution.
+- [ ] Cross-platform keyboard/IME audit.
+- [ ] Selection, copy, paste, and safe paste confirmation policy.
+- [ ] Search, marks, timestamps, folding, and outlining.
+- [ ] Configurable fonts, colors, themes, opacity, and cursor.
+- [ ] Mouse protocol and alternate-screen compatibility matrix.
+- [ ] Unicode, emoji, wide-character, combining-character, and bidi test matrix.
+- [ ] VT/xterm compatibility suite and published results.
+- [ ] Performance and memory benchmarks with reproducible workloads.
+- [ ] Session logging with secret/redaction policy.
+- [ ] Command palette, command sender, and quick bar.
+- [ ] Local/remote editing modes, completion, and snippets.
+
+## Files and remote workflows
+
+- [ ] Integrated SFTP browser and transfers.
+- [ ] SCP operations.
+- [ ] Local file browser and drag/drop policy.
+- [ ] Transfer queue, progress, resume, conflict handling, and integrity checks.
+- [ ] Remote editor workflow with safe temporary-file handling.
+
+## Additional protocols — only after SSH quality gates
+
+- [ ] Local shell profiles.
+- [ ] Telnet.
+- [ ] Raw TCP.
+- [ ] Serial.
+- [ ] ZModem/XModem/YModem transfer compatibility.
+
+## Additional WindTerm-class UI roadmap
+
+Unchecked items below are not implemented and are not a WindTerm parity claim.
+
+- [ ] Free-type and focus modes; local/remote vim-style keyboard modes.
+- [ ] Explorer/shell panes, enhanced paste dialog, screen lock.
+- [ ] Delimiter highlighting, configurable syntax/color schemes and online text search.
+- [ ] Select-to-copy and configurable middle/right-click paste.
+- [ ] Hide pointer while typing, layout persistence and session restoration.
+- [ ] Complete advertised WindTerm feature inventory reconciled against the [source README](https://github.com/garyz-inspirum/WindTerm/blob/master/README.md); any proposed exclusion requires an explicit scope decision.
+
+## Quality gates before calling a feature supported
+
+- [ ] User-visible behavior documented in the same change.
+- [ ] Automated tests cover policy and failure paths.
+- [ ] Native runtime validation on every claimed platform.
+- [ ] Security boundaries and stored data documented.
+- [ ] Resource cleanup verified for success, failure, cancel, and window close.
+- [ ] Accessibility and keyboard-only behavior reviewed.
+- [ ] No unsupported feature is implied by marketing or release notes.
