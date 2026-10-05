@@ -125,12 +125,7 @@ pub fn mkdir_remote(session: &Session, config: Option<&Path>, path: &str) -> Res
     Ok(())
 }
 
-pub fn rename_remote(
-    session: &Session,
-    config: Option<&Path>,
-    from: &str,
-    to: &str,
-) -> Result<()> {
+pub fn rename_remote(session: &Session, config: Option<&Path>, from: &str, to: &str) -> Result<()> {
     run_batch(
         session,
         config,
@@ -209,7 +204,10 @@ impl Transfer {
     fn finalize_success(&mut self) -> Result<()> {
         match self.kind {
             TransferKind::Download => {
-                let staging = self.staging.take().context("download staging file is missing")?;
+                let staging = self
+                    .staging
+                    .take()
+                    .context("download staging file is missing")?;
                 let actual = fs::metadata(&staging)?.len();
                 if let Some(expected) = self.expected_size {
                     ensure!(
@@ -232,7 +230,9 @@ impl Transfer {
                     .context("commit verified downloaded file")?;
             }
             TransferKind::Upload => {
-                let expected = self.expected_size.context("upload source size is missing")?;
+                let expected = self
+                    .expected_size
+                    .context("upload source size is missing")?;
                 let actual = remote_size(&self.session, self.config.as_deref(), &self.remote)?;
                 ensure!(
                     actual == expected,
