@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 # Respect standard Cargo overrides; keep generated credentials outside the checkout.
 export TERM=xterm-256color
 python3 - <<'PY'
-import getpass, os, pathlib, shutil, socket, subprocess, tempfile, time
+import atexit, getpass, os, pathlib, shutil, socket, subprocess, tempfile, time
 default_tmp = str(pathlib.Path(os.environ['CARGO_TARGET_DIR']).resolve().parent) if os.environ.get('CARGO_TARGET_DIR') else tempfile.gettempdir()
 root=pathlib.Path(os.environ.get('INSPIRUM_TEST_TMPDIR', default_tmp))
 root.mkdir(parents=True, exist_ok=True)
@@ -19,7 +19,16 @@ with tempfile.TemporaryDirectory(prefix='ssh-fixture-',dir=root) as tmp:
  fixture_password='inspirum-fixture-password'
  privileged_auth=(shutil.which('sudo') is not None and subprocess.run(['sudo','-n','true'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0)
  created_users=[]
- auth_servers=[]
+ def cleanup_users():
+  for user in reversed(created_users):
+   subprocess.run(
+    ['sudo','-n','userdel','-f',user],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    check=False,
+   )
+  created_users.clear()
+ atexit.register(cleanup_users)
  for key in ('host','client','wrong-host','wrong-client'):
   subprocess.run(['ssh-keygen','-q','-t','ed25519','-N','','-f',str(d/key)],check=True)
  subprocess.run(
@@ -309,20 +318,27 @@ Host *
     if time.monotonic()>deadline: raise
     time.sleep(.05)
  with (d/'sshd.log').open('w+') as log, (d/'jump_sshd.log').open('w+') as jump_log, (d/'sftp_sshd.log').open('w+') as sftp_log, (d/'password_sshd.log').open('w+') as password_log, (d/'mfa_sshd.log').open('w+') as mfa_log:
-  server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'sshd_config')],stdout=log,stderr=log)
-  jump_server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'jump_sshd_config')],stdout=jump_log,stderr=jump_log)
-  sftp_server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'sftp_sshd_config')],stdout=sftp_log,stderr=sftp_log)
-  if privileged_auth:
-   password_server=subprocess.Popen(['sudo','-n',sshd,'-D','-e','-f',str(d/'password_sshd_config')],stdout=password_log,stderr=password_log)
-   mfa_server=subprocess.Popen(['sudo','-n',sshd,'-D','-e','-f',str(d/'mfa_sshd_config')],stdout=mfa_log,stderr=mfa_log)
-   auth_servers.extend([password_server,mfa_server])
-  agent_sock=d/'agent.sock'
-  agent=subprocess.Popen(
-   ['ssh-agent','-D','-a',str(agent_sock)],
-   stdout=subprocess.DEVNULL,
-   stderr=subprocess.DEVNULL,
-  )
+  processes=[]
+  server=jump_server=sftp_server=password_server=mfa_server=agent=None
   try:
+   server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'sshd_config')],stdout=log,stderr=log)
+   processes.append(server)
+   jump_server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'jump_sshd_config')],stdout=jump_log,stderr=jump_log)
+   processes.append(jump_server)
+   sftp_server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'sftp_sshd_config')],stdout=sftp_log,stderr=sftp_log)
+   processes.append(sftp_server)
+   if privileged_auth:
+    password_server=subprocess.Popen(['sudo','-n',sshd,'-D','-e','-f',str(d/'password_sshd_config')],stdout=password_log,stderr=password_log)
+    processes.append(password_server)
+    mfa_server=subprocess.Popen(['sudo','-n',sshd,'-D','-e','-f',str(d/'mfa_sshd_config')],stdout=mfa_log,stderr=mfa_log)
+    processes.append(mfa_server)
+   agent_sock=d/'agent.sock'
+   agent=subprocess.Popen(
+    ['ssh-agent','-D','-a',str(agent_sock)],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+   )
+   processes.append(agent)
    wait_ready(server,port,'target')
    wait_ready(jump_server,jump_port,'jump')
    wait_ready(sftp_server,sftp_port,'sftp')
@@ -355,13 +371,13 @@ Host *
    print(f'Isolated target sshd: 127.0.0.1:{port}; jump sshd: 127.0.0.1:{jump_port}; sftp sshd: 127.0.0.1:{sftp_port}{auth_summary}; credentials removed on exit',flush=True)
    subprocess.run(cmd,env=env,check=True)
   finally:
-   for process in (server,jump_server,sftp_server,*auth_servers,agent):
-    process.terminate()
-   for process in (server,jump_server,sftp_server,*auth_servers,agent):
+   for process in reversed(processes):
+    if process.poll() is None:
+     process.terminate()
+   for process in reversed(processes):
     try: process.wait(timeout=5)
     except subprocess.TimeoutExpired: process.kill();process.wait()
-   for user in reversed(created_users):
-    subprocess.run(['sudo','-n','userdel','-f',user],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
+   cleanup_users()
    log.seek(0);print('--- disposable target sshd log ---\n'+log.read(),flush=True)
    jump_log.seek(0);print('--- disposable jump sshd log ---\n'+jump_log.read(),flush=True)
    sftp_log.seek(0);print('--- disposable sftp sshd log ---\n'+sftp_log.read(),flush=True)
