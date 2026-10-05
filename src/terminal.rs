@@ -241,6 +241,24 @@ pub fn sftp_launch_args(session: &Session, config: Option<&Path>) -> Result<Vec<
     if !session.ssh.proxy_jump.is_empty() {
         args.extend(["-J".into(), session.ssh.proxy_jump.clone()]);
     }
+    // Authentication policy is not agent forwarding. SFTP must honor method restrictions
+    // and delegation decisions even though terminal-only features are intentionally absent.
+    for (name, value) in [
+        ("PubkeyAuthentication", session.ssh.public_key_auth),
+        ("PasswordAuthentication", session.ssh.password_auth),
+        (
+            "KbdInteractiveAuthentication",
+            session.ssh.keyboard_interactive_auth,
+        ),
+        ("GSSAPIAuthentication", session.ssh.gssapi_auth),
+        (
+            "GSSAPIDelegateCredentials",
+            session.ssh.gssapi_delegate_credentials,
+        ),
+        ("IdentitiesOnly", session.ssh.identities_only),
+    ] {
+        crate::append_boolean_option(&mut args, name, value);
+    }
     match session.ssh.compression {
         Some(true) => args.push("-C".into()),
         Some(false) => args.extend(["-o".into(), "Compression=no".into()]),
@@ -258,7 +276,13 @@ pub fn sftp_launch_args(session: &Session, config: Option<&Path>) -> Result<Vec<
     if let Some(port) = session.port {
         args.extend(["-P".into(), port.to_string()]);
     }
-    args.push(session.host.clone());
+    // sftp parses host:path, unlike ssh. Brackets keep an IPv6 literal (and optional
+    // zone identifier) a host instead of accidentally requesting an automatic download.
+    args.push(if session.host.contains(':') {
+        format!("[{}]", session.host)
+    } else {
+        session.host.clone()
+    });
     Ok(args)
 }
 
