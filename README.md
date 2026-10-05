@@ -9,7 +9,7 @@ Current scope:
 - SSH sessions and interactive SFTP tabs launched as argument vectors through the system OpenSSH client tools;
 - saved, non-secret connection profiles with search, rename-on-save, editable duplication, confirmed deletion, and validated JSON import/export;
   Export refuses to overwrite an existing destination; replace-import requires explicit confirmation.
-- first-class profile controls for identity-file paths, ProxyJump, structured HTTP CONNECT/SOCKS5 proxy routing, authentication-method policy, GSSAPI delegation policy, `IdentitiesOnly`, agent/X11 forwarding, compression, connect timeout, keepalive, remote auto-command, and local/remote/dynamic port forwarding;
+- first-class profile controls for identity-file paths, ProxyJump, structured HTTP CONNECT/SOCKS5 proxy routing, app-managed OpenSSH ControlMaster multiplexing/lifecycle, authentication-method policy, GSSAPI delegation policy, `IdentitiesOnly`, agent/X11 forwarding, compression, connect timeout, keepalive, remote auto-command, and local/remote/dynamic port forwarding;
 - multiple SSH/SFTP terminal tabs, explicit disconnect by closing a tab, and explicit reconnect after a remote/session exit;
 - host-key trust tools that resolve the effective OpenSSH host identity with `ssh -G`, inspect trusted entries with `ssh-keygen -F`, and require explicit confirmation before `ssh-keygen -R` removal;
 - local-only `--diagnostics` reports with an allowlisted policy summary and no-clobber text export; no graphical desktop or server connection is required for this command;
@@ -125,3 +125,5 @@ Verify downloads with the platform's SHA-256 tooling before running them. Checks
 ## Contributing and license
 
 See `CONTRIBUTING.md`. Inspirum Terminal's own source is licensed under the Apache License 2.0; the full terms are in `LICENSE`. Third-party dependencies remain under their respective licenses and are not relicensed by the project. Release archives include their collected license and notice material in `THIRD_PARTY_NOTICES/`.
+
+- [SSH connection multiplexing](docs/controlmaster.md)

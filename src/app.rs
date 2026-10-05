@@ -1,8 +1,8 @@
 //! Small native connection/profile interface; terminal mechanics stay upstream.
 use crate::{
-    ProxyKind, Session, SessionImportMode, delete_session, duplicate_session_draft,
-    export_sessions, import_sessions, load_sessions, save_session_edit, save_sessions,
-    session_matches_query, terminal,
+    ControlMasterMode, ProxyKind, Session, SessionImportMode, delete_session,
+    duplicate_session_draft, export_sessions, import_sessions, load_sessions, save_session_edit,
+    save_sessions, session_matches_query, terminal,
 };
 use eframe::egui;
 use egui_term::{PtyEvent, TerminalBackend, TerminalView};
@@ -91,6 +91,8 @@ pub struct App {
     draft: Session,
     port: String,
     proxy_port: String,
+    control_persist: String,
+    control_master_notice: String,
     connect_timeout: String,
     keepalive: String,
     local_forwards: String,
@@ -133,6 +135,8 @@ impl App {
             draft: Session::default(),
             port: String::new(),
             proxy_port: String::new(),
+            control_persist: String::new(),
+            control_master_notice: String::new(),
             connect_timeout: String::new(),
             keepalive: String::new(),
             local_forwards: String::new(),
@@ -161,6 +165,11 @@ impl App {
         self.proxy_port = session
             .ssh
             .proxy_port
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        self.control_persist = session
+            .ssh
+            .control_persist_seconds
             .map(|value| value.to_string())
             .unwrap_or_default();
         self.connect_timeout = session
@@ -265,6 +274,13 @@ impl App {
         let mut session = self.draft.clone();
         session.port = parse_optional_u16(&self.port, "port")?;
         session.ssh.proxy_port = parse_optional_u16(&self.proxy_port, "proxy port")?;
+        session.ssh.control_persist_seconds = if self.control_persist.trim().is_empty() {
+            None
+        } else {
+            Some(self.control_persist.trim().parse::<u32>().map_err(|_| {
+                anyhow::anyhow!("ControlPersist must be a positive whole number of seconds")
+            })?)
+        };
         session.ssh.connect_timeout_seconds =
             parse_optional_u16(&self.connect_timeout, "connection timeout")?;
         session.ssh.server_alive_interval_seconds =
@@ -739,6 +755,33 @@ impl App {
                                 ui.small(
                                     "Inspirum supplies a built-in transport helper to OpenSSH ProxyCommand. If the proxy fails or denies the tunnel, the SSH connection fails; it does not retry directly.",
                                 );
+                            }
+
+                            ui.separator();
+                            ui.strong("Connection multiplexing");
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("ControlMaster");
+                                ui.selectable_value(&mut self.draft.ssh.control_master, ControlMasterMode::Inherit, "Inherit");
+                                ui.selectable_value(&mut self.draft.ssh.control_master, ControlMasterMode::Disabled, "Disabled");
+                                ui.selectable_value(&mut self.draft.ssh.control_master, ControlMasterMode::Auto, "Auto");
+                            });
+                            if self.draft.ssh.control_master == ControlMasterMode::Auto {
+                                ui.label("ControlPath");
+                                if ui.text_edit_singleline(&mut self.draft.ssh.control_path).has_focus() { self.terminal_focus = None; }
+                                ui.label("ControlPersist seconds (optional)");
+                                if ui.text_edit_singleline(&mut self.control_persist).has_focus() { self.terminal_focus = None; }
+                                ui.horizontal(|ui| {
+                                    if ui.button("Check master").clicked() {
+                                        self.control_master_notice = match self.validated_draft().and_then(|s| terminal::control_master_operation(&s, self.config.as_deref(), "check")) { Ok(v) => if v.is_empty() { "Master is active.".into() } else { v }, Err(e) => format!("{e:#}") };
+                                    }
+                                    if ui.button("Close master").clicked() {
+                                        self.control_master_notice = match self.validated_draft().and_then(|s| terminal::control_master_operation(&s, self.config.as_deref(), "exit")) { Ok(v) => if v.is_empty() { "Master close requested.".into() } else { v }, Err(e) => format!("{e:#}") };
+                                    }
+                                });
+                                if !self.control_master_notice.is_empty() { ui.small(&self.control_master_notice); }
+                                ui.small("Auto uses OpenSSH ControlMaster=auto with this explicit ControlPath. Stale or unavailable sockets are surfaced; Inspirum never silently deletes them.");
+                            } else {
+                                ui.small("Inherit leaves ~/.ssh/config multiplexing untouched. Disabled passes ControlMaster=no.");
                             }
 
                             ui.separator();

@@ -1,8 +1,10 @@
 //! Opt-in Linux loopback verification: scripts/test-ssh-integration.sh.
 use egui_term::{BackendCommand, PtyEvent, TerminalBackend};
 use inspirum_terminal::{
-    ProxyKind, Session, SshOptions,
-    terminal::{connect, connect_sftp, launch_args_with_proxy_helper},
+    ControlMasterMode, ProxyKind, Session, SshOptions,
+    terminal::{
+        connect, connect_sftp, control_master_operation, launch_args, launch_args_with_proxy_helper,
+    },
 };
 use std::{
     fs,
@@ -804,4 +806,55 @@ fn structured_proxy_denial_never_falls_back_to_direct_ssh() {
         "SSH reached directly reachable target after proxy denial: {stdout}"
     );
     println!("PASS proxy denial terminated SSH without direct-transport fallback");
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn controlmaster_lifecycle_check_and_explicit_close() {
+    let p = fixture();
+    let socket = PathBuf::from(format!("/tmp/inspirum-cm-{}-%C", std::process::id()));
+    let session = Session {
+        name: "ControlMaster fixture".into(),
+        host: "127.0.0.1".into(),
+        strict: true,
+        ssh: SshOptions {
+            control_master: ControlMasterMode::Auto,
+            control_path: socket.to_string_lossy().into_owned(),
+            control_persist_seconds: Some(30),
+            ..SshOptions::default()
+        },
+        ..Session::default()
+    };
+    let args = launch_args(&session, Some(&p.join("config"))).unwrap();
+    let mut child = Command::new("ssh")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"exit\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    control_master_operation(&session, Some(&p.join("config")), "check")
+        .expect("persisted master should be active");
+    control_master_operation(&session, Some(&p.join("config")), "exit")
+        .expect("explicit master close should succeed");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if control_master_operation(&session, Some(&p.join("config")), "check").is_err() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ControlMaster survived explicit close"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
 }

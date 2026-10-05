@@ -131,3 +131,5 @@ Unchecked items below are not implemented and are not a WindTerm parity claim.
 - [ ] Resource cleanup verified for success, failure, cancel, and window close.
 - [ ] Accessibility and keyboard-only behavior reviewed.
 - [ ] No unsupported feature is implied by marketing or release notes.
+
+- [x] Structured ControlMaster Inherit/Disabled/Auto policy, explicit ControlPath/ControlPersist, status/close lifecycle controls, portable argv tests and Linux disposable-sshd lifecycle acceptance (#15).

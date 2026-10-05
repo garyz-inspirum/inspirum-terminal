@@ -1,5 +1,5 @@
 //! Native terminal adapter: egui_term owns the Alacritty parser and platform PTY.
-use crate::{ProxyKind, Session};
+use crate::{ControlMasterMode, ProxyKind, Session};
 use anyhow::{Context, Result, ensure};
 use std::{path::Path, process::Command, sync::mpsc::Sender};
 
@@ -143,6 +143,59 @@ pub fn launch_args_with_proxy_helper(
     }
     args.splice(index..index, extra);
     Ok(args)
+}
+
+pub fn control_master_args(
+    session: &Session,
+    config: Option<&Path>,
+    operation: &str,
+) -> Result<Vec<String>> {
+    ensure!(
+        operation == "check" || operation == "exit",
+        "unsupported ControlMaster operation"
+    );
+    ensure!(
+        session.ssh.control_master == ControlMasterMode::Auto,
+        "app-managed ControlMaster is not enabled"
+    );
+    session.ssh_args()?;
+    let mut args = Vec::new();
+    if let Some(config) = config {
+        args.extend(["-F".into(), config_path_arg(config)?]);
+    }
+    args.extend(["-S".into(), session.ssh.control_path.clone()]);
+    args.extend(["-O".into(), operation.into()]);
+    if !session.user.is_empty() {
+        args.extend(["-l".into(), session.user.clone()]);
+    }
+    if let Some(port) = session.port {
+        args.extend(["-p".into(), port.to_string()]);
+    }
+    args.extend(["--".into(), session.host.clone()]);
+    Ok(args)
+}
+
+pub fn control_master_operation(
+    session: &Session,
+    config: Option<&Path>,
+    operation: &str,
+) -> Result<String> {
+    let output = Command::new("ssh")
+        .args(control_master_args(session, config, operation)?)
+        .output()
+        .context(SSH_HELP)?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    ensure!(
+        output.status.success(),
+        "ControlMaster {operation} failed: {}",
+        if stderr.is_empty() {
+            "master unavailable or stale ControlPath"
+        } else {
+            &stderr
+        }
+    );
+    Ok(if stdout.is_empty() { stderr } else { stdout })
 }
 
 pub fn launch_args(session: &Session, config: Option<&Path>) -> Result<Vec<String>> {
@@ -334,6 +387,20 @@ pub fn sftp_launch_args_with_proxy_helper(
     }
     if !session.ssh.proxy_jump.is_empty() {
         args.extend(["-J".into(), session.ssh.proxy_jump.clone()]);
+    }
+    match session.ssh.control_master {
+        ControlMasterMode::Inherit => {}
+        ControlMasterMode::Disabled => args.extend(["-o".into(), "ControlMaster=no".into()]),
+        ControlMasterMode::Auto => {
+            args.extend(["-o".into(), "ControlMaster=auto".into()]);
+            args.extend([
+                "-o".into(),
+                format!("ControlPath={}", session.ssh.control_path),
+            ]);
+            if let Some(seconds) = session.ssh.control_persist_seconds {
+                args.extend(["-o".into(), format!("ControlPersist={seconds}")]);
+            }
+        }
     }
     if let Some(command) = structured_proxy_option(session, config, helper)? {
         args.extend(["-o".into(), format!("ProxyCommand={command}")]);
