@@ -210,11 +210,15 @@ fn host_key_target_matches_openssh_known_hosts_identity_rules() {
         }
     );
     assert_eq!(
-        parse_host_key_target("hostname example.test\nport 2222\n").unwrap().lookup,
+        parse_host_key_target("hostname example.test\nport 2222\n")
+            .unwrap()
+            .lookup,
         "[example.test]:2222"
     );
     assert_eq!(
-        parse_host_key_target("hostname 2001:db8::7\nport 2200\n").unwrap().lookup,
+        parse_host_key_target("hostname 2001:db8::7\nport 2200\n")
+            .unwrap()
+            .lookup,
         "[2001:db8::7]:2200"
     );
     let alias =
