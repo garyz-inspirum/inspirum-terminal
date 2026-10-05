@@ -2015,6 +2015,53 @@ impl App {
                 self.terminal_focus = self.active;
             }
         }
+        if let Some(axis) = split_requested {
+            let source = self.active.and_then(|id| {
+                self.tabs
+                    .iter()
+                    .find(|tab| tab.id == id && !tab.exited && matches!(tab.kind, TabKind::Ssh))
+                    .map(|tab| (tab.id, tab.session.clone()))
+            });
+            if let Some((source_id, session)) = source {
+                if self.tabs.len() >= 16 {
+                    self.workspace_notice = "Cannot split: the 16-tab limit is reached.".into();
+                } else {
+                    let id = self.next_id;
+                    match terminal::connect(
+                        id,
+                        ctx.clone(),
+                        self.tx.clone(),
+                        &session,
+                        self.config.as_deref(),
+                    ) {
+                        Ok(terminal) => {
+                            self.tabs.push(Tab {
+                                id,
+                                name: format!("{} · split", session.name),
+                                kind: TabKind::Ssh,
+                                session,
+                                terminal,
+                                exited: false,
+                            });
+                            self.workspace_panes = vec![source_id, id];
+                            self.workspace_axis = axis;
+                            self.sync_input = SyncInputState::default();
+                            self.active = Some(id);
+                            self.terminal_focus = Some(id);
+                            self.next_id += 1;
+                            self.workspace_notice =
+                                "Split created. Synchronized input remains disarmed.".into();
+                        }
+                        Err(error) => {
+                            self.workspace_notice = format!("Cannot create split: {error:#}");
+                        }
+                    }
+                }
+            } else {
+                self.workspace_notice =
+                    "Select a connected SSH tab before creating a split.".into();
+            }
+        }
         if let Some((id, text)) = self.pending_paste.clone() {
             let mut confirm = false;
             let mut cancel = false;
