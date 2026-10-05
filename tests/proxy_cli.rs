@@ -96,3 +96,34 @@ fn headless_proxy_helper_cli_returns_failure_on_proxy_denial() {
     assert!(output.stdout.is_empty());
     proxy.join().unwrap();
 }
+
+
+#[test]
+fn headless_proxy_helper_flushes_server_first_protocol_before_eof() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let proxy = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\nSERVER-BANNER\n").unwrap();
+        let mut reply = [0_u8; 14];
+        stream.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"CLIENT-BANNER\n");
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_inspirum-terminal"))
+        .args(["--proxy-helper", "--mode", "http-connect", "--proxy-host", "127.0.0.1",
+            "--proxy-port", &port.to_string(), "--target-host", "target.example", "--target-port", "22"])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut banner = [0_u8; 14];
+    stdout.read_exact(&mut banner).unwrap();
+    assert_eq!(&banner, b"SERVER-BANNER\n");
+    child.stdin.take().unwrap().write_all(b"CLIENT-BANNER\n").unwrap();
+    assert!(child.wait().unwrap().success());
+    proxy.join().unwrap();
+}
