@@ -6,6 +6,7 @@ use crate::{
     scp_panel::ScpPanel,
     session_matches_query,
     sftp_browser::SftpBrowser,
+    support::{self, SanitizedErrorHistory},
     terminal,
     tmux::{self, TmuxSession},
 };
@@ -135,6 +136,11 @@ pub struct App {
     selected_tmux: Option<String>,
     tmux_new_name: String,
     tmux_notice: String,
+    recent_errors: SanitizedErrorHistory,
+    last_recorded_error: String,
+    support_report: String,
+    support_export_path: String,
+    support_notice: String,
     known_hosts_path: String,
     host_key_notice: String,
     host_key_remove_confirm: Option<(terminal::HostKeyTarget, Option<PathBuf>)>,
@@ -188,6 +194,11 @@ impl App {
             selected_tmux: None,
             tmux_new_name: String::new(),
             tmux_notice: String::new(),
+            recent_errors: SanitizedErrorHistory::default(),
+            last_recorded_error: String::new(),
+            support_report: String::new(),
+            support_export_path: String::new(),
+            support_notice: String::new(),
             known_hosts_path: String::new(),
             host_key_notice: String::new(),
             host_key_remove_confirm: None,
@@ -237,6 +248,8 @@ impl App {
         self.selected_tmux = None;
         self.tmux_new_name.clear();
         self.tmux_notice.clear();
+        self.support_report.clear();
+        self.support_notice.clear();
         self.draft = session;
     }
 
@@ -1310,6 +1323,84 @@ impl App {
                         "SFTP reuses host trust, OpenSSH config, identity, ProxyJump, timeout, keepalive and compression. Terminal-only remote commands, X11/agent forwarding and port forwards are not applied to SFTP.",
                     );
 
+                    egui::CollapsingHeader::new("Support diagnostics")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.small(
+                                "Generates a privacy-safe support report from local OpenSSH capability probes, allowlisted launch-policy state, platform metadata and sanitized in-memory error categories. Raw connection errors and arbitrary environment variables are never included.",
+                            );
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("Generate support report").clicked() {
+                                    self.terminal_focus = None;
+                                    let result = self.validated_draft().map(|session| {
+                                        self.support_report = support::collect(
+                                            Some(&session),
+                                            self.config.is_some(),
+                                            &self.recent_errors,
+                                        );
+                                        self.support_notice = format!(
+                                            "Support report generated with {} sanitized recent error(s).",
+                                            self.recent_errors.len()
+                                        );
+                                    });
+                                    self.error =
+                                        result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+                                }
+                                if ui
+                                    .add_enabled(
+                                        !self.recent_errors.is_empty(),
+                                        egui::Button::new("Clear recent errors"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.recent_errors.clear();
+                                    self.last_recorded_error.clear();
+                                    self.support_notice =
+                                        "Sanitized in-memory error history cleared.".into();
+                                }
+                            });
+                            ui.label("Export path");
+                            if ui
+                                .text_edit_singleline(&mut self.support_export_path)
+                                .has_focus()
+                            {
+                                self.terminal_focus = None;
+                            }
+                            if ui
+                                .add_enabled(
+                                    !self.support_report.is_empty(),
+                                    egui::Button::new("Export support report"),
+                                )
+                                .clicked()
+                            {
+                                let path = PathBuf::from(self.support_export_path.trim());
+                                let result = (|| -> anyhow::Result<()> {
+                                    anyhow::ensure!(
+                                        !self.support_export_path.trim().is_empty(),
+                                        "support export path is required"
+                                    );
+                                    support::export(&path, &self.support_report)?;
+                                    self.support_notice =
+                                        "Support report exported without overwriting an existing file."
+                                            .into();
+                                    Ok(())
+                                })();
+                                self.error =
+                                    result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+                            }
+                            if !self.support_notice.is_empty() {
+                                ui.small(&self.support_notice);
+                            }
+                            if !self.support_report.is_empty() {
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut self.support_report)
+                                        .desired_rows(14)
+                                        .font(egui::TextStyle::Monospace)
+                                        .interactive(false),
+                                );
+                            }
+                        });
+
                     if !self.error.is_empty() {
                         ui.colored_label(egui::Color32::LIGHT_RED, &self.error);
                     }
@@ -1456,6 +1547,13 @@ impl App {
                     self.error = format!("{error:#}");
                 }
             }
+        }
+
+        if self.error.is_empty() {
+            self.last_recorded_error.clear();
+        } else if self.error != self.last_recorded_error {
+            self.recent_errors.record(&self.error);
+            self.last_recorded_error = self.error.clone();
         }
     }
 }

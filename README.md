@@ -12,7 +12,7 @@ Current scope:
 - first-class profile controls for identity-file paths, ProxyJump, structured HTTP CONNECT/SOCKS5 proxy routing, app-managed OpenSSH ControlMaster multiplexing/lifecycle, authentication-method policy, GSSAPI delegation policy, `IdentitiesOnly`, agent/X11 forwarding, compression, connect timeout, keepalive, remote auto-command, and local/remote/dynamic port forwarding;
 - multiple SSH/SFTP terminal tabs, explicit disconnect by closing a tab, explicit reconnect after a remote/session exit, and explicit tmux discovery/attach/create with attach-only reconnect;
 - host-key trust tools that resolve the effective OpenSSH host identity with `ssh -G`, inspect trusted entries with `ssh-keygen -F`, and require explicit confirmation before `ssh-keygen -R` removal;
-- local-only `--diagnostics` reports with an allowlisted policy summary and no-clobber text export; no graphical desktop or server connection is required for this command;
+- privacy-safe diagnostics through both headless `--diagnostics` and the graphical Support diagnostics panel, with local OpenSSH/platform probes, allowlisted app-policy state, bounded sanitized in-memory error categories and no-clobber text export;
 - OpenSSH configuration, key material, agent, authentication prompts, host-key database, proxy transport, and forwarding implementation remain owned by OpenSSH.
 
 ## Verification status
@@ -82,7 +82,7 @@ inspirum-terminal --diagnostics --diagnostics-output support.txt
 inspirum-terminal --diagnostics --profiles sessions.json --diagnostic-profile "Work laptop"
 ```
 
-Diagnostics run before graphical initialization. They query local OpenSSH tools with fixed arguments; they never connect, authenticate or evaluate SSH configuration. An optional profile contributes only policy states, boolean flags and forwarding counts. Profile names, hosts, usernames, paths, remote commands, credentials, terminal contents and raw error text are omitted. Export refuses to overwrite an existing file.
+Headless diagnostics run before graphical initialization. The GUI Support diagnostics panel can add the current validated app launch policy and up to 12 sanitized in-memory error categories. Both surfaces query local OpenSSH tools with fixed arguments and never dump arbitrary environment variables or raw connection errors. Profile names, hosts, usernames, paths, endpoints, remote commands, passwords, passphrases, private-key material and authentication responses are omitted. Export refuses to overwrite an existing file.
 
 See [diagnostics and privacy boundaries](docs/diagnostics.md), [saved profiles and safe import/export](docs/profile-library.md), and [interactive SFTP policy](docs/sftp.md). A diagnostic report is not proof of SSH connectivity or complete platform acceptance.
 

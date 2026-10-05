@@ -1,6 +1,11 @@
-# Local SSH diagnostics
+# SSH diagnostics and privacy-safe support reports
 
-Run the installed executable without a graphical desktop:
+Inspirum exposes the same privacy boundary through two surfaces:
+
+- the headless command line, which can run without a graphical desktop;
+- the graphical **Support diagnostics** panel, which can include the current validated app launch policy and recent sanitized in-memory error categories.
+
+## Headless usage
 
 ```text
 inspirum-terminal --diagnostics
@@ -8,26 +13,47 @@ inspirum-terminal --diagnostics --diagnostics-output support.txt
 inspirum-terminal --diagnostics --profiles sessions.json --diagnostic-profile "Work laptop"
 ```
 
-On Windows the executable is `inspirum-terminal.exe`. An existing export destination is never overwritten. The destination directory must already exist. `--diagnostics-output` and `--diagnostic-profile` require `--diagnostics`.
+On Windows the executable is `inspirum-terminal.exe`. Existing export destinations are never overwritten. `--diagnostics-output` and `--diagnostic-profile` require `--diagnostics`.
 
-## What the report contains
+## Graphical usage
 
-The report includes the application version, operating system/architecture, a parsed OpenSSH version, whether SFTP and ssh-keygen return recognized usage text, and whether OpenSSH supports local cipher/key-exchange/key/MAC queries. Probe problems use fixed categories such as missing tool, launch failure, timeout or excessive output; raw stdout, stderr and operating-system errors are not copied into the report.
+Open **Support diagnostics** in the profile pane and choose **Generate support report**. The report is generated from the current validated draft profile, not from terminal screen contents. An optional export path can be supplied; export is no-clobber.
 
-An optional selected saved profile contributes only allowlisted booleans, policy states and forwarding counts. Names, hosts, usernames, port numbers, identity paths, jump destinations, forwarding endpoints and remote commands are omitted. Remote commands are never considered safe to share merely because they are profile metadata: users may have placed secrets in them. An unspecified profile means the profile store is not read at all. A missing/invalid store or non-unique selection is reported without disclosing identifiers.
+Inspirum keeps at most 12 recent sanitized error categories in memory for the current app run. Raw error strings are not retained by this history. The history has no timestamps, hostnames, usernames, paths, endpoints, commands or authentication responses and can be cleared explicitly. Closing the app discards it.
 
-## What it does not do
+## What is collected
 
-Diagnostics never open SSH/SFTP connections, authenticate, read private keys or known_hosts, evaluate SSH configuration, run a remote command, dump environment variables, inspect terminal contents or export recent session errors. `--ssh-config` is recorded only as an explicit/default source flag; its file is not opened or passed to a probe. No `ssh -G` or shell command is invoked.
+The support report contains:
 
-The only subprocess arguments are `ssh -V`, `ssh -Q help`, `sftp -h` and `ssh-keygen -?`. The operating system's executables on PATH are trusted, just as for normal terminal connections. An unexpected vendor/version response is not proof that a tool is unsafe or absent; it is reported as unrecognized.
+- application version;
+- operating system and CPU architecture;
+- parsed local OpenSSH version;
+- whether local `sftp`, `scp` and `ssh-keygen` return recognized usage responses;
+- whether local OpenSSH advertises cipher, KEX, key and MAC query support;
+- whether an explicit SSH config path is selected, without its path or contents;
+- an allowlisted summary of the app launch policy: host-trust mode, whether username/port/identity/ProxyJump/remote-command overrides are configured, structured proxy kind, ControlMaster mode, forwarding counts, authentication policy states, compression and timeout/keepalive presence;
+- recent sanitized in-memory error categories when generated from the GUI.
 
-Each started probe has a two-second run deadline and closed stdin. Anonymous temporary files avoid pipe deadlocks and reader-thread leaks; file sizes are checked while the process runs, and captures over 64 KiB are rejected. Temporary files can briefly grow beyond this threshold between polls, so this is not a filesystem sandbox for malicious executables. The direct child is killed/reaped on timeout and early errors; fixed OpenSSH query commands are not expected to spawn descendants. Captures are removed after the probe.
+The app-policy summary describes what Inspirum itself will contribute to the OpenSSH launch. It deliberately does **not** evaluate inherited OpenSSH configuration with `ssh -G`, so inherited values are reported as inherited rather than expanded.
 
-The report is a support aid, not an SSH connectivity test, authentication capability guarantee, platform release certification or full WindTerm parity claim. Graphical diagnostics, effective-connection display and a deliberately sanitized recent-error history remain tracked in #20; this command is the bounded increment in #33.
+## What is never collected
+
+The report never includes passwords, passphrases, private-key material, authentication responses, private-key paths, hostnames, usernames, profile names, proxy endpoints, forwarding endpoints, remote-command contents, known_hosts contents, terminal contents, raw connection/probe errors or arbitrary environment variables.
+
+Recent errors are classified into fixed categories such as authentication failure, host-key verification failure, timeout, connection refused, network/name-resolution failure, proxy failure, multiplexing failure, tmux failure, transfer failure, forwarding failure or generic connection-operation failure. The source error text is never copied into the report.
+
+Diagnostics do not authenticate, read private keys, read known_hosts, dump the process environment or run a remote command. The headless path does not open a graphical window. The local probes are fixed commands: `ssh -V`, `ssh -Q help`, `sftp -h`, `scp -h` and `ssh-keygen -?`.
+
+## Probe and export safety
+
+Each local probe has a two-second deadline, closed stdin and bounded capture. Captures over 64 KiB are rejected and raw stdout/stderr are not copied into the report except for narrowly parsed version/capability facts. Timed-out children are killed and reaped.
+
+Support-text export is atomic/no-clobber: the destination directory must exist and an existing file is never replaced.
 
 ## Verification
 
-Unit tests in `src/diagnostics/tests.rs` use a native throwaway helper for missing-tool, nonzero exit, dual-stream capture, output overflow and timeout paths. Privacy-canary tests ensure profile strings/raw error text are not rendered. Export tests verify no-clobber behavior and temporary-file cleanup.
+Shared unit tests cover version parsing, timeout/output-limit handling, deterministic allowlisted policy rendering, bounded recent-error history, privacy canaries and no-clobber export. Canary values resembling passwords, endpoints, profile strings and arbitrary raw errors must not appear in rendered diagnostics.
 
-`cargo test --locked --test diagnostics_cli` runs the actual application with display variables removed, exercises an optional saved-profile summary and checks that report export cannot overwrite a file. No live server is needed. CI runs the normal suite on Linux x64, Windows x64 and Apple Silicon.
+The CLI integration suite runs the actual executable headlessly, verifies that arbitrary environment variables are absent, verifies optional profile summaries omit sensitive fields, checks no-clobber export, and runs diagnostics twice to prove deterministic output for unchanged local state.
+
+CI runs the normal suite natively on Linux x64, Windows x64 and Apple Silicon. These diagnostics are a support aid, not proof of SSH connectivity, authentication capability or full WindTerm parity.

@@ -59,8 +59,7 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Agent forwarding and X11 forwarding profile/UI with Inherit/Enable/Disable policy and explicit risk text. Native acceptance remains pending.
 - [x] Connection timeout, server keepalive interval, and compression profile/UI; compression also has Inherit/Enable/Disable policy. Cipher/algorithm policy UI remains planned.
 - [x] Explicit reconnect button for an exited SSH tab; reconnect starts a fresh OpenSSH/PTy session from the tab's original profile and does not replay terminal input. Network-loss and host-key-change reconnect acceptance remains pending.
-- [x] Local-only `--diagnostics` and no-clobber support-text export, with allowlisted tool/platform status and optional profile policy flags/counts. No SSH connection, SSH config evaluation, session payload or raw-error export. See [diagnostics](diagnostics.md), issue #33 and PR #34 for scope and verification evidence.
-- [ ] Graphical connection diagnostics, effective-connection display and safe recent-error history (issue #20 remains open).
+- [x] Headless and graphical support diagnostics share one privacy-safe report core: local OpenSSH/platform capability probes, allowlisted current app launch-policy summary, bounded sanitized in-memory recent-error categories, deterministic/redaction tests and no-clobber export. No passwords, passphrases, private-key material, authentication responses, arbitrary environment dump, terminal contents or raw error text are included (#20/#33). See [diagnostics](diagnostics.md).
 - [ ] Native Windows and macOS isolated SSH-server acceptance tests for authentication, trust, ProxyJump/forwarding, and lifecycle behavior.
 
 ## Sessions and workspace

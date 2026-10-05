@@ -23,9 +23,9 @@ fn diagnostics_run_headlessly_without_opening_a_profile_store_or_ssh_config() {
         .unwrap();
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
-    assert!(text.contains("support report - schema 1"));
+    assert!(text.contains("support report - schema 2"));
     assert!(text.contains("profile store not read"));
-    assert!(text.contains("local probes only"));
+    assert!(text.contains("local OpenSSH probes + allowlisted app policy"));
     assert!(!text.contains("ENVIRONMENT_SECRET_CANARY"));
     assert!(!text.contains("missing-profiles"));
     assert!(!text.contains("missing-config"));
@@ -96,4 +96,15 @@ fn diagnostic_only_options_require_the_diagnostics_flag() {
     assert!(!path.exists());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("require --diagnostics"));
+}
+
+#[test]
+fn support_report_is_deterministic_for_the_same_local_state() {
+    let first = command().arg("--diagnostics").output().unwrap();
+    let second = command().arg("--diagnostics").output().unwrap();
+    assert!(first.status.success() && second.status.success());
+    assert_eq!(first.stdout, second.stdout);
+    let text = String::from_utf8(first.stdout).unwrap();
+    assert!(!text.contains("ENVIRONMENT_SECRET_CANARY"));
+    assert!(text.contains("arbitrary environment variables"));
 }
