@@ -546,6 +546,25 @@ impl App {
             }
         }
 
+        if let Some(source) = active_terminal.filter(|id| self.terminal_focus == Some(*id))
+            && self.sync_input.armed()
+        {
+            let destinations = self.sync_input.destinations(source);
+            let payloads: Vec<Vec<u8>> = ctx.input(|input| {
+                input.events.iter().filter_map(synchronized_event_bytes).collect()
+            });
+            for destination in destinations {
+                if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == destination && !tab.exited)
+                {
+                    for payload in &payloads {
+                        tab.terminal.process_command(BackendCommand::Write(payload.clone()));
+                    }
+                }
+            }
+        }
         let search_shortcut = ctx.input(|input| {
             input.key_pressed(egui::Key::F) && input.modifiers.command && input.modifiers.shift
         });
