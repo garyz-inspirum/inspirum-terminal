@@ -288,12 +288,12 @@ impl SftpBrowser {
         ui.strong("Local");
         ui.horizontal(|ui| {
             ui.text_edit_singleline(&mut self.local_path);
-            if ui.button("Up").clicked() {
-                if let Some(parent) = Path::new(self.local_path.trim()).parent() {
-                    self.local_path = parent.to_string_lossy().into_owned();
-                    if let Err(error) = self.refresh_local() {
-                        self.error = format!("{error:#}");
-                    }
+            if ui.button("Up").clicked()
+                && let Some(parent) = Path::new(self.local_path.trim()).parent()
+            {
+                self.local_path = parent.to_string_lossy().into_owned();
+                if let Err(error) = self.refresh_local() {
+                    self.error = format!("{error:#}");
                 }
             }
             if ui.button("Refresh").clicked()
@@ -389,15 +389,15 @@ impl SftpBrowser {
 
     fn render_remote_actions(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Upload →").clicked() {
-                if let Err(error) = self.request_upload() {
-                    self.error = format!("{error:#}");
-                }
+            if ui.button("Upload →").clicked()
+                && let Err(error) = self.request_upload()
+            {
+                self.error = format!("{error:#}");
             }
-            if ui.button("← Download").clicked() {
-                if let Err(error) = self.request_download() {
-                    self.error = format!("{error:#}");
-                }
+            if ui.button("← Download").clicked()
+                && let Err(error) = self.request_download()
+            {
+                self.error = format!("{error:#}");
             }
         });
 
@@ -561,9 +561,9 @@ impl SftpBrowser {
     pub fn ui(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         self.tick_transfers(ctx);
         ui.heading(format!("SFTP files · {}", self.session.name));
-        ui.small(format!(
-            "Uses the same OpenSSH host-key, authentication, config, proxy and ControlMaster policy as this profile. Credentials are not stored."
-        ));
+        ui.small(
+            "Uses the same OpenSSH host-key, authentication, config, proxy and ControlMaster policy as this profile. Credentials are not stored.",
+        );
         ui.columns(2, |columns| {
             self.render_local(&mut columns[0]);
             self.render_remote(&mut columns[1]);
