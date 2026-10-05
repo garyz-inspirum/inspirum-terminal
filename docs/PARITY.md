@@ -47,6 +47,7 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Optional per-profile remote command executed by OpenSSH after authentication; it is stored as profile metadata, passed after the SSH destination, and never invoked through a local shell. Remote-command acceptance remains pending.
 - [ ] Tmux-aware integration (SSH-first scope; ordinary tmux inside a terminal is not equivalent).
 - [x] Ask-before-trusting and already-trusted-only host-key modes.
+- [x] Host-key trust panel resolves effective `Hostname`/`Port`/`HostKeyAlias` with `ssh -G`, inspects `known_hosts` via `ssh-keygen -F`, and requires explicit confirmation before `ssh-keygen -R` removal. It does not auto-accept replacement keys; custom `UserKnownHostsFile` paths must be selected explicitly.
 - [x] Separate argv construction without a shell.
 - [x] Disposable Linux sshd fixture: 3 ignored tests verified for public-key session I/O, resize, changed-host-key rejection, exit, and disconnect cleanup. Not password, MFA, or Windows/macOS acceptance.
 - [x] Identity-file path editor plus validated profile persistence; private-key contents and passphrases are never stored. Native auth acceptance is still pending.

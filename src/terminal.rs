@@ -5,6 +5,15 @@ use std::{path::Path, process::Command, sync::mpsc::Sender};
 
 const SSH_HELP: &str = "OpenSSH client unavailable. Install OpenSSH Client (Windows Settings > Optional features), macOS command-line tools, or your Linux openssh-clients package; ensure ssh is on PATH and restart Inspirum.";
 const SFTP_HELP: &str = "OpenSSH sftp client unavailable. Install OpenSSH Client and ensure sftp is on PATH, then restart Inspirum.";
+const SSH_KEYGEN_HELP: &str = "OpenSSH ssh-keygen unavailable. Install OpenSSH Client and ensure ssh-keygen is on PATH, then restart Inspirum.";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostKeyTarget {
+    pub hostname: String,
+    pub port: u16,
+    pub host_key_alias: Option<String>,
+    pub lookup: String,
+}
 
 pub fn check_openssh(program: &Path) -> Result<()> {
     let output = Command::new(program).arg("-V").output().context(SSH_HELP)?;
@@ -52,6 +61,165 @@ pub fn launch_args(session: &Session, config: Option<&Path>) -> Result<Vec<Strin
         args.splice(index..index, ["-F".into(), text]);
     }
     Ok(args)
+}
+
+fn host_key_query_args(session: &Session, config: Option<&Path>) -> Result<Vec<String>> {
+    // Validate the complete profile before deriving the effective OpenSSH destination.
+    session.ssh_args()?;
+    let mut args = vec!["-G".into()];
+    if let Some(config) = config {
+        args.extend(["-F".into(), config_path_arg(config)?]);
+    }
+    if !session.user.is_empty() {
+        args.extend(["-l".into(), session.user.clone()]);
+    }
+    if let Some(port) = session.port {
+        args.extend(["-p".into(), port.to_string()]);
+    }
+    args.extend(["--".into(), session.host.clone()]);
+    Ok(args)
+}
+
+fn known_hosts_lookup(hostname: &str, port: u16, host_key_alias: Option<&str>) -> String {
+    if let Some(alias) = host_key_alias {
+        return alias.to_owned();
+    }
+    if port == 22 {
+        hostname.to_owned()
+    } else {
+        format!("[{hostname}]:{port}")
+    }
+}
+
+pub fn parse_host_key_target(config: &str) -> Result<HostKeyTarget> {
+    let mut hostname = None;
+    let mut port = None;
+    let mut host_key_alias = None;
+
+    for line in config.lines() {
+        let Some((key, value)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let value = value.trim();
+        match key.to_ascii_lowercase().as_str() {
+            "hostname" if !value.is_empty() => hostname = Some(value.to_owned()),
+            "port" => {
+                let parsed = value
+                    .parse::<u16>()
+                    .context("invalid port in ssh -G output")?;
+                ensure!(parsed > 0, "invalid zero port in ssh -G output");
+                port = Some(parsed);
+            }
+            "hostkeyalias" if !value.is_empty() && !value.eq_ignore_ascii_case("none") => {
+                host_key_alias = Some(value.to_owned());
+            }
+            _ => {}
+        }
+    }
+
+    let hostname = hostname.context("ssh -G output did not contain hostname")?;
+    let port = port.unwrap_or(22);
+    let lookup = known_hosts_lookup(&hostname, port, host_key_alias.as_deref());
+    Ok(HostKeyTarget {
+        hostname,
+        port,
+        host_key_alias,
+        lookup,
+    })
+}
+
+pub fn resolve_host_key_target(session: &Session, config: Option<&Path>) -> Result<HostKeyTarget> {
+    let args = host_key_query_args(session, config)?;
+    check_openssh(Path::new("ssh"))?;
+    let output = Command::new("ssh")
+        .args(args)
+        .output()
+        .context("query effective OpenSSH destination with ssh -G")?;
+    ensure!(
+        output.status.success(),
+        "ssh -G failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let text = String::from_utf8(output.stdout).context("ssh -G output was not UTF-8")?;
+    parse_host_key_target(&text)
+}
+
+fn ssh_keygen_args(action: &str, lookup: &str, known_hosts: Option<&Path>) -> Result<Vec<String>> {
+    ensure!(
+        action == "-F" || action == "-R",
+        "unsupported ssh-keygen known-hosts action"
+    );
+    ensure!(
+        !lookup.is_empty() && !lookup.chars().any(char::is_control),
+        "known-hosts lookup target is invalid"
+    );
+    let mut args = vec![action.to_owned(), lookup.to_owned()];
+    if let Some(path) = known_hosts {
+        ensure!(
+            path.is_file(),
+            "known_hosts override does not exist or is not a regular file: {}",
+            path.display()
+        );
+        let value = path
+            .to_str()
+            .context("known_hosts path must be valid Unicode")?;
+        ensure!(!value.contains('\0'), "known_hosts path contains NUL");
+        args.extend(["-f".into(), value.to_owned()]);
+    }
+    Ok(args)
+}
+
+pub fn inspect_known_host(target: &HostKeyTarget, known_hosts: Option<&Path>) -> Result<String> {
+    let args = ssh_keygen_args("-F", &target.lookup, known_hosts)?;
+    let output = Command::new("ssh-keygen")
+        .args(args)
+        .output()
+        .context(SSH_KEYGEN_HELP)?;
+    let matches = match output.status.code() {
+        Some(0) => String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        Some(1) => return Ok(String::new()),
+        _ => anyhow::bail!(
+            "ssh-keygen -F failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+    };
+
+    let mut matched_file =
+        tempfile::NamedTempFile::new().context("create temporary host-key fingerprint input")?;
+    std::io::Write::write_all(&mut matched_file, matches.as_bytes())?;
+    matched_file.as_file().sync_all()?;
+    let matched_path = matched_file.into_temp_path();
+    let fingerprint_output = Command::new("ssh-keygen")
+        .arg("-l")
+        .arg("-f")
+        .arg(&matched_path)
+        .output()
+        .context(SSH_KEYGEN_HELP)?;
+    ensure!(
+        fingerprint_output.status.success(),
+        "ssh-keygen fingerprint failed: {}",
+        String::from_utf8_lossy(&fingerprint_output.stderr).trim()
+    );
+    let fingerprints = String::from_utf8_lossy(&fingerprint_output.stdout)
+        .trim()
+        .to_owned();
+    Ok(format!("{matches}\nFingerprints:\n{fingerprints}"))
+}
+
+pub fn remove_known_host(target: &HostKeyTarget, known_hosts: Option<&Path>) -> Result<String> {
+    let args = ssh_keygen_args("-R", &target.lookup, known_hosts)?;
+    let output = Command::new("ssh-keygen")
+        .args(args)
+        .output()
+        .context(SSH_KEYGEN_HELP)?;
+    ensure!(
+        output.status.success(),
+        "ssh-keygen -R failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    Ok(if stdout.is_empty() { stderr } else { stdout })
 }
 
 pub fn sftp_launch_args(session: &Session, config: Option<&Path>) -> Result<Vec<String>> {
