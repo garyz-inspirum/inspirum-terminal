@@ -2062,6 +2062,61 @@ impl App {
                     "Select a connected SSH tab before creating a split.".into();
             }
         }
+        if workspace_save_requested {
+            let result = (|| -> anyhow::Result<()> {
+                let value = self.workspace_path.trim();
+                anyhow::ensure!(!value.is_empty(), "workspace layout path is required");
+                let ids: Vec<u64> = if self.workspace_panes.is_empty() {
+                    self.active.into_iter().collect()
+                } else {
+                    self.workspace_panes.clone()
+                };
+                let panes: Vec<Session> = ids
+                    .iter()
+                    .filter_map(|id| {
+                        self.tabs
+                            .iter()
+                            .find(|tab| tab.id == *id && matches!(tab.kind, TabKind::Ssh))
+                            .map(|tab| tab.session.clone())
+                    })
+                    .collect();
+                let layout = WorkspaceLayout {
+                    version: 1,
+                    axis: self.workspace_axis,
+                    reconnect_on_restore: self.workspace_reconnect_on_restore,
+                    panes,
+                };
+                workspace::save_layout(&PathBuf::from(value), &layout)
+            })();
+            self.workspace_notice = match result {
+                Ok(()) => "Workspace layout saved.".into(),
+                Err(error) => format!("Cannot save workspace: {error:#}"),
+            };
+        }
+
+        if workspace_load_requested {
+            let value = self.workspace_path.trim();
+            if value.is_empty() {
+                self.workspace_notice = "Workspace layout path is required.".into();
+            } else {
+                match workspace::load_layout(&PathBuf::from(value)) {
+                    Ok(layout) => {
+                        let pane_count = layout.panes.len();
+                        let reconnect = layout.reconnect_on_restore;
+                        self.workspace_loaded = Some(layout);
+                        self.workspace_notice = if reconnect {
+                            format!("Loaded {pane_count} pane(s) as metadata only. Use Restore & reconnect to connect them.")
+                        } else {
+                            format!("Loaded {pane_count} pane(s) as metadata only. Reconnect is disabled in this layout.")
+                        };
+                    }
+                    Err(error) => {
+                        self.workspace_loaded = None;
+                        self.workspace_notice = format!("Cannot load workspace: {error:#}");
+                    }
+                }
+            }
+        }
         if let Some((id, text)) = self.pending_paste.clone() {
             let mut confirm = false;
             let mut cancel = false;
