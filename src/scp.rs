@@ -157,7 +157,10 @@ pub fn download_args_with_proxy_helper(
     let local = local
         .to_str()
         .context("local SCP path must be valid Unicode")?;
-    ensure!(!local.chars().any(char::is_control), "local SCP path is invalid");
+    ensure!(
+        !local.chars().any(char::is_control),
+        "local SCP path is invalid"
+    );
     let mut args = common_args_with_proxy_helper(session, config, helper)?;
     args.extend(["--".into(), remote_spec(session, remote)?, local.to_owned()]);
     Ok(args)
