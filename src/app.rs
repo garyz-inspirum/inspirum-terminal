@@ -205,10 +205,9 @@ impl App {
         }
 
         Ok(match mode {
-            SessionImportMode::Merge => format!(
-                "Merged {imported_count} profile(s) from {}",
-                path.display()
-            ),
+            SessionImportMode::Merge => {
+                format!("Merged {imported_count} profile(s) from {}", path.display())
+            }
             SessionImportMode::Replace => format!(
                 "Replaced the saved library with {imported_count} profile(s) from {}",
                 path.display()
