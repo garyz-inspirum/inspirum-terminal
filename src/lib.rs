@@ -5,6 +5,15 @@ use std::{fs, io::Read, path::Path};
 
 const MAX_PROFILE_BYTES: usize = 1_048_576;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyKind {
+    #[default]
+    None,
+    HttpConnect,
+    Socks5,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SshOptions {
@@ -12,6 +21,10 @@ pub struct SshOptions {
     pub identity_file: String,
     /// OpenSSH ProxyJump route, for example `bastion` or `user@bastion:2222,target-hop`.
     pub proxy_jump: String,
+    /// Structured proxy transport. No proxy credentials are stored.
+    pub proxy_kind: ProxyKind,
+    pub proxy_host: String,
+    pub proxy_port: Option<u16>,
     /// Authentication policies. None inherits the effective OpenSSH configuration.
     pub public_key_auth: Option<bool>,
     pub password_auth: Option<bool>,
@@ -50,6 +63,20 @@ impl SshOptions {
             ensure!(
                 valid_proxy_jump(&self.proxy_jump),
                 "ProxyJump must be a comma-separated SSH destination chain without spaces, control characters or option prefixes"
+            );
+        }
+        if self.proxy_kind != ProxyKind::None {
+            ensure!(
+                self.proxy_jump.is_empty(),
+                "ProxyJump and structured HTTP/SOCKS proxy transport are mutually exclusive"
+            );
+            ensure!(
+                valid_proxy_endpoint(&self.proxy_host),
+                "proxy host must be a hostname or IPv4/IPv6 address without spaces, zone identifiers, options or shell syntax"
+            );
+            ensure!(
+                self.proxy_port.is_some_and(|port| port > 0),
+                "proxy port must be 1–65535 when structured proxy transport is enabled"
             );
         }
         for (name, value) in [
@@ -210,6 +237,15 @@ fn append_boolean_option(args: &mut Vec<String>, name: &str, value: Option<bool>
 
 fn valid_single_argument(value: &str, max_len: usize) -> bool {
     !value.is_empty() && value.len() <= max_len && !value.chars().any(char::is_control)
+}
+
+fn valid_proxy_endpoint(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && !value.starts_with('-')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-:".contains(&byte))
 }
 
 fn valid_proxy_jump(value: &str) -> bool {
@@ -464,6 +500,7 @@ fn read_sessions(file: fs::File) -> Result<Vec<Session>> {
     Ok(sessions)
 }
 
+pub mod proxy;
 pub mod terminal;
 
 pub mod app;

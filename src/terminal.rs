@@ -1,5 +1,5 @@
 //! Native terminal adapter: egui_term owns the Alacritty parser and platform PTY.
-use crate::Session;
+use crate::{ProxyKind, Session};
 use anyhow::{Context, Result, ensure};
 use std::{path::Path, process::Command, sync::mpsc::Sender};
 
@@ -50,17 +50,107 @@ fn config_path_arg(config: &Path) -> Result<String> {
     Ok(text.to_owned())
 }
 
-pub fn launch_args(session: &Session, config: Option<&Path>) -> Result<Vec<String>> {
-    let mut args = session.ssh_args()?;
-    if let Some(config) = config {
-        let text = config_path_arg(config)?;
-        let index = args
-            .iter()
-            .position(|arg| arg == "--")
-            .context("internal SSH argv is missing option terminator")?;
-        args.splice(index..index, ["-F".into(), text]);
+fn safe_proxy_target(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && !value.starts_with('-')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-:".contains(&byte))
+}
+
+fn quote_proxy_program(path: &Path) -> Result<String> {
+    let text = path
+        .to_str()
+        .context("proxy helper executable path must be valid Unicode")?;
+    ensure!(
+        !text.is_empty() && !text.chars().any(char::is_control),
+        "proxy helper executable path is invalid"
+    );
+    #[cfg(windows)]
+    {
+        ensure!(
+            !text.bytes().any(|byte| b"%!^&|<>\"".contains(&byte)),
+            "proxy helper executable path contains characters unsafe for Windows ProxyCommand"
+        );
+        Ok(format!("\"{text}\""))
     }
+    #[cfg(not(windows))]
+    {
+        Ok(format!("'{}'", text.replace('\'', "'\\''")))
+    }
+}
+
+pub fn proxy_command_for_target(
+    session: &Session,
+    helper: &Path,
+    target_host: &str,
+    target_port: u16,
+) -> Result<Option<String>> {
+    session.ssh_args()?;
+    if session.ssh.proxy_kind == ProxyKind::None {
+        return Ok(None);
+    }
+    ensure!(
+        safe_proxy_target(target_host) && target_port > 0,
+        "effective proxy target contains characters unsafe for ProxyCommand"
+    );
+    let proxy_port = session
+        .ssh
+        .proxy_port
+        .context("structured proxy port is missing")?;
+    ensure!(proxy_port > 0, "structured proxy port must be non-zero");
+    let mode = match session.ssh.proxy_kind {
+        ProxyKind::HttpConnect => "http-connect",
+        ProxyKind::Socks5 => "socks5",
+        ProxyKind::None => unreachable!(),
+    };
+    let program = quote_proxy_program(helper)?;
+    Ok(Some(format!(
+        "{program} --proxy-helper --mode {mode} --proxy-host {} --proxy-port {proxy_port} --target-host {target_host} --target-port {target_port}",
+        session.ssh.proxy_host
+    )))
+}
+
+fn structured_proxy_option(
+    session: &Session,
+    config: Option<&Path>,
+    helper: &Path,
+) -> Result<Option<String>> {
+    if session.ssh.proxy_kind == ProxyKind::None {
+        return Ok(None);
+    }
+    let target = resolve_host_key_target(session, config)?;
+    proxy_command_for_target(session, helper, &target.hostname, target.port)
+}
+
+pub fn launch_args_with_proxy_helper(
+    session: &Session,
+    config: Option<&Path>,
+    helper: &Path,
+) -> Result<Vec<String>> {
+    let mut args = session.ssh_args()?;
+    let index = args
+        .iter()
+        .position(|arg| arg == "--")
+        .context("internal SSH argv is missing option terminator")?;
+    let mut extra = Vec::new();
+    if let Some(config) = config {
+        extra.extend(["-F".into(), config_path_arg(config)?]);
+    }
+    if let Some(command) = structured_proxy_option(session, config, helper)? {
+        extra.extend(["-o".into(), format!("ProxyCommand={command}")]);
+    }
+    args.splice(index..index, extra);
     Ok(args)
+}
+
+pub fn launch_args(session: &Session, config: Option<&Path>) -> Result<Vec<String>> {
+    if session.ssh.proxy_kind == ProxyKind::None {
+        return launch_args_with_proxy_helper(session, config, Path::new(""));
+    }
+    let helper = std::env::current_exe().context("locate Inspirum proxy helper executable")?;
+    launch_args_with_proxy_helper(session, config, &helper)
 }
 
 fn host_key_query_args(session: &Session, config: Option<&Path>) -> Result<Vec<String>> {
@@ -222,7 +312,11 @@ pub fn remove_known_host(target: &HostKeyTarget, known_hosts: Option<&Path>) -> 
     Ok(if stdout.is_empty() { stderr } else { stdout })
 }
 
-pub fn sftp_launch_args(session: &Session, config: Option<&Path>) -> Result<Vec<String>> {
+pub fn sftp_launch_args_with_proxy_helper(
+    session: &Session,
+    config: Option<&Path>,
+    helper: &Path,
+) -> Result<Vec<String>> {
     // Reuse the SSH profile validator, then map only options that apply to sftp.
     session.ssh_args()?;
     let mut args = vec![
@@ -240,6 +334,9 @@ pub fn sftp_launch_args(session: &Session, config: Option<&Path>) -> Result<Vec<
     }
     if !session.ssh.proxy_jump.is_empty() {
         args.extend(["-J".into(), session.ssh.proxy_jump.clone()]);
+    }
+    if let Some(command) = structured_proxy_option(session, config, helper)? {
+        args.extend(["-o".into(), format!("ProxyCommand={command}")]);
     }
     // Authentication policy is not agent forwarding. SFTP must honor method restrictions
     // and delegation decisions even though terminal-only features are intentionally absent.
@@ -284,6 +381,14 @@ pub fn sftp_launch_args(session: &Session, config: Option<&Path>) -> Result<Vec<
         session.host.clone()
     });
     Ok(args)
+}
+
+pub fn sftp_launch_args(session: &Session, config: Option<&Path>) -> Result<Vec<String>> {
+    if session.ssh.proxy_kind == ProxyKind::None {
+        return sftp_launch_args_with_proxy_helper(session, config, Path::new(""));
+    }
+    let helper = std::env::current_exe().context("locate Inspirum proxy helper executable")?;
+    sftp_launch_args_with_proxy_helper(session, config, &helper)
 }
 
 pub fn connect(

@@ -1,14 +1,15 @@
 //! Opt-in Linux loopback verification: scripts/test-ssh-integration.sh.
 use egui_term::{BackendCommand, PtyEvent, TerminalBackend};
 use inspirum_terminal::{
-    Session, SshOptions,
-    terminal::{connect, connect_sftp},
+    ProxyKind, Session, SshOptions,
+    terminal::{connect, connect_sftp, launch_args_with_proxy_helper},
 };
 use std::{
     fs,
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     path::PathBuf,
+    process::{Command, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -686,4 +687,121 @@ fn dropping_backend_disconnects_remote_process_and_joins_subscription_thread() {
             "PASS backend {id} drop terminates remote process {pid} and joins subscription thread"
         );
     }
+}
+
+fn start_http_connect_proxy(deny: bool) -> (u16, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = thread::spawn(move || {
+        let (mut client, _) = listener.accept().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(8)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !request.ends_with(b"\r\n\r\n") {
+            assert!(request.len() < 16 * 1024, "oversized CONNECT request");
+            client.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        let text = String::from_utf8(request).unwrap();
+        let authority = text
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("CONNECT "))
+            .and_then(|rest| rest.strip_suffix(" HTTP/1.1"))
+            .expect("valid CONNECT request");
+        if deny {
+            client
+                .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            return;
+        }
+        let (host, port) = authority.rsplit_once(':').expect("host:port");
+        let host = host.trim_matches(['[', ']']);
+        let port: u16 = port.parse().unwrap();
+        let mut target = TcpStream::connect((host, port)).unwrap();
+        client
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .unwrap();
+        client.set_read_timeout(None).unwrap();
+
+        let mut client_read = client.try_clone().unwrap();
+        let mut target_write = target.try_clone().unwrap();
+        let up = thread::spawn(move || {
+            let _ = std::io::copy(&mut client_read, &mut target_write);
+            let _ = target_write.shutdown(std::net::Shutdown::Write);
+        });
+        let _ = std::io::copy(&mut target, &mut client);
+        let _ = client.shutdown(std::net::Shutdown::Both);
+        let _ = target.shutdown(std::net::Shutdown::Both);
+        let _ = up.join();
+    });
+    (port, handle)
+}
+
+fn structured_proxy_ssh_output(p: &std::path::Path, proxy_port: u16) -> std::process::Output {
+    let session = Session {
+        name: "Disposable proxy route".into(),
+        host: "127.0.0.1".into(),
+        strict: true,
+        ssh: SshOptions {
+            proxy_kind: ProxyKind::HttpConnect,
+            proxy_host: "127.0.0.1".into(),
+            proxy_port: Some(proxy_port),
+            remote_command: "exit".into(),
+            ..SshOptions::default()
+        },
+        ..Session::default()
+    };
+    let helper = PathBuf::from(env!("CARGO_BIN_EXE_inspirum-terminal"));
+    let args = launch_args_with_proxy_helper(&session, Some(&p.join("config")), &helper).unwrap();
+    let mut child = Command::new("ssh")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run real OpenSSH through structured proxy helper");
+    child
+        .stdin
+        .take()
+        .expect("proxy SSH stdin")
+        .write_all(b"exit\n")
+        .expect("request disposable remote exit");
+    child.wait_with_output().expect("wait for proxy SSH")
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn structured_http_proxy_routes_authenticated_ssh_through_connect_tunnel() {
+    let p = fixture();
+    let (proxy_port, _proxy) = start_http_connect_proxy(false);
+    let output = structured_proxy_ssh_output(&p, proxy_port);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("FIXTURE_AUTHENTICATED"),
+        "real OpenSSH did not authenticate through proxy; status={:?}, stdout={stdout:?}, stderr={stderr:?}",
+        output.status.code()
+    );
+    println!("PASS structured HTTP CONNECT proxy carried the authenticated SSH session");
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn structured_proxy_denial_never_falls_back_to_direct_ssh() {
+    let p = fixture();
+    let (proxy_port, _proxy) = start_http_connect_proxy(true);
+    let output = structured_proxy_ssh_output(&p, proxy_port);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success(),
+        "SSH unexpectedly succeeded after proxy denial"
+    );
+    assert!(
+        !stdout.contains("FIXTURE_AUTHENTICATED"),
+        "SSH reached directly reachable target after proxy denial: {stdout}"
+    );
+    println!("PASS proxy denial terminated SSH without direct-transport fallback");
 }
