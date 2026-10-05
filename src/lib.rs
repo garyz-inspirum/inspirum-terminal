@@ -349,17 +349,20 @@ fn ensure_unique_profile_names(sessions: &[Session], label: &str) -> Result<()> 
     Ok(())
 }
 
-/// Load and validate an external non-secret profile file without modifying the active store.
+/// Validate an existing import source and the complete result without writing either file.
 pub fn import_sessions(
     path: &Path,
     existing: &[Session],
     mode: SessionImportMode,
 ) -> Result<Vec<Session>> {
-    let imported = load_sessions(path).context("load profile import")?;
+    // A missing active store is normal at startup; a missing import is never an empty library.
+    // Open once and parse that handle, rather than checking existence and reopening the path.
+    let file = fs::File::open(path).context("open profile import (source must exist)")?;
+    let imported = read_sessions(file).context("load profile import")?;
     ensure_unique_profile_names(&imported, "profile import")?;
 
-    match mode {
-        SessionImportMode::Replace => Ok(imported),
+    let candidate = match mode {
+        SessionImportMode::Replace => imported,
         SessionImportMode::Merge => {
             ensure!(
                 existing.len() + imported.len() <= 1000,
@@ -374,9 +377,12 @@ pub fn import_sessions(
             }
             let mut merged = existing.to_vec();
             merged.extend(imported);
-            Ok(merged)
+            merged
         }
-    }
+    };
+    ensure_unique_profile_names(&candidate, "resulting profile library")?;
+    validated_session_bytes(&candidate).context("validate imported profile library")?;
+    Ok(candidate)
 }
 
 fn validated_session_bytes(sessions: &[Session]) -> Result<Vec<u8>> {
@@ -428,13 +434,17 @@ pub fn save_sessions(path: &Path, sessions: &[Session]) -> Result<()> {
     file.persist(path).context("replace profile file")?;
     Ok(())
 }
-/// Missing file is an empty collection; malformed, oversized or unsafe profiles are errors.
+/// Missing active store is an empty collection; import sources must exist.
 pub fn load_sessions(path: &Path) -> Result<Vec<Session>> {
     let file = match fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error).context("open profile file"),
     };
+    read_sessions(file)
+}
+
+fn read_sessions(file: fs::File) -> Result<Vec<Session>> {
     let mut bytes = Vec::new();
     file.take((MAX_PROFILE_BYTES + 1) as u64)
         .read_to_end(&mut bytes)?;
