@@ -568,6 +568,8 @@ fn read_sessions(file: fs::File) -> Result<Vec<Session>> {
 }
 
 pub mod proxy;
+pub mod scp;
+pub mod scp_panel;
 pub mod sftp;
 pub mod sftp_browser;
 pub mod terminal;
