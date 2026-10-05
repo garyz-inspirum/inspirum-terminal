@@ -16,7 +16,10 @@ fn connect_tcp(host: &str, port: u16) -> Result<TcpStream> {
         .to_socket_addrs()
         .with_context(|| format!("resolve proxy endpoint {host}:{port}"))?
         .collect();
-    ensure!(!addresses.is_empty(), "proxy endpoint resolved to no addresses");
+    ensure!(
+        !addresses.is_empty(),
+        "proxy endpoint resolved to no addresses"
+    );
     let mut last = None;
     for address in addresses {
         match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
@@ -179,9 +182,11 @@ pub fn run_stdio(
     let mut output = io::stdout().lock();
     io::copy(&mut downstream, &mut output).context("relay proxy response to OpenSSH")?;
     output.flush()?;
-    match writer.join() {
-        Ok(result) => result.context("relay OpenSSH input to proxy")?,
-        Err(_) => bail!("proxy input relay thread panicked"),
+    if writer.is_finished() {
+        match writer.join() {
+            Ok(result) => result.context("relay OpenSSH input to proxy")?,
+            Err(_) => bail!("proxy input relay thread panicked"),
+        }
     }
     Ok(())
 }
