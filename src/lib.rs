@@ -158,18 +158,16 @@ impl Session {
 }
 
 fn valid_single_argument(value: &str, max_len: usize) -> bool {
-    !value.is_empty()
-        && value.len() <= max_len
-        && !value.chars().any(char::is_control)
+    !value.is_empty() && value.len() <= max_len && !value.chars().any(char::is_control)
 }
 
 fn valid_proxy_jump(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 1024
         && !value.starts_with('-')
-        && value.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || b"._-@:,%[]".contains(&b)
-        })
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-@:,%[]".contains(&b))
 }
 
 fn validate_forward_specs(label: &str, specs: &[String]) -> Result<()> {
