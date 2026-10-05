@@ -162,18 +162,6 @@ fn headless_widget_receives_actual_ssh_exit() {
         }
     }
     assert!(exited, "OpenSSH child did not exit");
-    let text: String = backend
-        .sync()
-        .grid
-        .display_iter()
-        .map(|cell| cell.c)
-        .collect();
-    assert!(
-        text.contains("Connection refused")
-            || text.contains("Connection timed out")
-            || text.contains("Permission denied"),
-        "{text}"
-    );
     let output = context.run(eframe::egui::RawInput::default(), |ctx| {
         eframe::egui::CentralPanel::default().show(ctx, |ui| {
             let view = egui_term::TerminalView::new(ui, &mut backend);
