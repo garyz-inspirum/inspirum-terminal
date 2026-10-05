@@ -40,7 +40,9 @@ fn parse_proxy_helper(args: &[OsString]) -> Result<()> {
                 })
             }
             "--proxy-host" => proxy_host = Some(value.to_owned()),
-            "--proxy-port" => proxy_port = Some(value.parse::<u16>().context("invalid proxy port")?),
+            "--proxy-port" => {
+                proxy_port = Some(value.parse::<u16>().context("invalid proxy port")?)
+            }
             "--target-host" => target_host = Some(value.to_owned()),
             "--target-port" => {
                 target_port = Some(value.parse::<u16>().context("invalid target port")?)
