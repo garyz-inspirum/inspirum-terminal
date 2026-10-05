@@ -1,6 +1,6 @@
 //! Small native connection/profile interface; terminal mechanics stay upstream.
 use crate::{
-    Session, SessionImportMode, delete_session, duplicate_session_draft, export_sessions,
+    ProxyKind, Session, SessionImportMode, delete_session, duplicate_session_draft, export_sessions,
     import_sessions, load_sessions, save_session_edit, save_sessions, session_matches_query,
     terminal,
 };
@@ -90,6 +90,7 @@ pub struct App {
     profile_transfer_notice: String,
     draft: Session,
     port: String,
+    proxy_port: String,
     connect_timeout: String,
     keepalive: String,
     local_forwards: String,
@@ -131,6 +132,7 @@ impl App {
             profile_transfer_notice: String::new(),
             draft: Session::default(),
             port: String::new(),
+            proxy_port: String::new(),
             connect_timeout: String::new(),
             keepalive: String::new(),
             local_forwards: String::new(),
@@ -156,6 +158,11 @@ impl App {
 
     fn load_draft(&mut self, session: Session) {
         self.port = session.port.map(|p| p.to_string()).unwrap_or_default();
+        self.proxy_port = session
+            .ssh
+            .proxy_port
+            .map(|value| value.to_string())
+            .unwrap_or_default();
         self.connect_timeout = session
             .ssh
             .connect_timeout_seconds
@@ -257,6 +264,7 @@ impl App {
     fn validated_draft(&self) -> anyhow::Result<Session> {
         let mut session = self.draft.clone();
         session.port = parse_optional_u16(&self.port, "port")?;
+        session.ssh.proxy_port = parse_optional_u16(&self.proxy_port, "proxy port")?;
         session.ssh.connect_timeout_seconds =
             parse_optional_u16(&self.connect_timeout, "connection timeout")?;
         session.ssh.server_alive_interval_seconds =
@@ -683,6 +691,55 @@ impl App {
                                 self.terminal_focus = None;
                             }
                             ui.small("Example: bastion or user@bastion:2222,second-hop");
+
+                            ui.separator();
+                            ui.strong("Structured proxy");
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Transport");
+                                if ui
+                                    .selectable_value(
+                                        &mut self.draft.ssh.proxy_kind,
+                                        ProxyKind::None,
+                                        "None",
+                                    )
+                                    .changed()
+                                    || ui
+                                        .selectable_value(
+                                            &mut self.draft.ssh.proxy_kind,
+                                            ProxyKind::HttpConnect,
+                                            "HTTP CONNECT",
+                                        )
+                                        .changed()
+                                    || ui
+                                        .selectable_value(
+                                            &mut self.draft.ssh.proxy_kind,
+                                            ProxyKind::Socks5,
+                                            "SOCKS5",
+                                        )
+                                        .changed()
+                                {
+                                    self.terminal_focus = None;
+                                }
+                            });
+                            if self.draft.ssh.proxy_kind != ProxyKind::None {
+                                ui.label("Proxy host");
+                                if ui
+                                    .text_edit_singleline(&mut self.draft.ssh.proxy_host)
+                                    .has_focus()
+                                {
+                                    self.terminal_focus = None;
+                                }
+                                ui.label("Proxy port");
+                                if ui.text_edit_singleline(&mut self.proxy_port).has_focus() {
+                                    self.terminal_focus = None;
+                                }
+                                ui.small(
+                                    "ProxyJump and structured proxy transport cannot be enabled together. HTTP/SOCKS proxy authentication is not stored or supported yet.",
+                                );
+                                ui.small(
+                                    "Inspirum supplies a built-in transport helper to OpenSSH ProxyCommand. If the proxy fails or denies the tunnel, the SSH connection fails; it does not retry directly.",
+                                );
+                            }
 
                             ui.separator();
                             ui.strong("Authentication");
