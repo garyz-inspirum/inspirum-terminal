@@ -241,10 +241,7 @@ impl App {
                     .unwrap_or_else(|| " in ssh-keygen's default known_hosts file".into())
             )
         } else {
-            format!(
-                "Effective host-key target: {:?}\n{}",
-                target.lookup, found
-            )
+            format!("Effective host-key target: {:?}\n{}", target.lookup, found)
         };
         self.host_key_remove_confirm = None;
         Ok(())
