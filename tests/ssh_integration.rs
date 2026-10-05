@@ -4,6 +4,7 @@ use inspirum_terminal::{
     ControlMasterMode, ProxyKind, Session, SshOptions,
     terminal::{
         connect, connect_sftp, control_master_operation, launch_args, launch_args_with_proxy_helper,
+        start_tunnels,
     },
 };
 use std::{
@@ -857,4 +858,42 @@ fn controlmaster_lifecycle_check_and_explicit_close() {
         );
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn tunnel_manager_reports_listener_failure_and_stop_closes_listener() {
+    let p = fixture();
+    let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let occupied_port = occupied.local_addr().unwrap().port();
+    let mut blocked = Session {
+        name: "Blocked tunnel fixture".into(),
+        host: "127.0.0.1".into(),
+        strict: true,
+        ssh: SshOptions {
+            local_forwards: vec![format!("127.0.0.1:{occupied_port}:127.0.0.1:1")],
+            ..SshOptions::default()
+        },
+        ..Session::default()
+    };
+    let error = match start_tunnels(&blocked, Some(&p.join("config"))) {
+        Ok(_) => panic!("occupied requested listener unexpectedly succeeded"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("tunnel setup failed"),
+        "listener failure was not surfaced: {error}"
+    );
+    drop(occupied);
+
+    let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    blocked.ssh.local_forwards = vec![format!("127.0.0.1:{port}:127.0.0.1:1")];
+    let mut tunnels = start_tunnels(&blocked, Some(&p.join("config")))
+        .expect("forwarding-only manager should stay running");
+    TcpStream::connect((Ipv4Addr::LOCALHOST, port)).expect("managed listener should be ready");
+    tunnels.stop().expect("explicit tunnel stop");
+    wait_listener_closed(port);
+    println!("PASS tunnel manager surfaced listener failure and explicit stop closed listener");
 }
