@@ -8,8 +8,9 @@ Current scope:
 - terminal rendering and PTY integration through `egui_term`;
 - SSH sessions launched as argument vectors through the system OpenSSH client;
 - saved, non-secret connection profiles;
+- first-class profile controls for identity-file paths, ProxyJump, agent/X11 forwarding, compression, connect timeout, keepalive, and local/remote/dynamic port forwarding;
 - multiple terminal tabs and explicit disconnect by closing a tab;
-- OpenSSH configuration, keys, agent, prompts, and host-key database remain owned by OpenSSH.
+- OpenSSH configuration, key material, agent, authentication prompts, host-key database, proxy transport, and forwarding implementation remain owned by OpenSSH.
 
 ## Verification status
 
@@ -91,7 +92,7 @@ The SSH script requires `sshd`, `ssh-keygen`, and Python 3. It uses only an unpr
 
 ## Security and data model
 
-Inspirum stores profile names, hosts, usernames, ports, and strict-host-key preference. It does not save passwords or private keys. Authentication occurs inside OpenSSH's PTY. Inputs are converted to separate process arguments rather than a shell command.
+Inspirum stores profile names, hosts, usernames, ports, strict-host-key preference, identity-file paths, ProxyJump routes, forwarding specifications, keepalive/timeout values, and boolean SSH feature choices. It does not save passwords, passphrases, private-key contents, or authentication responses. Authentication occurs inside OpenSSH's PTY. Every configured SSH value is passed as a separate process argument rather than being interpolated into a shell command.
 
 This is an early slice, not a security audit. Review `docs/ARCHITECTURE.md` for boundaries and `docs/PARITY.md` for the roadmap. The parity document is not a claim that WindTerm parity exists.
 
