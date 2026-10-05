@@ -1,6 +1,6 @@
 //! Privacy-safe local diagnostics and support-bundle rendering.
 use crate::Session;
-use anyhow::{Context, Result, ensure};
+use anyhow::Result;
 use std::{
     collections::VecDeque,
     fs::File,
