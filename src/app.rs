@@ -1999,6 +1999,22 @@ impl App {
                 ui.label("No sessions are automatically connected on startup.");
             }
         });
+        if let Some(id) = focus_pane {
+            self.active = Some(id);
+            self.terminal_focus = Some(id);
+        }
+
+        if let Some(id) = close_pane {
+            self.tabs.retain(|tab| tab.id != id);
+            self.workspace_panes.retain(|pane| *pane != id);
+            self.sync_input.remove_pane(id);
+            if self.active == Some(id) {
+                self.active = self.workspace_panes.last().copied().or_else(|| self.tabs.last().map(|tab| tab.id));
+            }
+            if self.terminal_focus == Some(id) {
+                self.terminal_focus = self.active;
+            }
+        }
         if let Some((id, text)) = self.pending_paste.clone() {
             let mut confirm = false;
             let mut cancel = false;
