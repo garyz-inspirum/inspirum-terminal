@@ -91,10 +91,7 @@ pub fn find_text(haystack: &str, needle: &str, limit: usize) -> Vec<SearchHit> {
 
 /// Creates a new session log without overwriting an existing file.
 pub fn start_session_log(path: &Path) -> Result<()> {
-    ensure!(
-        !path.as_os_str().is_empty(),
-        "session log path is required"
-    );
+    ensure!(!path.as_os_str().is_empty(), "session log path is required");
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -171,10 +168,7 @@ mod tests {
             PastePolicy::ConfirmAll,
             PastePolicy::BlockMultiline,
         ] {
-            assert_eq!(
-                classify_paste(policy, "hello\0world"),
-                PasteDecision::Block
-            );
+            assert_eq!(classify_paste(policy, "hello\0world"), PasteDecision::Block);
         }
     }
 
