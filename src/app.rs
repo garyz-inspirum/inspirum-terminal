@@ -1,7 +1,8 @@
 //! Small native connection/profile interface; terminal mechanics stay upstream.
 use crate::{
-    Session, delete_session, duplicate_session_draft, load_sessions, save_session_edit,
-    save_sessions, session_matches_query, terminal,
+    Session, SessionImportMode, delete_session, duplicate_session_draft, export_sessions,
+    import_sessions, load_sessions, save_session_edit, save_sessions, session_matches_query,
+    terminal,
 };
 use eframe::egui;
 use egui_term::{PtyEvent, TerminalBackend, TerminalView};
@@ -84,6 +85,9 @@ pub struct App {
     profile_query: String,
     selected_profile: Option<String>,
     delete_confirm: Option<String>,
+    profile_transfer_path: String,
+    replace_import_confirm: Option<PathBuf>,
+    profile_transfer_notice: String,
     draft: Session,
     port: String,
     connect_timeout: String,
@@ -119,6 +123,9 @@ impl App {
             profile_query: String::new(),
             selected_profile: None,
             delete_confirm: None,
+            profile_transfer_path: String::new(),
+            replace_import_confirm: None,
+            profile_transfer_notice: String::new(),
             draft: Session::default(),
             port: String::new(),
             connect_timeout: String::new(),
@@ -157,6 +164,55 @@ impl App {
         self.remote_forwards = session.ssh.remote_forwards.join("\n");
         self.dynamic_forwards = session.ssh.dynamic_forwards.join("\n");
         self.draft = session;
+    }
+
+    fn profile_transfer_path(&self) -> anyhow::Result<PathBuf> {
+        let value = self.profile_transfer_path.trim();
+        anyhow::ensure!(!value.is_empty(), "profile import/export path is required");
+        Ok(PathBuf::from(value))
+    }
+
+    fn export_profile_library(&self) -> anyhow::Result<String> {
+        let path = self.profile_transfer_path()?;
+        export_sessions(&path, &self.profiles)?;
+        Ok(format!(
+            "Exported {} profile(s) to {}",
+            self.profiles.len(),
+            path.display()
+        ))
+    }
+
+    fn import_profile_library(
+        &mut self,
+        path: &std::path::Path,
+        mode: SessionImportMode,
+    ) -> anyhow::Result<String> {
+        let next = import_sessions(path, &self.profiles, mode)?;
+        let imported_count = match mode {
+            SessionImportMode::Merge => next.len().saturating_sub(self.profiles.len()),
+            SessionImportMode::Replace => next.len(),
+        };
+
+        // Persist the fully validated candidate before changing in-memory state.
+        save_sessions(&self.path, &next)?;
+        self.profiles = next;
+        self.delete_confirm = None;
+        self.replace_import_confirm = None;
+
+        if mode == SessionImportMode::Replace {
+            self.selected_profile = None;
+            self.load_draft(Session::default());
+        }
+
+        Ok(match mode {
+            SessionImportMode::Merge => {
+                format!("Merged {imported_count} profile(s) from {}", path.display())
+            }
+            SessionImportMode::Replace => format!(
+                "Replaced the saved library with {imported_count} profile(s) from {}",
+                path.display()
+            ),
+        })
     }
 
     fn validated_draft(&self) -> anyhow::Result<Session> {
@@ -290,6 +346,137 @@ impl App {
                             });
                         });
                     }
+
+                    egui::CollapsingHeader::new("Profile import / export")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.small(
+                                "Uses Inspirum's validated non-secret JSON profile format. Hostnames, usernames, identity-file paths and SSH policy settings are included; passwords, passphrases and private-key contents are not.",
+                            );
+                            ui.label("JSON file path");
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut self.profile_transfer_path)
+                                        .hint_text("/path/to/inspirum-profiles.json"),
+                                )
+                                .has_focus()
+                            {
+                                self.terminal_focus = None;
+                            }
+                            ui.small(
+                                "Identity-file paths and other local paths may need adjustment when importing on another machine.",
+                            );
+
+                            ui.horizontal_wrapped(|ui| {
+                                if ui
+                                    .add_enabled(
+                                        self.writable,
+                                        egui::Button::new("Export all"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.terminal_focus = None;
+                                    match self.export_profile_library() {
+                                        Ok(message) => {
+                                            self.error.clear();
+                                            self.profile_transfer_notice = message;
+                                        }
+                                        Err(error) => {
+                                            self.profile_transfer_notice.clear();
+                                            self.error = format!("{error:#}");
+                                        }
+                                    }
+                                }
+
+                                if ui
+                                    .add_enabled(
+                                        self.writable,
+                                        egui::Button::new("Import + merge"),
+                                    )
+                                    .on_hover_text(
+                                        "Reject the entire import if any imported profile name already exists",
+                                    )
+                                    .clicked()
+                                {
+                                    self.terminal_focus = None;
+                                    let result = self
+                                        .profile_transfer_path()
+                                        .and_then(|path| {
+                                            self.import_profile_library(
+                                                &path,
+                                                SessionImportMode::Merge,
+                                            )
+                                        });
+                                    match result {
+                                        Ok(message) => {
+                                            self.error.clear();
+                                            self.profile_transfer_notice = message;
+                                        }
+                                        Err(error) => {
+                                            self.profile_transfer_notice.clear();
+                                            self.error = format!("{error:#}");
+                                        }
+                                    }
+                                }
+
+                                if ui
+                                    .add_enabled(
+                                        self.writable,
+                                        egui::Button::new("Replace from file"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.terminal_focus = None;
+                                    match self.profile_transfer_path() {
+                                        Ok(path) => {
+                                            self.error.clear();
+                                            self.profile_transfer_notice.clear();
+                                            self.replace_import_confirm = Some(path);
+                                        }
+                                        Err(error) => {
+                                            self.profile_transfer_notice.clear();
+                                            self.error = format!("{error:#}");
+                                        }
+                                    }
+                                }
+                            });
+
+                            if let Some(confirmed_path) = self.replace_import_confirm.clone() {
+                                ui.group(|ui| {
+                                    ui.label(format!(
+                                        "Replace every saved profile with the validated contents of {}?",
+                                        confirmed_path.display()
+                                    ));
+                                    ui.small(
+                                        "Open SSH/SFTP tabs stay connected. The active profile file is changed only after the complete import validates and the atomic save succeeds. Editing the path field above does not change this confirmation.",
+                                    );
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Confirm replace").clicked() {
+                                            match self.import_profile_library(
+                                                &confirmed_path,
+                                                SessionImportMode::Replace,
+                                            ) {
+                                                Ok(message) => {
+                                                    self.error.clear();
+                                                    self.profile_transfer_notice = message;
+                                                }
+                                                Err(error) => {
+                                                    self.profile_transfer_notice.clear();
+                                                    self.error = format!("{error:#}");
+                                                }
+                                            }
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            self.replace_import_confirm = None;
+                                        }
+                                    });
+                                });
+                            }
+
+                            if !self.profile_transfer_notice.is_empty() {
+                                ui.small(&self.profile_transfer_notice);
+                            }
+                        });
 
                     ui.separator();
                     ui.label("Name");

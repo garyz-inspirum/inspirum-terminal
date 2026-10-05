@@ -330,8 +330,56 @@ pub fn duplicate_session_draft(sessions: &[Session], source: &Session) -> Sessio
     }
 }
 
-/// Atomically replace validated non-secret profiles; never truncate an existing file on failure.
-pub fn save_sessions(path: &Path, sessions: &[Session]) -> Result<()> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionImportMode {
+    Merge,
+    Replace,
+}
+
+fn ensure_unique_profile_names(sessions: &[Session], label: &str) -> Result<()> {
+    for (index, session) in sessions.iter().enumerate() {
+        ensure!(
+            !sessions[..index]
+                .iter()
+                .any(|profile| profile.name == session.name),
+            "{label} contains duplicate profile name {:?}",
+            session.name
+        );
+    }
+    Ok(())
+}
+
+/// Load and validate an external non-secret profile file without modifying the active store.
+pub fn import_sessions(
+    path: &Path,
+    existing: &[Session],
+    mode: SessionImportMode,
+) -> Result<Vec<Session>> {
+    let imported = load_sessions(path).context("load profile import")?;
+    ensure_unique_profile_names(&imported, "profile import")?;
+
+    match mode {
+        SessionImportMode::Replace => Ok(imported),
+        SessionImportMode::Merge => {
+            ensure!(
+                existing.len() + imported.len() <= 1000,
+                "merged profile library would exceed 1000 profiles"
+            );
+            for session in &imported {
+                ensure!(
+                    !existing.iter().any(|profile| profile.name == session.name),
+                    "profile import conflicts with existing profile {:?}",
+                    session.name
+                );
+            }
+            let mut merged = existing.to_vec();
+            merged.extend(imported);
+            Ok(merged)
+        }
+    }
+}
+
+fn validated_session_bytes(sessions: &[Session]) -> Result<Vec<u8>> {
     ensure!(
         sessions.len() <= 1000,
         "at most 1000 profiles are supported"
@@ -345,10 +393,33 @@ pub fn save_sessions(path: &Path, sessions: &[Session]) -> Result<()> {
         bytes.len() <= MAX_PROFILE_BYTES,
         "profile file exceeds 1 MiB"
     );
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
+    Ok(bytes)
+}
+
+fn profile_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+}
+
+/// Export the validated non-secret profile model without overwriting an existing destination.
+pub fn export_sessions(path: &Path, sessions: &[Session]) -> Result<()> {
+    let bytes = validated_session_bytes(sessions)?;
+    let parent = profile_parent(path);
+    fs::create_dir_all(parent).context("create export directory")?;
+    let mut file =
+        tempfile::NamedTempFile::new_in(parent).context("create temporary export file")?;
+    std::io::Write::write_all(&mut file, &bytes)?;
+    file.as_file().sync_all()?;
+    file.persist_noclobber(path)
+        .context("export destination already exists or cannot be created")?;
+    Ok(())
+}
+
+/// Atomically replace validated non-secret profiles; never truncate an existing file on failure.
+pub fn save_sessions(path: &Path, sessions: &[Session]) -> Result<()> {
+    let bytes = validated_session_bytes(sessions)?;
+    let parent = profile_parent(path);
     fs::create_dir_all(parent).context("create profile directory")?;
     let mut file =
         tempfile::NamedTempFile::new_in(parent).context("create temporary profile file")?;

@@ -64,7 +64,8 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Saved profile selection and update by profile name.
 - [x] Multiple terminal tabs and explicit close/disconnect.
 - [x] Search, rename-on-save, editable duplicate, and confirmed delete for saved profiles; operations preserve atomic persistence and do not disconnect already-open tabs.
-- [ ] Group, tag, and import/export profiles.
+- [x] Validated non-secret JSON profile import/export with collision-safe merge and confirmed replace; imported local identity paths may require adjustment on another machine.
+- [ ] Group and tag profiles.
 - [ ] Split panes and flexible layouts.
 - [ ] Restore selected layouts with opt-in reconnect.
 - [ ] Tab search, tab color, close-right/others, and bulk actions.

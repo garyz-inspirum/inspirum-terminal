@@ -1,6 +1,7 @@
 use inspirum_terminal::{
-    Session, SshOptions, delete_session, duplicate_session_draft, load_sessions, save_session_edit,
-    save_sessions, session_matches_query,
+    Session, SessionImportMode, SshOptions, delete_session, duplicate_session_draft,
+    export_sessions, import_sessions, load_sessions, save_session_edit, save_sessions,
+    session_matches_query,
 };
 
 fn session() -> Session {
@@ -400,4 +401,115 @@ fn delete_session_removes_only_the_selected_profile() {
     let next = delete_session(&[first, second.clone()], "Work laptop").unwrap();
     assert_eq!(next, vec![second]);
     assert!(delete_session(&next, "missing").is_err());
+}
+
+#[test]
+fn profile_export_round_trips_the_validated_nonsecret_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("export.json");
+    let mut exported = session();
+    exported.ssh.identity_file = "/keys/machine-specific".into();
+    exported.ssh.proxy_jump = "bastion".into();
+
+    export_sessions(&path, std::slice::from_ref(&exported)).unwrap();
+    assert_eq!(load_sessions(&path).unwrap(), vec![exported]);
+
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert!(value[0].get("password").is_none());
+    assert!(value[0].get("passphrase").is_none());
+}
+
+#[test]
+fn profile_export_refuses_to_overwrite_existing_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("export.json");
+    std::fs::write(&path, b"keep-me").unwrap();
+
+    let error = export_sessions(&path, &[session()])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("already exists"), "{error}");
+    assert_eq!(std::fs::read(path).unwrap(), b"keep-me");
+}
+
+#[test]
+fn profile_import_merge_appends_only_nonconflicting_valid_profiles() {
+    let dir = tempfile::tempdir().unwrap();
+    let import_path = dir.path().join("import.json");
+    let existing = session();
+    let mut incoming = session();
+    incoming.name = "Imported".into();
+    incoming.host = "imported-host".into();
+    export_sessions(&import_path, std::slice::from_ref(&incoming)).unwrap();
+
+    let merged = import_sessions(
+        &import_path,
+        std::slice::from_ref(&existing),
+        SessionImportMode::Merge,
+    )
+    .unwrap();
+    assert_eq!(merged, vec![existing, incoming]);
+}
+
+#[test]
+fn profile_import_merge_rejects_name_collision_without_touching_active_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let active_path = dir.path().join("active.json");
+    let import_path = dir.path().join("import.json");
+    let existing = session();
+    save_sessions(&active_path, std::slice::from_ref(&existing)).unwrap();
+    let before = std::fs::read(&active_path).unwrap();
+
+    let mut conflicting = existing.clone();
+    conflicting.host = "different-host".into();
+    export_sessions(&import_path, &[conflicting]).unwrap();
+
+    assert!(
+        import_sessions(
+            &import_path,
+            std::slice::from_ref(&existing),
+            SessionImportMode::Merge
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read(active_path).unwrap(), before);
+}
+
+#[test]
+fn profile_import_rejects_malformed_or_duplicate_names_before_state_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let malformed = dir.path().join("malformed.json");
+    std::fs::write(&malformed, "{bad").unwrap();
+    assert!(import_sessions(&malformed, &[], SessionImportMode::Replace).is_err());
+
+    let duplicate = dir.path().join("duplicate.json");
+    let one = session();
+    let mut two = one.clone();
+    two.host = "other-host".into();
+    save_sessions(&duplicate, &[one, two]).unwrap();
+    let error = import_sessions(&duplicate, &[], SessionImportMode::Replace)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("duplicate profile name"), "{error}");
+}
+
+#[test]
+fn replace_import_returns_only_validated_import_without_mutating_source_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let import_path = dir.path().join("import.json");
+    let existing = session();
+    let mut replacement = session();
+    replacement.name = "Replacement".into();
+    replacement.host = "replacement-host".into();
+    export_sessions(&import_path, std::slice::from_ref(&replacement)).unwrap();
+    let import_before = std::fs::read(&import_path).unwrap();
+
+    let next = import_sessions(
+        &import_path,
+        std::slice::from_ref(&existing),
+        SessionImportMode::Replace,
+    )
+    .unwrap();
+    assert_eq!(next, vec![replacement]);
+    assert_eq!(std::fs::read(import_path).unwrap(), import_before);
 }
