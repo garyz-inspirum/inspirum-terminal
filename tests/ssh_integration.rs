@@ -249,6 +249,22 @@ fn authenticated_grid_input_resize_and_exit() {
 }
 #[test]
 #[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn remote_command_is_sent_after_authentication() {
+    let p = fixture();
+    let command = "printf canary && whoami";
+    let ssh = SshOptions {
+        remote_command: command.into(),
+        ..SshOptions::default()
+    };
+    let (mut backend, rx) = open_with_ssh(&p, 708, true, "config", ssh);
+    wait_text(&mut backend, "FIXTURE_AUTHENTICATED");
+    wait_text(&mut backend, &format!("REMOTE_COMMAND:{command}"));
+    wait_exit(&rx, 708);
+    println!("PASS remote command is delivered after SSH authentication");
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
 fn changed_host_key_rejected_even_in_ask_mode() {
     let p = fixture();
     let (mut b, rx) = open(&p, 702, false, "changed-config");
