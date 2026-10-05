@@ -367,9 +367,7 @@ pub fn import_sessions(
             );
             for session in &imported {
                 ensure!(
-                    !existing
-                        .iter()
-                        .any(|profile| profile.name == session.name),
+                    !existing.iter().any(|profile| profile.name == session.name),
                     "profile import conflicts with existing profile {:?}",
                     session.name
                 );
