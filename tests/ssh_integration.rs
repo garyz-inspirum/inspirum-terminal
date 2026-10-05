@@ -1,7 +1,7 @@
 //! Opt-in Linux loopback verification: scripts/test-ssh-integration.sh.
 use egui_term::{BackendCommand, PtyEvent, TerminalBackend};
 use inspirum_terminal::{
-    ControlMasterMode, ProxyKind, Session, SshOptions,
+    ControlMasterMode, ProxyKind, Session, SshOptions, sftp,
     terminal::{
         connect, connect_sftp, control_master_operation, launch_args,
         launch_args_with_proxy_helper, start_tunnels,
@@ -896,4 +896,151 @@ fn tunnel_manager_reports_listener_failure_and_stop_closes_listener() {
     tunnels.stop().expect("explicit tunnel stop");
     wait_listener_closed(port);
     println!("PASS tunnel manager surfaced listener failure and explicit stop closed listener");
+}
+
+fn fixture_sftp_session() -> Session {
+    Session {
+        name: "Graphical SFTP fixture".into(),
+        host: "fixture-sftp".into(),
+        strict: true,
+        ..Session::default()
+    }
+}
+
+fn wait_managed_transfer(transfer: &mut sftp::Transfer) -> anyhow::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(12);
+    loop {
+        match transfer.poll() {
+            Ok(Some(())) => return Ok(()),
+            Ok(None) => {
+                assert!(Instant::now() < deadline, "managed SFTP transfer timed out");
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn graphical_sftp_operations_are_verified_conflict_safe_and_cancellable() {
+    let p = fixture();
+    let session = fixture_sftp_session();
+    let config = p.join("config");
+    let local = p.join("graphical-sftp-local");
+    fs::create_dir_all(&local).unwrap();
+
+    let source = local.join("binary source.bin");
+    let payload: Vec<u8> = (0..65536).map(|index| (index % 251) as u8).collect();
+    fs::write(&source, &payload).unwrap();
+    let remote = "browser binary.bin";
+
+    let mut upload = sftp::start_upload(&session, Some(&config), &source, remote)
+        .expect("start managed SFTP upload");
+    wait_managed_transfer(&mut upload).expect("verified managed SFTP upload");
+
+    let listed = sftp::list_remote(&session, Some(&config), ".").unwrap();
+    let uploaded = listed
+        .iter()
+        .find(|entry| entry.name == remote)
+        .expect("uploaded file in graphical listing");
+    assert_eq!(uploaded.size, Some(payload.len() as u64));
+
+    let destination = local.join("downloaded binary.bin");
+    let mut download = sftp::start_download(
+        &session,
+        Some(&config),
+        remote,
+        &destination,
+        false,
+        Some(payload.len() as u64),
+    )
+    .expect("start managed SFTP download");
+    wait_managed_transfer(&mut download).expect("verified managed SFTP download");
+    assert_eq!(fs::read(&destination).unwrap(), payload);
+
+    fs::write(&destination, b"KEEP-EXISTING").unwrap();
+    let conflict = sftp::start_download(
+        &session,
+        Some(&config),
+        remote,
+        &destination,
+        false,
+        Some(payload.len() as u64),
+    );
+    assert!(conflict.is_err(), "unsafe local overwrite was not rejected");
+    assert_eq!(fs::read(&destination).unwrap(), b"KEEP-EXISTING");
+
+    let mut bad_integrity = sftp::start_download(
+        &session,
+        Some(&config),
+        remote,
+        &destination,
+        true,
+        Some(payload.len() as u64 + 1),
+    )
+    .unwrap();
+    assert!(
+        wait_managed_transfer(&mut bad_integrity).is_err(),
+        "wrong expected size unexpectedly passed integrity verification"
+    );
+    assert_eq!(
+        fs::read(&destination).unwrap(),
+        b"KEEP-EXISTING",
+        "failed verified overwrite modified the original file"
+    );
+
+    let mut overwrite = sftp::start_download(
+        &session,
+        Some(&config),
+        remote,
+        &destination,
+        true,
+        Some(payload.len() as u64),
+    )
+    .unwrap();
+    wait_managed_transfer(&mut overwrite).unwrap();
+    assert_eq!(fs::read(&destination).unwrap(), payload);
+
+    let cancel_destination = local.join("cancelled.bin");
+    let mut cancelled = sftp::start_download(
+        &session,
+        Some(&config),
+        remote,
+        &cancel_destination,
+        false,
+        Some(payload.len() as u64),
+    )
+    .unwrap();
+    cancelled.cancel().unwrap();
+    drop(cancelled);
+    assert!(!cancel_destination.exists());
+    assert!(
+        fs::read_dir(&local)
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".inspirum-download-")),
+        "cancelled download left a staging file"
+    );
+
+    sftp::mkdir_remote(&session, Some(&config), "browser-dir").unwrap();
+    sftp::rename_remote(&session, Some(&config), "browser-dir", "browser-renamed").unwrap();
+    let listed = sftp::list_remote(&session, Some(&config), ".").unwrap();
+    assert!(
+        listed
+            .iter()
+            .any(|entry| entry.name == "browser-renamed" && entry.is_dir)
+    );
+    sftp::delete_remote(&session, Some(&config), "browser-renamed", true).unwrap();
+    sftp::delete_remote(&session, Some(&config), remote, false).unwrap();
+    assert!(
+        sftp::delete_remote(&session, Some(&config), "missing-entry", false).is_err(),
+        "negative remote delete unexpectedly succeeded"
+    );
+    println!(
+        "PASS graphical SFTP browse/mutate, binary transfer, conflict safety, verification and cancellation"
+    );
 }

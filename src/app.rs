@@ -2,7 +2,7 @@
 use crate::{
     ControlMasterMode, ProxyKind, Session, SessionImportMode, delete_session,
     duplicate_session_draft, export_sessions, import_sessions, load_sessions, save_session_edit,
-    save_sessions, session_matches_query, terminal,
+    save_sessions, session_matches_query, sftp_browser::SftpBrowser, terminal,
 };
 use eframe::egui;
 use egui_term::{PtyEvent, TerminalBackend, TerminalView};
@@ -124,6 +124,7 @@ pub struct App {
     forward_risk_ack: bool,
     tunnel_process: Option<terminal::TunnelProcess>,
     tunnel_notice: String,
+    sftp_browser: Option<SftpBrowser>,
     known_hosts_path: String,
     host_key_notice: String,
     host_key_remove_confirm: Option<(terminal::HostKeyTarget, Option<PathBuf>)>,
@@ -171,6 +172,7 @@ impl App {
             forward_risk_ack: false,
             tunnel_process: None,
             tunnel_notice: String::new(),
+            sftp_browser: None,
             known_hosts_path: String::new(),
             host_key_notice: String::new(),
             host_key_remove_confirm: None,
@@ -1117,6 +1119,22 @@ impl App {
                             self.error =
                                 result.err().map(|e| format!("{e:#}")).unwrap_or_default();
                         }
+                        if ui
+                            .button("Files")
+                            .on_hover_text("Open the graphical SFTP browser and transfer queue")
+                            .clicked()
+                        {
+                            self.terminal_focus = None;
+                            let result = self.validated_draft().and_then(|session| {
+                                self.sftp_browser = Some(SftpBrowser::new(
+                                    session,
+                                    self.config.clone(),
+                                )?);
+                                Ok(())
+                            });
+                            self.error =
+                                result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+                        }
                     });
                     ui.small(
                         "SFTP reuses host trust, OpenSSH config, identity, ProxyJump, timeout, keepalive and compression. Terminal-only remote commands, X11/agent forwarding and port forwards are not applied to SFTP.",
@@ -1170,7 +1188,19 @@ impl App {
         });
 
         let mut reconnect = None;
+        let mut close_browser = false;
         egui::CentralPanel::default().show(ctx, |ui| {
+            if let Some(browser) = self.sftp_browser.as_mut() {
+                ui.horizontal(|ui| {
+                    ui.strong(format!("Files · {}", browser.session_name()));
+                    if ui.button("Close file browser").clicked() {
+                        close_browser = true;
+                    }
+                });
+                ui.separator();
+                browser.ui(ctx, ui);
+                return;
+            }
             let terminal_focus = self.terminal_focus;
             if let Some(tab) = self.tabs.iter_mut().find(|tab| Some(tab.id) == self.active) {
                 if tab.exited {
@@ -1201,6 +1231,9 @@ impl App {
                 ui.label("No sessions are automatically connected on startup.");
             }
         });
+        if close_browser {
+            self.sftp_browser = None;
+        }
 
         if let Some((old_id, kind, session)) = reconnect {
             let new_id = self.next_id;
