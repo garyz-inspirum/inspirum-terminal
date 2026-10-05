@@ -104,7 +104,9 @@ pub fn parse_host_key_target(config: &str) -> Result<HostKeyTarget> {
         match key.to_ascii_lowercase().as_str() {
             "hostname" if !value.is_empty() => hostname = Some(value.to_owned()),
             "port" => {
-                let parsed = value.parse::<u16>().context("invalid port in ssh -G output")?;
+                let parsed = value
+                    .parse::<u16>()
+                    .context("invalid port in ssh -G output")?;
                 ensure!(parsed > 0, "invalid zero port in ssh -G output");
                 port = Some(parsed);
             }
@@ -126,10 +128,7 @@ pub fn parse_host_key_target(config: &str) -> Result<HostKeyTarget> {
     })
 }
 
-pub fn resolve_host_key_target(
-    session: &Session,
-    config: Option<&Path>,
-) -> Result<HostKeyTarget> {
+pub fn resolve_host_key_target(session: &Session, config: Option<&Path>) -> Result<HostKeyTarget> {
     let args = host_key_query_args(session, config)?;
     check_openssh(Path::new("ssh"))?;
     let output = Command::new("ssh")
@@ -185,8 +184,8 @@ pub fn inspect_known_host(target: &HostKeyTarget, known_hosts: Option<&Path>) ->
         ),
     };
 
-    let mut matched_file = tempfile::NamedTempFile::new()
-        .context("create temporary host-key fingerprint input")?;
+    let mut matched_file =
+        tempfile::NamedTempFile::new().context("create temporary host-key fingerprint input")?;
     std::io::Write::write_all(&mut matched_file, matches.as_bytes())?;
     matched_file.as_file().sync_all()?;
     let matched_path = matched_file.into_temp_path();
