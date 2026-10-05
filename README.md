@@ -10,7 +10,7 @@ Current scope:
 - saved, non-secret connection profiles with search, rename-on-save, editable duplication, confirmed deletion, and validated JSON import/export;
   Export refuses to overwrite an existing destination; replace-import requires explicit confirmation.
 - first-class profile controls for identity-file paths, ProxyJump, structured HTTP CONNECT/SOCKS5 proxy routing, app-managed OpenSSH ControlMaster multiplexing/lifecycle, authentication-method policy, GSSAPI delegation policy, `IdentitiesOnly`, agent/X11 forwarding, compression, connect timeout, keepalive, remote auto-command, and local/remote/dynamic port forwarding;
-- multiple SSH/SFTP terminal tabs, explicit disconnect by closing a tab, and explicit reconnect after a remote/session exit;
+- multiple SSH/SFTP terminal tabs, explicit disconnect by closing a tab, explicit reconnect after a remote/session exit, and explicit tmux discovery/attach/create with attach-only reconnect;
 - host-key trust tools that resolve the effective OpenSSH host identity with `ssh -G`, inspect trusted entries with `ssh-keygen -F`, and require explicit confirmation before `ssh-keygen -R` removal;
 - local-only `--diagnostics` reports with an allowlisted policy summary and no-clobber text export; no graphical desktop or server connection is required for this command;
 - OpenSSH configuration, key material, agent, authentication prompts, host-key database, proxy transport, and forwarding implementation remain owned by OpenSSH.
@@ -72,7 +72,7 @@ inspirum-terminal [--profiles PATH] [--ssh-config PATH]
 
 `--profiles` changes the JSON profile location. `--ssh-config` passes one explicit configuration file to OpenSSH. Otherwise OpenSSH uses its normal configuration and identity discovery. The SFTP button opens an interactive OpenSSH `sftp` tab. The Files button opens the graphical SFTP browser and transfer queue. The SCP button opens explicit OpenSSH `scp` upload/download operations with overwrite safeguards; see [graphical SFTP](docs/sftp-browser.md) and [SCP operations](docs/scp.md). Structured HTTP CONNECT and SOCKS5 proxy transport currently supports no-auth proxies only; see [proxy transport](docs/proxy.md).
 
-Click a terminal to give it keyboard focus. Moving the pointer away does not transfer that focus. Verify new host-key fingerprints through an independent trusted channel before accepting them. The Host key trust panel can inspect/remove entries from the default user `known_hosts` file or an explicitly selected file; it never auto-accepts a replacement key. If your SSH config uses a custom `UserKnownHostsFile`, select that file explicitly before inspecting or removing entries.
+Click a terminal to give it keyboard focus. Moving the pointer away does not transfer that focus. The tmux controls are explicit and never run on ordinary Connect; see [tmux-aware SSH sessions](docs/tmux.md). Verify new host-key fingerprints through an independent trusted channel before accepting them. The Host key trust panel can inspect/remove entries from the default user `known_hosts` file or an explicitly selected file; it never auto-accepts a replacement key. If your SSH config uses a custom `UserKnownHostsFile`, select that file explicitly before inspecting or removing entries.
 
 ## Local support diagnostics
 
