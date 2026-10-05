@@ -14,9 +14,15 @@ sshd=shutil.which('sshd') or '/usr/sbin/sshd'
 if not pathlib.Path(sshd).is_file(): raise SystemExit('ERROR: fixture requires sshd')
 with tempfile.TemporaryDirectory(prefix='ssh-fixture-',dir=root) as tmp:
  d=pathlib.Path(tmp);os.chmod(d,0o700)
- for key in ('host','client','wrong-host'):
+ for key in ('host','client','wrong-host','wrong-client'):
   subprocess.run(['ssh-keygen','-q','-t','ed25519','-N','','-f',str(d/key)],check=True)
- (d/'authorized_keys').write_text((d/'client.pub').read_text())
+ subprocess.run(
+  ['ssh-keygen','-q','-t','ed25519','-N','fixture-passphrase','-f',str(d/'encrypted-client')],
+  check=True,
+ )
+ (d/'authorized_keys').write_text(
+  (d/'client.pub').read_text()+(d/'encrypted-client.pub').read_text()
+ )
  (d/'remote.sh').write_text('''#!/bin/sh
 stty -echo
 printf '%s\\n' "$$" > "'''+str(d)+'''/remote.pid"
@@ -136,6 +142,37 @@ Host *
  ControlPath none
  ProxyCommand none
 ''')
+ (d/'encrypted-config').write_text(f'''Host *
+ HostName 127.0.0.1
+ Port {port}
+ User {getpass.getuser()}
+ IdentityFile {d}/encrypted-client
+ IdentitiesOnly yes
+ IdentityAgent none
+ UserKnownHostsFile {d}/known_hosts
+ GlobalKnownHostsFile /dev/null
+ BatchMode no
+ ConnectTimeout 3
+ UpdateHostKeys no
+ ControlMaster no
+ ControlPath none
+ ProxyCommand none
+''')
+ (d/'agent-config').write_text(f'''Host *
+ HostName 127.0.0.1
+ Port {port}
+ User {getpass.getuser()}
+ IdentityFile {d}/wrong-client
+ IdentitiesOnly no
+ UserKnownHostsFile {d}/known_hosts
+ GlobalKnownHostsFile /dev/null
+ BatchMode yes
+ ConnectTimeout 3
+ UpdateHostKeys no
+ ControlMaster no
+ ControlPath none
+ ProxyCommand none
+''')
  subprocess.run([sshd,'-t','-f',str(d/'sshd_config')],check=True)
  subprocess.run([sshd,'-t','-f',str(d/'jump_sshd_config')],check=True)
  subprocess.run([sshd,'-t','-f',str(d/'sftp_sshd_config')],check=True)
@@ -152,19 +189,42 @@ Host *
   server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'sshd_config')],stdout=log,stderr=log)
   jump_server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'jump_sshd_config')],stdout=jump_log,stderr=jump_log)
   sftp_server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'sftp_sshd_config')],stdout=sftp_log,stderr=sftp_log)
+  agent_sock=d/'agent.sock'
+  agent=subprocess.Popen(
+   ['ssh-agent','-D','-a',str(agent_sock)],
+   stdout=subprocess.DEVNULL,
+   stderr=subprocess.DEVNULL,
+  )
   try:
    wait_ready(server,port,'target')
    wait_ready(jump_server,jump_port,'jump')
    wait_ready(sftp_server,sftp_port,'sftp')
-   env=dict(os.environ,INSPIRUM_SSH_FIXTURE=str(d))
+   deadline=time.monotonic()+5
+   while not agent_sock.exists():
+    if agent.poll() is not None: raise RuntimeError('ssh-agent exited at startup')
+    if time.monotonic()>deadline: raise RuntimeError('ssh-agent socket did not become ready')
+    time.sleep(.05)
+   agent_env=dict(os.environ,SSH_AUTH_SOCK=str(agent_sock))
+   subprocess.run(
+    ['ssh-add',str(d/'client')],
+    env=agent_env,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    check=True,
+   )
+   env=dict(
+    os.environ,
+    INSPIRUM_SSH_FIXTURE=str(d),
+    SSH_AUTH_SOCK=str(agent_sock),
+   )
    cmd=['cargo','test','--locked','--test','ssh_integration','--','--ignored','--nocapture','--test-threads=1']
    print('RUN:',' '.join(cmd),flush=True)
    print(f'Isolated target sshd: 127.0.0.1:{port}; jump sshd: 127.0.0.1:{jump_port}; sftp sshd: 127.0.0.1:{sftp_port}; keys removed on exit',flush=True)
    subprocess.run(cmd,env=env,check=True)
   finally:
-   for process in (server,jump_server,sftp_server):
+   for process in (server,jump_server,sftp_server,agent):
     process.terminate()
-   for process in (server,jump_server,sftp_server):
+   for process in (server,jump_server,sftp_server,agent):
     try: process.wait(timeout=5)
     except subprocess.TimeoutExpired: process.kill();process.wait()
    log.seek(0);print('--- disposable target sshd log ---\n'+log.read(),flush=True)

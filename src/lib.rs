@@ -12,6 +12,13 @@ pub struct SshOptions {
     pub identity_file: String,
     /// OpenSSH ProxyJump route, for example `bastion` or `user@bastion:2222,target-hop`.
     pub proxy_jump: String,
+    /// Authentication policies. None inherits the effective OpenSSH configuration.
+    pub public_key_auth: Option<bool>,
+    pub password_auth: Option<bool>,
+    pub keyboard_interactive_auth: Option<bool>,
+    pub gssapi_auth: Option<bool>,
+    pub gssapi_delegate_credentials: Option<bool>,
+    pub identities_only: Option<bool>,
     /// None inherits OpenSSH config; Some(true/false) explicitly enables/disables.
     pub agent_forwarding: Option<bool>,
     /// None inherits OpenSSH config; Some(true/false) explicitly enables/disables.
@@ -73,6 +80,20 @@ impl SshOptions {
         if !self.proxy_jump.is_empty() {
             args.extend(["-J".into(), self.proxy_jump.clone()]);
         }
+        append_boolean_option(args, "PubkeyAuthentication", self.public_key_auth);
+        append_boolean_option(args, "PasswordAuthentication", self.password_auth);
+        append_boolean_option(
+            args,
+            "KbdInteractiveAuthentication",
+            self.keyboard_interactive_auth,
+        );
+        append_boolean_option(args, "GSSAPIAuthentication", self.gssapi_auth);
+        append_boolean_option(
+            args,
+            "GSSAPIDelegateCredentials",
+            self.gssapi_delegate_credentials,
+        );
+        append_boolean_option(args, "IdentitiesOnly", self.identities_only);
         match self.agent_forwarding {
             Some(true) => args.push("-A".into()),
             Some(false) => args.push("-a".into()),
@@ -175,6 +196,15 @@ impl Session {
             args.push(self.ssh.remote_command.clone());
         }
         Ok(args)
+    }
+}
+
+fn append_boolean_option(args: &mut Vec<String>, name: &str, value: Option<bool>) {
+    if let Some(enabled) = value {
+        args.extend([
+            "-o".into(),
+            format!("{name}={}", if enabled { "yes" } else { "no" }),
+        ]);
     }
 }
 

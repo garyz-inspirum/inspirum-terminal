@@ -255,6 +255,61 @@ impl App {
                             }
                             ui.small("Example: bastion or user@bastion:2222,second-hop");
 
+                            ui.separator();
+                            ui.strong("Authentication");
+                            ui.small(
+                                "Inherit preserves OpenSSH config/defaults. These controls choose which authentication methods OpenSSH may attempt; credentials still stay inside OpenSSH.",
+                            );
+                            if ssh_policy_control(
+                                ui,
+                                "Public key",
+                                &mut self.draft.ssh.public_key_auth,
+                            ) {
+                                self.terminal_focus = None;
+                            }
+                            if ssh_policy_control(
+                                ui,
+                                "Password",
+                                &mut self.draft.ssh.password_auth,
+                            ) {
+                                self.terminal_focus = None;
+                            }
+                            if ssh_policy_control(
+                                ui,
+                                "Keyboard-interactive / MFA",
+                                &mut self.draft.ssh.keyboard_interactive_auth,
+                            ) {
+                                self.terminal_focus = None;
+                            }
+                            if ssh_policy_control(
+                                ui,
+                                "GSSAPI",
+                                &mut self.draft.ssh.gssapi_auth,
+                            ) {
+                                self.terminal_focus = None;
+                            }
+                            if ssh_policy_control(
+                                ui,
+                                "Delegate GSSAPI credentials",
+                                &mut self.draft.ssh.gssapi_delegate_credentials,
+                            ) {
+                                self.terminal_focus = None;
+                            }
+                            ui.small(
+                                "GSSAPI support is platform/OpenSSH-build dependent. Credential delegation can expose delegated credentials to the remote host; enable only when required.",
+                            );
+                            if ssh_policy_control(
+                                ui,
+                                "Use configured identities only",
+                                &mut self.draft.ssh.identities_only,
+                            ) {
+                                self.terminal_focus = None;
+                            }
+                            ui.small(
+                                "Enabling IdentitiesOnly limits public-key authentication to explicitly configured identities and certificate files instead of every key offered by an agent.",
+                            );
+
+                            ui.separator();
                             if ssh_policy_control(
                                 ui,
                                 "SSH agent forwarding",

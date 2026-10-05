@@ -62,6 +62,7 @@ fn advanced_ssh_fields_map_to_discrete_openssh_arguments() {
         ],
         remote_forwards: vec!["127.0.0.1:9000:127.0.0.1:3000".into()],
         dynamic_forwards: vec!["127.0.0.1:1080".into()],
+        ..SshOptions::default()
     };
     assert_eq!(
         s.ssh_args().unwrap(),
@@ -97,6 +98,39 @@ fn advanced_ssh_fields_map_to_discrete_openssh_arguments() {
             "--",
             "work-alias",
             "tmux attach || tmux new"
+        ]
+    );
+}
+
+#[test]
+fn authentication_policies_map_to_explicit_openssh_options() {
+    let mut s = session();
+    s.ssh.public_key_auth = Some(true);
+    s.ssh.password_auth = Some(false);
+    s.ssh.keyboard_interactive_auth = Some(true);
+    s.ssh.gssapi_auth = Some(false);
+    s.ssh.gssapi_delegate_credentials = Some(false);
+    s.ssh.identities_only = Some(true);
+    assert_eq!(
+        s.ssh_args().unwrap(),
+        [
+            "-tt",
+            "-o",
+            "StrictHostKeyChecking=ask",
+            "-o",
+            "PubkeyAuthentication=yes",
+            "-o",
+            "PasswordAuthentication=no",
+            "-o",
+            "KbdInteractiveAuthentication=yes",
+            "-o",
+            "GSSAPIAuthentication=no",
+            "-o",
+            "GSSAPIDelegateCredentials=no",
+            "-o",
+            "IdentitiesOnly=yes",
+            "--",
+            "work-alias"
         ]
     );
 }
