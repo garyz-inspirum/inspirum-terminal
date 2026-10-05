@@ -177,6 +177,7 @@ fn profile_summary(session: &Session) -> String {
          Port override: {}\n\
          Identity path configured: {}\n\
          Jump route configured: {}\n\
+         Structured proxy: {} (endpoint omitted)\n\
          Remote command configured: {} (contents omitted)\n\
          Forward counts: local={}, remote={}, dynamic={}\n\
          Authentication: public-key={}, password={}, keyboard-interactive={}\n\
@@ -194,6 +195,11 @@ fn profile_summary(session: &Session) -> String {
         session.port.is_some(),
         !session.ssh.identity_file.is_empty(),
         !session.ssh.proxy_jump.is_empty(),
+        match session.ssh.proxy_kind {
+            inspirum_terminal::ProxyKind::None => "none",
+            inspirum_terminal::ProxyKind::HttpConnect => "http-connect",
+            inspirum_terminal::ProxyKind::Socks5 => "socks5",
+        },
         !session.ssh.remote_command.is_empty(),
         session.ssh.local_forwards.len(),
         session.ssh.remote_forwards.len(),
