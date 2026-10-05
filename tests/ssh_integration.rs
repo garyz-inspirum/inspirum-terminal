@@ -1230,7 +1230,9 @@ fn tmux_create_attach_disconnect_and_reconnect_preserve_server_session() {
     .expect("create and attach tmux session");
     wait_tmux_attached(&session, &config, &name, true);
 
-    created.process_command(BackendCommand::Write(b"printf 'TMUX_CREATE_OK\\n'\n".to_vec()));
+    created.process_command(BackendCommand::Write(
+        b"printf 'TMUX_CREATE_OK\\n'\n".to_vec(),
+    ));
     thread::sleep(Duration::from_millis(100));
     drop(created);
     wait_tmux_attached(&session, &config, &name, false);
