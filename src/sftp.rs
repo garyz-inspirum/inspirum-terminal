@@ -99,7 +99,10 @@ pub fn list_remote(
     let output = run_batch(
         session,
         config,
-        &[format!("ls -lan {}", quote_batch_arg(remote_dir)?)],
+        &[
+            format!("cd {}", quote_batch_arg(remote_dir)?),
+            "ls -lan".into(),
+        ],
     )?;
     Ok(parse_listing(&output))
 }
@@ -219,15 +222,19 @@ impl Transfer {
                     .destination
                     .as_ref()
                     .context("download destination is missing")?;
-                if destination.exists() && !self.overwrite {
-                    anyhow::bail!(
-                        "local destination already exists; explicit overwrite is required"
-                    );
+                if self.overwrite {
+                    staging
+                        .persist(destination)
+                        .map_err(|error| error.error)
+                        .context("commit verified downloaded file")?;
+                } else {
+                    staging
+                        .persist_noclobber(destination)
+                        .map_err(|error| error.error)
+                        .context(
+                            "commit verified downloaded file without overwriting an existing destination",
+                        )?;
                 }
-                staging
-                    .persist(destination)
-                    .map_err(|error| error.error)
-                    .context("commit verified downloaded file")?;
             }
             TransferKind::Upload => {
                 let expected = self
