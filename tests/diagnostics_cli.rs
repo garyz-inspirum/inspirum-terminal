@@ -98,7 +98,6 @@ fn diagnostic_only_options_require_the_diagnostics_flag() {
     assert!(error.contains("require --diagnostics"));
 }
 
-
 #[test]
 fn support_report_is_deterministic_for_the_same_local_state() {
     let first = command().arg("--diagnostics").output().unwrap();
