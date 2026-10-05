@@ -1045,7 +1045,6 @@ fn graphical_sftp_operations_are_verified_conflict_safe_and_cancellable() {
     );
 }
 
-
 fn sha256(path: &std::path::Path) -> String {
     let output = Command::new("sha256sum")
         .arg(path)
