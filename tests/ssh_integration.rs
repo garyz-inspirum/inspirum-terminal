@@ -800,4 +800,3 @@ fn structured_proxy_denial_never_falls_back_to_direct_ssh() {
     );
     println!("PASS proxy denial terminated SSH without direct-transport fallback");
 }
-
