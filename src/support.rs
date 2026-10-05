@@ -12,6 +12,9 @@ use std::{
 };
 
 const OUTPUT_LIMIT: u64 = 65_536;
+#[cfg(target_os = "windows")]
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(not(target_os = "windows"))]
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 pub const MAX_RECENT_ERRORS: usize = 12;
 
