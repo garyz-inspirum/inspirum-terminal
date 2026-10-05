@@ -1,0 +1,19 @@
+[package]
+name = "inspirum-terminal"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "An early cross-platform native SSH terminal using system OpenSSH"
+repository = "https://github.com/garyz-inspirum/inspirum-terminal"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+directories = "6"
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+egui_term = "0.1"
+
+[profile.dev]
+debug = 0
