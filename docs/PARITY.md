@@ -43,7 +43,7 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [ ] GSSAPI authentication and credential-delegation policy, with explicit platform capability checks.
 - [ ] ControlMaster/multiplexing workflow and platform limitations.
 - [ ] HTTP and SOCKS proxy workflows and no-direct-fallback verification.
-- [ ] SSH auto-execution after authentication, with explicit user opt-in.
+- [x] Optional per-profile remote command executed by OpenSSH after authentication; it is stored as profile metadata, passed after the SSH destination, and never invoked through a local shell. Remote-command acceptance remains pending.
 - [ ] Tmux-aware integration (SSH-first scope; ordinary tmux inside a terminal is not equivalent).
 - [x] Ask-before-trusting and already-trusted-only host-key modes.
 - [x] Separate argv construction without a shell.
