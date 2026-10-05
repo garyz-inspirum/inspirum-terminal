@@ -95,6 +95,9 @@ pub struct App {
     local_forwards: String,
     remote_forwards: String,
     dynamic_forwards: String,
+    known_hosts_path: String,
+    host_key_notice: String,
+    host_key_remove_confirm: Option<(terminal::HostKeyTarget, Option<PathBuf>)>,
     error: String,
     writable: bool,
     tabs: Vec<Tab>,
@@ -133,6 +136,9 @@ impl App {
             local_forwards: String::new(),
             remote_forwards: String::new(),
             dynamic_forwards: String::new(),
+            known_hosts_path: String::new(),
+            host_key_notice: String::new(),
+            host_key_remove_confirm: None,
             error,
             writable,
             tabs: Vec::new(),
@@ -213,6 +219,42 @@ impl App {
                 path.display()
             ),
         })
+    }
+
+    fn known_hosts_override(&self) -> Option<PathBuf> {
+        let value = self.known_hosts_path.trim();
+        (!value.is_empty()).then(|| PathBuf::from(value))
+    }
+
+    fn inspect_draft_host_key(&mut self) -> anyhow::Result<()> {
+        let session = self.validated_draft()?;
+        let target = terminal::resolve_host_key_target(&session, self.config.as_deref())?;
+        let known_hosts = self.known_hosts_override();
+        let found = terminal::inspect_known_host(&target, known_hosts.as_deref())?;
+        self.host_key_notice = if found.is_empty() {
+            format!(
+                "No matching key found for {:?}{}.",
+                target.lookup,
+                known_hosts
+                    .as_ref()
+                    .map(|path| format!(" in {}", path.display()))
+                    .unwrap_or_else(|| " in ssh-keygen's default known_hosts file".into())
+            )
+        } else {
+            format!(
+                "Effective host-key target: {:?}\n{}",
+                target.lookup, found
+            )
+        };
+        self.host_key_remove_confirm = None;
+        Ok(())
+    }
+
+    fn prepare_host_key_removal(&mut self) -> anyhow::Result<()> {
+        let session = self.validated_draft()?;
+        let target = terminal::resolve_host_key_target(&session, self.config.as_deref())?;
+        self.host_key_remove_confirm = Some((target, self.known_hosts_override()));
+        Ok(())
     }
 
     fn validated_draft(&self) -> anyhow::Result<Session> {
@@ -507,6 +549,120 @@ impl App {
                     ui.small(
                         "Unchecked: OpenSSH asks before trusting a new host. Changed host keys are rejected.",
                     );
+
+                    egui::CollapsingHeader::new("Host key trust")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.strong(if self.draft.strict {
+                                "Effective app policy: already-trusted keys only"
+                            } else {
+                                "Effective app policy: ask before trusting a new key"
+                            });
+                            ui.small(
+                                "Inspirum never auto-accepts host keys. Verify a new fingerprint through an independent trusted channel.",
+                            );
+                            ui.label("known_hosts file override (blank: ssh-keygen default)");
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut self.known_hosts_path)
+                                        .hint_text("/path/to/known_hosts"),
+                                )
+                                .has_focus()
+                            {
+                                self.terminal_focus = None;
+                            }
+                            ui.small(
+                                "Use an explicit file here when SSH config uses a custom UserKnownHostsFile. The file path is not saved in the profile.",
+                            );
+
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("Inspect trusted key").clicked() {
+                                    self.terminal_focus = None;
+                                    if let Err(error) = self.inspect_draft_host_key() {
+                                        self.host_key_notice.clear();
+                                        self.error = format!("{error:#}");
+                                    } else {
+                                        self.error.clear();
+                                    }
+                                }
+                                if ui
+                                    .button("Remove trusted key…")
+                                    .on_hover_text(
+                                        "Resolve the effective OpenSSH host identity, then ask for confirmation before editing known_hosts",
+                                    )
+                                    .clicked()
+                                {
+                                    self.terminal_focus = None;
+                                    if let Err(error) = self.prepare_host_key_removal() {
+                                        self.error = format!("{error:#}");
+                                    } else {
+                                        self.error.clear();
+                                    }
+                                }
+                            });
+
+                            if let Some((target, known_hosts)) =
+                                self.host_key_remove_confirm.clone()
+                            {
+                                ui.group(|ui| {
+                                    let file = known_hosts
+                                        .as_ref()
+                                        .map(|path| path.display().to_string())
+                                        .unwrap_or_else(|| {
+                                            "ssh-keygen's default known_hosts file".into()
+                                        });
+                                    ui.label(format!(
+                                        "Remove all trusted keys matching {:?} from {file}?",
+                                        target.lookup
+                                    ));
+                                    ui.small(format!(
+                                        "Resolved destination: {}:{}{}",
+                                        target.hostname,
+                                        target.port,
+                                        target
+                                            .host_key_alias
+                                            .as_ref()
+                                            .map(|alias| format!(", HostKeyAlias={alias}"))
+                                            .unwrap_or_default()
+                                    ));
+                                    ui.small(
+                                        "Removal does not trust a replacement key. Ask mode will prompt on a later connection; strict mode will reject until an appropriate key is trusted.",
+                                    );
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Confirm removal").clicked() {
+                                            match terminal::remove_known_host(
+                                                &target,
+                                                known_hosts.as_deref(),
+                                            ) {
+                                                Ok(message) => {
+                                                    self.host_key_notice = if message.is_empty() {
+                                                        format!(
+                                                            "Removed trusted-key entries for {:?}.",
+                                                            target.lookup
+                                                        )
+                                                    } else {
+                                                        message
+                                                    };
+                                                    self.host_key_remove_confirm = None;
+                                                    self.error.clear();
+                                                }
+                                                Err(error) => {
+                                                    self.error = format!("{error:#}");
+                                                }
+                                            }
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            self.host_key_remove_confirm = None;
+                                        }
+                                    });
+                                });
+                            }
+
+                            if !self.host_key_notice.is_empty() {
+                                ui.separator();
+                                ui.monospace(&self.host_key_notice);
+                            }
+                        });
 
                     egui::CollapsingHeader::new("Advanced SSH")
                         .default_open(false)
