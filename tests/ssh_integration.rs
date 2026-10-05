@@ -738,10 +738,7 @@ fn start_http_connect_proxy(deny: bool) -> (u16, thread::JoinHandle<()>) {
     (port, handle)
 }
 
-fn structured_proxy_ssh_output(
-    p: &std::path::Path,
-    proxy_port: u16,
-) -> std::process::Output {
+fn structured_proxy_ssh_output(p: &std::path::Path, proxy_port: u16) -> std::process::Output {
     let session = Session {
         name: "Disposable proxy route".into(),
         host: "127.0.0.1".into(),
