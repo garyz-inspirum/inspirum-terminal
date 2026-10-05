@@ -240,6 +240,83 @@ fn valid_token(value: &str, host: bool) -> bool {
             b.is_ascii_alphanumeric() || b"._-".contains(&b) || (host && b":%".contains(&b))
         })
 }
+/// Return true when a saved SSH profile matches a case-insensitive library query.
+pub fn session_matches_query(session: &Session, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    query.is_empty()
+        || session.name.to_lowercase().contains(&query)
+        || session.host.to_lowercase().contains(&query)
+        || session.user.to_lowercase().contains(&query)
+}
+
+/// Replace the selected profile, or save a new profile when no selection is active.
+///
+/// Renaming is represented by `selected_name`: the old entry is replaced in place, and a
+/// collision with a different saved profile is rejected rather than silently overwriting it.
+pub fn save_session_edit(
+    sessions: &[Session],
+    selected_name: Option<&str>,
+    session: Session,
+) -> Result<Vec<Session>> {
+    session.ssh_args()?;
+    let mut next = sessions.to_vec();
+
+    if let Some(selected_name) = selected_name {
+        let index = next
+            .iter()
+            .position(|profile| profile.name == selected_name)
+            .context("selected profile no longer exists")?;
+        ensure!(
+            !next
+                .iter()
+                .enumerate()
+                .any(|(other, profile)| other != index && profile.name == session.name),
+            "a profile named {:?} already exists",
+            session.name
+        );
+        next[index] = session;
+        return Ok(next);
+    }
+
+    ensure!(
+        !next.iter().any(|profile| profile.name == session.name),
+        "a profile named {:?} already exists",
+        session.name
+    );
+    next.push(session);
+    Ok(next)
+}
+
+/// Remove one saved profile by its exact name.
+pub fn delete_session(sessions: &[Session], name: &str) -> Result<Vec<Session>> {
+    let index = sessions
+        .iter()
+        .position(|profile| profile.name == name)
+        .context("selected profile no longer exists")?;
+    let mut next = sessions.to_vec();
+    next.remove(index);
+    Ok(next)
+}
+
+/// Build a unique editable duplicate without persisting it.
+pub fn duplicate_session_draft(sessions: &[Session], source: &Session) -> Session {
+    let mut copy = source.clone();
+    let base = format!("{} copy", source.name);
+    if !sessions.iter().any(|profile| profile.name == base) {
+        copy.name = base;
+        return copy;
+    }
+    let mut suffix = 2_u32;
+    loop {
+        let candidate = format!("{base} {suffix}");
+        if !sessions.iter().any(|profile| profile.name == candidate) {
+            copy.name = candidate;
+            return copy;
+        }
+        suffix += 1;
+    }
+}
+
 /// Atomically replace validated non-secret profiles; never truncate an existing file on failure.
 pub fn save_sessions(path: &Path, sessions: &[Session]) -> Result<()> {
     ensure!(
