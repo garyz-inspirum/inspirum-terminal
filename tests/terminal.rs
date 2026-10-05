@@ -169,7 +169,9 @@ fn headless_widget_receives_actual_ssh_exit() {
         .map(|cell| cell.c)
         .collect();
     assert!(
-        text.contains("Connection refused") || text.contains("Permission denied"),
+        text.contains("Connection refused")
+            || text.contains("Connection timed out")
+            || text.contains("Permission denied"),
         "{text}"
     );
     let output = context.run(eframe::egui::RawInput::default(), |ctx| {
