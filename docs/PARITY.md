@@ -70,10 +70,10 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Search, rename-on-save, editable duplicate, and confirmed delete for saved profiles; operations preserve atomic persistence and do not disconnect already-open tabs.
 - [x] Validated non-secret JSON profile import/export with collision-safe merge and confirmed replace; missing import sources are errors and the complete merged candidate must fit the file-size limit before any store change. Imported local identity paths may require adjustment on another machine.
 - [ ] Group and tag profiles.
-- [ ] Split panes and flexible layouts.
-- [ ] Restore selected layouts with opt-in reconnect.
+- [x] Bounded two-pane horizontal/vertical SSH splits with independent PTY lifecycle (#22).
+- [x] Persisted workspace layouts load as metadata only and reconnect only after saved opt-in plus an explicit restore action (#22).
 - [ ] Tab search, tab color, close-right/others, and bulk actions.
-- [ ] Sync input with prominent target and safety controls.
+- [x] Synchronized input requires explicit pane targets plus a prominent armed state; close/reconnect disarms it and multiline paste remains confirmation-gated (#22).
 - [ ] Startup session selection.
 
 ## Terminal experience
