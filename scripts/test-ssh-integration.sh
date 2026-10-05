@@ -21,6 +21,10 @@ with tempfile.TemporaryDirectory(prefix='ssh-fixture-',dir=root) as tmp:
 stty -echo
 printf '%s\\n' "$$" > "'''+str(d)+'''/remote.pid"
 printf 'FIXTURE_AUTHENTICATED\\n'
+if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
+ printf 'REMOTE_COMMAND:%s\\n' "$SSH_ORIGINAL_COMMAND"
+ exit 0
+fi
 while IFS= read -r line; do
  case "$line" in
  echo:*) printf 'REMOTE_ECHO:%s\\n' "${line#echo:}" ;;
