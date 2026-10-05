@@ -189,10 +189,11 @@ pub fn inspect_known_host(target: &HostKeyTarget, known_hosts: Option<&Path>) ->
         .context("create temporary host-key fingerprint input")?;
     std::io::Write::write_all(&mut matched_file, matches.as_bytes())?;
     matched_file.as_file().sync_all()?;
+    let matched_path = matched_file.into_temp_path();
     let fingerprint_output = Command::new("ssh-keygen")
         .arg("-l")
         .arg("-f")
-        .arg(matched_file.path())
+        .arg(&matched_path)
         .output()
         .context(SSH_KEYGEN_HELP)?;
     ensure!(
