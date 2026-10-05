@@ -61,6 +61,7 @@ fn advanced_ssh_fields_map_to_discrete_openssh_arguments() {
         ],
         remote_forwards: vec!["127.0.0.1:9000:127.0.0.1:3000".into()],
         dynamic_forwards: vec!["127.0.0.1:1080".into()],
+        ..SshOptions::default()
     };
     assert_eq!(
         s.ssh_args().unwrap(),
