@@ -69,7 +69,7 @@ pub fn find_text(haystack: &str, needle: &str, limit: usize) -> Vec<SearchHit> {
                 break;
             };
             let byte_column = start + found;
-            let column = line[..byte_column].chars().count() + 1;
+            let column = line_lower[..byte_column].chars().count() + 1;
             let preview = if line.chars().count() > 180 {
                 line.chars().take(177).collect::<String>() + "..."
             } else {
@@ -185,6 +185,10 @@ mod tests {
         assert_eq!(hits[0].line, 1);
         assert_eq!(hits[0].column, 1);
         assert_eq!(hits[1].line, 2);
+
+        let unicode = find_text("Ångström 東京", "ång", 5);
+        assert_eq!(unicode.len(), 1);
+        assert_eq!(unicode[0].column, 1);
     }
 
     #[test]
