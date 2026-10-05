@@ -223,10 +223,7 @@ fn open_with_ssh(
         rx,
     )
 }
-fn open_sftp(
-    p: &std::path::Path,
-    id: u64,
-) -> (TerminalBackend, mpsc::Receiver<(u64, PtyEvent)>) {
+fn open_sftp(p: &std::path::Path, id: u64) -> (TerminalBackend, mpsc::Receiver<(u64, PtyEvent)>) {
     let (tx, rx) = mpsc::channel();
     let session = Session {
         name: "Disposable SFTP".into(),
