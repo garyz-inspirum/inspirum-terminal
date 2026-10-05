@@ -3,6 +3,7 @@ use crate::{
     ControlMasterMode, ProxyKind, Session, SessionImportMode, delete_session,
     duplicate_session_draft, export_sessions, import_sessions, load_sessions, save_session_edit,
     save_sessions, scp_panel::ScpPanel, session_matches_query, sftp_browser::SftpBrowser, terminal,
+    tmux::{self, TmuxSession},
 };
 use eframe::egui;
 use egui_term::{PtyEvent, TerminalBackend, TerminalView};
@@ -126,6 +127,10 @@ pub struct App {
     tunnel_notice: String,
     sftp_browser: Option<SftpBrowser>,
     scp_panel: Option<ScpPanel>,
+    tmux_sessions: Vec<TmuxSession>,
+    selected_tmux: Option<String>,
+    tmux_new_name: String,
+    tmux_notice: String,
     known_hosts_path: String,
     host_key_notice: String,
     host_key_remove_confirm: Option<(terminal::HostKeyTarget, Option<PathBuf>)>,
@@ -175,6 +180,10 @@ impl App {
             tunnel_notice: String::new(),
             sftp_browser: None,
             scp_panel: None,
+            tmux_sessions: Vec::new(),
+            selected_tmux: None,
+            tmux_new_name: String::new(),
+            tmux_notice: String::new(),
             known_hosts_path: String::new(),
             host_key_notice: String::new(),
             host_key_remove_confirm: None,
@@ -220,6 +229,10 @@ impl App {
         self.dynamic_forwards = session.ssh.dynamic_forwards.join("\n");
         self.forward_risk_ack = false;
         self.tunnel_notice.clear();
+        self.tmux_sessions.clear();
+        self.selected_tmux = None;
+        self.tmux_new_name.clear();
+        self.tmux_notice.clear();
         self.draft = session;
     }
 
@@ -929,6 +942,142 @@ impl App {
                             );
 
                             ui.separator();
+                            ui.strong("tmux sessions");
+                            ui.small(
+                                "tmux integration is explicit: Refresh discovers sessions, Attach selects an existing one, and Create starts only the name you enter. Ordinary SSH Connect never attaches or creates tmux automatically.",
+                            );
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("Refresh tmux").clicked() {
+                                    self.terminal_focus = None;
+                                    let result = self.validated_draft().and_then(|session| {
+                                        let sessions = tmux::list_sessions(
+                                            &session,
+                                            self.config.as_deref(),
+                                        )?;
+                                        if !self
+                                            .selected_tmux
+                                            .as_ref()
+                                            .is_some_and(|selected| {
+                                                sessions.iter().any(|item| &item.name == selected)
+                                            })
+                                        {
+                                            self.selected_tmux =
+                                                sessions.first().map(|item| item.name.clone());
+                                        }
+                                        self.tmux_notice =
+                                            format!("Found {} tmux session(s).", sessions.len());
+                                        self.tmux_sessions = sessions;
+                                        Ok(())
+                                    });
+                                    self.error =
+                                        result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+                                }
+                                if !self.tmux_sessions.is_empty() {
+                                    egui::ComboBox::from_id_salt("tmux-session-select")
+                                        .selected_text(
+                                            self.selected_tmux
+                                                .as_deref()
+                                                .unwrap_or("Select tmux session"),
+                                        )
+                                        .show_ui(ui, |ui| {
+                                            for item in &self.tmux_sessions {
+                                                let label = format!(
+                                                    "{} ({} attached)",
+                                                    item.name, item.attached_clients
+                                                );
+                                                ui.selectable_value(
+                                                    &mut self.selected_tmux,
+                                                    Some(item.name.clone()),
+                                                    label,
+                                                );
+                                            }
+                                        });
+                                }
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                let can_open = self.tabs.len() < 16;
+                                let can_attach = can_open && self.selected_tmux.is_some();
+                                if ui
+                                    .add_enabled(can_attach, egui::Button::new("Attach selected"))
+                                    .clicked()
+                                {
+                                    self.terminal_focus = None;
+                                    let selected = self.selected_tmux.clone().unwrap_or_default();
+                                    let result = self.validated_draft().and_then(|session| {
+                                        let attach = tmux::attach_session(&session, &selected)?;
+                                        let terminal = terminal::connect(
+                                            self.next_id,
+                                            ctx.clone(),
+                                            self.tx.clone(),
+                                            &attach,
+                                            self.config.as_deref(),
+                                        )?;
+                                        self.tabs.push(Tab {
+                                            id: self.next_id,
+                                            name: format!("{} · tmux:{selected}", session.name),
+                                            kind: TabKind::Ssh,
+                                            session: attach,
+                                            terminal,
+                                            exited: false,
+                                        });
+                                        self.active = Some(self.next_id);
+                                        self.terminal_focus = Some(self.next_id);
+                                        self.next_id += 1;
+                                        self.tmux_notice =
+                                            format!("Attaching tmux session {selected:?}.");
+                                        Ok(())
+                                    });
+                                    self.error =
+                                        result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+                                }
+                                ui.label("New");
+                                if ui.text_edit_singleline(&mut self.tmux_new_name).has_focus() {
+                                    self.terminal_focus = None;
+                                }
+                                if ui
+                                    .add_enabled(can_open, egui::Button::new("Create tmux"))
+                                    .clicked()
+                                {
+                                    self.terminal_focus = None;
+                                    let name = self.tmux_new_name.trim().to_owned();
+                                    let result = self.validated_draft().and_then(|session| {
+                                        let create = tmux::create_session(&session, &name)?;
+                                        let reconnect = tmux::attach_session(&session, &name)?;
+                                        let terminal = terminal::connect(
+                                            self.next_id,
+                                            ctx.clone(),
+                                            self.tx.clone(),
+                                            &create,
+                                            self.config.as_deref(),
+                                        )?;
+                                        self.tabs.push(Tab {
+                                            id: self.next_id,
+                                            name: format!("{} · tmux:{name}", session.name),
+                                            kind: TabKind::Ssh,
+                                            session: reconnect,
+                                            terminal,
+                                            exited: false,
+                                        });
+                                        self.active = Some(self.next_id);
+                                        self.terminal_focus = Some(self.next_id);
+                                        self.next_id += 1;
+                                        self.selected_tmux = Some(name.clone());
+                                        self.tmux_notice =
+                                            format!("Creating tmux session {name:?}.");
+                                        Ok(())
+                                    });
+                                    self.error =
+                                        result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+                                }
+                            });
+                            ui.small(
+                                "Refresh uses non-interactive OpenSSH authentication (agent/key/ControlMaster). Create/Attach use the normal SSH PTY. Closing a tmux tab disconnects that tmux client and leaves the server-side tmux session running.",
+                            );
+                            if !self.tmux_notice.is_empty() {
+                                ui.small(&self.tmux_notice);
+                            }
+
+                            ui.separator();
                             ui.strong("Port forwarding");
                             ui.small(
                                 "One OpenSSH forwarding specification per line. These are added to any forwards from OpenSSH config. Profile forwarding is tied to this SSH session and fails the connection if setup fails.",
@@ -1184,9 +1333,19 @@ impl App {
                         self.active = Some(tab.id);
                         self.terminal_focus = Some(tab.id);
                     }
+                    let close_help = if tab
+                        .session
+                        .ssh
+                        .remote_command
+                        .starts_with("exec tmux attach-session -t ")
+                    {
+                        "Disconnect/detach this tmux client and close the terminal; the server-side tmux session remains"
+                    } else {
+                        "Disconnect and close terminal"
+                    };
                     if ui
                         .small_button("×")
-                        .on_hover_text("Disconnect and close terminal")
+                        .on_hover_text(close_help)
                         .clicked()
                     {
                         close = Some(tab.id);
