@@ -10,6 +10,7 @@ use std::{
 struct Tab {
     id: u64,
     name: String,
+    session: Session,
     terminal: TerminalBackend,
     exited: bool,
 }
@@ -349,7 +350,8 @@ impl App {
                                 )?;
                                 self.tabs.push(Tab {
                                     id: self.next_id,
-                                    name: session.name,
+                                    name: session.name.clone(),
+                                    session,
                                     terminal,
                                     exited: false,
                                 });
@@ -410,9 +412,19 @@ impl App {
             }
         });
 
+        let mut reconnect = None;
         egui::CentralPanel::default().show(ctx, |ui| {
             let terminal_focus = self.terminal_focus;
             if let Some(tab) = self.tabs.iter_mut().find(|tab| Some(tab.id) == self.active) {
+                if tab.exited {
+                    ui.horizontal(|ui| {
+                        ui.strong("Session exited.");
+                        if ui.button("Reconnect").clicked() {
+                            reconnect = Some((tab.id, tab.session.clone()));
+                        }
+                    });
+                    ui.separator();
+                }
                 let view = TerminalView::new(ui, &mut tab.terminal)
                     .set_focus(terminal_accepts_keyboard(terminal_focus, tab.id, tab.exited));
                 let response = ui.add(view);
@@ -432,6 +444,33 @@ impl App {
                 ui.label("No sessions are automatically connected on startup.");
             }
         });
+
+        if let Some((old_id, session)) = reconnect {
+            let new_id = self.next_id;
+            match terminal::connect(
+                new_id,
+                ctx.clone(),
+                self.tx.clone(),
+                &session,
+                self.config.as_deref(),
+            ) {
+                Ok(terminal) => {
+                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == old_id) {
+                        tab.id = new_id;
+                        tab.session = session;
+                        tab.terminal = terminal;
+                        tab.exited = false;
+                        self.active = Some(new_id);
+                        self.terminal_focus = Some(new_id);
+                        self.next_id += 1;
+                        self.error.clear();
+                    }
+                }
+                Err(error) => {
+                    self.error = format!("{error:#}");
+                }
+            }
+        }
     }
 }
 
