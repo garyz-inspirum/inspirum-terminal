@@ -93,7 +93,7 @@ The SSH script requires `sshd`, `ssh-keygen`, and Python 3. It uses only an unpr
 
 ## Security and data model
 
-Inspirum stores profile names, hosts, usernames, ports, strict-host-key preference, identity-file paths, ProxyJump routes, forwarding specifications, keepalive/timeout values, and boolean SSH feature choices. It does not save passwords, passphrases, private-key contents, or authentication responses. Authentication occurs inside OpenSSH's PTY. Every configured SSH value is passed as a separate process argument rather than being interpolated into a shell command.
+Inspirum stores profile names, hosts, usernames, ports, strict-host-key preference, identity-file paths, ProxyJump routes, forwarding specifications, keepalive/timeout values, and tri-state SSH feature policies that can inherit, enable, or disable selected OpenSSH behavior. It does not save passwords, passphrases, private-key contents, or authentication responses. Authentication occurs inside OpenSSH's PTY. Every configured SSH value is passed as a separate process argument rather than being interpolated into a shell command.
 
 This is an early slice, not a security audit. Review `docs/ARCHITECTURE.md` for boundaries and `docs/PARITY.md` for the roadmap. The parity document is not a claim that WindTerm parity exists.
 
