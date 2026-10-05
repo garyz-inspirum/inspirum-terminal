@@ -313,7 +313,6 @@ fn oversized_save_does_not_replace_previous_file() {
     assert_eq!(std::fs::read(path).unwrap(), before);
 }
 
-
 #[test]
 fn saved_profile_search_matches_name_host_and_user_case_insensitively() {
     let mut s = session();
@@ -336,8 +335,12 @@ fn selected_profile_can_be_renamed_without_leaving_the_old_entry() {
     edited.name = "Primary".into();
     edited.host = "primary-host".into();
 
-    let next = save_session_edit(&[first, second.clone()], Some("Work laptop"), edited.clone())
-        .unwrap();
+    let next = save_session_edit(
+        &[first, second.clone()],
+        Some("Work laptop"),
+        edited.clone(),
+    )
+    .unwrap();
     assert_eq!(next, vec![edited, second]);
     assert!(!next.iter().any(|profile| profile.name == "Work laptop"));
 }
