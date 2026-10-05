@@ -2,7 +2,7 @@
 use crate::{
     ControlMasterMode, ProxyKind, Session, SessionImportMode, delete_session,
     duplicate_session_draft, export_sessions, import_sessions, load_sessions, save_session_edit,
-    save_sessions, session_matches_query, sftp_browser::SftpBrowser, terminal,
+    save_sessions, scp_panel::ScpPanel, session_matches_query, sftp_browser::SftpBrowser, terminal,
 };
 use eframe::egui;
 use egui_term::{PtyEvent, TerminalBackend, TerminalView};
@@ -125,6 +125,7 @@ pub struct App {
     tunnel_process: Option<terminal::TunnelProcess>,
     tunnel_notice: String,
     sftp_browser: Option<SftpBrowser>,
+    scp_panel: Option<ScpPanel>,
     known_hosts_path: String,
     host_key_notice: String,
     host_key_remove_confirm: Option<(terminal::HostKeyTarget, Option<PathBuf>)>,
@@ -173,6 +174,7 @@ impl App {
             tunnel_process: None,
             tunnel_notice: String::new(),
             sftp_browser: None,
+            scp_panel: None,
             known_hosts_path: String::new(),
             host_key_notice: String::new(),
             host_key_remove_confirm: None,
@@ -1135,6 +1137,21 @@ impl App {
                             self.error =
                                 result.err().map(|e| format!("{e:#}")).unwrap_or_default();
                         }
+                        if ui
+                            .button("SCP")
+                            .on_hover_text("Open explicit SCP upload/download operations")
+                            .clicked()
+                        {
+                            self.terminal_focus = None;
+                            let result = self.validated_draft().map(|session| {
+                                self.scp_panel = Some(ScpPanel::new(
+                                    session,
+                                    self.config.clone(),
+                                ));
+                            });
+                            self.error =
+                                result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+                        }
                     });
                     ui.small(
                         "SFTP reuses host trust, OpenSSH config, identity, ProxyJump, timeout, keepalive and compression. Terminal-only remote commands, X11/agent forwarding and port forwards are not applied to SFTP.",
@@ -1189,7 +1206,19 @@ impl App {
 
         let mut reconnect = None;
         let mut close_browser = false;
+        let mut close_scp = false;
         egui::CentralPanel::default().show(ctx, |ui| {
+            if let Some(panel) = self.scp_panel.as_mut() {
+                ui.horizontal(|ui| {
+                    ui.strong(format!("SCP · {}", panel.session_name()));
+                    if ui.button("Close SCP").clicked() {
+                        close_scp = true;
+                    }
+                });
+                ui.separator();
+                panel.ui(ctx, ui);
+                return;
+            }
             if let Some(browser) = self.sftp_browser.as_mut() {
                 ui.horizontal(|ui| {
                     ui.strong(format!("Files · {}", browser.session_name()));
@@ -1233,6 +1262,9 @@ impl App {
         });
         if close_browser {
             self.sftp_browser = None;
+        }
+        if close_scp {
+            self.scp_panel = None;
         }
 
         if let Some((old_id, kind, session)) = reconnect {
