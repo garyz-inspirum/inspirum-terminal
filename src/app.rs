@@ -10,6 +10,7 @@ use crate::{
     terminal,
     terminal_ux::{self, PasteDecision, PastePolicy},
     tmux::{self, TmuxSession},
+    workspace::{self, SplitAxis, SyncInputState, WorkspaceLayout},
 };
 use eframe::egui;
 use egui_term::{BackendCommand, PtyEvent, TerminalBackend, TerminalView};
@@ -72,6 +73,86 @@ fn terminal_screen_text(terminal: &mut TerminalBackend) -> String {
     }
 
     result.trim_end_matches(&[' ', '\n'][..]).to_owned()
+}
+
+fn synchronized_event_bytes(event: &egui::Event) -> Option<Vec<u8>> {
+    match event {
+        egui::Event::Text(text) if !text.is_empty() && !terminal_ux::is_multiline_paste(text) => {
+            Some(text.as_bytes().to_vec())
+        }
+        egui::Event::Paste(text)
+            if terminal_ux::classify_paste(PastePolicy::ConfirmMultiline, text)
+                == PasteDecision::Send =>
+        {
+            Some(text.as_bytes().to_vec())
+        }
+        egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } if !modifiers.command && !modifiers.ctrl => match key {
+            egui::Key::Enter => Some(vec![b'\r']),
+            egui::Key::Tab => Some(vec![b'\t']),
+            egui::Key::Backspace => Some(vec![0x7f]),
+            egui::Key::ArrowUp => Some(b"\x1b[A".to_vec()),
+            egui::Key::ArrowDown => Some(b"\x1b[B".to_vec()),
+            egui::Key::ArrowRight => Some(b"\x1b[C".to_vec()),
+            egui::Key::ArrowLeft => Some(b"\x1b[D".to_vec()),
+            egui::Key::Home => Some(b"\x1b[H".to_vec()),
+            egui::Key::End => Some(b"\x1b[F".to_vec()),
+            egui::Key::Delete => Some(b"\x1b[3~".to_vec()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn render_terminal_tab(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    tab: &mut Tab,
+    terminal_focus: Option<u64>,
+    copy_selected: bool,
+    show_pane_header: bool,
+) -> (Option<(u64, TabKind, Session)>, bool, bool) {
+    let mut reconnect = None;
+    let mut focus = false;
+    let mut close = false;
+
+    if show_pane_header {
+        ui.horizontal(|ui| {
+            ui.strong(&tab.name);
+            if ui.small_button("Close pane").clicked() {
+                close = true;
+            }
+        });
+    }
+    if tab.exited {
+        ui.horizontal(|ui| {
+            ui.strong("Session exited.");
+            if ui.button("Reconnect").clicked() {
+                reconnect = Some((tab.id, tab.kind, tab.session.clone()));
+            }
+        });
+        ui.separator();
+    }
+    let view = TerminalView::new(ui, &mut tab.terminal).set_focus(terminal_accepts_keyboard(
+        terminal_focus,
+        tab.id,
+        tab.exited,
+    ));
+    let response = ui.add(view);
+    if copy_selected {
+        let selected = tab.terminal.selectable_content();
+        if !selected.is_empty() {
+            ctx.copy_text(selected);
+        }
+    }
+    if response.clicked() && !tab.exited {
+        focus = true;
+    }
+    (reconnect, focus, close)
 }
 
 fn parse_optional_u16(value: &str, label: &str) -> anyhow::Result<Option<u16>> {
@@ -180,6 +261,13 @@ pub struct App {
     session_log_path: String,
     last_logged_screen: String,
     log_notice: String,
+    workspace_panes: Vec<u64>,
+    workspace_axis: SplitAxis,
+    workspace_path: String,
+    workspace_reconnect_on_restore: bool,
+    workspace_loaded: Option<WorkspaceLayout>,
+    workspace_notice: String,
+    sync_input: SyncInputState,
     next_id: u64,
     tx: Sender<(u64, PtyEvent)>,
     rx: Receiver<(u64, PtyEvent)>,
@@ -247,6 +335,13 @@ impl App {
             session_log_path: String::new(),
             last_logged_screen: String::new(),
             log_notice: String::new(),
+            workspace_panes: Vec::new(),
+            workspace_axis: SplitAxis::Horizontal,
+            workspace_path: String::new(),
+            workspace_reconnect_on_restore: false,
+            workspace_loaded: None,
+            workspace_notice: String::new(),
+            sync_input: SyncInputState::default(),
             next_id: 1,
             tx,
             rx,
@@ -454,6 +549,30 @@ impl App {
             }
         }
 
+        if let Some(source) = active_terminal.filter(|id| self.terminal_focus == Some(*id))
+            && self.sync_input.armed()
+        {
+            let destinations = self.sync_input.destinations(source);
+            let payloads: Vec<Vec<u8>> = ctx.input(|input| {
+                input
+                    .events
+                    .iter()
+                    .filter_map(synchronized_event_bytes)
+                    .collect()
+            });
+            for destination in destinations {
+                if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == destination && !tab.exited)
+                {
+                    for payload in &payloads {
+                        tab.terminal
+                            .process_command(BackendCommand::Write(payload.clone()));
+                    }
+                }
+            }
+        }
         let search_shortcut = ctx.input(|input| {
             input.key_pressed(egui::Key::F) && input.modifiers.command && input.modifiers.shift
         });
@@ -1545,6 +1664,8 @@ impl App {
             });
             if let Some(id) = close {
                 self.tabs.retain(|tab| tab.id != id);
+                self.workspace_panes.retain(|pane| *pane != id);
+                self.sync_input.remove_pane(id);
                 if self.active == Some(id) {
                     self.active = self.tabs.last().map(|tab| tab.id);
                 }
@@ -1557,6 +1678,12 @@ impl App {
         let mut reconnect = None;
         let mut close_browser = false;
         let mut close_scp = false;
+        let mut close_pane = None;
+        let mut focus_pane = None;
+        let mut split_requested = None;
+        let mut workspace_save_requested = false;
+        let mut workspace_load_requested = false;
+        let mut workspace_restore_requested = false;
         let mut copy_selected = false;
         let active_screen = if self.search_open || self.logging_tab.is_some() {
             self.active.and_then(|id| {
@@ -1703,28 +1830,169 @@ impl App {
                 ui.separator();
             }
 
-            let terminal_focus = self.terminal_focus;
-            if let Some(tab) = self.tabs.iter_mut().find(|tab| Some(tab.id) == self.active) {
-                if tab.exited {
-                    ui.horizontal(|ui| {
-                        ui.strong("Session exited.");
-                        if ui.button("Reconnect").clicked() {
-                            reconnect = Some((tab.id, tab.kind, tab.session.clone()));
+            ui.group(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong("SSH workspace");
+                    if ui.button("Split horizontal").clicked() {
+                        split_requested = Some(SplitAxis::Horizontal);
+                    }
+                    if ui.button("Split vertical").clicked() {
+                        split_requested = Some(SplitAxis::Vertical);
+                    }
+                    ui.label("Layout");
+                    let path = ui.add(
+                        egui::TextEdit::singleline(&mut self.workspace_path)
+                            .desired_width(220.0)
+                            .hint_text("workspace.json"),
+                    );
+                    if path.has_focus() {
+                        self.terminal_focus = None;
+                    }
+                    if ui.button("Save").clicked() {
+                        workspace_save_requested = true;
+                    }
+                    if ui.button("Load metadata").clicked() {
+                        workspace_load_requested = true;
+                    }
+                    if ui
+                        .add_enabled(
+                            self.workspace_loaded
+                                .as_ref()
+                                .is_some_and(|layout| layout.reconnect_on_restore),
+                            egui::Button::new("Restore & reconnect"),
+                        )
+                        .clicked()
+                    {
+                        workspace_restore_requested = true;
+                    }
+                });
+                ui.checkbox(
+                    &mut self.workspace_reconnect_on_restore,
+                    "Allow reconnect when this saved layout is explicitly restored",
+                );
+                ui.small(
+                    "Loading layout metadata never reconnects. Restore & reconnect is a separate explicit action and is only enabled for layouts saved with reconnect permission.",
+                );
+
+                if self.workspace_panes.len() >= 2 {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Sync targets:");
+                        for pane_id in self.workspace_panes.clone() {
+                            let label = self
+                                .tabs
+                                .iter()
+                                .find(|tab| tab.id == pane_id)
+                                .map(|tab| tab.name.clone())
+                                .unwrap_or_else(|| format!("pane {pane_id}"));
+                            let mut selected = self.sync_input.is_target(pane_id);
+                            if ui.checkbox(&mut selected, label).changed() {
+                                self.sync_input.set_target(pane_id, selected);
+                            }
+                        }
+                        if self.sync_input.armed() {
+                            if ui.button("Disarm synchronized input").clicked() {
+                                self.sync_input.set_armed(false);
+                            }
+                        } else if ui
+                            .add_enabled(
+                                self.sync_input.selected_count() >= 2,
+                                egui::Button::new("Arm synchronized input"),
+                            )
+                            .clicked()
+                        {
+                            self.sync_input.set_armed(true);
                         }
                     });
-                    ui.separator();
-                }
-                let view = TerminalView::new(ui, &mut tab.terminal)
-                    .set_focus(terminal_accepts_keyboard(terminal_focus, tab.id, tab.exited));
-                let response = ui.add(view);
-                if copy_selected {
-                    let selected = tab.terminal.selectable_content();
-                    if !selected.is_empty() {
-                        ctx.copy_text(selected);
+                    if self.sync_input.armed() {
+                        ui.strong(
+                            "SYNC INPUT ARMED — text, safe paste and navigation keys are mirrored to every selected pane.",
+                        );
+                    } else {
+                        ui.small("Synchronized input is disarmed.");
                     }
                 }
-                if response.clicked() && !tab.exited {
-                    self.terminal_focus = Some(tab.id);
+                if !self.workspace_notice.is_empty() {
+                    ui.small(&self.workspace_notice);
+                }
+            });
+            ui.separator();
+
+            let terminal_focus = self.terminal_focus;
+            let split_ids: Vec<u64> = self
+                .workspace_panes
+                .iter()
+                .copied()
+                .filter(|id| self.tabs.iter().any(|tab| tab.id == *id))
+                .take(2)
+                .collect();
+
+            if split_ids.len() == 2 {
+                let first_index = self.tabs.iter().position(|tab| tab.id == split_ids[0]);
+                let second_index = self.tabs.iter().position(|tab| tab.id == split_ids[1]);
+                if let (Some(first_index), Some(second_index)) = (first_index, second_index) {
+                    let (first, second) = if first_index < second_index {
+                        let (left, right) = self.tabs.split_at_mut(second_index);
+                        (&mut left[first_index], &mut right[0])
+                    } else {
+                        let (left, right) = self.tabs.split_at_mut(first_index);
+                        (&mut right[0], &mut left[second_index])
+                    };
+                    let active = self.active;
+                    let mut render = |ui: &mut egui::Ui, tab: &mut Tab| {
+                        let (next_reconnect, focused, close) = render_terminal_tab(
+                            ui,
+                            ctx,
+                            tab,
+                            terminal_focus,
+                            copy_selected && active == Some(tab.id),
+                            true,
+                        );
+                        if reconnect.is_none() {
+                            reconnect = next_reconnect;
+                        }
+                        if focused {
+                            focus_pane = Some(tab.id);
+                        }
+                        if close {
+                            close_pane = Some(tab.id);
+                        }
+                    };
+                    match self.workspace_axis {
+                        SplitAxis::Horizontal => {
+                            ui.columns(2, |columns| {
+                                render(&mut columns[0], first);
+                                render(&mut columns[1], second);
+                            });
+                        }
+                        SplitAxis::Vertical => {
+                            let pane_height = (ui.available_height() / 2.0 - 4.0).max(80.0);
+                            ui.allocate_ui(
+                                egui::vec2(ui.available_width(), pane_height),
+                                |ui| render(ui, first),
+                            );
+                            ui.separator();
+                            ui.allocate_ui(
+                                egui::vec2(ui.available_width(), pane_height),
+                                |ui| render(ui, second),
+                            );
+                        }
+                    }
+                }
+            } else if let Some(tab) = self.tabs.iter_mut().find(|tab| Some(tab.id) == self.active) {
+                let (next_reconnect, focused, close) = render_terminal_tab(
+                    ui,
+                    ctx,
+                    tab,
+                    terminal_focus,
+                    copy_selected,
+                    false,
+                );
+                reconnect = next_reconnect;
+                if focused {
+                    focus_pane = Some(tab.id);
+                }
+                if close {
+                    close_pane = Some(tab.id);
                 }
             } else {
                 ui.heading("Connect to an SSH server");
@@ -1739,6 +2007,188 @@ impl App {
                 ui.label("No sessions are automatically connected on startup.");
             }
         });
+        if let Some(id) = focus_pane {
+            self.active = Some(id);
+            self.terminal_focus = Some(id);
+        }
+
+        if let Some(id) = close_pane {
+            self.tabs.retain(|tab| tab.id != id);
+            self.workspace_panes.retain(|pane| *pane != id);
+            self.sync_input.remove_pane(id);
+            if self.active == Some(id) {
+                self.active = self
+                    .workspace_panes
+                    .last()
+                    .copied()
+                    .or_else(|| self.tabs.last().map(|tab| tab.id));
+            }
+            if self.terminal_focus == Some(id) {
+                self.terminal_focus = self.active;
+            }
+        }
+        if let Some(axis) = split_requested {
+            let source = self.active.and_then(|id| {
+                self.tabs
+                    .iter()
+                    .find(|tab| tab.id == id && !tab.exited && matches!(tab.kind, TabKind::Ssh))
+                    .map(|tab| (tab.id, tab.session.clone()))
+            });
+            if let Some((source_id, session)) = source {
+                if self.tabs.len() >= 16 {
+                    self.workspace_notice = "Cannot split: the 16-tab limit is reached.".into();
+                } else {
+                    let id = self.next_id;
+                    match terminal::connect(
+                        id,
+                        ctx.clone(),
+                        self.tx.clone(),
+                        &session,
+                        self.config.as_deref(),
+                    ) {
+                        Ok(terminal) => {
+                            self.tabs.push(Tab {
+                                id,
+                                name: format!("{} · split", session.name),
+                                kind: TabKind::Ssh,
+                                session,
+                                terminal,
+                                exited: false,
+                            });
+                            self.workspace_panes = vec![source_id, id];
+                            self.workspace_axis = axis;
+                            self.sync_input = SyncInputState::default();
+                            self.active = Some(id);
+                            self.terminal_focus = Some(id);
+                            self.next_id += 1;
+                            self.workspace_notice =
+                                "Split created. Synchronized input remains disarmed.".into();
+                        }
+                        Err(error) => {
+                            self.workspace_notice = format!("Cannot create split: {error:#}");
+                        }
+                    }
+                }
+            } else {
+                self.workspace_notice =
+                    "Select a connected SSH tab before creating a split.".into();
+            }
+        }
+        if workspace_save_requested {
+            let result = (|| -> anyhow::Result<()> {
+                let value = self.workspace_path.trim();
+                anyhow::ensure!(!value.is_empty(), "workspace layout path is required");
+                let ids: Vec<u64> = if self.workspace_panes.is_empty() {
+                    self.active.into_iter().collect()
+                } else {
+                    self.workspace_panes.clone()
+                };
+                let panes: Vec<Session> = ids
+                    .iter()
+                    .filter_map(|id| {
+                        self.tabs
+                            .iter()
+                            .find(|tab| tab.id == *id && matches!(tab.kind, TabKind::Ssh))
+                            .map(|tab| tab.session.clone())
+                    })
+                    .collect();
+                let layout = WorkspaceLayout {
+                    version: 1,
+                    axis: self.workspace_axis,
+                    reconnect_on_restore: self.workspace_reconnect_on_restore,
+                    panes,
+                };
+                workspace::save_layout(&PathBuf::from(value), &layout)
+            })();
+            self.workspace_notice = match result {
+                Ok(()) => "Workspace layout saved.".into(),
+                Err(error) => format!("Cannot save workspace: {error:#}"),
+            };
+        }
+
+        if workspace_load_requested {
+            let value = self.workspace_path.trim();
+            if value.is_empty() {
+                self.workspace_notice = "Workspace layout path is required.".into();
+            } else {
+                match workspace::load_layout(&PathBuf::from(value)) {
+                    Ok(layout) => {
+                        let pane_count = layout.panes.len();
+                        let reconnect = layout.reconnect_on_restore;
+                        self.workspace_loaded = Some(layout);
+                        self.workspace_notice = if reconnect {
+                            format!(
+                                "Loaded {pane_count} pane(s) as metadata only. Use Restore & reconnect to connect them."
+                            )
+                        } else {
+                            format!(
+                                "Loaded {pane_count} pane(s) as metadata only. Reconnect is disabled in this layout."
+                            )
+                        };
+                    }
+                    Err(error) => {
+                        self.workspace_loaded = None;
+                        self.workspace_notice = format!("Cannot load workspace: {error:#}");
+                    }
+                }
+            }
+        }
+        if workspace_restore_requested {
+            let result = (|| -> anyhow::Result<(Vec<Tab>, SplitAxis)> {
+                let layout = self
+                    .workspace_loaded
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("load workspace metadata first"))?;
+                anyhow::ensure!(
+                    layout.may_reconnect(true),
+                    "this workspace was not saved with reconnect permission"
+                );
+                anyhow::ensure!(
+                    self.tabs.len() + layout.panes.len() <= 16,
+                    "restoring this workspace would exceed the 16-tab limit"
+                );
+                let axis = layout.axis;
+                let mut created = Vec::new();
+                for (offset, session) in layout.panes.into_iter().enumerate() {
+                    let id = self.next_id + offset as u64;
+                    let terminal = terminal::connect(
+                        id,
+                        ctx.clone(),
+                        self.tx.clone(),
+                        &session,
+                        self.config.as_deref(),
+                    )?;
+                    created.push(Tab {
+                        id,
+                        name: format!("{} · restored", session.name),
+                        kind: TabKind::Ssh,
+                        session,
+                        terminal,
+                        exited: false,
+                    });
+                }
+                Ok((created, axis))
+            })();
+
+            match result {
+                Ok((created, axis)) => {
+                    let ids: Vec<u64> = created.iter().map(|tab| tab.id).collect();
+                    self.next_id += created.len() as u64;
+                    self.tabs.extend(created);
+                    self.workspace_panes = ids;
+                    self.workspace_axis = axis;
+                    self.sync_input = SyncInputState::default();
+                    self.active = self.workspace_panes.last().copied();
+                    self.terminal_focus = self.active;
+                    self.workspace_notice =
+                        "Workspace restored by explicit action; synchronized input is disarmed."
+                            .into();
+                }
+                Err(error) => {
+                    self.workspace_notice = format!("Cannot restore workspace: {error:#}");
+                }
+            }
+        }
         if let Some((id, text)) = self.pending_paste.clone() {
             let mut confirm = false;
             let mut cancel = false;
@@ -1779,9 +2229,28 @@ impl App {
             confirm |= ctx.input(|input| input.key_pressed(egui::Key::Enter));
             cancel |= ctx.input(|input| input.key_pressed(egui::Key::Escape));
             if confirm {
-                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id && !tab.exited) {
+                let bytes = text.into_bytes();
+                let source_exists = if let Some(tab) =
+                    self.tabs.iter_mut().find(|tab| tab.id == id && !tab.exited)
+                {
                     tab.terminal
-                        .process_command(BackendCommand::Write(text.into_bytes()));
+                        .process_command(BackendCommand::Write(bytes.clone()));
+                    true
+                } else {
+                    false
+                };
+                if source_exists {
+                    for destination in self.sync_input.destinations(id) {
+                        if let Some(target) = self
+                            .tabs
+                            .iter_mut()
+                            .find(|tab| tab.id == destination && !tab.exited)
+                        {
+                            target
+                                .terminal
+                                .process_command(BackendCommand::Write(bytes.clone()));
+                        }
+                    }
                     self.paste_notice = "Paste sent after explicit confirmation.".into();
                     self.terminal_focus = Some(id);
                 } else {
@@ -1839,6 +2308,12 @@ impl App {
                         tab.session = session;
                         tab.terminal = terminal;
                         tab.exited = false;
+                        for pane in &mut self.workspace_panes {
+                            if *pane == old_id {
+                                *pane = new_id;
+                            }
+                        }
+                        self.sync_input = SyncInputState::default();
                         self.active = Some(new_id);
                         self.terminal_focus = Some(new_id);
                         self.next_id += 1;
