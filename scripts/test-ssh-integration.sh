@@ -19,6 +19,7 @@ with tempfile.TemporaryDirectory(prefix='ssh-fixture-',dir=root) as tmp:
  fixture_password='inspirum-fixture-password'
  privileged_auth=(shutil.which('sudo') is not None and subprocess.run(['sudo','-n','true'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0)
  created_users=[]
+ auth_public_dir=None
  def cleanup_users():
   for user in reversed(created_users):
    subprocess.run(
@@ -28,7 +29,11 @@ with tempfile.TemporaryDirectory(prefix='ssh-fixture-',dir=root) as tmp:
     check=False,
    )
   created_users.clear()
+ def cleanup_public_assets():
+  if auth_public_dir is not None:
+   shutil.rmtree(auth_public_dir, ignore_errors=True)
  atexit.register(cleanup_users)
+ atexit.register(cleanup_public_assets)
  for key in ('host','client','wrong-host','wrong-client'):
   subprocess.run(['ssh-keygen','-q','-t','ed25519','-N','','-f',str(d/key)],check=True)
  subprocess.run(
@@ -141,6 +146,12 @@ LogLevel VERBOSE
 ''')
  if privileged_auth:
   suffix=str(os.getpid())
+  auth_public_dir=pathlib.Path(tempfile.mkdtemp(prefix='inspirum-auth-fixture-',dir='/tmp'))
+  os.chmod(auth_public_dir,0o755)
+  shutil.copyfile(d/'authorized_keys',auth_public_dir/'authorized_keys')
+  os.chmod(auth_public_dir/'authorized_keys',0o644)
+  shutil.copyfile(d/'auth_remote.sh',auth_public_dir/'auth_remote.sh')
+  os.chmod(auth_public_dir/'auth_remote.sh',0o755)
   password_user=('inspw'+suffix)[-31:]
   mfa_user=('inspmfa'+suffix)[-31:]
   for user in (password_user,mfa_user):
@@ -172,14 +183,14 @@ PermitTunnel no
 PermitTTY yes
 PrintMotd no
 PrintLastLog no
-ForceCommand /bin/sh {d}/auth_remote.sh
+ForceCommand /bin/sh {auth_public_dir}/auth_remote.sh
 LogLevel VERBOSE
 ''')
   (d/'mfa_sshd_config').write_text(f'''ListenAddress 127.0.0.1
 Port {mfa_port}
 HostKey {d}/host
 PidFile {d}/mfa-sshd.pid
-AuthorizedKeysFile {d}/authorized_keys
+AuthorizedKeysFile {auth_public_dir}/authorized_keys
 StrictModes no
 UsePAM yes
 PasswordAuthentication no
@@ -378,6 +389,7 @@ Host *
     try: process.wait(timeout=5)
     except subprocess.TimeoutExpired: process.kill();process.wait()
    cleanup_users()
+   cleanup_public_assets()
    log.seek(0);print('--- disposable target sshd log ---\n'+log.read(),flush=True)
    jump_log.seek(0);print('--- disposable jump sshd log ---\n'+jump_log.read(),flush=True)
    sftp_log.seek(0);print('--- disposable sftp sshd log ---\n'+sftp_log.read(),flush=True)
