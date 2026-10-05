@@ -1,7 +1,5 @@
 use inspirum_terminal::{
-    ProxyKind, Session, SshOptions,
-    proxy::connect_tunnel,
-    terminal::proxy_command_for_target,
+    ProxyKind, Session, SshOptions, proxy::connect_tunnel, terminal::proxy_command_for_target,
 };
 use std::{
     io::{Read, Write},
@@ -16,7 +14,9 @@ fn http_echo_proxy() -> (u16, thread::JoinHandle<()>) {
     let port = listener.local_addr().unwrap().port();
     let handle = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         let mut request = Vec::new();
         let mut byte = [0_u8; 1];
         while !request.ends_with(b"\r\n\r\n") {
@@ -24,8 +24,13 @@ fn http_echo_proxy() -> (u16, thread::JoinHandle<()>) {
             request.push(byte[0]);
         }
         let text = String::from_utf8(request).unwrap();
-        assert!(text.starts_with("CONNECT target.example:2222 HTTP/1.1\r\n"), "{text}");
-        stream.write_all(b"HTTP/1.1 200 Connection Established\r\nX-Test: yes\r\n\r\n").unwrap();
+        assert!(
+            text.starts_with("CONNECT target.example:2222 HTTP/1.1\r\n"),
+            "{text}"
+        );
+        stream
+            .write_all(b"HTTP/1.1 200 Connection Established\r\nX-Test: yes\r\n\r\n")
+            .unwrap();
         let mut payload = [0_u8; 11];
         stream.read_exact(&mut payload).unwrap();
         assert_eq!(&payload, b"http-tunnel");
@@ -88,14 +93,8 @@ fn http_connect_helper_establishes_and_relays_tunnel() {
 #[test]
 fn socks5_helper_establishes_and_relays_tunnel() {
     let (port, proxy) = socks_echo_proxy();
-    let mut tunnel = connect_tunnel(
-        ProxyKind::Socks5,
-        "127.0.0.1",
-        port,
-        "target.example",
-        2222,
-    )
-    .unwrap();
+    let mut tunnel =
+        connect_tunnel(ProxyKind::Socks5, "127.0.0.1", port, "target.example", 2222).unwrap();
     tunnel.write_all(b"socks-tunnel").unwrap();
     let mut echoed = [0_u8; 12];
     tunnel.read_exact(&mut echoed).unwrap();
@@ -181,7 +180,13 @@ fn proxy_command_has_fixed_options_and_no_user_shell_fragment() {
 
 #[test]
 fn proxy_endpoint_rejects_shell_syntax_before_command_construction() {
-    for host in ["proxy example", "proxy;touch", "$(id)", "-oProxyCommand=x"] {
+    for host in [
+        "proxy example",
+        "proxy;touch",
+        "$(id)",
+        "-oProxyCommand=x",
+        "fe80::1%PATH%",
+    ] {
         let session = Session {
             host: "target.example".into(),
             ssh: SshOptions {
