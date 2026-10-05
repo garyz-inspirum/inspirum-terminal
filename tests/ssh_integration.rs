@@ -756,13 +756,20 @@ fn structured_proxy_ssh_output(p: &std::path::Path, proxy_port: u16) -> std::pro
     };
     let helper = PathBuf::from(env!("CARGO_BIN_EXE_inspirum-terminal"));
     let args = launch_args_with_proxy_helper(&session, Some(&p.join("config")), &helper).unwrap();
-    Command::new("ssh")
+    let mut child = Command::new("ssh")
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .expect("run real OpenSSH through structured proxy helper")
+        .spawn()
+        .expect("run real OpenSSH through structured proxy helper");
+    child
+        .stdin
+        .take()
+        .expect("proxy SSH stdin")
+        .write_all(b"exit\n")
+        .expect("request disposable remote exit");
+    child.wait_with_output().expect("wait for proxy SSH")
 }
 
 #[test]
