@@ -180,8 +180,9 @@ impl SftpBrowser {
         let name = local
             .file_name()
             .and_then(|name| name.to_str())
-            .ok_or_else(|| anyhow::anyhow!("local filename must be valid Unicode"))?;
-        let remote = sftp::join_remote(self.remote_path.trim(), name);
+            .ok_or_else(|| anyhow::anyhow!("local filename must be valid Unicode"))?
+            .to_owned();
+        let remote = sftp::join_remote(self.remote_path.trim(), &name);
         let pending = Conflict {
             direction: Direction::Upload,
             local,
