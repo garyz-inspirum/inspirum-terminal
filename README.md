@@ -6,7 +6,7 @@ Current scope:
 
 - native `eframe`/egui desktop window;
 - terminal rendering and PTY integration through `egui_term`;
-- SSH sessions, interactive SFTP tabs, and a graphical SFTP browser/transfer queue launched through the system OpenSSH client tools;
+- SSH sessions, interactive SFTP tabs, a graphical SFTP browser/transfer queue, and explicit SCP upload/download operations launched through the system OpenSSH client tools;
 - saved, non-secret connection profiles with search, rename-on-save, editable duplication, confirmed deletion, and validated JSON import/export;
   Export refuses to overwrite an existing destination; replace-import requires explicit confirmation.
 - first-class profile controls for identity-file paths, ProxyJump, structured HTTP CONNECT/SOCKS5 proxy routing, app-managed OpenSSH ControlMaster multiplexing/lifecycle, authentication-method policy, GSSAPI delegation policy, `IdentitiesOnly`, agent/X11 forwarding, compression, connect timeout, keepalive, remote auto-command, and local/remote/dynamic port forwarding;
@@ -51,7 +51,7 @@ Early artifacts are unsigned prereleases because no code-signing or notarization
 ## Requirements
 
 - a graphical desktop for interactive terminal windows (not required for diagnostics);
-- the system `ssh` command from OpenSSH on `PATH`; interactive SFTP tabs also require the matching `sftp` command on `PATH`, and host-key inspection/removal requires `ssh-keygen`;
+- the system `ssh` command from OpenSSH on `PATH`; SFTP workflows require `sftp`, SCP operations require `scp`, and host-key inspection/removal requires `ssh-keygen`;
 - Rust 1.95.0 to match CI (the package uses edition 2024);
 - on Linux, the normal X11/Wayland development packages needed by `eframe`.
 
@@ -70,7 +70,7 @@ Optional arguments:
 inspirum-terminal [--profiles PATH] [--ssh-config PATH]
 ```
 
-`--profiles` changes the JSON profile location. `--ssh-config` passes one explicit configuration file to OpenSSH. Otherwise OpenSSH uses its normal configuration and identity discovery. The SFTP button opens an interactive OpenSSH `sftp` tab. The Files button opens the graphical SFTP browser and transfer queue using the same validated OpenSSH policy inputs; see [graphical SFTP](docs/sftp-browser.md). Structured HTTP CONNECT and SOCKS5 proxy transport currently supports no-auth proxies only; see [proxy transport](docs/proxy.md).
+`--profiles` changes the JSON profile location. `--ssh-config` passes one explicit configuration file to OpenSSH. Otherwise OpenSSH uses its normal configuration and identity discovery. The SFTP button opens an interactive OpenSSH `sftp` tab. The Files button opens the graphical SFTP browser and transfer queue. The SCP button opens explicit OpenSSH `scp` upload/download operations with overwrite safeguards; see [graphical SFTP](docs/sftp-browser.md) and [SCP operations](docs/scp.md). Structured HTTP CONNECT and SOCKS5 proxy transport currently supports no-auth proxies only; see [proxy transport](docs/proxy.md).
 
 Click a terminal to give it keyboard focus. Moving the pointer away does not transfer that focus. Verify new host-key fingerprints through an independent trusted channel before accepting them. The Host key trust panel can inspect/remove entries from the default user `known_hosts` file or an explicitly selected file; it never auto-accepts a replacement key. If your SSH config uses a custom `UserKnownHostsFile`, select that file explicitly before inspecting or removing entries.
 

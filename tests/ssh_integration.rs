@@ -1,7 +1,7 @@
 //! Opt-in Linux loopback verification: scripts/test-ssh-integration.sh.
 use egui_term::{BackendCommand, PtyEvent, TerminalBackend};
 use inspirum_terminal::{
-    ControlMasterMode, ProxyKind, Session, SshOptions, sftp,
+    ControlMasterMode, ProxyKind, Session, SshOptions, scp, sftp,
     terminal::{
         connect, connect_sftp, control_master_operation, launch_args,
         launch_args_with_proxy_helper, start_tunnels,
@@ -1042,5 +1042,117 @@ fn graphical_sftp_operations_are_verified_conflict_safe_and_cancellable() {
     );
     println!(
         "PASS graphical SFTP browse/mutate, binary transfer, conflict safety, verification and cancellation"
+    );
+}
+
+fn sha256(path: &std::path::Path) -> String {
+    let output = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .expect("sha256sum must be available in Linux CI");
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+fn wait_scp_transfer(transfer: &mut scp::Transfer) -> anyhow::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(12);
+    loop {
+        match transfer.poll() {
+            Ok(Some(())) => return Ok(()),
+            Ok(None) => {
+                assert!(Instant::now() < deadline, "managed SCP transfer timed out");
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn scp_binary_round_trip_checksums_match_and_failures_leave_no_success_file() {
+    let p = fixture();
+    let session = fixture_sftp_session();
+    let config = p.join("config");
+    let local = p.join("scp-local");
+    fs::create_dir_all(&local).unwrap();
+
+    let source = local.join("source binary.bin");
+    let payload: Vec<u8> = (0..131072)
+        .map(|index| ((index * 31) % 251) as u8)
+        .collect();
+    fs::write(&source, &payload).unwrap();
+    let remote = "scp binary;literal.bin";
+
+    let mut upload = scp::start_upload(&session, Some(&config), &source, remote, false)
+        .expect("start managed SCP upload");
+    wait_scp_transfer(&mut upload).expect("verified SCP upload");
+    let remote_path = p.join("sftp-root").join(remote);
+    assert_eq!(sha256(&source), sha256(&remote_path));
+
+    let download = local.join("downloaded binary.bin");
+    let mut transfer = scp::start_download(&session, Some(&config), remote, &download, false)
+        .expect("start managed SCP download");
+    wait_scp_transfer(&mut transfer).expect("verified SCP download");
+    assert_eq!(sha256(&source), sha256(&download));
+
+    let overwrite_rejected = scp::start_download(&session, Some(&config), remote, &download, false);
+    assert!(
+        overwrite_rejected.is_err(),
+        "SCP download overwrote an existing local destination without confirmation"
+    );
+
+    let original = b"KEEP-EXISTING";
+    fs::write(&download, original).unwrap();
+    let missing = scp::start_download(
+        &session,
+        Some(&config),
+        "missing-remote.bin",
+        &download,
+        true,
+    );
+    assert!(
+        missing.is_err(),
+        "missing remote SCP source unexpectedly started"
+    );
+    assert_eq!(fs::read(&download).unwrap(), original);
+
+    let existing_upload = scp::start_upload(&session, Some(&config), &source, remote, false);
+    assert!(
+        existing_upload.is_err(),
+        "SCP upload overwrote an existing remote destination without confirmation"
+    );
+    assert_eq!(sha256(&source), sha256(&remote_path));
+
+    let bad_remote = "missing-dir/final.bin";
+    let mut failed_upload = scp::start_upload(&session, Some(&config), &source, bad_remote, true)
+        .expect("SCP child should start before remote path failure");
+    assert!(
+        wait_scp_transfer(&mut failed_upload).is_err(),
+        "SCP upload to missing remote directory unexpectedly succeeded"
+    );
+    assert!(!p.join("sftp-root/missing-dir/final.bin").exists());
+    assert!(
+        fs::read_dir(p.join("sftp-root"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .contains(".inspirum-scp-")),
+        "failed SCP upload left a remote staging file"
+    );
+
+    let mut overwrite = scp::start_upload(&session, Some(&config), &source, remote, true)
+        .expect("start confirmed SCP overwrite");
+    wait_scp_transfer(&mut overwrite).expect("verified confirmed SCP overwrite");
+    assert_eq!(sha256(&source), sha256(&remote_path));
+
+    println!(
+        "PASS SCP binary SHA-256 upload/download, overwrite guards, staging and negative cleanup"
     );
 }
