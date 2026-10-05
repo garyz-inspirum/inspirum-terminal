@@ -414,8 +414,7 @@ fn profile_export_round_trips_the_validated_nonsecret_model() {
     export_sessions(&path, std::slice::from_ref(&exported)).unwrap();
     assert_eq!(load_sessions(&path).unwrap(), vec![exported]);
 
-    let value: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     assert!(value[0].get("password").is_none());
     assert!(value[0].get("passphrase").is_none());
 }
@@ -426,7 +425,9 @@ fn profile_export_refuses_to_overwrite_existing_destination() {
     let path = dir.path().join("export.json");
     std::fs::write(&path, b"keep-me").unwrap();
 
-    let error = export_sessions(&path, &[session()]).unwrap_err().to_string();
+    let error = export_sessions(&path, &[session()])
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("already exists"), "{error}");
     assert_eq!(std::fs::read(path).unwrap(), b"keep-me");
 }
@@ -441,9 +442,12 @@ fn profile_import_merge_appends_only_nonconflicting_valid_profiles() {
     incoming.host = "imported-host".into();
     export_sessions(&import_path, std::slice::from_ref(&incoming)).unwrap();
 
-    let merged =
-        import_sessions(&import_path, std::slice::from_ref(&existing), SessionImportMode::Merge)
-            .unwrap();
+    let merged = import_sessions(
+        &import_path,
+        std::slice::from_ref(&existing),
+        SessionImportMode::Merge,
+    )
+    .unwrap();
     assert_eq!(merged, vec![existing, incoming]);
 }
 
@@ -476,9 +480,7 @@ fn profile_import_rejects_malformed_or_duplicate_names_before_state_change() {
     let dir = tempfile::tempdir().unwrap();
     let malformed = dir.path().join("malformed.json");
     std::fs::write(&malformed, "{bad").unwrap();
-    assert!(
-        import_sessions(&malformed, &[], SessionImportMode::Replace).is_err()
-    );
+    assert!(import_sessions(&malformed, &[], SessionImportMode::Replace).is_err());
 
     let duplicate = dir.path().join("duplicate.json");
     let one = session();
