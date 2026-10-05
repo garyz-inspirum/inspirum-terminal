@@ -55,6 +55,7 @@ fn advanced_ssh_fields_map_to_discrete_openssh_arguments() {
         compression: Some(true),
         connect_timeout_seconds: Some(12),
         server_alive_interval_seconds: Some(30),
+        remote_command: "tmux attach || tmux new".into(),
         local_forwards: vec![
             "127.0.0.1:8080:internal.example:80".into(),
             "[::1]:8443:internal.example:443".into(),
@@ -95,7 +96,8 @@ fn advanced_ssh_fields_map_to_discrete_openssh_arguments() {
             "-p",
             "2222",
             "--",
-            "work-alias"
+            "work-alias",
+            "tmux attach || tmux new"
         ]
     );
 }
@@ -179,6 +181,10 @@ fn rejects_invalid_advanced_ssh_arguments() {
 
     let mut s = session();
     s.ssh.dynamic_forwards = vec![String::new()];
+    assert!(s.ssh_args().is_err());
+
+    let mut s = session();
+    s.ssh.remote_command = "echo ok\nwhoami".into();
     assert!(s.ssh_args().is_err());
 }
 
