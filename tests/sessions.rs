@@ -381,6 +381,16 @@ fn duplicate_draft_uses_first_available_copy_name_without_persisting() {
 }
 
 #[test]
+fn duplicate_draft_keeps_generated_name_within_profile_limit() {
+    let mut source = session();
+    source.name = "x".repeat(256);
+    let draft = duplicate_session_draft(std::slice::from_ref(&source), &source);
+    assert!(draft.name.len() <= 256);
+    assert!(draft.name.ends_with(" copy"));
+    draft.ssh_args().unwrap();
+}
+
+#[test]
 fn delete_session_removes_only_the_selected_profile() {
     let first = session();
     let mut second = session();
