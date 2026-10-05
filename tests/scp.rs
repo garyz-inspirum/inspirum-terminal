@@ -49,7 +49,10 @@ fn scp_upload_is_discrete_argv_and_reuses_profile_policy() {
     assert!(args.windows(2).any(|v| v == ["-P", "2222"]));
     assert!(args.windows(2).any(|v| v == ["-o", "User=alice"]));
     assert!(args.windows(2).any(|v| v == ["-o", "ControlMaster=auto"]));
-    assert!(args.windows(2).any(|v| v == ["-o", "PasswordAuthentication=no"]));
+    assert!(
+        args.windows(2)
+            .any(|v| v == ["-o", "PasswordAuthentication=no"])
+    );
     assert!(args.iter().any(|v| v == "-C"));
     assert_eq!(args[args.len() - 3], "--");
     assert_eq!(args[args.len() - 2], local.to_string_lossy());
@@ -73,10 +76,7 @@ fn scp_download_keeps_remote_and_local_paths_as_separate_argv() {
     )
     .unwrap();
     assert_eq!(args[args.len() - 3], "--");
-    assert_eq!(
-        args[args.len() - 2],
-        "example.internal:dir/remote file.bin"
-    );
+    assert_eq!(args[args.len() - 2], "example.internal:dir/remote file.bin");
     assert_eq!(args.last().unwrap(), &local.to_string_lossy());
 }
 
@@ -90,13 +90,7 @@ fn structured_proxy_is_rejected_when_combined_with_proxy_jump() {
     let local = temp.path().join("source");
     std::fs::write(&local, b"x").unwrap();
     assert!(
-        upload_args_with_proxy_helper(
-            &session,
-            None,
-            Path::new("/helper"),
-            &local,
-            "remote",
-        )
-        .is_err()
+        upload_args_with_proxy_helper(&session, None, Path::new("/helper"), &local, "remote",)
+            .is_err()
     );
 }
