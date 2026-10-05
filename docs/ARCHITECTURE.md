@@ -16,7 +16,7 @@ Inspirum Terminal is an early SSH-only native desktop slice. The architecture de
 
 `src/lib.rs` defines the non-secret `Session` model and JSON persistence. Profile fields are validated before save and load. Both directions enforce the same 1 MiB serialized-file limit. Writes validate and serialize before creating a temporary file, then use replacement so a failed save does not truncate a prior profile file. Unknown JSON fields are rejected.
 
-A profile can contain a display name, host/config alias, username, port, and strict-host-key flag. It cannot contain a password, private key, command, arbitrary OpenSSH option, or shell fragment.
+A profile can contain a display name, host/config alias, username, port, strict-host-key flag, identity-file path, ProxyJump route, agent/X11 forwarding flags, compression, connection timeout, server keepalive interval, and local/remote/dynamic forwarding specifications. It cannot contain a password, passphrase, private-key contents, arbitrary OpenSSH option, remote command, or shell fragment. Forwarding is launched with `ExitOnForwardFailure=yes` so a requested listener failure is surfaced instead of silently producing a partially configured session.
 
 ### SSH and terminal boundary
 
@@ -30,7 +30,7 @@ Remote terminal output is untrusted. PTY title or clipboard events are currently
 
 1. The user selects or enters a profile.
 2. Inspirum validates profile tokens and converts them to separate OpenSSH arguments.
-3. Inspirum optionally adds one `-F` configuration path.
+3. Inspirum adds validated first-class SSH options as discrete argv values, then optionally adds one `-F` configuration path.
 4. `egui_term` starts system `ssh` in a native PTY.
 5. Input and resize commands flow from the terminal widget to the PTY.
 6. Parsed terminal state flows back into the egui widget; exit events mark the tab exited.
