@@ -768,9 +768,8 @@ fn structured_proxy_ssh_output(p: &std::path::Path, proxy_port: u16) -> std::pro
 #[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
 fn structured_http_proxy_routes_authenticated_ssh_through_connect_tunnel() {
     let p = fixture();
-    let (proxy_port, proxy) = start_http_connect_proxy(false);
+    let (proxy_port, _proxy) = start_http_connect_proxy(false);
     let output = structured_proxy_ssh_output(&p, proxy_port);
-    proxy.join().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -785,9 +784,8 @@ fn structured_http_proxy_routes_authenticated_ssh_through_connect_tunnel() {
 #[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
 fn structured_proxy_denial_never_falls_back_to_direct_ssh() {
     let p = fixture();
-    let (proxy_port, proxy) = start_http_connect_proxy(true);
+    let (proxy_port, _proxy) = start_http_connect_proxy(true);
     let output = structured_proxy_ssh_output(&p, proxy_port);
-    proxy.join().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         !output.status.success(),
