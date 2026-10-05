@@ -136,4 +136,4 @@ Unchecked items below are not implemented and are not a WindTerm parity claim.
 
 - [x] First-class SSH tunnel manager lifecycle for profile local/remote/dynamic forwards, including live per-forward status, listener startup failure reporting, explicit stop/cleanup, non-loopback risk acknowledgement, portable policy tests and Linux disposable-sshd acceptance (#16).
 
-- [x] Graphical SFTP browser and transfer queue with local/remote navigation, remote mutation, explicit overwrite handling, staged verified downloads, verified uploads, progress state, cancel/retry and isolated binary-transfer/negative acceptance (#17; pending merge).
+- [x] Graphical SFTP browser and transfer queue with local/remote navigation, remote mutation, explicit overwrite handling, staged verified downloads, verified uploads, progress state, cancel/retry and isolated binary-transfer/negative acceptance (#17).
