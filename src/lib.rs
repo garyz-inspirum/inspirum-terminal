@@ -14,6 +14,15 @@ pub enum ProxyKind {
     Socks5,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlMasterMode {
+    #[default]
+    Inherit,
+    Disabled,
+    Auto,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SshOptions {
@@ -25,6 +34,10 @@ pub struct SshOptions {
     pub proxy_kind: ProxyKind,
     pub proxy_host: String,
     pub proxy_port: Option<u16>,
+    /// Structured OpenSSH connection multiplexing. Inherit leaves ~/.ssh/config untouched.
+    pub control_master: ControlMasterMode,
+    pub control_path: String,
+    pub control_persist_seconds: Option<u32>,
     /// Authentication policies. None inherits the effective OpenSSH configuration.
     pub public_key_auth: Option<bool>,
     pub password_auth: Option<bool>,
@@ -79,6 +92,15 @@ impl SshOptions {
                 "proxy port must be 1–65535 when structured proxy transport is enabled"
             );
         }
+        if self.control_master == ControlMasterMode::Auto {
+            ensure!(
+                valid_single_argument(&self.control_path, 4096),
+                "ControlPath is required for app-managed multiplexing, must be at most 4096 bytes and contain no control characters"
+            );
+        }
+        if let Some(seconds) = self.control_persist_seconds {
+            ensure!(seconds > 0, "ControlPersist must be greater than zero");
+        }
         for (name, value) in [
             ("connect timeout", self.connect_timeout_seconds),
             ("server alive interval", self.server_alive_interval_seconds),
@@ -121,6 +143,17 @@ impl SshOptions {
             self.gssapi_delegate_credentials,
         );
         append_boolean_option(args, "IdentitiesOnly", self.identities_only);
+        match self.control_master {
+            ControlMasterMode::Inherit => {}
+            ControlMasterMode::Disabled => args.extend(["-o".into(), "ControlMaster=no".into()]),
+            ControlMasterMode::Auto => {
+                args.extend(["-o".into(), "ControlMaster=auto".into()]);
+                args.extend(["-o".into(), format!("ControlPath={}", self.control_path)]);
+                if let Some(seconds) = self.control_persist_seconds {
+                    args.extend(["-o".into(), format!("ControlPersist={seconds}")]);
+                }
+            }
+        }
         match self.agent_forwarding {
             Some(true) => args.push("-A".into()),
             Some(false) => args.push("-a".into()),
