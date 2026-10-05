@@ -9,6 +9,7 @@ use std::{
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     path::PathBuf,
+    process::{Command, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -737,12 +738,10 @@ fn start_http_connect_proxy(deny: bool) -> (u16, thread::JoinHandle<()>) {
     (port, handle)
 }
 
-fn open_with_structured_proxy(
+fn structured_proxy_ssh_output(
     p: &std::path::Path,
-    id: u64,
     proxy_port: u16,
-) -> (TerminalBackend, mpsc::Receiver<(u64, PtyEvent)>) {
-    let (tx, rx) = mpsc::channel();
+) -> std::process::Output {
     let session = Session {
         name: "Disposable proxy route".into(),
         host: "127.0.0.1".into(),
@@ -757,18 +756,13 @@ fn open_with_structured_proxy(
     };
     let helper = PathBuf::from(env!("CARGO_BIN_EXE_inspirum-terminal"));
     let args = launch_args_with_proxy_helper(&session, Some(&p.join("config")), &helper).unwrap();
-    let backend = TerminalBackend::new(
-        id,
-        eframe::egui::Context::default(),
-        tx,
-        egui_term::BackendSettings {
-            shell: "ssh".into(),
-            args,
-            working_directory: None,
-        },
-    )
-    .unwrap();
-    (backend, rx)
+    Command::new("ssh")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run real OpenSSH through structured proxy helper")
 }
 
 #[test]
@@ -776,14 +770,15 @@ fn open_with_structured_proxy(
 fn structured_http_proxy_routes_authenticated_ssh_through_connect_tunnel() {
     let p = fixture();
     let (proxy_port, proxy) = start_http_connect_proxy(false);
-    let (mut backend, rx) = open_with_structured_proxy(&p, 718, proxy_port);
-    wait_text(&mut backend, "FIXTURE_AUTHENTICATED");
-    write(&mut backend, "echo:http-proxy-718\n");
-    wait_text(&mut backend, "REMOTE_ECHO:http-proxy-718");
-    write(&mut backend, "exit\n");
-    wait_exit(&rx, 718);
-    drop(backend);
+    let output = structured_proxy_ssh_output(&p, proxy_port);
     proxy.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("FIXTURE_AUTHENTICATED"),
+        "real OpenSSH did not authenticate through proxy; status={:?}, stdout={stdout:?}, stderr={stderr:?}",
+        output.status.code()
+    );
     println!("PASS structured HTTP CONNECT proxy carried the authenticated SSH session");
 }
 
@@ -792,13 +787,17 @@ fn structured_http_proxy_routes_authenticated_ssh_through_connect_tunnel() {
 fn structured_proxy_denial_never_falls_back_to_direct_ssh() {
     let p = fixture();
     let (proxy_port, proxy) = start_http_connect_proxy(true);
-    let (mut backend, rx) = open_with_structured_proxy(&p, 719, proxy_port);
-    wait_exit(&rx, 719);
-    let text = grid(&mut backend);
-    assert!(
-        !text.contains("FIXTURE_AUTHENTICATED"),
-        "SSH reached directly reachable target after proxy denial: {text}"
-    );
+    let output = structured_proxy_ssh_output(&p, proxy_port);
     proxy.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success(),
+        "SSH unexpectedly succeeded after proxy denial"
+    );
+    assert!(
+        !stdout.contains("FIXTURE_AUTHENTICATED"),
+        "SSH reached directly reachable target after proxy denial: {stdout}"
+    );
     println!("PASS proxy denial terminated SSH without direct-transport fallback");
 }
+
