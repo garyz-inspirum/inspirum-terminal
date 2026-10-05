@@ -20,7 +20,7 @@ Native CI for PR #5 completed successfully on Linux x86_64, Windows x64, and mac
 
 Verified evidence:
 
-- Linux x86_64: formatting, build/check, Rust tests, clippy, helper-script tests, and the isolated authenticated `sshd` fixture passed on the existing baseline. The fixture branch for the authentication matrix additionally exercises password prompts, encrypted-key prompts, SSH-agent authentication, public-key + keyboard-interactive PAM MFA, disabled-method negative cases, prompt cancellation, and a stalled-handshake `ConnectTimeout` path; those added rows are not considered verified until the feature PR CI passes.
+- Linux x86_64: formatting, build/check, Rust tests, clippy, helper-script tests, and the isolated authenticated `sshd` fixture passed. CI run #78 at `1a8716d0d9ed45e3c1d43c1db5918cc5725b2186` additionally verified password authentication, encrypted-key prompts, SSH-agent authentication, public-key + keyboard-interactive PAM MFA, disabled-method negative cases, password-prompt cancellation, and a stalled-handshake `ConnectTimeout` path. The fixture log contained the expected PASS markers and did not contain the synthetic fixture password.
 - Windows x64: formatting, build/check, Rust tests, and clippy passed. The native suite includes the Windows PTY child-argument-boundary test and an actual OpenSSH child-exit smoke test.
 - macOS Apple Silicon: formatting, build/check, Rust tests, and clippy passed natively on arm64. The suite includes an actual OpenSSH child-exit smoke test.
 - License closure: Linux and Windows remain clear for the current dependency graph. The active `dispatch 0.2.0` notice still blocks macOS distribution; it does not block compilation or tests.
@@ -28,7 +28,7 @@ Verified evidence:
 Not yet run:
 
 - isolated authenticated SSH-server acceptance on Windows or macOS;
-- the broader authentication, ProxyJump/forwarding, X11/agent-forwarding acceptance matrix on all three platforms;
+- GSSAPI authentication acceptance and the broader ProxyJump/forwarding, X11/agent-forwarding acceptance matrix on all three platforms;
 - manual GUI/device acceptance, a release workflow, and downloaded-artifact verification.
 
 The CI and release workflows pin Rust 1.95.0. Passing native CI proves the exercised code paths on those runners; it does not by itself establish complete SSH or WindTerm parity.
