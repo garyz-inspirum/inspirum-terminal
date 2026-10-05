@@ -25,7 +25,7 @@ fn diagnostics_run_headlessly_without_opening_a_profile_store_or_ssh_config() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("support report - schema 2"));
     assert!(text.contains("profile store not read"));
-    assert!(text.contains("local probes only"));
+    assert!(text.contains("local OpenSSH probes + allowlisted app policy"));
     assert!(!text.contains("ENVIRONMENT_SECRET_CANARY"));
     assert!(!text.contains("missing-profiles"));
     assert!(!text.contains("missing-config"));
