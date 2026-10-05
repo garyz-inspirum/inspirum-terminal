@@ -27,6 +27,30 @@ fn wait_text(b: &mut TerminalBackend, needle: &str) {
         thread::sleep(Duration::from_millis(25));
     }
 }
+
+fn wait_text_case_insensitive_secret_safe(b: &mut TerminalBackend, needle: &str) {
+    let needle = needle.to_lowercase();
+    let end = Instant::now() + Duration::from_secs(12);
+    loop {
+        if grid(b).to_lowercase().contains(&needle) {
+            return;
+        }
+        assert!(
+            Instant::now() < end,
+            "expected authentication prompt was not observed"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn privileged_auth_fixture_available() -> bool {
+    std::env::var("INSPIRUM_PRIV_AUTH_FIXTURE").as_deref() == Ok("1")
+}
+
+fn fixture_password() -> String {
+    std::env::var("INSPIRUM_FIXTURE_PASSWORD")
+        .expect("scripts/test-ssh-integration.sh must supply fixture password")
+}
 fn write(b: &mut TerminalBackend, s: &str) {
     b.process_command(BackendCommand::Write(s.as_bytes().to_vec()));
 }
@@ -47,6 +71,16 @@ fn subscription_threads() -> usize {
         .filter_map(|task| fs::read_to_string(task.path().join("comm")).ok())
         .filter(|name| name.trim() == "pty_event_subsc")
         .count()
+}
+
+fn start_stalled_ssh_once() -> (u16, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = thread::spawn(move || {
+        let (_stream, _) = listener.accept().unwrap();
+        thread::sleep(Duration::from_secs(5));
+    });
+    (port, handle)
 }
 
 fn start_echo_once() -> (u16, thread::JoinHandle<()>) {
@@ -332,6 +366,186 @@ fn ssh_agent_authenticates_without_identity_file_secret_storage() {
     write(&mut backend, "exit\n");
     wait_exit(&rx, 711);
     println!("PASS SSH agent authenticated through the application PTY path");
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn password_authenticates_through_pty_prompt_without_echo_or_log_disclosure() {
+    if !privileged_auth_fixture_available() {
+        eprintln!("SKIP password acceptance: passwordless sudo fixture unavailable");
+        return;
+    }
+    let p = fixture();
+    let secret = fixture_password();
+    let ssh = SshOptions {
+        public_key_auth: Some(false),
+        password_auth: Some(true),
+        keyboard_interactive_auth: Some(false),
+        gssapi_auth: Some(false),
+        ..SshOptions::default()
+    };
+    let (mut backend, rx) = open_with_ssh(&p, 712, true, "password-config", ssh);
+    wait_text_case_insensitive_secret_safe(&mut backend, "password:");
+    write(&mut backend, &format!("{secret}\n"));
+    wait_text(&mut backend, "FIXTURE_AUTHENTICATED");
+    assert!(
+        !grid(&mut backend).contains(&secret),
+        "password was echoed into the terminal grid"
+    );
+    write(&mut backend, "exit\n");
+    wait_exit(&rx, 712);
+    wait_file_contains(&p.join("password_sshd.log"), "Accepted password");
+    assert!(
+        !fs::read_to_string(p.join("password_sshd.log"))
+            .unwrap()
+            .contains(&secret),
+        "password was written to the sshd log"
+    );
+    println!("PASS password authentication completed through PTY prompt without secret disclosure");
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn public_key_plus_keyboard_interactive_pam_mfa_authenticates() {
+    if !privileged_auth_fixture_available() {
+        eprintln!("SKIP MFA acceptance: passwordless sudo fixture unavailable");
+        return;
+    }
+    let p = fixture();
+    let secret = fixture_password();
+    let ssh = SshOptions {
+        public_key_auth: Some(true),
+        password_auth: Some(false),
+        keyboard_interactive_auth: Some(true),
+        gssapi_auth: Some(false),
+        identities_only: Some(true),
+        ..SshOptions::default()
+    };
+    let (mut backend, rx) = open_with_ssh(&p, 713, true, "mfa-config", ssh);
+    wait_text_case_insensitive_secret_safe(&mut backend, "password:");
+    write(&mut backend, &format!("{secret}\n"));
+    wait_text(&mut backend, "FIXTURE_AUTHENTICATED");
+    assert!(
+        !grid(&mut backend).contains(&secret),
+        "keyboard-interactive response was echoed into the terminal grid"
+    );
+    write(&mut backend, "exit\n");
+    wait_exit(&rx, 713);
+
+    wait_file_contains(&p.join("mfa_sshd.log"), "publickey");
+    wait_file_contains(&p.join("mfa_sshd.log"), "keyboard-interactive");
+    let log = fs::read_to_string(p.join("mfa_sshd.log")).unwrap();
+    assert!(
+        !log.contains(&secret),
+        "keyboard-interactive response was written to the sshd log"
+    );
+    println!("PASS public-key plus keyboard-interactive PAM MFA authenticated through application PTY");
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn disabled_password_policy_does_not_prompt_or_authenticate() {
+    if !privileged_auth_fixture_available() {
+        eprintln!("SKIP password policy negative case: passwordless sudo fixture unavailable");
+        return;
+    }
+    let p = fixture();
+    let ssh = SshOptions {
+        public_key_auth: Some(false),
+        password_auth: Some(false),
+        keyboard_interactive_auth: Some(false),
+        gssapi_auth: Some(false),
+        ..SshOptions::default()
+    };
+    let (mut backend, rx) = open_with_ssh(&p, 714, true, "password-config", ssh);
+    wait_exit(&rx, 714);
+    let text = grid(&mut backend).to_lowercase();
+    assert!(!text.contains("fixture_authenticated"));
+    assert!(!text.contains("password:"));
+    println!("PASS disabled password policy prevented prompt and authentication");
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn disabled_keyboard_interactive_policy_blocks_second_mfa_factor() {
+    if !privileged_auth_fixture_available() {
+        eprintln!("SKIP MFA policy negative case: passwordless sudo fixture unavailable");
+        return;
+    }
+    let p = fixture();
+    let ssh = SshOptions {
+        public_key_auth: Some(true),
+        password_auth: Some(false),
+        keyboard_interactive_auth: Some(false),
+        gssapi_auth: Some(false),
+        identities_only: Some(true),
+        ..SshOptions::default()
+    };
+    let (mut backend, rx) = open_with_ssh(&p, 715, true, "mfa-config", ssh);
+    wait_exit(&rx, 715);
+    let text = grid(&mut backend).to_lowercase();
+    assert!(!text.contains("fixture_authenticated"));
+    assert!(!text.contains("password:"));
+    println!("PASS disabled keyboard-interactive policy blocked required MFA factor");
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn password_prompt_can_be_cancelled_without_authentication() {
+    if !privileged_auth_fixture_available() {
+        eprintln!("SKIP password cancellation: passwordless sudo fixture unavailable");
+        return;
+    }
+    let p = fixture();
+    let ssh = SshOptions {
+        public_key_auth: Some(false),
+        password_auth: Some(true),
+        keyboard_interactive_auth: Some(false),
+        gssapi_auth: Some(false),
+        ..SshOptions::default()
+    };
+    let (mut backend, rx) = open_with_ssh(&p, 716, true, "password-config", ssh);
+    wait_text_case_insensitive_secret_safe(&mut backend, "password:");
+    write(&mut backend, "\u{3}");
+    wait_exit(&rx, 716);
+    assert!(!grid(&mut backend).contains("FIXTURE_AUTHENTICATED"));
+    println!("PASS password prompt cancellation exited without authentication");
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn connect_timeout_terminates_stalled_ssh_handshake() {
+    let p = fixture();
+    let (port, stalled_server) = start_stalled_ssh_once();
+    let (tx, rx) = mpsc::channel();
+    let session = Session {
+        name: "Stalled handshake".into(),
+        host: "127.0.0.1".into(),
+        port: Some(port),
+        strict: true,
+        ssh: SshOptions {
+            connect_timeout_seconds: Some(1),
+            ..SshOptions::default()
+        },
+        ..Session::default()
+    };
+    let started = Instant::now();
+    let mut backend = connect(
+        717,
+        eframe::egui::Context::default(),
+        tx,
+        &session,
+        Some(&p.join("config")),
+    )
+    .expect("start stalled OpenSSH client");
+    wait_exit(&rx, 717);
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "ConnectTimeout=1 did not bound the stalled SSH handshake"
+    );
+    assert!(!grid(&mut backend).contains("FIXTURE_AUTHENTICATED"));
+    stalled_server.join().unwrap();
+    println!("PASS ConnectTimeout bounded a stalled SSH handshake through application PTY");
 }
 
 #[test]
