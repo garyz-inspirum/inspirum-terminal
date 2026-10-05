@@ -1656,6 +1656,8 @@ impl App {
             });
             if let Some(id) = close {
                 self.tabs.retain(|tab| tab.id != id);
+                self.workspace_panes.retain(|pane| *pane != id);
+                self.sync_input.remove_pane(id);
                 if self.active == Some(id) {
                     self.active = self.tabs.last().map(|tab| tab.id);
                 }
