@@ -86,7 +86,7 @@ pub struct App {
     selected_profile: Option<String>,
     delete_confirm: Option<String>,
     profile_transfer_path: String,
-    replace_import_confirm: bool,
+    replace_import_confirm: Option<PathBuf>,
     profile_transfer_notice: String,
     draft: Session,
     port: String,
@@ -124,7 +124,7 @@ impl App {
             selected_profile: None,
             delete_confirm: None,
             profile_transfer_path: String::new(),
-            replace_import_confirm: false,
+            replace_import_confirm: None,
             profile_transfer_notice: String::new(),
             draft: Session::default(),
             port: String::new(),
@@ -182,9 +182,12 @@ impl App {
         ))
     }
 
-    fn import_profile_library(&mut self, mode: SessionImportMode) -> anyhow::Result<String> {
-        let path = self.profile_transfer_path()?;
-        let next = import_sessions(&path, &self.profiles, mode)?;
+    fn import_profile_library(
+        &mut self,
+        path: &std::path::Path,
+        mode: SessionImportMode,
+    ) -> anyhow::Result<String> {
+        let next = import_sessions(path, &self.profiles, mode)?;
         let imported_count = match mode {
             SessionImportMode::Merge => next.len().saturating_sub(self.profiles.len()),
             SessionImportMode::Replace => next.len(),
@@ -194,7 +197,7 @@ impl App {
         save_sessions(&self.path, &next)?;
         self.profiles = next;
         self.delete_confirm = None;
-        self.replace_import_confirm = false;
+        self.replace_import_confirm = None;
 
         if mode == SessionImportMode::Replace {
             self.selected_profile = None;
@@ -397,7 +400,15 @@ impl App {
                                     .clicked()
                                 {
                                     self.terminal_focus = None;
-                                    match self.import_profile_library(SessionImportMode::Merge) {
+                                    let result = self
+                                        .profile_transfer_path()
+                                        .and_then(|path| {
+                                            self.import_profile_library(
+                                                &path,
+                                                SessionImportMode::Merge,
+                                            )
+                                        });
+                                    match result {
                                         Ok(message) => {
                                             self.error.clear();
                                             self.profile_transfer_notice = message;
@@ -417,21 +428,35 @@ impl App {
                                     .clicked()
                                 {
                                     self.terminal_focus = None;
-                                    self.replace_import_confirm = true;
+                                    match self.profile_transfer_path() {
+                                        Ok(path) => {
+                                            self.error.clear();
+                                            self.profile_transfer_notice.clear();
+                                            self.replace_import_confirm = Some(path);
+                                        }
+                                        Err(error) => {
+                                            self.profile_transfer_notice.clear();
+                                            self.error = format!("{error:#}");
+                                        }
+                                    }
                                 }
                             });
 
-                            if self.replace_import_confirm {
+                            if let Some(confirmed_path) = self.replace_import_confirm.clone() {
                                 ui.group(|ui| {
-                                    ui.label("Replace every saved profile with the validated contents of this file?");
+                                    ui.label(format!(
+                                        "Replace every saved profile with the validated contents of {}?",
+                                        confirmed_path.display()
+                                    ));
                                     ui.small(
-                                        "Open SSH/SFTP tabs stay connected. The active profile file is changed only after the complete import validates and the atomic save succeeds.",
+                                        "Open SSH/SFTP tabs stay connected. The active profile file is changed only after the complete import validates and the atomic save succeeds. Editing the path field above does not change this confirmation.",
                                     );
                                     ui.horizontal(|ui| {
                                         if ui.button("Confirm replace").clicked() {
-                                            match self
-                                                .import_profile_library(SessionImportMode::Replace)
-                                            {
+                                            match self.import_profile_library(
+                                                &confirmed_path,
+                                                SessionImportMode::Replace,
+                                            ) {
                                                 Ok(message) => {
                                                     self.error.clear();
                                                     self.profile_transfer_notice = message;
@@ -443,7 +468,7 @@ impl App {
                                             }
                                         }
                                         if ui.button("Cancel").clicked() {
-                                            self.replace_import_confirm = false;
+                                            self.replace_import_confirm = None;
                                         }
                                     });
                                 });
