@@ -242,6 +242,9 @@ impl App {
                             {
                                 self.terminal_focus = None;
                             }
+                            ui.small(
+                                "X11 forwarding lets remote applications connect to your local X server when available. Enable only when needed and for trusted hosts.",
+                            );
                             if ui
                                 .checkbox(&mut self.draft.ssh.compression, "Enable compression (-C)")
                                 .clicked()
