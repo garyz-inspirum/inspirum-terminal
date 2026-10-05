@@ -23,7 +23,7 @@ use std::ops::{Index, RangeInclusive};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{mpsc, Arc};
-use std::thread::JoinHandle;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 pub type TerminalMode = TermMode;
@@ -134,6 +134,26 @@ impl From<TerminalSize> for WindowSize {
     }
 }
 
+struct PtyEventLoopRollback(Option<Notifier>);
+
+impl PtyEventLoopRollback {
+    fn new(notifier: Notifier) -> Self {
+        Self(Some(notifier))
+    }
+
+    fn commit(mut self) -> Notifier {
+        self.0.take().expect("rollback notifier")
+    }
+}
+
+impl Drop for PtyEventLoopRollback {
+    fn drop(&mut self) {
+        if let Some(notifier) = self.0.take() {
+            let _ = notifier.0.send(Msg::Shutdown);
+        }
+    }
+}
+
 pub struct TerminalBackend {
     pub id: u64,
     pub url_regex: RegexSearch,
@@ -152,6 +172,26 @@ impl TerminalBackend {
         pty_event_proxy_sender: Sender<(u64, PtyEvent)>,
         settings: BackendSettings,
     ) -> Result<Self> {
+        Self::new_with_subscription_spawner(
+            id,
+            app_context,
+            pty_event_proxy_sender,
+            settings,
+            |builder, subscription| builder.spawn(subscription),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn new_with_subscription_spawner<F>(
+        id: u64,
+        app_context: egui::Context,
+        pty_event_proxy_sender: Sender<(u64, PtyEvent)>,
+        settings: BackendSettings,
+        spawn_subscription: F,
+    ) -> Result<Self>
+    where
+        F: FnOnce(thread::Builder, Box<dyn FnOnce() + Send + 'static>) -> Result<JoinHandle<()>>,
+    {
         let pty_config = tty::Options {
             shell: Some(tty::Shell::new(settings.shell, settings.args)),
             working_directory: settings.working_directory,
@@ -175,30 +215,33 @@ impl TerminalBackend {
         };
         let term = Arc::new(FairMutex::new(term));
         let pty_event_loop = EventLoop::new(term.clone(), event_proxy, pty, false, false)?;
-        let notifier = Notifier(pty_event_loop.channel());
+        let event_loop_rollback = PtyEventLoopRollback::new(Notifier(pty_event_loop.channel()));
         let url_regex = RegexSearch::new(r#"(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file://|git://|ssh:|ftp://)[^\u{0000}-\u{001F}\u{007F}-\u{009F}<>"\s{-}\^⟨⟩`]+"#).unwrap();
         let _pty_event_loop_thread = pty_event_loop.spawn();
         let subscription_shutdown = Arc::new(AtomicBool::new(false));
         let thread_shutdown = subscription_shutdown.clone();
-        let subscription_thread = std::thread::Builder::new()
-            .name(format!("pty_event_subscription_{}", id))
-            .spawn(move || {
-                while !thread_shutdown.load(Ordering::Acquire) {
-                    match event_receiver.recv_timeout(Duration::from_millis(50)) {
-                        Ok(event) => {
-                            if pty_event_proxy_sender.send((id, event.clone())).is_err() {
-                                break;
-                            }
-                            app_context.request_repaint();
-                            if let Event::Exit = event {
-                                break;
-                            }
+        let subscription = Box::new(move || {
+            while !thread_shutdown.load(Ordering::Acquire) {
+                match event_receiver.recv_timeout(Duration::from_millis(50)) {
+                    Ok(event) => {
+                        if pty_event_proxy_sender.send((id, event.clone())).is_err() {
+                            break;
                         }
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        app_context.request_repaint();
+                        if let Event::Exit = event {
+                            break;
+                        }
                     }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
-            })?;
+            }
+        });
+        let subscription_thread = spawn_subscription(
+            thread::Builder::new().name(format!("pty_event_subscription_{}", id)),
+            subscription,
+        )?;
+        let notifier = event_loop_rollback.commit();
 
         Ok(Self {
             id,

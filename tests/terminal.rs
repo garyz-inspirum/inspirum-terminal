@@ -2,11 +2,51 @@ use inspirum_terminal::{
     Session,
     terminal::{check_openssh, connect, launch_args},
 };
+#[cfg(unix)]
+use std::thread;
 use std::{
     path::Path,
     sync::mpsc,
     time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+fn wait_for_grid(backend: &mut egui_term::TerminalBackend, needle: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let text: String = backend
+            .sync()
+            .grid
+            .display_iter()
+            .map(|cell| cell.c)
+            .collect();
+        if text.contains(needle) {
+            return text;
+        }
+        assert!(Instant::now() < deadline, "missing {needle:?} in {text:?}");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(unix)]
+fn line_capture_backend(id: u64) -> egui_term::TerminalBackend {
+    let (tx, _rx) = mpsc::channel();
+    egui_term::TerminalBackend::new(
+        id,
+        eframe::egui::Context::default(),
+        tx,
+        egui_term::BackendSettings {
+            shell: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "IFS= read -r line; printf '\\nCAPTURE=<%s>\\n' \"$line\"; sleep 1".into(),
+            ],
+            working_directory: None,
+        },
+    )
+    .unwrap()
+}
+
 #[test]
 fn missing_ssh_has_actionable_error() {
     let error = check_openssh(Path::new("inspirum-nonexistent-ssh-7e65"))
@@ -77,35 +117,313 @@ fn headless_widget_receives_actual_ssh_exit() {
     assert!(!output.shapes.is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn focused_terminal_dispatches_keyboard_events_after_pointer_leaves() {
+    use eframe::egui::{Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect, vec2};
+
+    let context = eframe::egui::Context::default();
+    let mut backend = line_capture_backend(81);
+    let screen = Rect::from_min_size(Pos2::ZERO, vec2(640.0, 480.0));
+    let press = RawInput {
+        screen_rect: Some(screen),
+        events: vec![
+            Event::PointerMoved(Pos2::new(50.0, 50.0)),
+            Event::PointerButton {
+                pos: Pos2::new(50.0, 50.0),
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::default(),
+            },
+        ],
+        ..RawInput::default()
+    };
+    let _ = context.run(press, |ctx| {
+        eframe::egui::CentralPanel::default().show(ctx, |ui| {
+            let view = egui_term::TerminalView::new(ui, &mut backend)
+                .set_size(vec2(200.0, 100.0))
+                .set_focus(true);
+            ui.add(view);
+        });
+    });
+
+    let release = RawInput {
+        screen_rect: Some(screen),
+        events: vec![
+            Event::PointerMoved(Pos2::new(50.0, 50.0)),
+            Event::PointerButton {
+                pos: Pos2::new(50.0, 50.0),
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::default(),
+            },
+        ],
+        ..RawInput::default()
+    };
+    let focused = std::cell::Cell::new(false);
+    let _ = context.run(release, |ctx| {
+        eframe::egui::CentralPanel::default().show(ctx, |ui| {
+            let view = egui_term::TerminalView::new(ui, &mut backend)
+                .set_size(vec2(200.0, 100.0))
+                .set_focus(true);
+            focused.set(ui.add(view).has_focus());
+        });
+    });
+    assert!(
+        focused.get(),
+        "terminal must retain focus after pointer click dispatch"
+    );
+
+    let text_input = RawInput {
+        screen_rect: Some(screen),
+        events: vec![
+            Event::PointerMoved(Pos2::new(500.0, 400.0)),
+            Event::Text("typed".into()),
+        ],
+        ..RawInput::default()
+    };
+    let _ = context.run(text_input, |ctx| {
+        eframe::egui::CentralPanel::default().show(ctx, |ui| {
+            let view = egui_term::TerminalView::new(ui, &mut backend)
+                .set_size(vec2(200.0, 100.0))
+                .set_focus(true);
+            ui.add(view);
+        });
+    });
+    let paste_input = RawInput {
+        screen_rect: Some(screen),
+        modifiers: Modifiers::COMMAND | Modifiers::SHIFT,
+        events: vec![Event::Paste("-pasted".into())],
+        ..RawInput::default()
+    };
+    let _ = context.run(paste_input, |ctx| {
+        eframe::egui::CentralPanel::default().show(ctx, |ui| {
+            let view = egui_term::TerminalView::new(ui, &mut backend)
+                .set_size(vec2(200.0, 100.0))
+                .set_focus(true);
+            ui.add(view);
+        });
+    });
+    let enter_input = RawInput {
+        screen_rect: Some(screen),
+        events: vec![Event::Key {
+            key: Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::default(),
+        }],
+        ..RawInput::default()
+    };
+    let _ = context.run(enter_input, |ctx| {
+        eframe::egui::CentralPanel::default().show(ctx, |ui| {
+            let view = egui_term::TerminalView::new(ui, &mut backend)
+                .set_size(vec2(200.0, 100.0))
+                .set_focus(true);
+            ui.add(view);
+        });
+    });
+    wait_for_grid(&mut backend, "CAPTURE=<typed-pasted>");
+}
+
+#[cfg(unix)]
+#[test]
+fn focused_form_dispatch_does_not_leak_into_hovered_terminal() {
+    use eframe::egui::{Event, Key, Modifiers, Pos2, RawInput, Rect, vec2};
+
+    let context = eframe::egui::Context::default();
+    let mut backend = line_capture_backend(82);
+    let mut form = String::new();
+    let screen = Rect::from_min_size(Pos2::ZERO, vec2(640.0, 480.0));
+    let _ = context.run(
+        RawInput {
+            screen_rect: Some(screen),
+            ..RawInput::default()
+        },
+        |ctx| {
+            eframe::egui::CentralPanel::default().show(ctx, |ui| {
+                ui.text_edit_singleline(&mut form).request_focus();
+                let view = egui_term::TerminalView::new(ui, &mut backend)
+                    .set_size(vec2(200.0, 100.0))
+                    .set_focus(false);
+                ui.add(view);
+            });
+        },
+    );
+    let _ = context.run(
+        RawInput {
+            screen_rect: Some(screen),
+            events: vec![
+                Event::PointerMoved(Pos2::new(50.0, 60.0)),
+                Event::Text("form-typed".into()),
+                Event::Paste("-pasted".into()),
+                Event::Key {
+                    key: Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::default(),
+                },
+            ],
+            ..RawInput::default()
+        },
+        |ctx| {
+            eframe::egui::CentralPanel::default().show(ctx, |ui| {
+                ui.text_edit_singleline(&mut form);
+                let view = egui_term::TerminalView::new(ui, &mut backend)
+                    .set_size(vec2(200.0, 100.0))
+                    .set_focus(false);
+                ui.add(view);
+            });
+        },
+    );
+    assert_eq!(form, "form-typed-pasted");
+    backend.process_command(egui_term::BackendCommand::Write(
+        b"expected-only\n".to_vec(),
+    ));
+    let text = wait_for_grid(&mut backend, "CAPTURE=<expected-only>");
+    assert!(!text.contains("form-typed"), "form input leaked: {text:?}");
+    assert!(!text.contains("pasted"), "form paste leaked: {text:?}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn subscription_spawn_failure_rolls_back_started_pty() {
+    use std::{fs, io};
+
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("spawn-failure.pid");
+    let (tx, _rx) = mpsc::channel();
+    let settings = egui_term::BackendSettings {
+        shell: "/bin/sh".into(),
+        args: vec![
+            "-c".into(),
+            "echo $$ > \"$1\"; exec sleep 30".into(),
+            "inspirum-spawn-failure".into(),
+            pid_file.to_string_lossy().into_owned(),
+        ],
+        working_directory: None,
+    };
+    let result = egui_term::TerminalBackend::new_with_subscription_spawner(
+        83,
+        eframe::egui::Context::default(),
+        tx,
+        settings,
+        |_, _| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !pid_file.is_file() {
+                assert!(Instant::now() < deadline, "PTY child never started");
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(io::Error::other("injected subscription spawn failure"))
+        },
+    );
+    assert!(result.is_err());
+    let pid: u32 = fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let process = std::path::PathBuf::from(format!("/proc/{pid}"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "PTY child {pid} survived subscription spawn rollback"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn disconnected_subscriber_stops_forwarding_thread() {
+    use std::fs;
+
+    fn subscription_threads() -> usize {
+        fs::read_dir("/proc/self/task")
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|task| fs::read_to_string(task.path().join("comm")).ok())
+            .filter(|name| name.trim() == "pty_event_subsc")
+            .count()
+    }
+
+    let baseline = subscription_threads();
+    let (tx, rx) = mpsc::channel();
+    drop(rx);
+    let backend = egui_term::TerminalBackend::new(
+        84,
+        eframe::egui::Context::default(),
+        tx,
+        egui_term::BackendSettings {
+            shell: "/bin/sh".into(),
+            args: vec!["-c".into(), "exit 0".into()],
+            working_directory: None,
+        },
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if subscription_threads() == baseline {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "subscriber survived disconnected forwarding channel"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    drop(backend);
+}
+
 #[cfg(target_os = "windows")]
 #[test]
 fn windows_pty_preserves_actual_child_argument_boundaries() {
+    use std::{fmt::Write as _, process::Command};
+
     let dir = tempfile::Builder::new()
         .prefix("inspirum argv spaces ")
         .tempdir()
         .unwrap();
-    let script = dir.path().join("argv probe with spaces.ps1");
+    let source = dir.path().join("argv dump helper.rs");
+    let executable = dir.path().join("argv dump helper.exe");
+    let output = dir.path().join("captured argv.txt");
     std::fs::write(
-        &script,
-        r#"$i = 0
-foreach ($value in $args) {
-    Write-Output ("ARG{0}=<{1}>" -f $i, $value)
-    $i++
+        &source,
+        r#"use std::{env, fmt::Write as _, fs};
+fn main() {
+    let mut args = env::args_os();
+    let _executable = args.next().unwrap();
+    let output = args.next().unwrap();
+    let values: Vec<_> = args.collect();
+    let mut encoded = format!("ARGC={}\n", values.len());
+    for (index, value) in values.into_iter().enumerate() {
+        write!(&mut encoded, "ARG{index}=").unwrap();
+        for byte in value.into_string().unwrap().into_bytes() {
+            write!(&mut encoded, "{byte:02X}").unwrap();
+        }
+        encoded.push('\n');
+    }
+    fs::write(output, encoded).unwrap();
 }
 "#,
     )
     .unwrap();
+    let compiled = Command::new("rustc")
+        .arg(&source)
+        .arg("-o")
+        .arg(&executable)
+        .status()
+        .unwrap();
+    assert!(compiled.success(), "native argv helper did not compile");
+
     let expected = [
         "value with spaces",
         "quote\"inside",
         r"C:\directory with spaces\",
     ];
-    let mut args = vec![
-        "-NoProfile".into(),
-        "-NonInteractive".into(),
-        "-File".into(),
-        script.to_string_lossy().into_owned(),
-    ];
+    let mut args = vec![output.to_string_lossy().into_owned()];
     args.extend(expected.iter().map(|value| (*value).to_owned()));
     let (tx, rx) = mpsc::channel();
     let mut backend = egui_term::TerminalBackend::new(
@@ -113,31 +431,33 @@ foreach ($value in $args) {
         eframe::egui::Context::default(),
         tx,
         egui_term::BackendSettings {
-            shell: "powershell.exe".into(),
+            shell: executable.to_string_lossy().into_owned(),
             args,
             working_directory: None,
         },
     )
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
+    let mut exited = false;
     while Instant::now() < deadline {
         if matches!(
             rx.recv_timeout(Duration::from_millis(50)),
             Ok((88, egui_term::PtyEvent::Exit))
         ) {
+            exited = true;
             break;
         }
     }
-    let text: String = backend
-        .sync()
-        .grid
-        .display_iter()
-        .map(|cell| cell.c)
-        .collect();
+    assert!(exited, "native argv helper did not emit PTY exit");
+
+    let mut encoded = format!("ARGC={}\n", expected.len());
     for (index, value) in expected.iter().enumerate() {
-        assert!(
-            text.contains(&format!("ARG{index}=<{value}>")),
-            "missing argv[{index}] in {text:?}"
-        );
+        write!(&mut encoded, "ARG{index}=").unwrap();
+        for byte in value.as_bytes() {
+            write!(&mut encoded, "{byte:02X}").unwrap();
+        }
+        encoded.push('\n');
     }
+    assert_eq!(std::fs::read_to_string(output).unwrap(), encoded);
+    let _ = backend.sync();
 }

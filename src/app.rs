@@ -191,32 +191,3 @@ impl eframe::App for App {
         self.ui(ctx);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::terminal_accepts_keyboard;
-    use eframe::egui::{Event, Key, Modifiers};
-
-    #[test]
-    fn form_events_are_not_terminal_input_just_because_pointer_hovers_terminal() {
-        let pointer_is_over_terminal = true;
-        let events = [
-            Event::Text("typed-in-form".into()),
-            Event::Paste("pasted-in-form".into()),
-            Event::Key {
-                key: Key::Enter,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: Modifiers::default(),
-            },
-        ];
-        let form_owns_keyboard = true;
-        let owner = if form_owns_keyboard { None } else { Some(7) };
-        for _event in events {
-            assert!(pointer_is_over_terminal);
-            assert!(!terminal_accepts_keyboard(owner, 7, false));
-        }
-        assert!(terminal_accepts_keyboard(Some(7), 7, false));
-    }
-}

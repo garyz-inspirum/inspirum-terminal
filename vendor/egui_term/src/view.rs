@@ -133,10 +133,11 @@ impl<'a> TerminalView<'a> {
     }
 
     fn process_input(self, layout: &Response, state: &mut TerminalViewState) -> Self {
-        if !layout.has_focus() || !layout.contains_pointer() {
+        if !layout.has_focus() {
             return self;
         }
 
+        let pointer_is_over_terminal = layout.contains_pointer();
         let modifiers = layout.ctx.input(|i| i.modifiers);
         let events = layout.ctx.input(|i| i.events.clone());
         for event in events {
@@ -152,16 +153,21 @@ impl<'a> TerminalView<'a> {
                     &self.bindings_layout,
                     modifiers,
                 )),
-                egui::Event::MouseWheel { unit, delta, .. } => input_actions.push(
-                    process_mouse_wheel(state, self.font.font_type().size, unit, delta),
-                ),
+                egui::Event::MouseWheel { unit, delta, .. } if pointer_is_over_terminal => {
+                    input_actions.push(process_mouse_wheel(
+                        state,
+                        self.font.font_type().size,
+                        unit,
+                        delta,
+                    ));
+                }
                 egui::Event::PointerButton {
                     button,
                     pressed,
                     modifiers,
                     pos,
                     ..
-                } => input_actions.push(process_button_click(
+                } if layout.rect.contains(pos) => input_actions.push(process_button_click(
                     state,
                     layout,
                     self.backend,
@@ -171,7 +177,7 @@ impl<'a> TerminalView<'a> {
                     &modifiers,
                     pressed,
                 )),
-                egui::Event::PointerMoved(pos) => {
+                egui::Event::PointerMoved(pos) if layout.rect.contains(pos) => {
                     input_actions = process_mouse_move(state, layout, self.backend, pos, &modifiers)
                 }
                 _ => {}
