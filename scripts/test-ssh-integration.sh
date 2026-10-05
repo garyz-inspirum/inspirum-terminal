@@ -44,7 +44,7 @@ KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 AuthenticationMethods publickey
 AllowUsers {getpass.getuser()}
-AllowTcpForwarding no
+AllowTcpForwarding yes
 AllowAgentForwarding no
 X11Forwarding no
 PermitTunnel no
