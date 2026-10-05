@@ -48,7 +48,7 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [ ] ControlMaster/multiplexing workflow and platform limitations.
 - [x] Structured no-auth HTTP CONNECT and SOCKS5 proxy workflows use the built-in Inspirum proxy helper; Linux fixture coverage verifies actual HTTP proxy routing and hard failure without direct fallback. Proxy authentication, raw ProxyCommand compatibility and Windows/macOS authenticated-proxy acceptance remain open (#14/#35).
 - [x] Optional per-profile remote command executed by OpenSSH after authentication; it is stored as profile metadata, passed after the SSH destination, and never invoked through a local shell. Full remote-command acceptance remains pending.
-- [ ] Tmux-aware integration (SSH-first scope; ordinary tmux inside a terminal is not equivalent).
+- [x] Tmux-aware integration with explicit discovery, selectable attach, explicit create, disconnect-as-detach behavior, attach-only reconnect, no production kill action, portable policy tests and isolated Linux tmux lifecycle acceptance (#19).
 - [x] Ask-before-trusting and already-trusted-only host-key modes.
 - [x] Host-key trust panel resolves effective `Hostname`/`Port`/`HostKeyAlias` with `ssh -G`, inspects `known_hosts` via `ssh-keygen -F`, and requires explicit confirmation before `ssh-keygen -R` removal. It does not auto-accept replacement keys; custom `UserKnownHostsFile` paths must be selected explicitly.
 - [x] Separate argv construction without a shell.
