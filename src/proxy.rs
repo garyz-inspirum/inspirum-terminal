@@ -216,8 +216,21 @@ pub fn run_stdio(
     });
 
     let mut output = io::stdout().lock();
-    io::copy(&mut downstream, &mut output).context("relay proxy response to OpenSSH")?;
-    output.flush()?;
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = downstream
+            .read(&mut buffer)
+            .context("read proxy response for OpenSSH")?;
+        if read == 0 {
+            break;
+        }
+        output
+            .write_all(&buffer[..read])
+            .context("relay proxy response to OpenSSH")?;
+        // ProxyCommand stdout is a protocol transport, not terminal output. Flush every
+        // received chunk so interactive handshakes cannot deadlock behind stdio buffering.
+        output.flush().context("flush proxy response to OpenSSH")?;
+    }
     if writer.is_finished() {
         match writer.join() {
             Ok(result) => result.context("relay OpenSSH input to proxy")?,
