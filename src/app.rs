@@ -71,7 +71,7 @@ fn terminal_screen_text(terminal: &mut TerminalBackend) -> String {
         result.push(indexed.c);
     }
 
-    result.trim_end_matches([' ', '\n']).to_owned()
+    result.trim_end_matches(&[' ', '\n'][..]).to_owned()
 }
 
 fn parse_optional_u16(value: &str, label: &str) -> anyhow::Result<Option<u16>> {
@@ -1751,7 +1751,7 @@ impl App {
                     let line_count = text
                         .as_bytes()
                         .iter()
-                        .filter(|byte| matches!(byte, b'\r' | b'\n'))
+                        .filter(|&&byte| matches!(byte, b'\r' | b'\n'))
                         .count()
                         + 1;
                     ui.strong(format!(
@@ -1762,9 +1762,9 @@ impl App {
                     ui.label(
                         "Review carefully. Multiline terminal pastes can execute several commands immediately.",
                     );
-                    let preview = text.chars().take(4000).collect::<String>();
+                    let mut preview = text.chars().take(4000).collect::<String>();
                     ui.add(
-                        egui::TextEdit::multiline(&mut preview.as_str())
+                        egui::TextEdit::multiline(&mut preview)
                             .desired_rows(8)
                             .interactive(false),
                     );
