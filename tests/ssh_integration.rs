@@ -265,6 +265,53 @@ fn remote_command_is_sent_after_authentication() {
 
 #[test]
 #[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn encrypted_private_key_authenticates_through_pty_prompt() {
+    let p = fixture();
+    let ssh = SshOptions {
+        public_key_auth: Some(true),
+        password_auth: Some(false),
+        keyboard_interactive_auth: Some(false),
+        gssapi_auth: Some(false),
+        ..SshOptions::default()
+    };
+    let (mut backend, rx) = open_with_ssh(&p, 710, true, "encrypted-config", ssh);
+    wait_text(&mut backend, "Enter passphrase for key");
+    write(&mut backend, "fixture-passphrase\n");
+    wait_text(&mut backend, "FIXTURE_AUTHENTICATED");
+    assert!(
+        !grid(&mut backend).contains("fixture-passphrase"),
+        "private-key passphrase was echoed into the terminal grid"
+    );
+    write(&mut backend, "exit\n");
+    wait_exit(&rx, 710);
+    println!("PASS encrypted private key authenticated through PTY prompt without echo");
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn ssh_agent_authenticates_without_identity_file_secret_storage() {
+    let p = fixture();
+    let ssh = SshOptions {
+        public_key_auth: Some(true),
+        password_auth: Some(false),
+        keyboard_interactive_auth: Some(false),
+        gssapi_auth: Some(false),
+        identities_only: Some(false),
+        ..SshOptions::default()
+    };
+    let (mut backend, rx) = open_with_ssh(&p, 711, true, "agent-config", ssh);
+    wait_text(&mut backend, "FIXTURE_AUTHENTICATED");
+    assert!(
+        !grid(&mut backend).contains("Enter passphrase"),
+        "agent-backed authentication unexpectedly prompted for a private-key passphrase"
+    );
+    write(&mut backend, "exit\n");
+    wait_exit(&rx, 711);
+    println!("PASS SSH agent authenticated through the application PTY path");
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
 fn changed_host_key_rejected_even_in_ask_mode() {
     let p = fixture();
     let (mut b, rx) = open(&p, 702, false, "changed-config");
