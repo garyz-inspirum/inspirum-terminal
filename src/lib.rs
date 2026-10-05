@@ -97,6 +97,11 @@ impl SshOptions {
                 valid_single_argument(&self.control_path, 4096),
                 "ControlPath is required for app-managed multiplexing, must be at most 4096 bytes and contain no control characters"
             );
+            #[cfg(unix)]
+            ensure!(
+                self.control_path.len() <= 80,
+                "ControlPath is too long for reliable Unix-domain socket creation; use a shorter path (80 bytes or fewer before OpenSSH expansion)"
+            );
         }
         if let Some(seconds) = self.control_persist_seconds {
             ensure!(seconds > 0, "ControlPersist must be greater than zero");
