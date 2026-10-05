@@ -1,11 +1,12 @@
 //! Opt-in Linux loopback verification: scripts/test-ssh-integration.sh.
 use egui_term::{BackendCommand, PtyEvent, TerminalBackend};
 use inspirum_terminal::{
-    ControlMasterMode, ProxyKind, Session, SshOptions, scp, sftp, tmux,
+    ControlMasterMode, ProxyKind, Session, SshOptions, scp, sftp,
     terminal::{
         connect, connect_sftp, control_master_operation, launch_args,
         launch_args_with_proxy_helper, start_tunnels,
     },
+    tmux,
 };
 use std::{
     fs,
@@ -1156,7 +1157,6 @@ fn scp_binary_round_trip_checksums_match_and_failures_leave_no_success_file() {
         "PASS SCP binary SHA-256 upload/download, overwrite guards, staging and negative cleanup"
     );
 }
-
 
 fn fixture_tmux_session() -> Session {
     Session {
