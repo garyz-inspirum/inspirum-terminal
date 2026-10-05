@@ -137,8 +137,11 @@ fn render_terminal_tab(
         });
         ui.separator();
     }
-    let view = TerminalView::new(ui, &mut tab.terminal)
-        .set_focus(terminal_accepts_keyboard(terminal_focus, tab.id, tab.exited));
+    let view = TerminalView::new(ui, &mut tab.terminal).set_focus(terminal_accepts_keyboard(
+        terminal_focus,
+        tab.id,
+        tab.exited,
+    ));
     let response = ui.add(view);
     if copy_selected {
         let selected = tab.terminal.selectable_content();
@@ -551,7 +554,11 @@ impl App {
         {
             let destinations = self.sync_input.destinations(source);
             let payloads: Vec<Vec<u8>> = ctx.input(|input| {
-                input.events.iter().filter_map(synchronized_event_bytes).collect()
+                input
+                    .events
+                    .iter()
+                    .filter_map(synchronized_event_bytes)
+                    .collect()
             });
             for destination in destinations {
                 if let Some(tab) = self
@@ -560,7 +567,8 @@ impl App {
                     .find(|tab| tab.id == destination && !tab.exited)
                 {
                     for payload in &payloads {
-                        tab.terminal.process_command(BackendCommand::Write(payload.clone()));
+                        tab.terminal
+                            .process_command(BackendCommand::Write(payload.clone()));
                     }
                 }
             }
