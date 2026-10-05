@@ -29,7 +29,10 @@ fn options(args: &[String], name: &str) -> Vec<String> {
 fn inherited_authentication_options_are_not_overridden() {
     let args = sftp_launch_args(&profile(), None).unwrap();
     for name in AUTH_OPTIONS {
-        assert!(options(&args, name).is_empty(), "unexpected {name} override");
+        assert!(
+            options(&args, name).is_empty(),
+            "unexpected {name} override"
+        );
     }
 }
 
@@ -63,8 +66,14 @@ fn mixed_authentication_policy_keeps_inherited_fields_absent() {
     session.ssh.password_auth = Some(false);
     session.ssh.gssapi_delegate_credentials = Some(false);
     let args = sftp_launch_args(&session, None).unwrap();
-    assert_eq!(options(&args, "PubkeyAuthentication"), ["PubkeyAuthentication=yes"]);
-    assert_eq!(options(&args, "PasswordAuthentication"), ["PasswordAuthentication=no"]);
+    assert_eq!(
+        options(&args, "PubkeyAuthentication"),
+        ["PubkeyAuthentication=yes"]
+    );
+    assert_eq!(
+        options(&args, "PasswordAuthentication"),
+        ["PasswordAuthentication=no"]
+    );
     assert_eq!(
         options(&args, "GSSAPIDelegateCredentials"),
         ["GSSAPIDelegateCredentials=no"]
@@ -90,7 +99,10 @@ fn sftp_hostname_alias_and_ipv4_are_not_rewritten() {
     for host in ["work-alias", "example.test", "127.0.0.1"] {
         let mut session = profile();
         session.host = host.into();
-        assert_eq!(sftp_launch_args(&session, None).unwrap().last().unwrap(), host);
+        assert_eq!(
+            sftp_launch_args(&session, None).unwrap().last().unwrap(),
+            host
+        );
     }
 }
 
@@ -105,11 +117,23 @@ fn auth_overrides_preserve_paths_trust_and_terminal_only_exclusions() {
     session.ssh.remote_command = "must-not-run".into();
     session.ssh.local_forwards = vec!["127.0.0.1:8080:example.test:80".into()];
     let args = sftp_launch_args(&session, Some(Path::new("config with spaces"))).unwrap();
-    assert!(args.windows(2).any(|pair| pair == ["-i", "C:/keys/work key"]));
-    assert!(args.windows(2).any(|pair| pair == ["-F", "config with spaces"]));
-    assert_eq!(options(&args, "StrictHostKeyChecking"), ["StrictHostKeyChecking=yes"]);
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["-i", "C:/keys/work key"])
+    );
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["-F", "config with spaces"])
+    );
+    assert_eq!(
+        options(&args, "StrictHostKeyChecking"),
+        ["StrictHostKeyChecking=yes"]
+    );
     for unwanted in ["-A", "-a", "-X", "-L", "-R", "-D", "must-not-run"] {
-        assert!(!args.iter().any(|arg| arg == unwanted), "unexpected {unwanted}");
+        assert!(
+            !args.iter().any(|arg| arg == unwanted),
+            "unexpected {unwanted}"
+        );
     }
 }
 
@@ -118,7 +142,13 @@ mod fixture {
     use super::*;
     use egui_term::{BackendCommand, PtyEvent, TerminalBackend};
     use inspirum_terminal::terminal::connect_sftp;
-    use std::{fs, path::PathBuf, sync::mpsc, thread, time::{Duration, Instant}};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    };
 
     fn fixture_dir() -> PathBuf {
         let path = PathBuf::from(
@@ -129,10 +159,7 @@ mod fixture {
         path
     }
 
-    fn open(
-        config: &Path,
-        ssh: SshOptions,
-    ) -> (TerminalBackend, mpsc::Receiver<(u64, PtyEvent)>) {
+    fn open(config: &Path, ssh: SshOptions) -> (TerminalBackend, mpsc::Receiver<(u64, PtyEvent)>) {
         let (tx, rx) = mpsc::channel();
         let session = Session {
             host: "fixture-sftp".into(),
@@ -152,7 +179,12 @@ mod fixture {
     }
 
     fn text(backend: &mut TerminalBackend) -> String {
-        backend.sync().grid.display_iter().map(|cell| cell.c).collect()
+        backend
+            .sync()
+            .grid
+            .display_iter()
+            .map(|cell| cell.c)
+            .collect()
     }
 
     fn wait_exit(rx: &mpsc::Receiver<(u64, PtyEvent)>) {
@@ -180,7 +212,10 @@ mod fixture {
         wait_exit(&rx);
         let output = text(&mut backend);
         assert!(output.contains("Permission denied"), "{output}");
-        assert!(!output.contains("sftp>"), "SFTP authenticated despite disabled methods");
+        assert!(
+            !output.contains("sftp>"),
+            "SFTP authenticated despite disabled methods"
+        );
         println!("PASS disabled public-key policy blocks SFTP with valid configured key");
     }
 
@@ -232,8 +267,14 @@ mod fixture {
         let (mut backend, rx) = open(&config, ssh);
         wait_exit(&rx);
         let output = text(&mut backend);
-        assert!(output.contains("REMOTE HOST IDENTIFICATION HAS CHANGED"), "{output}");
-        assert!(!output.contains("sftp>"), "SFTP authenticated despite changed host key");
+        assert!(
+            output.contains("REMOTE HOST IDENTIFICATION HAS CHANGED"),
+            "{output}"
+        );
+        assert!(
+            !output.contains("sftp>"),
+            "SFTP authenticated despite changed host key"
+        );
         println!("PASS changed host key blocks SFTP before authentication");
     }
 }
