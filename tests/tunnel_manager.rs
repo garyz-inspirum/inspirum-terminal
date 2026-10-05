@@ -23,17 +23,29 @@ fn tunnel_launch_is_forwarding_only_and_keeps_structured_argv() {
     assert!(args.iter().any(|arg| arg == "-N"));
     assert!(args.iter().any(|arg| arg == "-T"));
     assert!(!args.iter().any(|arg| arg == "-tt"));
-    assert!(args.windows(2).any(|w| w == ["-L", "127.0.0.1:8080:internal:80"]));
+    assert!(
+        args.windows(2)
+            .any(|w| w == ["-L", "127.0.0.1:8080:internal:80"])
+    );
     assert!(args.windows(2).any(|w| w == ["-R", "9000:127.0.0.1:3000"]));
     assert!(args.windows(2).any(|w| w == ["-D", "127.0.0.1:1080"]));
 }
 
 #[test]
 fn exposure_requires_ack_but_loopback_and_implicit_defaults_do_not() {
-    for safe in ["127.0.0.1:8080:host:80", "localhost:8080:host:80", "[::1]:8080:host:80", "8080:host:80"] {
+    for safe in [
+        "127.0.0.1:8080:host:80",
+        "localhost:8080:host:80",
+        "[::1]:8080:host:80",
+        "8080:host:80",
+    ] {
         assert!(!forward_requires_risk_ack(safe, false), "{safe}");
     }
-    for exposed in ["0.0.0.0:8080:host:80", "*:8080:host:80", "192.0.2.10:8080:host:80"] {
+    for exposed in [
+        "0.0.0.0:8080:host:80",
+        "*:8080:host:80",
+        "192.0.2.10:8080:host:80",
+    ] {
         assert!(forward_requires_risk_ack(exposed, false), "{exposed}");
     }
     assert!(!forward_requires_risk_ack("1080", true));
