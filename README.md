@@ -8,7 +8,7 @@ Current scope:
 - terminal rendering and PTY integration through `egui_term`;
 - SSH sessions launched as argument vectors through the system OpenSSH client;
 - saved, non-secret connection profiles;
-- first-class profile controls for identity-file paths, ProxyJump, agent/X11 forwarding, compression, connect timeout, keepalive, and local/remote/dynamic port forwarding;
+- first-class profile controls for identity-file paths, ProxyJump, agent/X11 forwarding, compression, connect timeout, keepalive, remote auto-command, and local/remote/dynamic port forwarding;
 - multiple terminal tabs, explicit disconnect by closing a tab, and explicit reconnect after a remote/session exit;
 - OpenSSH configuration, key material, agent, authentication prompts, host-key database, proxy transport, and forwarding implementation remain owned by OpenSSH.
 
@@ -93,7 +93,7 @@ The SSH script requires `sshd`, `ssh-keygen`, and Python 3. It uses only an unpr
 
 ## Security and data model
 
-Inspirum stores profile names, hosts, usernames, ports, strict-host-key preference, identity-file paths, ProxyJump routes, forwarding specifications, keepalive/timeout values, and tri-state SSH feature policies that can inherit, enable, or disable selected OpenSSH behavior. It does not save passwords, passphrases, private-key contents, or authentication responses. Authentication occurs inside OpenSSH's PTY. Every configured SSH value is passed as a separate process argument rather than being interpolated into a shell command.
+Inspirum stores profile names, hosts, usernames, ports, strict-host-key preference, identity-file paths, ProxyJump routes, forwarding specifications, keepalive/timeout values, optional remote commands, and tri-state SSH feature policies that can inherit, enable, or disable selected OpenSSH behavior. It does not save passwords, passphrases, private-key contents, or authentication responses. Authentication occurs inside OpenSSH's PTY. Every configured SSH value is passed as a separate local process argument rather than being interpolated into a local shell command. An optional remote command is sent only after the SSH destination and is interpreted by the remote account's shell after authentication.
 
 This is an early slice, not a security audit. Review `docs/ARCHITECTURE.md` for boundaries and `docs/PARITY.md` for the roadmap. The parity document is not a claim that WindTerm parity exists.
 
