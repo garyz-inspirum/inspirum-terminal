@@ -1670,6 +1670,12 @@ impl App {
         let mut reconnect = None;
         let mut close_browser = false;
         let mut close_scp = false;
+        let mut close_pane = None;
+        let mut focus_pane = None;
+        let mut split_requested = None;
+        let mut workspace_save_requested = false;
+        let mut workspace_load_requested = false;
+        let mut workspace_restore_requested = false;
         let mut copy_selected = false;
         let active_screen = if self.search_open || self.logging_tab.is_some() {
             self.active.and_then(|id| {
@@ -1816,28 +1822,169 @@ impl App {
                 ui.separator();
             }
 
-            let terminal_focus = self.terminal_focus;
-            if let Some(tab) = self.tabs.iter_mut().find(|tab| Some(tab.id) == self.active) {
-                if tab.exited {
-                    ui.horizontal(|ui| {
-                        ui.strong("Session exited.");
-                        if ui.button("Reconnect").clicked() {
-                            reconnect = Some((tab.id, tab.kind, tab.session.clone()));
+            ui.group(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong("SSH workspace");
+                    if ui.button("Split horizontal").clicked() {
+                        split_requested = Some(SplitAxis::Horizontal);
+                    }
+                    if ui.button("Split vertical").clicked() {
+                        split_requested = Some(SplitAxis::Vertical);
+                    }
+                    ui.label("Layout");
+                    let path = ui.add(
+                        egui::TextEdit::singleline(&mut self.workspace_path)
+                            .desired_width(220.0)
+                            .hint_text("workspace.json"),
+                    );
+                    if path.has_focus() {
+                        self.terminal_focus = None;
+                    }
+                    if ui.button("Save").clicked() {
+                        workspace_save_requested = true;
+                    }
+                    if ui.button("Load metadata").clicked() {
+                        workspace_load_requested = true;
+                    }
+                    if ui
+                        .add_enabled(
+                            self.workspace_loaded
+                                .as_ref()
+                                .is_some_and(|layout| layout.reconnect_on_restore),
+                            egui::Button::new("Restore & reconnect"),
+                        )
+                        .clicked()
+                    {
+                        workspace_restore_requested = true;
+                    }
+                });
+                ui.checkbox(
+                    &mut self.workspace_reconnect_on_restore,
+                    "Allow reconnect when this saved layout is explicitly restored",
+                );
+                ui.small(
+                    "Loading layout metadata never reconnects. Restore & reconnect is a separate explicit action and is only enabled for layouts saved with reconnect permission.",
+                );
+
+                if self.workspace_panes.len() >= 2 {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Sync targets:");
+                        for pane_id in self.workspace_panes.clone() {
+                            let label = self
+                                .tabs
+                                .iter()
+                                .find(|tab| tab.id == pane_id)
+                                .map(|tab| tab.name.clone())
+                                .unwrap_or_else(|| format!("pane {pane_id}"));
+                            let mut selected = self.sync_input.is_target(pane_id);
+                            if ui.checkbox(&mut selected, label).changed() {
+                                self.sync_input.set_target(pane_id, selected);
+                            }
+                        }
+                        if self.sync_input.armed() {
+                            if ui.button("Disarm synchronized input").clicked() {
+                                self.sync_input.set_armed(false);
+                            }
+                        } else if ui
+                            .add_enabled(
+                                self.sync_input.selected_count() >= 2,
+                                egui::Button::new("Arm synchronized input"),
+                            )
+                            .clicked()
+                        {
+                            self.sync_input.set_armed(true);
                         }
                     });
-                    ui.separator();
-                }
-                let view = TerminalView::new(ui, &mut tab.terminal)
-                    .set_focus(terminal_accepts_keyboard(terminal_focus, tab.id, tab.exited));
-                let response = ui.add(view);
-                if copy_selected {
-                    let selected = tab.terminal.selectable_content();
-                    if !selected.is_empty() {
-                        ctx.copy_text(selected);
+                    if self.sync_input.armed() {
+                        ui.strong(
+                            "SYNC INPUT ARMED — text, safe paste and navigation keys are mirrored to every selected pane.",
+                        );
+                    } else {
+                        ui.small("Synchronized input is disarmed.");
                     }
                 }
-                if response.clicked() && !tab.exited {
-                    self.terminal_focus = Some(tab.id);
+                if !self.workspace_notice.is_empty() {
+                    ui.small(&self.workspace_notice);
+                }
+            });
+            ui.separator();
+
+            let terminal_focus = self.terminal_focus;
+            let split_ids: Vec<u64> = self
+                .workspace_panes
+                .iter()
+                .copied()
+                .filter(|id| self.tabs.iter().any(|tab| tab.id == *id))
+                .take(2)
+                .collect();
+
+            if split_ids.len() == 2 {
+                let first_index = self.tabs.iter().position(|tab| tab.id == split_ids[0]);
+                let second_index = self.tabs.iter().position(|tab| tab.id == split_ids[1]);
+                if let (Some(first_index), Some(second_index)) = (first_index, second_index) {
+                    let (first, second) = if first_index < second_index {
+                        let (left, right) = self.tabs.split_at_mut(second_index);
+                        (&mut left[first_index], &mut right[0])
+                    } else {
+                        let (left, right) = self.tabs.split_at_mut(first_index);
+                        (&mut right[0], &mut left[second_index])
+                    };
+                    let active = self.active;
+                    let mut render = |ui: &mut egui::Ui, tab: &mut Tab| {
+                        let (next_reconnect, focused, close) = render_terminal_tab(
+                            ui,
+                            ctx,
+                            tab,
+                            terminal_focus,
+                            copy_selected && active == Some(tab.id),
+                            true,
+                        );
+                        if reconnect.is_none() {
+                            reconnect = next_reconnect;
+                        }
+                        if focused {
+                            focus_pane = Some(tab.id);
+                        }
+                        if close {
+                            close_pane = Some(tab.id);
+                        }
+                    };
+                    match self.workspace_axis {
+                        SplitAxis::Horizontal => {
+                            ui.columns(2, |columns| {
+                                render(&mut columns[0], first);
+                                render(&mut columns[1], second);
+                            });
+                        }
+                        SplitAxis::Vertical => {
+                            let pane_height = (ui.available_height() / 2.0 - 4.0).max(80.0);
+                            ui.allocate_ui(
+                                egui::vec2(ui.available_width(), pane_height),
+                                |ui| render(ui, first),
+                            );
+                            ui.separator();
+                            ui.allocate_ui(
+                                egui::vec2(ui.available_width(), pane_height),
+                                |ui| render(ui, second),
+                            );
+                        }
+                    }
+                }
+            } else if let Some(tab) = self.tabs.iter_mut().find(|tab| Some(tab.id) == self.active) {
+                let (next_reconnect, focused, close) = render_terminal_tab(
+                    ui,
+                    ctx,
+                    tab,
+                    terminal_focus,
+                    copy_selected,
+                    false,
+                );
+                reconnect = next_reconnect;
+                if focused {
+                    focus_pane = Some(tab.id);
+                }
+                if close {
+                    close_pane = Some(tab.id);
                 }
             } else {
                 ui.heading("Connect to an SSH server");
