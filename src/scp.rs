@@ -30,7 +30,21 @@ fn remote_path(value: &str) -> Result<&str> {
         value.len() <= 8192 && !value.chars().any(char::is_control),
         "remote SCP path must be at most 8192 bytes and contain no control characters"
     );
+    ensure!(
+        value == "/" || !value.ends_with('/'),
+        "remote SCP destination must name a file, not end with a directory separator"
+    );
+    ensure!(value != "/", "remote SCP path must name a file");
     Ok(value)
+}
+
+fn remote_parent_name(path: &str) -> Result<(&str, &str)> {
+    remote_path(path)?;
+    match path.rsplit_once('/') {
+        Some(("", name)) => Ok(("/", name)),
+        Some((parent, name)) => Ok((parent, name)),
+        None => Ok((".", path)),
+    }
 }
 
 fn common_args_with_proxy_helper(
@@ -274,8 +288,7 @@ impl Transfer {
                     );
                 }
                 if !self.overwrite {
-                    let parent = destination.rsplit_once('/').map(|(p, _)| p).unwrap_or(".");
-                    let name = destination.rsplit('/').next().unwrap_or(destination);
+                    let (parent, name) = remote_parent_name(destination)?;
                     if sftp::list_remote(&self.session, self.config.as_deref(), parent)?
                         .iter()
                         .any(|entry| entry.name == name)
@@ -349,8 +362,7 @@ pub fn start_upload(
 ) -> Result<Transfer> {
     remote_path(remote)?;
     if !overwrite {
-        let parent = remote.rsplit_once('/').map(|(p, _)| p).unwrap_or(".");
-        let name = remote.rsplit('/').next().unwrap_or(remote);
+        let (parent, name) = remote_parent_name(remote)?;
         if sftp::list_remote(session, config, parent)?
             .iter()
             .any(|entry| entry.name == name)
@@ -434,5 +446,11 @@ mod tests {
             "[2001:db8::1]:dir/file name;literal"
         );
         assert!(remote_spec(&session, "bad\npath").is_err());
+        assert!(remote_spec(&session, "directory/").is_err());
+        assert_eq!(remote_parent_name("/root.bin").unwrap(), ("/", "root.bin"));
+        assert_eq!(
+            remote_parent_name("dir/file.bin").unwrap(),
+            ("dir", "file.bin")
+        );
     }
 }
