@@ -7,9 +7,32 @@ use std::{
     sync::mpsc::{self, Receiver, Sender},
 };
 
+#[derive(Clone, Copy)]
+enum TabKind {
+    Ssh,
+    Sftp,
+}
+
+impl TabKind {
+    fn connect(
+        self,
+        id: u64,
+        context: egui::Context,
+        sender: Sender<(u64, PtyEvent)>,
+        session: &Session,
+        config: Option<&std::path::Path>,
+    ) -> anyhow::Result<TerminalBackend> {
+        match self {
+            Self::Ssh => terminal::connect(id, context, sender, session, config),
+            Self::Sftp => terminal::connect_sftp(id, context, sender, session, config),
+        }
+    }
+}
+
 struct Tab {
     id: u64,
     name: String,
+    kind: TabKind,
     session: Session,
     terminal: TerminalBackend,
     exited: bool,
@@ -366,6 +389,36 @@ impl App {
                                 self.tabs.push(Tab {
                                     id: self.next_id,
                                     name: session.name.clone(),
+                                    kind: TabKind::Ssh,
+                                    session,
+                                    terminal,
+                                    exited: false,
+                                });
+                                self.active = Some(self.next_id);
+                                self.terminal_focus = Some(self.next_id);
+                                self.next_id += 1;
+                                Ok(())
+                            });
+                            self.error =
+                                result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+                        }
+                        if ui
+                            .add_enabled(self.tabs.len() < 16, egui::Button::new("SFTP"))
+                            .on_hover_text("Open an interactive OpenSSH sftp session")
+                            .clicked()
+                        {
+                            let result = self.validated_draft().and_then(|session| {
+                                let terminal = terminal::connect_sftp(
+                                    self.next_id,
+                                    ctx.clone(),
+                                    self.tx.clone(),
+                                    &session,
+                                    self.config.as_deref(),
+                                )?;
+                                self.tabs.push(Tab {
+                                    id: self.next_id,
+                                    name: format!("{} · SFTP", session.name),
+                                    kind: TabKind::Sftp,
                                     session,
                                     terminal,
                                     exited: false,
@@ -379,6 +432,9 @@ impl App {
                                 result.err().map(|e| format!("{e:#}")).unwrap_or_default();
                         }
                     });
+                    ui.small(
+                        "SFTP reuses host trust, OpenSSH config, identity, ProxyJump, timeout, keepalive and compression. Terminal-only remote commands, X11/agent forwarding and port forwards are not applied to SFTP.",
+                    );
 
                     if !self.error.is_empty() {
                         ui.colored_label(egui::Color32::LIGHT_RED, &self.error);
@@ -435,7 +491,7 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.strong("Session exited.");
                         if ui.button("Reconnect").clicked() {
-                            reconnect = Some((tab.id, tab.session.clone()));
+                            reconnect = Some((tab.id, tab.kind, tab.session.clone()));
                         }
                     });
                     ui.separator();
@@ -460,9 +516,9 @@ impl App {
             }
         });
 
-        if let Some((old_id, session)) = reconnect {
+        if let Some((old_id, kind, session)) = reconnect {
             let new_id = self.next_id;
-            match terminal::connect(
+            match kind.connect(
                 new_id,
                 ctx.clone(),
                 self.tx.clone(),
@@ -472,6 +528,7 @@ impl App {
                 Ok(terminal) => {
                     if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == old_id) {
                         tab.id = new_id;
+                        tab.kind = kind;
                         tab.session = session;
                         tab.terminal = terminal;
                         tab.exited = false;
