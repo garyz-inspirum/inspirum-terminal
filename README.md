@@ -12,6 +12,7 @@ Current scope:
 - first-class profile controls for identity-file paths, ProxyJump, authentication-method policy, GSSAPI delegation policy, `IdentitiesOnly`, agent/X11 forwarding, compression, connect timeout, keepalive, remote auto-command, and local/remote/dynamic port forwarding;
 - multiple SSH/SFTP terminal tabs, explicit disconnect by closing a tab, and explicit reconnect after a remote/session exit;
 - host-key trust tools that resolve the effective OpenSSH host identity with `ssh -G`, inspect trusted entries with `ssh-keygen -F`, and require explicit confirmation before `ssh-keygen -R` removal;
+- local-only `--diagnostics` reports with an allowlisted policy summary and no-clobber text export; no graphical desktop or server connection is required for this command;
 - OpenSSH configuration, key material, agent, authentication prompts, host-key database, proxy transport, and forwarding implementation remain owned by OpenSSH.
 
 ## Verification status
@@ -49,7 +50,7 @@ Early artifacts are unsigned prereleases because no code-signing or notarization
 
 ## Requirements
 
-- a graphical desktop;
+- a graphical desktop for interactive terminal windows (not required for diagnostics);
 - the system `ssh` command from OpenSSH on `PATH`; interactive SFTP tabs also require the matching `sftp` command on `PATH`, and host-key inspection/removal requires `ssh-keygen`;
 - Rust 1.95.0 to match CI (the package uses edition 2024);
 - on Linux, the normal X11/Wayland development packages needed by `eframe`.
@@ -71,7 +72,19 @@ inspirum-terminal [--profiles PATH] [--ssh-config PATH]
 
 `--profiles` changes the JSON profile location. `--ssh-config` passes one explicit configuration file to OpenSSH. Otherwise OpenSSH uses its normal configuration and identity discovery. The SFTP button opens an interactive OpenSSH `sftp` tab using the same host-trust, config, identity, ProxyJump and connection-policy inputs; the graphical file browser and transfer queue are not implemented yet.
 
-Keep the pointer over the terminal while typing; this is a current `egui_term` interaction limitation. Verify new host-key fingerprints through an independent trusted channel before accepting them. The Host key trust panel can inspect/remove entries from the default user `known_hosts` file or an explicitly selected file; it never auto-accepts a replacement key. If your SSH config uses a custom `UserKnownHostsFile`, select that file explicitly before inspecting or removing entries.
+Click a terminal to give it keyboard focus. Moving the pointer away does not transfer that focus. Verify new host-key fingerprints through an independent trusted channel before accepting them. The Host key trust panel can inspect/remove entries from the default user `known_hosts` file or an explicitly selected file; it never auto-accepts a replacement key. If your SSH config uses a custom `UserKnownHostsFile`, select that file explicitly before inspecting or removing entries.
+
+## Local support diagnostics
+
+```text
+inspirum-terminal --diagnostics
+inspirum-terminal --diagnostics --diagnostics-output support.txt
+inspirum-terminal --diagnostics --profiles sessions.json --diagnostic-profile "Work laptop"
+```
+
+Diagnostics run before graphical initialization. They query local OpenSSH tools with fixed arguments; they never connect, authenticate or evaluate SSH configuration. An optional profile contributes only policy states, boolean flags and forwarding counts. Profile names, hosts, usernames, paths, remote commands, credentials, terminal contents and raw error text are omitted. Export refuses to overwrite an existing file.
+
+See [diagnostics and privacy boundaries](docs/diagnostics.md), [saved profiles and safe import/export](docs/profile-library.md), and [interactive SFTP policy](docs/sftp.md). A diagnostic report is not proof of SSH connectivity or complete platform acceptance.
 
 ## Testing
 
