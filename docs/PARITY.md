@@ -53,7 +53,7 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Local, remote, and dynamic forwarding profile/UI with discrete `-L`/`-R`/`-D` argv and `ExitOnForwardFailure=yes`. Native forwarding acceptance and richer lifecycle controls remain pending.
 - [x] Agent forwarding and X11 forwarding profile/UI with Inherit/Enable/Disable policy and explicit risk text. Native acceptance remains pending.
 - [x] Connection timeout, server keepalive interval, and compression profile/UI; compression also has Inherit/Enable/Disable policy. Cipher/algorithm policy UI remains planned.
-- [ ] Reconnect behavior with explicit user control.
+- [x] Explicit reconnect button for an exited SSH tab; reconnect starts a fresh OpenSSH/PTy session from the tab's original profile and does not replay terminal input. Network-loss and host-key-change reconnect acceptance remains pending.
 - [ ] Connection diagnostics and sanitized support bundle.
 - [ ] Native Windows and macOS isolated SSH-server acceptance tests for authentication, trust, ProxyJump/forwarding, and lifecycle behavior.
 
