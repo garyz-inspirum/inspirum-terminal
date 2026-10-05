@@ -39,6 +39,17 @@ fn parse_forward_lines(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn ssh_policy_control(ui: &mut egui::Ui, label: &str, value: &mut Option<bool>) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        changed |= ui.selectable_value(value, None, "Inherit").changed();
+        changed |= ui.selectable_value(value, Some(true), "Enable").changed();
+        changed |= ui.selectable_value(value, Some(false), "Disable").changed();
+    });
+    changed
+}
+
 pub struct App {
     path: PathBuf,
     config: Option<PathBuf>,
@@ -220,37 +231,35 @@ impl App {
                             }
                             ui.small("Example: bastion or user@bastion:2222,second-hop");
 
-                            if ui
-                                .checkbox(
-                                    &mut self.draft.ssh.agent_forwarding,
-                                    "Forward SSH agent (-A)",
-                                )
-                                .clicked()
-                            {
+                            if ssh_policy_control(
+                                ui,
+                                "SSH agent forwarding",
+                                &mut self.draft.ssh.agent_forwarding,
+                            ) {
                                 self.terminal_focus = None;
                             }
                             ui.small(
-                                "Agent forwarding lets the remote host use your local agent. Enable only for trusted hosts.",
+                                "Inherit follows OpenSSH config. Enabling lets the remote host use your local agent; enable only for trusted hosts.",
                             );
 
-                            if ui
-                                .checkbox(
-                                    &mut self.draft.ssh.x11_forwarding,
-                                    "Enable X11 forwarding (-X)",
-                                )
-                                .clicked()
-                            {
+                            if ssh_policy_control(
+                                ui,
+                                "X11 forwarding",
+                                &mut self.draft.ssh.x11_forwarding,
+                            ) {
                                 self.terminal_focus = None;
                             }
                             ui.small(
-                                "X11 forwarding lets remote applications connect to your local X server when available. Enable only when needed and for trusted hosts.",
+                                "Inherit follows OpenSSH config. Enabling lets remote applications connect to your local X server when available; enable only when needed and for trusted hosts.",
                             );
-                            if ui
-                                .checkbox(&mut self.draft.ssh.compression, "Enable compression (-C)")
-                                .clicked()
-                            {
+                            if ssh_policy_control(
+                                ui,
+                                "Compression",
+                                &mut self.draft.ssh.compression,
+                            ) {
                                 self.terminal_focus = None;
                             }
+                            ui.small("Inherit follows the effective OpenSSH configuration.");
 
                             ui.label("Connection timeout seconds");
                             if ui.text_edit_singleline(&mut self.connect_timeout).has_focus() {
@@ -264,7 +273,7 @@ impl App {
                             ui.separator();
                             ui.strong("Port forwarding");
                             ui.small(
-                                "One OpenSSH forwarding specification per line. Forwarding is tied to this SSH session and fails the connection if setup fails.",
+                                "One OpenSSH forwarding specification per line. These are added to any forwards from OpenSSH config. Profile forwarding is tied to this SSH session and fails the connection if setup fails.",
                             );
 
                             ui.label("Local forwards (-L)");
