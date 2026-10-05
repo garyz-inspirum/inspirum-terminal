@@ -50,7 +50,8 @@ impl Drop for ReapedChild {
 }
 
 fn read_capture(file: &mut File) -> Result<String, ProbeFailure> {
-    file.seek(SeekFrom::Start(0)).map_err(|_| ProbeFailure::Io)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| ProbeFailure::Io)?;
     let mut bytes = Vec::new();
     file.take(OUTPUT_LIMIT + 1)
         .read_to_end(&mut bytes)
@@ -69,8 +70,12 @@ fn probe(program: &Path, args: &[&str], timeout: Duration) -> Result<Capture, Pr
     let child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout.try_clone().map_err(|_| ProbeFailure::Io)?))
-        .stderr(Stdio::from(stderr.try_clone().map_err(|_| ProbeFailure::Io)?))
+        .stdout(Stdio::from(
+            stdout.try_clone().map_err(|_| ProbeFailure::Io)?,
+        ))
+        .stderr(Stdio::from(
+            stderr.try_clone().map_err(|_| ProbeFailure::Io)?,
+        ))
         .spawn()
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
@@ -135,12 +140,10 @@ fn openssh_version(text: &str) -> Option<String> {
 
 fn describe_version(result: Result<Capture, ProbeFailure>) -> String {
     match result {
-        Ok(capture) if capture.success => {
-            openssh_version(&capture.stdout)
-                .or_else(|| openssh_version(&capture.stderr))
-                .map(|version| format!("OpenSSH {version}"))
-                .unwrap_or_else(|| "unrecognized version response (raw output omitted)".into())
-        }
+        Ok(capture) if capture.success => openssh_version(&capture.stdout)
+            .or_else(|| openssh_version(&capture.stderr))
+            .map(|version| format!("OpenSSH {version}"))
+            .unwrap_or_else(|| "unrecognized version response (raw output omitted)".into()),
         Ok(_) => "version probe failed (raw output omitted)".into(),
         Err(error) => error.label().into(),
     }
@@ -148,9 +151,7 @@ fn describe_version(result: Result<Capture, ProbeFailure>) -> String {
 
 fn describe_usage(result: Result<Capture, ProbeFailure>, expected: &str) -> String {
     match result {
-        Ok(capture)
-            if capture.stdout.contains(expected) || capture.stderr.contains(expected) =>
-        {
+        Ok(capture) if capture.stdout.contains(expected) || capture.stderr.contains(expected) => {
             "available (usage response; not a connectivity test)".into()
         }
         Ok(_) => "unrecognized usage response (raw output omitted)".into(),
@@ -184,7 +185,11 @@ fn profile_summary(session: &Session) -> String {
          Terminal agent forwarding: {}\n\
          Terminal X11 forwarding: {}\n\
          Compression: {}\n",
-        if session.strict { "already trusted only" } else { "ask before new trust" },
+        if session.strict {
+            "already trusted only"
+        } else {
+            "ask before new trust"
+        },
         !session.user.is_empty(),
         session.port.is_some(),
         !session.ssh.identity_file.is_empty(),
@@ -207,7 +212,10 @@ fn profile_summary(session: &Session) -> String {
 
 pub fn collect(profiles: Option<&Path>, selected: Option<&str>, explicit_config: bool) -> String {
     let version = describe_version(probe(Path::new("ssh"), &["-V"], PROBE_TIMEOUT));
-    let sftp = describe_usage(probe(Path::new("sftp"), &["-h"], PROBE_TIMEOUT), "usage: sftp");
+    let sftp = describe_usage(
+        probe(Path::new("sftp"), &["-h"], PROBE_TIMEOUT),
+        "usage: sftp",
+    );
     let keygen = describe_usage(
         probe(Path::new("ssh-keygen"), &["-?"], PROBE_TIMEOUT),
         "usage: ssh-keygen",
@@ -217,7 +225,10 @@ pub fn collect(profiles: Option<&Path>, selected: Option<&str>, explicit_config:
             let has = |query: &str| capture.stdout.lines().any(|line| line.trim() == query);
             format!(
                 "cipher={}, kex={}, key={}, mac={} (local query support only)",
-                has("cipher"), has("kex"), has("key"), has("mac")
+                has("cipher"),
+                has("kex"),
+                has("key"),
+                has("mac")
             )
         }
         Ok(_) => "not available (raw output omitted)".into(),
@@ -234,7 +245,11 @@ pub fn collect(profiles: Option<&Path>, selected: Option<&str>, explicit_config:
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,
-        if explicit_config { "explicit" } else { "default" },
+        if explicit_config {
+            "explicit"
+        } else {
+            "default"
+        },
     );
     if let (Some(path), Some(name)) = (profiles, selected) {
         match load_sessions(path) {
@@ -243,7 +258,8 @@ pub fn collect(profiles: Option<&Path>, selected: Option<&str>, explicit_config:
                 if matches.len() == 1 {
                     report.push_str(&profile_summary(matches[0]));
                 } else {
-                    report.push_str("Saved profile: not found or ambiguous (identifiers omitted)\n");
+                    report
+                        .push_str("Saved profile: not found or ambiguous (identifiers omitted)\n");
                 }
             }
             Err(_) => report.push_str("Saved profiles: unavailable or invalid (details omitted)\n"),
@@ -260,8 +276,14 @@ pub fn collect(profiles: Option<&Path>, selected: Option<&str>, explicit_config:
 }
 
 pub fn export(path: &Path, report: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(report.len() <= OUTPUT_LIMIT as usize, "support report is too large");
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    anyhow::ensure!(
+        report.len() <= OUTPUT_LIMIT as usize,
+        "support report is too large"
+    );
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     let mut file = tempfile::NamedTempFile::new_in(parent)
         .map_err(|_| anyhow::anyhow!("cannot create support report in destination directory"))?;
     file.write_all(report.as_bytes())

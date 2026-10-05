@@ -49,7 +49,11 @@ fn selected_profile_report_omits_sensitive_fields_and_export_never_overwrites() 
     save_sessions(&profiles, &[session]).unwrap();
     let original_profiles = fs::read(&profiles).unwrap();
     let output = command()
-        .args(["--diagnostics", "--diagnostic-profile", "PROFILE_SECRET_CANARY"])
+        .args([
+            "--diagnostics",
+            "--diagnostic-profile",
+            "PROFILE_SECRET_CANARY",
+        ])
         .arg("--profiles")
         .arg(&profiles)
         .arg("--diagnostics-output")

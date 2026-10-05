@@ -5,9 +5,14 @@ fn helper() -> &'static Path {
     static HELPER: OnceLock<(tempfile::TempDir, PathBuf)> = OnceLock::new();
     &HELPER
         .get_or_init(|| {
-            let dir = tempfile::Builder::new().prefix("diagnostic helper ").tempdir().unwrap();
+            let dir = tempfile::Builder::new()
+                .prefix("diagnostic helper ")
+                .tempdir()
+                .unwrap();
             let source = dir.path().join("probe.rs");
-            let program = dir.path().join(format!("probe{}", std::env::consts::EXE_SUFFIX));
+            let program = dir
+                .path()
+                .join(format!("probe{}", std::env::consts::EXE_SUFFIX));
             fs::write(
                 &source,
                 r#"use std::{env, io::{self, Write}, thread, time::Duration};
@@ -37,7 +42,10 @@ fn main() {
 
 #[test]
 fn parses_only_version_tokens_including_windows() {
-    assert_eq!(openssh_version("OpenSSH_9.9p2, LibreSSL 1.0"), Some("9.9p2".into()));
+    assert_eq!(
+        openssh_version("OpenSSH_9.9p2, LibreSSL 1.0"),
+        Some("9.9p2".into())
+    );
     assert_eq!(
         openssh_version("OpenSSH_for_Windows_9.5p1, LibreSSL 3.8.2"),
         Some("9.5p1".into())
@@ -108,8 +116,13 @@ fn profile_summary_is_deterministic_and_never_contains_profile_strings() {
     let text = profile_summary(&session);
     assert_eq!(text, profile_summary(&session));
     for canary in [
-        "NAME_CANARY", "HOST_CANARY", "USER_CANARY", "KEY_PATH_CANARY",
-        "JUMP_CANARY", "COMMAND_SECRET_CANARY", "FORWARD_CANARY",
+        "NAME_CANARY",
+        "HOST_CANARY",
+        "USER_CANARY",
+        "KEY_PATH_CANARY",
+        "JUMP_CANARY",
+        "COMMAND_SECRET_CANARY",
+        "FORWARD_CANARY",
     ] {
         assert!(!text.contains(canary));
     }

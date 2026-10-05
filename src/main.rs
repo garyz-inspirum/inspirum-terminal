@@ -5,10 +5,12 @@ use inspirum_terminal::app::App;
 use std::path::PathBuf;
 
 fn default_profiles() -> Result<PathBuf> {
-    Ok(directories::ProjectDirs::from("com", "Inspirum", "Inspirum Terminal")
-        .context("cannot locate configuration directory; pass --profiles PATH")?
-        .config_dir()
-        .join("sessions.json"))
+    Ok(
+        directories::ProjectDirs::from("com", "Inspirum", "Inspirum Terminal")
+            .context("cannot locate configuration directory; pass --profiles PATH")?
+            .config_dir()
+            .join("sessions.json"),
+    )
 }
 
 fn main() -> Result<()> {
@@ -48,7 +50,8 @@ fn main() -> Result<()> {
             Some("--diagnostics") => diagnostics = true,
             Some("--diagnostics-output") => {
                 diagnostics_output = Some(PathBuf::from(
-                    args.next().context("--diagnostics-output requires a path")?,
+                    args.next()
+                        .context("--diagnostics-output requires a path")?,
                 ));
             }
             Some("--diagnostic-profile") => {
