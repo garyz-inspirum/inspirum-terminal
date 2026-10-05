@@ -140,6 +140,39 @@ mod tests {
     }
 
     #[test]
+    fn discovery_is_non_interactive_and_production_commands_are_non_destructive() {
+        let session = Session {
+            name: "tmux".into(),
+            host: "example".into(),
+            ..Session::default()
+        };
+        let args = list_args(&session, None).unwrap();
+        assert!(args.iter().any(|arg| arg == "-T"));
+        assert!(!args.iter().any(|arg| arg == "-tt"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-o", "BatchMode=yes"])
+        );
+        let joined = args.join(" ");
+        assert!(!joined.contains("kill-session"));
+        assert!(!joined.contains("kill-server"));
+        assert!(
+            !attach_session(&session, "safe")
+                .unwrap()
+                .ssh
+                .remote_command
+                .contains("kill")
+        );
+        assert!(
+            !create_session(&session, "safe")
+                .unwrap()
+                .ssh
+                .remote_command
+                .contains("kill")
+        );
+    }
+
+    #[test]
     fn parser_returns_selectable_session_state() {
         assert_eq!(
             parse_sessions("alpha|0\nbeta-2|3\n").unwrap(),
