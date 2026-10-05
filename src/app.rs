@@ -2212,9 +2212,21 @@ impl App {
             confirm |= ctx.input(|input| input.key_pressed(egui::Key::Enter));
             cancel |= ctx.input(|input| input.key_pressed(egui::Key::Escape));
             if confirm {
+                let bytes = text.into_bytes();
                 if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id && !tab.exited) {
                     tab.terminal
-                        .process_command(BackendCommand::Write(text.into_bytes()));
+                        .process_command(BackendCommand::Write(bytes.clone()));
+                    for destination in self.sync_input.destinations(id) {
+                        if let Some(target) = self
+                            .tabs
+                            .iter_mut()
+                            .find(|tab| tab.id == destination && !tab.exited)
+                        {
+                            target
+                                .terminal
+                                .process_command(BackendCommand::Write(bytes.clone()));
+                        }
+                    }
                     self.paste_notice = "Paste sent after explicit confirmation.".into();
                     self.terminal_focus = Some(id);
                 } else {
@@ -2272,6 +2284,12 @@ impl App {
                         tab.session = session;
                         tab.terminal = terminal;
                         tab.exited = false;
+                        for pane in &mut self.workspace_panes {
+                            if *pane == old_id {
+                                *pane = new_id;
+                            }
+                        }
+                        self.sync_input = SyncInputState::default();
                         self.active = Some(new_id);
                         self.terminal_focus = Some(new_id);
                         self.next_id += 1;
