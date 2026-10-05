@@ -574,6 +574,7 @@ pub mod sftp;
 pub mod sftp_browser;
 pub mod support;
 pub mod terminal;
+pub mod terminal_ux;
 pub mod tmux;
 
 pub mod app;

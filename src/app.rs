@@ -8,10 +8,11 @@ use crate::{
     sftp_browser::SftpBrowser,
     support::{self, SanitizedErrorHistory},
     terminal,
+    terminal_ux::{self, PasteDecision, PastePolicy},
     tmux::{self, TmuxSession},
 };
 use eframe::egui;
-use egui_term::{PtyEvent, TerminalBackend, TerminalView};
+use egui_term::{BackendCommand, PtyEvent, TerminalBackend, TerminalView};
 use std::{
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
@@ -50,6 +51,27 @@ struct Tab {
 
 fn terminal_accepts_keyboard(owner: Option<u64>, id: u64, exited: bool) -> bool {
     owner == Some(id) && !exited
+}
+
+fn terminal_screen_text(terminal: &mut TerminalBackend) -> String {
+    let content = terminal.sync();
+    let mut result = String::new();
+    let mut current_line = None;
+
+    for indexed in content.grid.display_iter() {
+        if current_line != Some(indexed.point.line) {
+            if current_line.is_some() {
+                while result.ends_with(' ') {
+                    result.pop();
+                }
+                result.push('\n');
+            }
+            current_line = Some(indexed.point.line);
+        }
+        result.push(indexed.c);
+    }
+
+    result.trim_end_matches(&[' ', '\n'][..]).to_owned()
 }
 
 fn parse_optional_u16(value: &str, label: &str) -> anyhow::Result<Option<u16>> {
@@ -149,6 +171,15 @@ pub struct App {
     tabs: Vec<Tab>,
     active: Option<u64>,
     terminal_focus: Option<u64>,
+    paste_policy: PastePolicy,
+    pending_paste: Option<(u64, String)>,
+    paste_notice: String,
+    search_open: bool,
+    search_query: String,
+    logging_tab: Option<u64>,
+    session_log_path: String,
+    last_logged_screen: String,
+    log_notice: String,
     next_id: u64,
     tx: Sender<(u64, PtyEvent)>,
     rx: Receiver<(u64, PtyEvent)>,
@@ -207,6 +238,15 @@ impl App {
             tabs: Vec::new(),
             active: None,
             terminal_focus: None,
+            paste_policy: PastePolicy::default(),
+            pending_paste: None,
+            paste_notice: String::new(),
+            search_open: false,
+            search_query: String::new(),
+            logging_tab: None,
+            session_log_path: String::new(),
+            last_logged_screen: String::new(),
+            log_notice: String::new(),
             next_id: 1,
             tx,
             rx,
@@ -368,6 +408,62 @@ impl App {
             {
                 tab.exited = true;
             }
+        }
+
+        let active_terminal = self
+            .active
+            .filter(|id| self.terminal_focus == Some(*id))
+            .and_then(|id| {
+                self.tabs
+                    .iter()
+                    .find(|tab| tab.id == id && !tab.exited)
+                    .map(|_| id)
+            });
+
+        if let Some(id) = active_terminal {
+            let policy = self.paste_policy;
+            let mut confirm_payload = None;
+            let mut blocked = false;
+            ctx.input_mut(|input| {
+                input.events.retain(|event| {
+                    let egui::Event::Paste(text) = event else {
+                        return true;
+                    };
+                    match terminal_ux::classify_paste(policy, text) {
+                        PasteDecision::Send => true,
+                        PasteDecision::Confirm => {
+                            if confirm_payload.is_none() {
+                                confirm_payload = Some(text.clone());
+                            }
+                            false
+                        }
+                        PasteDecision::Block => {
+                            blocked = true;
+                            false
+                        }
+                    }
+                });
+            });
+            if let Some(text) = confirm_payload {
+                self.pending_paste = Some((id, text));
+                self.terminal_focus = None;
+                self.paste_notice = "Multiline paste is waiting for explicit confirmation.".into();
+            } else if blocked {
+                self.paste_notice =
+                    "Paste blocked by policy (multiline or NUL-containing payload).".into();
+            }
+        }
+
+        let search_shortcut = ctx.input(|input| {
+            input.key_pressed(egui::Key::F) && input.modifiers.command && input.modifiers.shift
+        });
+        if search_shortcut {
+            self.search_open = true;
+            self.terminal_focus = None;
+        }
+        if self.search_open && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.search_open = false;
+            self.terminal_focus = self.active;
         }
 
         egui::SidePanel::left("connections")
@@ -1461,6 +1557,22 @@ impl App {
         let mut reconnect = None;
         let mut close_browser = false;
         let mut close_scp = false;
+        let mut copy_selected = false;
+        let active_screen = if self.search_open || self.logging_tab.is_some() {
+            self.active.and_then(|id| {
+                self.tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == id)
+                    .map(|tab| terminal_screen_text(&mut tab.terminal))
+            })
+        } else {
+            None
+        };
+        let search_hits = active_screen
+            .as_deref()
+            .map(|screen| terminal_ux::find_text(screen, &self.search_query, 50))
+            .unwrap_or_default();
+
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(panel) = self.scp_panel.as_mut() {
                 ui.horizontal(|ui| {
@@ -1484,6 +1596,113 @@ impl App {
                 browser.ui(ctx, ui);
                 return;
             }
+            if self.sftp_browser.is_none() && self.scp_panel.is_none() && self.active.is_some() {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Copy selection").clicked() {
+                        copy_selected = true;
+                    }
+                    if ui
+                        .button(if self.search_open { "Close search" } else { "Search" })
+                        .on_hover_text("Keyboard: Ctrl/Cmd+Shift+F")
+                        .clicked()
+                    {
+                        self.search_open = !self.search_open;
+                        self.terminal_focus = if self.search_open { None } else { self.active };
+                    }
+
+                    ui.label("Paste:");
+                    ui.selectable_value(
+                        &mut self.paste_policy,
+                        PastePolicy::ConfirmMultiline,
+                        "confirm multiline",
+                    );
+                    ui.selectable_value(
+                        &mut self.paste_policy,
+                        PastePolicy::ConfirmAll,
+                        "confirm all",
+                    );
+                    ui.selectable_value(
+                        &mut self.paste_policy,
+                        PastePolicy::BlockMultiline,
+                        "block multiline",
+                    );
+                });
+
+                if !self.paste_notice.is_empty() {
+                    ui.small(&self.paste_notice);
+                }
+
+                if self.search_open {
+                    ui.horizontal(|ui| {
+                        ui.label("Find");
+                        let response = ui.add(
+                            egui::TextEdit::singleline(&mut self.search_query)
+                                .hint_text("Search current terminal viewport"),
+                        );
+                        if response.has_focus() {
+                            self.terminal_focus = None;
+                        }
+                        ui.label(format!("{} match(es)", search_hits.len()));
+                    });
+                    egui::ScrollArea::vertical()
+                        .max_height(110.0)
+                        .show(ui, |ui| {
+                            for hit in &search_hits {
+                                ui.monospace(format!(
+                                    "{}:{}  {}",
+                                    hit.line, hit.column, hit.preview
+                                ));
+                            }
+                        });
+                }
+
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Session log");
+                    let path_edit = ui.add(
+                        egui::TextEdit::singleline(&mut self.session_log_path)
+                            .desired_width(280.0)
+                            .hint_text("new log file path"),
+                    );
+                    if path_edit.has_focus() {
+                        self.terminal_focus = None;
+                    }
+                    if self.logging_tab.is_none() {
+                        if ui
+                            .add_enabled(
+                                self.active.is_some() && !self.session_log_path.trim().is_empty(),
+                                egui::Button::new("Start logging"),
+                            )
+                            .on_hover_text(
+                                "Opt-in screen snapshots. Terminal output can contain passwords, tokens and other secrets.",
+                            )
+                            .clicked()
+                        {
+                            let path = PathBuf::from(self.session_log_path.trim());
+                            match terminal_ux::start_session_log(&path) {
+                                Ok(()) => {
+                                    self.logging_tab = self.active;
+                                    self.last_logged_screen.clear();
+                                    self.log_notice =
+                                        "Logging enabled for the active tab. Input keystrokes are not logged; visible output may contain secrets.".into();
+                                }
+                                Err(error) => {
+                                    self.log_notice = format!("{error:#}");
+                                }
+                            }
+                        }
+                    } else if ui.button("Stop logging").clicked() {
+                        self.logging_tab = None;
+                        self.last_logged_screen.clear();
+                        self.log_notice = "Session logging stopped.".into();
+                    }
+                });
+                if !self.log_notice.is_empty() {
+                    ui.small(&self.log_notice);
+                }
+                ui.separator();
+            }
+
             let terminal_focus = self.terminal_focus;
             if let Some(tab) = self.tabs.iter_mut().find(|tab| Some(tab.id) == self.active) {
                 if tab.exited {
@@ -1498,6 +1717,12 @@ impl App {
                 let view = TerminalView::new(ui, &mut tab.terminal)
                     .set_focus(terminal_accepts_keyboard(terminal_focus, tab.id, tab.exited));
                 let response = ui.add(view);
+                if copy_selected {
+                    let selected = tab.terminal.selectable_content();
+                    if !selected.is_empty() {
+                        ctx.copy_text(selected);
+                    }
+                }
                 if response.clicked() && !tab.exited {
                     self.terminal_focus = Some(tab.id);
                 }
@@ -1514,6 +1739,83 @@ impl App {
                 ui.label("No sessions are automatically connected on startup.");
             }
         });
+        if let Some((id, text)) = self.pending_paste.clone() {
+            let mut confirm = false;
+            let mut cancel = false;
+            egui::Window::new("Confirm terminal paste")
+                .collapsible(false)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    let line_count = text
+                        .as_bytes()
+                        .iter()
+                        .filter(|&&byte| matches!(byte, b'\r' | b'\n'))
+                        .count()
+                        + 1;
+                    ui.strong(format!(
+                        "Paste {} bytes across approximately {} line(s)?",
+                        text.len(),
+                        line_count
+                    ));
+                    ui.label(
+                        "Review carefully. Multiline terminal pastes can execute several commands immediately.",
+                    );
+                    let mut preview = text.chars().take(4000).collect::<String>();
+                    ui.add(
+                        egui::TextEdit::multiline(&mut preview)
+                            .desired_rows(8)
+                            .interactive(false),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Paste now").clicked() {
+                            confirm = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                    ui.small("Keyboard: Enter confirms; Escape cancels.");
+                });
+            confirm |= ctx.input(|input| input.key_pressed(egui::Key::Enter));
+            cancel |= ctx.input(|input| input.key_pressed(egui::Key::Escape));
+            if confirm {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id && !tab.exited) {
+                    tab.terminal
+                        .process_command(BackendCommand::Write(text.into_bytes()));
+                    self.paste_notice = "Paste sent after explicit confirmation.".into();
+                    self.terminal_focus = Some(id);
+                } else {
+                    self.paste_notice =
+                        "Paste cancelled because the terminal is no longer active.".into();
+                }
+                self.pending_paste = None;
+            } else if cancel {
+                self.pending_paste = None;
+                self.paste_notice = "Paste cancelled.".into();
+                self.terminal_focus = self.active;
+            }
+        }
+
+        if let Some(log_id) = self.logging_tab {
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == log_id) {
+                let screen = terminal_screen_text(&mut tab.terminal);
+                let path = PathBuf::from(self.session_log_path.trim());
+                if let Err(error) = terminal_ux::append_screen_snapshot(
+                    &path,
+                    &mut self.last_logged_screen,
+                    &screen,
+                ) {
+                    self.log_notice = format!("Session logging stopped: {error:#}");
+                    self.logging_tab = None;
+                    self.last_logged_screen.clear();
+                }
+            } else {
+                self.logging_tab = None;
+                self.last_logged_screen.clear();
+                self.log_notice = "Session logging stopped because its tab was closed.".into();
+            }
+        }
+
         if close_browser {
             self.sftp_browser = None;
         }
