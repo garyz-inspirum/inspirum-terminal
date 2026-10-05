@@ -6,6 +6,7 @@ use inspirum_terminal::{
         connect, connect_sftp, control_master_operation, launch_args,
         launch_args_with_proxy_helper, start_tunnels,
     },
+    tmux,
 };
 use std::{
     fs,
@@ -1154,5 +1155,132 @@ fn scp_binary_round_trip_checksums_match_and_failures_leave_no_success_file() {
 
     println!(
         "PASS SCP binary SHA-256 upload/download, overwrite guards, staging and negative cleanup"
+    );
+}
+
+fn fixture_tmux_session() -> Session {
+    Session {
+        name: "tmux fixture".into(),
+        host: "fixture-tmux".into(),
+        strict: true,
+        ..Session::default()
+    }
+}
+
+fn wait_tmux_attached(
+    session: &Session,
+    config: &std::path::Path,
+    name: &str,
+    expected_attached: bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let sessions = tmux::list_sessions(session, Some(config)).unwrap();
+        if let Some(item) = sessions.iter().find(|item| item.name == name)
+            && (item.attached_clients > 0) == expected_attached
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "tmux session {name:?} did not reach attached={expected_attached}; sessions={sessions:?}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn cleanup_tmux_session(session: &Session, config: &std::path::Path, name: &str) {
+    let mut cleanup = session.clone();
+    cleanup.ssh.remote_command = format!("tmux kill-session -t {name}");
+    let output = Command::new("ssh")
+        .args(launch_args(&cleanup, Some(config)).unwrap())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run tmux fixture cleanup");
+    assert!(
+        output.status.success(),
+        "tmux cleanup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "requires disposable sshd and tmux: scripts/test-ssh-integration.sh"]
+fn tmux_create_attach_disconnect_and_reconnect_preserve_server_session() {
+    let p = fixture();
+    let session = fixture_tmux_session();
+    let config = p.join("config");
+    let name = format!("inspirum{}", std::process::id());
+
+    let before = tmux::list_sessions(&session, Some(&config)).unwrap();
+    assert!(
+        before.iter().all(|item| item.name != name),
+        "unique fixture tmux session already exists"
+    );
+
+    let create = tmux::create_session(&session, &name).unwrap();
+    let (tx, _rx) = mpsc::channel();
+    let mut created = connect(
+        719,
+        eframe::egui::Context::default(),
+        tx,
+        &create,
+        Some(&config),
+    )
+    .expect("create and attach tmux session");
+    wait_tmux_attached(&session, &config, &name, true);
+
+    created.process_command(BackendCommand::Write(
+        b"printf 'TMUX_CREATE_OK\\n'\n".to_vec(),
+    ));
+    thread::sleep(Duration::from_millis(100));
+    drop(created);
+    wait_tmux_attached(&session, &config, &name, false);
+
+    let listed = tmux::list_sessions(&session, Some(&config)).unwrap();
+    assert!(
+        listed
+            .iter()
+            .any(|item| item.name == name && item.attached_clients == 0),
+        "disconnect did not preserve detached tmux session"
+    );
+
+    let attach = tmux::attach_session(&session, &name).unwrap();
+    let (tx, _rx) = mpsc::channel();
+    let attached = connect(
+        720,
+        eframe::egui::Context::default(),
+        tx,
+        &attach,
+        Some(&config),
+    )
+    .expect("attach existing tmux session");
+    wait_tmux_attached(&session, &config, &name, true);
+    drop(attached);
+    wait_tmux_attached(&session, &config, &name, false);
+
+    let (tx, _rx) = mpsc::channel();
+    let reattached = connect(
+        721,
+        eframe::egui::Context::default(),
+        tx,
+        &attach,
+        Some(&config),
+    )
+    .expect("reconnect by attaching existing tmux session");
+    wait_tmux_attached(&session, &config, &name, true);
+    drop(reattached);
+    wait_tmux_attached(&session, &config, &name, false);
+
+    cleanup_tmux_session(&session, &config, &name);
+    assert!(
+        tmux::list_sessions(&session, Some(&config))
+            .unwrap()
+            .iter()
+            .all(|item| item.name != name),
+        "fixture tmux session survived explicit test cleanup"
+    );
+    println!(
+        "PASS tmux create, selectable discovery, attach, disconnect-detach and attach-only reconnect"
     );
 }
