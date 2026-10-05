@@ -133,3 +133,5 @@ Unchecked items below are not implemented and are not a WindTerm parity claim.
 - [ ] No unsupported feature is implied by marketing or release notes.
 
 - [x] Structured ControlMaster Inherit/Disabled/Auto policy, explicit ControlPath/ControlPersist, status/close lifecycle controls, portable argv tests and Linux disposable-sshd lifecycle acceptance (#15).
+
+- [x] First-class SSH tunnel manager lifecycle for profile local/remote/dynamic forwards, including live per-forward status, listener startup failure reporting, explicit stop/cleanup, non-loopback risk acknowledgement, portable policy tests and Linux disposable-sshd acceptance (#16; pending merge of PR #38).
