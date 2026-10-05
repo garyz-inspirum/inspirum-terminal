@@ -1,4 +1,6 @@
-use inspirum_terminal::{Session, SessionImportMode, import_sessions, load_sessions, save_sessions};
+use inspirum_terminal::{
+    Session, SessionImportMode, import_sessions, load_sessions, save_sessions,
+};
 use std::fs;
 
 fn profile(name: &str) -> Session {
