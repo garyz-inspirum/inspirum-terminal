@@ -295,6 +295,33 @@ fn valid_proxy_jump(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"._-@:,%[]".contains(&b))
 }
 
+pub fn forward_requires_risk_ack(spec: &str, dynamic: bool) -> bool {
+    let parts: Vec<&str> = spec.split(':').collect();
+    let bind = if dynamic {
+        (parts.len() >= 2).then_some(parts[0])
+    } else {
+        (parts.len() >= 4).then_some(parts[0])
+    };
+    bind.is_some_and(|value| {
+        let value = value.trim_matches(['[', ']']);
+        !matches!(value, "127.0.0.1" | "::1" | "localhost")
+    })
+}
+
+pub fn session_requires_forward_risk_ack(session: &Session) -> bool {
+    session
+        .ssh
+        .local_forwards
+        .iter()
+        .chain(session.ssh.remote_forwards.iter())
+        .any(|spec| forward_requires_risk_ack(spec, false))
+        || session
+            .ssh
+            .dynamic_forwards
+            .iter()
+            .any(|spec| forward_requires_risk_ack(spec, true))
+}
+
 fn validate_forward_specs(label: &str, specs: &[String]) -> Result<()> {
     ensure!(specs.len() <= 32, "at most 32 {label}s are supported");
     for spec in specs {
