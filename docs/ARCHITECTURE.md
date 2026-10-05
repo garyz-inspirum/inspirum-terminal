@@ -20,7 +20,7 @@ A profile can contain a display name, host/config alias, username, port, strict-
 
 ### SSH and terminal boundary
 
-`src/terminal.rs` verifies that `ssh -V` reports OpenSSH, creates a vector of process arguments, and starts `ssh` in the PTY supplied by `egui_term`. No shell is involved.
+`src/terminal.rs` verifies that `ssh -V` reports OpenSSH, creates a vector of process arguments, and starts `ssh` in the PTY supplied by `egui_term`. No shell is involved. Host-key tooling separately uses `ssh -G` to resolve the effective `Hostname`, `Port`, and `HostKeyAlias`, then invokes `ssh-keygen -F` for inspection or `ssh-keygen -R` for explicit removal. `HostKeyAlias` is used directly; otherwise a non-default port is represented as `[host]:port`, matching OpenSSH's known-host identity rules.
 
 The minimally patched `egui_term` 0.1.0 source is vendored under `vendor/egui_term` with its upstream MIT license and provenance. It provides the terminal widget, Alacritty terminal parser, and native PTY abstraction. The local patch enables Alacritty's Windows argument escaping so one Rust argument remains one child argument. Because Alacritty 0.25 passes a null application name to `CreateProcessW` and otherwise emits the executable program unquoted, the Windows boundary also validates that the program contains neither a quote nor NUL and serializes it as one quoted command-line token. POSIX program handling is unchanged. It also routes keyboard events according to retained widget focus while requiring pointer containment for mouse events. PTY construction installs a rollback guard before the fallible subscription-thread spawn, the subscription stops on channel closure or forwarding failure, and backend drop joins it. These dependency changes do not alter Inspirum Terminal's Apache-2.0 project license. OpenSSH provides transport, authentication, configuration parsing, proxy/jump behavior configured by the user, host-key storage, and agent integration.
 
@@ -41,7 +41,7 @@ Remote terminal output is untrusted. PTY title or clipboard events are currently
 - Profile JSON is local but treated as untrusted input when loaded.
 - Profile fields cannot become shell syntax or arbitrary command-line options.
 - OpenSSH configuration is trusted according to normal OpenSSH rules; users remain responsible for its contents and permissions.
-- Host-key acceptance is security-sensitive. The default asks through OpenSSH; strict profiles require an already trusted key.
+- Host-key acceptance is security-sensitive. The default asks through OpenSSH; strict profiles require an already trusted key. Inspirum does not auto-accept or replace host keys. Known-host removal requires an explicit confirmation after resolving the effective OpenSSH host identity. A blank management-file override uses `ssh-keygen`'s default user known-hosts file; custom `UserKnownHostsFile` configurations must be selected explicitly in the UI before management.
 - Terminal escape sequences originate remotely and must not silently gain host capabilities.
 - Release artifacts are currently unsigned. SHA-256 checksums provide integrity checking after obtaining `SHA256SUMS`, but not publisher identity.
 
