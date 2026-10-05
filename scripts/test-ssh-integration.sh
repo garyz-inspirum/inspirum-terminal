@@ -15,7 +15,7 @@ root.mkdir(parents=True, exist_ok=True)
 sshd=shutil.which('sshd') or '/usr/sbin/sshd'
 if not pathlib.Path(sshd).is_file(): raise SystemExit('ERROR: fixture requires sshd')
 with tempfile.TemporaryDirectory(prefix='ssh-fixture-',dir=root) as tmp:
- d=pathlib.Path(tmp);os.chmod(d,0o755)
+ d=pathlib.Path(tmp);os.chmod(d,0o700)
  fixture_password='inspirum-fixture-password'
  privileged_auth=(shutil.which('sudo') is not None and subprocess.run(['sudo','-n','true'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0)
  created_users=[]
