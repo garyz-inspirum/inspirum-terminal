@@ -271,6 +271,21 @@ impl App {
                                 self.terminal_focus = None;
                             }
 
+                            ui.label("Command after authentication (remote)");
+                            if ui
+                                .add(
+                                    egui::TextEdit::multiline(&mut self.draft.ssh.remote_command)
+                                        .desired_rows(2)
+                                        .hint_text("tmux attach || tmux new"),
+                                )
+                                .has_focus()
+                            {
+                                self.terminal_focus = None;
+                            }
+                            ui.small(
+                                "Sent to the remote account after SSH authentication. It is not executed by a local shell; the remote account's shell interprets it.",
+                            );
+
                             ui.separator();
                             ui.strong("Port forwarding");
                             ui.small(
