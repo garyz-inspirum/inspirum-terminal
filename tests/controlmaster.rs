@@ -59,3 +59,12 @@ fn auto_requires_control_path_and_lifecycle_uses_fixed_argv() {
     );
     assert!(control_master_args(&s, None, "shell-fragment").is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn auto_rejects_control_paths_too_long_for_reliable_unix_socket_creation() {
+    let mut s = session(ControlMasterMode::Auto);
+    s.ssh.control_path = format!("/tmp/{}", "x".repeat(90));
+    let error = s.ssh_args().unwrap_err().to_string();
+    assert!(error.contains("too long"), "{error}");
+}
