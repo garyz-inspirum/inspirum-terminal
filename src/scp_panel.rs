@@ -1,9 +1,6 @@
 use crate::{Session, scp};
 use eframe::egui;
-use std::{
-    path::PathBuf,
-    time::Duration,
-};
+use std::{path::PathBuf, time::Duration};
 
 pub struct ScpPanel {
     session: Session,
@@ -159,9 +156,7 @@ impl ScpPanel {
                 });
                 ui.label(format!("{done}/{total} bytes"));
                 if total > 0 {
-                    ui.add(
-                        egui::ProgressBar::new(done as f32 / total as f32).desired_width(180.0),
-                    );
+                    ui.add(egui::ProgressBar::new(done as f32 / total as f32).desired_width(180.0));
                 }
             });
             if transfer.direction() == scp::Direction::Upload {
