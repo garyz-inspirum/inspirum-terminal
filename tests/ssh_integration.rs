@@ -1,6 +1,9 @@
 //! Opt-in Linux loopback verification: scripts/test-ssh-integration.sh.
 use egui_term::{BackendCommand, PtyEvent, TerminalBackend};
-use inspirum_terminal::{Session, SshOptions, terminal::connect};
+use inspirum_terminal::{
+    Session, SshOptions,
+    terminal::{connect, connect_sftp},
+};
 use std::{
     fs,
     io::{Read, Write},
@@ -220,6 +223,27 @@ fn open_with_ssh(
         rx,
     )
 }
+fn open_sftp(p: &std::path::Path, id: u64) -> (TerminalBackend, mpsc::Receiver<(u64, PtyEvent)>) {
+    let (tx, rx) = mpsc::channel();
+    let session = Session {
+        name: "Disposable SFTP".into(),
+        host: "fixture-sftp".into(),
+        strict: true,
+        ..Session::default()
+    };
+    (
+        connect_sftp(
+            id,
+            eframe::egui::Context::default(),
+            tx,
+            &session,
+            Some(&p.join("config")),
+        )
+        .expect("real terminal::connect_sftp"),
+        rx,
+    )
+}
+
 #[test]
 #[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
 fn authenticated_grid_input_resize_and_exit() {
@@ -331,6 +355,34 @@ fn local_remote_and_dynamic_forwarding_round_trip_and_teardown() {
     println!(
         "PASS local, remote and SOCKS5 dynamic forwarding round trips and listeners close on disconnect"
     );
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn sftp_upload_download_round_trip_and_exit() {
+    let p = fixture();
+    let source = p.join("sftp-source.bin");
+    let downloaded = p.join("sftp-downloaded.bin");
+    let payload = b"inspirum-sftp-round-trip-709\0with-binary\xff";
+    fs::write(&source, payload).unwrap();
+
+    let (mut backend, rx) = open_sftp(&p, 709);
+    wait_text(&mut backend, "sftp>");
+
+    write(
+        &mut backend,
+        &format!("put \"{}\" upload.bin\n", source.display()),
+    );
+    write(
+        &mut backend,
+        &format!("get upload.bin \"{}\"\n", downloaded.display()),
+    );
+    write(&mut backend, "quit\n");
+    wait_exit(&rx, 709);
+
+    assert_eq!(fs::read(&downloaded).unwrap(), payload);
+    assert_eq!(fs::read(p.join("sftp-root/upload.bin")).unwrap(), payload);
+    println!("PASS SFTP upload/download preserved bytes and exited cleanly");
 }
 
 #[test]
