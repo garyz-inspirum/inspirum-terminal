@@ -145,9 +145,19 @@ pub fn launch_args_with_proxy_helper(
     Ok(args)
 }
 
-pub fn control_master_args(session: &Session, config: Option<&Path>, operation: &str) -> Result<Vec<String>> {
-    ensure!(operation == "check" || operation == "exit", "unsupported ControlMaster operation");
-    ensure!(session.ssh.control_master == ControlMasterMode::Auto, "app-managed ControlMaster is not enabled");
+pub fn control_master_args(
+    session: &Session,
+    config: Option<&Path>,
+    operation: &str,
+) -> Result<Vec<String>> {
+    ensure!(
+        operation == "check" || operation == "exit",
+        "unsupported ControlMaster operation"
+    );
+    ensure!(
+        session.ssh.control_master == ControlMasterMode::Auto,
+        "app-managed ControlMaster is not enabled"
+    );
     session.ssh_args()?;
     let mut args = Vec::new();
     if let Some(config) = config {
@@ -155,17 +165,36 @@ pub fn control_master_args(session: &Session, config: Option<&Path>, operation: 
     }
     args.extend(["-S".into(), session.ssh.control_path.clone()]);
     args.extend(["-O".into(), operation.into()]);
-    if !session.user.is_empty() { args.extend(["-l".into(), session.user.clone()]); }
-    if let Some(port) = session.port { args.extend(["-p".into(), port.to_string()]); }
+    if !session.user.is_empty() {
+        args.extend(["-l".into(), session.user.clone()]);
+    }
+    if let Some(port) = session.port {
+        args.extend(["-p".into(), port.to_string()]);
+    }
     args.extend(["--".into(), session.host.clone()]);
     Ok(args)
 }
 
-pub fn control_master_operation(session: &Session, config: Option<&Path>, operation: &str) -> Result<String> {
-    let output = Command::new("ssh").args(control_master_args(session, config, operation)?).output().context(SSH_HELP)?;
+pub fn control_master_operation(
+    session: &Session,
+    config: Option<&Path>,
+    operation: &str,
+) -> Result<String> {
+    let output = Command::new("ssh")
+        .args(control_master_args(session, config, operation)?)
+        .output()
+        .context(SSH_HELP)?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    ensure!(output.status.success(), "ControlMaster {operation} failed: {}", if stderr.is_empty() { "master unavailable or stale ControlPath" } else { &stderr });
+    ensure!(
+        output.status.success(),
+        "ControlMaster {operation} failed: {}",
+        if stderr.is_empty() {
+            "master unavailable or stale ControlPath"
+        } else {
+            &stderr
+        }
+    );
     Ok(if stdout.is_empty() { stderr } else { stdout })
 }
 
@@ -364,7 +393,10 @@ pub fn sftp_launch_args_with_proxy_helper(
         ControlMasterMode::Disabled => args.extend(["-o".into(), "ControlMaster=no".into()]),
         ControlMasterMode::Auto => {
             args.extend(["-o".into(), "ControlMaster=auto".into()]);
-            args.extend(["-o".into(), format!("ControlPath={}", session.ssh.control_path)]);
+            args.extend([
+                "-o".into(),
+                format!("ControlPath={}", session.ssh.control_path),
+            ]);
             if let Some(seconds) = session.ssh.control_persist_seconds {
                 args.extend(["-o".into(), format!("ControlPersist={seconds}")]);
             }
