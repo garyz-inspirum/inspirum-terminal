@@ -46,7 +46,7 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Linux CI run #78 at `1a8716d0d9ed45e3c1d43c1db5918cc5725b2186` verified password authentication, encrypted private key, SSH agent, public-key + keyboard-interactive PAM MFA, disabled-method negative cases, password-prompt cancellation, and stalled-handshake timeout through the application PTY path.
 - [ ] GSSAPI authentication acceptance with a real Kerberos realm, plus isolated authenticated-server acceptance for applicable methods on Windows and macOS.
 - [ ] ControlMaster/multiplexing workflow and platform limitations.
-- [ ] HTTP and SOCKS proxy workflows and no-direct-fallback verification.
+- [x] Structured no-auth HTTP CONNECT and SOCKS5 proxy workflows use the built-in Inspirum proxy helper; Linux fixture coverage verifies actual HTTP proxy routing and hard failure without direct fallback. Proxy authentication, raw ProxyCommand compatibility and Windows/macOS authenticated-proxy acceptance remain open (#14/#35).
 - [x] Optional per-profile remote command executed by OpenSSH after authentication; it is stored as profile metadata, passed after the SSH destination, and never invoked through a local shell. Full remote-command acceptance remains pending.
 - [ ] Tmux-aware integration (SSH-first scope; ordinary tmux inside a terminal is not equivalent).
 - [x] Ask-before-trusting and already-trusted-only host-key modes.
