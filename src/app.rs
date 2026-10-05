@@ -67,6 +67,29 @@ fn parse_forward_lines(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn forward_editor(ui: &mut egui::Ui, label: &str, value: &mut String, default_spec: &str) -> bool {
+    ui.label(label);
+    let mut rows = parse_forward_lines(value);
+    let mut remove = None;
+    let mut focused = false;
+    for (index, row) in rows.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            focused |= ui.text_edit_singleline(row).has_focus();
+            if ui.small_button("Remove").clicked() {
+                remove = Some(index);
+            }
+        });
+    }
+    if let Some(index) = remove {
+        rows.remove(index);
+    }
+    if ui.small_button(format!("Add {label}")).clicked() {
+        rows.push(default_spec.to_owned());
+    }
+    *value = rows.join("\n");
+    focused
+}
+
 fn ssh_policy_control(ui: &mut egui::Ui, label: &str, value: &mut Option<bool>) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
@@ -907,39 +930,28 @@ impl App {
                                 "One OpenSSH forwarding specification per line. These are added to any forwards from OpenSSH config. Profile forwarding is tied to this SSH session and fails the connection if setup fails.",
                             );
 
-                            ui.label("Local forwards (-L)");
-                            if ui
-                                .add(
-                                    egui::TextEdit::multiline(&mut self.local_forwards)
-                                        .desired_rows(2)
-                                        .hint_text("127.0.0.1:8080:internal.example:80"),
-                                )
-                                .has_focus()
-                            {
+                            if forward_editor(
+                                ui,
+                                "Local forward (-L)",
+                                &mut self.local_forwards,
+                                "127.0.0.1:8080:internal.example:80",
+                            ) {
                                 self.terminal_focus = None;
                             }
-
-                            ui.label("Remote forwards (-R)");
-                            if ui
-                                .add(
-                                    egui::TextEdit::multiline(&mut self.remote_forwards)
-                                        .desired_rows(2)
-                                        .hint_text("127.0.0.1:9000:127.0.0.1:3000"),
-                                )
-                                .has_focus()
-                            {
+                            if forward_editor(
+                                ui,
+                                "Remote forward (-R)",
+                                &mut self.remote_forwards,
+                                "127.0.0.1:9000:127.0.0.1:3000",
+                            ) {
                                 self.terminal_focus = None;
                             }
-
-                            ui.label("Dynamic forwards (-D)");
-                            if ui
-                                .add(
-                                    egui::TextEdit::multiline(&mut self.dynamic_forwards)
-                                        .desired_rows(2)
-                                        .hint_text("127.0.0.1:1080"),
-                                )
-                                .has_focus()
-                            {
+                            if forward_editor(
+                                ui,
+                                "Dynamic forward (-D)",
+                                &mut self.dynamic_forwards,
+                                "127.0.0.1:1080",
+                            ) {
                                 self.terminal_focus = None;
                             }
 
