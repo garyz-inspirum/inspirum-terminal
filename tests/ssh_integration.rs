@@ -44,7 +44,10 @@ fn wait_text_case_insensitive_secret_safe(b: &mut TerminalBackend, needle: &str)
 }
 
 fn privileged_auth_fixture_available() -> bool {
-    std::env::var("INSPIRUM_PRIV_AUTH_FIXTURE").as_deref() == Ok("1")
+    matches!(
+        std::env::var("INSPIRUM_PRIV_AUTH_FIXTURE").as_deref(),
+        Ok("1")
+    )
 }
 
 fn fixture_password() -> String {
@@ -77,8 +80,9 @@ fn start_stalled_ssh_once() -> (u16, thread::JoinHandle<()>) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let handle = thread::spawn(move || {
-        let (_stream, _) = listener.accept().unwrap();
+        let (stream, _) = listener.accept().unwrap();
         thread::sleep(Duration::from_secs(5));
+        drop(stream);
     });
     (port, handle)
 }
