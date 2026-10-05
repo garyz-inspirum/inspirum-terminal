@@ -81,14 +81,14 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] `egui_term` terminal rendering backed by the Alacritty parser.
 - [x] PTY resize propagation exercised on Linux by the fixture. Not Windows or macOS execution.
 - [ ] Cross-platform keyboard/IME audit.
-- [ ] Selection, copy, paste, and safe paste confirmation policy.
-- [ ] Search, marks, timestamps, folding, and outlining.
+- [x] Selection/copy plus guarded paste policy: multiline CR/LF payloads cannot reach the PTY without explicit confirmation (or are blocked), with keyboard confirmation/cancel controls (#21).
+- [ ] Search, marks, timestamps, folding, and outlining. Current-viewport case-insensitive terminal search is implemented for #21; retained-scrollback navigation/highlighting, marks, timestamps, folding and outlining remain open.
 - [ ] Configurable fonts, colors, themes, opacity, and cursor.
 - [ ] Mouse protocol and alternate-screen compatibility matrix.
 - [ ] Unicode, emoji, wide-character, combining-character, and bidi test matrix.
 - [ ] VT/xterm compatibility suite and published results.
 - [ ] Performance and memory benchmarks with reproducible workloads.
-- [ ] Session logging with secret/redaction policy.
+- [x] Opt-in per-tab screen-snapshot session logging is off by default, creates a new file without overwrite, never records local keystrokes, and documents that remote output can contain sensitive material (#21).
 - [ ] Command palette, command sender, and quick bar.
 - [ ] Local/remote editing modes, completion, and snippets.
 
