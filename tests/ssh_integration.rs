@@ -688,7 +688,6 @@ fn dropping_backend_disconnects_remote_process_and_joins_subscription_thread() {
     }
 }
 
-
 fn start_http_connect_proxy(deny: bool) -> (u16, thread::JoinHandle<()>) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -757,8 +756,7 @@ fn open_with_structured_proxy(
         ..Session::default()
     };
     let helper = PathBuf::from(env!("CARGO_BIN_EXE_inspirum-terminal"));
-    let args =
-        launch_args_with_proxy_helper(&session, Some(&p.join("config")), &helper).unwrap();
+    let args = launch_args_with_proxy_helper(&session, Some(&p.join("config")), &helper).unwrap();
     let backend = TerminalBackend::new(
         id,
         eframe::egui::Context::default(),
