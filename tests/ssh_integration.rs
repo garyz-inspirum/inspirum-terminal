@@ -3,8 +3,8 @@ use egui_term::{BackendCommand, PtyEvent, TerminalBackend};
 use inspirum_terminal::{
     ControlMasterMode, ProxyKind, Session, SshOptions,
     terminal::{
-        connect, connect_sftp, control_master_operation, launch_args, launch_args_with_proxy_helper,
-        start_tunnels,
+        connect, connect_sftp, control_master_operation, launch_args,
+        launch_args_with_proxy_helper, start_tunnels,
     },
 };
 use std::{
