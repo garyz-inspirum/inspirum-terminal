@@ -898,7 +898,6 @@ fn tunnel_manager_reports_listener_failure_and_stop_closes_listener() {
     println!("PASS tunnel manager surfaced listener failure and explicit stop closed listener");
 }
 
-
 fn fixture_sftp_session() -> Session {
     Session {
         name: "Graphical SFTP fixture".into(),
@@ -1020,18 +1019,15 @@ fn graphical_sftp_operations_are_verified_conflict_safe_and_cancellable() {
         fs::read_dir(&local)
             .unwrap()
             .filter_map(Result::ok)
-            .all(|entry| !entry.file_name().to_string_lossy().starts_with(".inspirum-download-")),
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".inspirum-download-")),
         "cancelled download left a staging file"
     );
 
     sftp::mkdir_remote(&session, Some(&config), "browser-dir").unwrap();
-    sftp::rename_remote(
-        &session,
-        Some(&config),
-        "browser-dir",
-        "browser-renamed",
-    )
-    .unwrap();
+    sftp::rename_remote(&session, Some(&config), "browser-dir", "browser-renamed").unwrap();
     let listed = sftp::list_remote(&session, Some(&config), ".").unwrap();
     assert!(
         listed
