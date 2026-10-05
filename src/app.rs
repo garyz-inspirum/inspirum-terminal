@@ -2,37 +2,85 @@
 use crate::{Session, load_sessions, save_sessions, terminal};
 use eframe::egui;
 use egui_term::{PtyEvent, TerminalBackend, TerminalView};
-use std::{path::PathBuf, sync::mpsc::{self, Receiver, Sender}};
+use std::{
+    path::PathBuf,
+    sync::mpsc::{self, Receiver, Sender},
+};
 
-struct Tab { id: u64, name: String, terminal: TerminalBackend, exited: bool }
+struct Tab {
+    id: u64,
+    name: String,
+    terminal: TerminalBackend,
+    exited: bool,
+}
+fn terminal_accepts_keyboard(owner: Option<u64>, id: u64, exited: bool) -> bool {
+    owner == Some(id) && !exited
+}
 pub struct App {
-    path: PathBuf, config: Option<PathBuf>, profiles: Vec<Session>, draft: Session,
-    port: String, error: String, writable: bool, tabs: Vec<Tab>, active: Option<u64>,
-    next_id: u64, tx: Sender<(u64, PtyEvent)>, rx: Receiver<(u64, PtyEvent)>,
+    path: PathBuf,
+    config: Option<PathBuf>,
+    profiles: Vec<Session>,
+    draft: Session,
+    port: String,
+    error: String,
+    writable: bool,
+    tabs: Vec<Tab>,
+    active: Option<u64>,
+    terminal_focus: Option<u64>,
+    next_id: u64,
+    tx: Sender<(u64, PtyEvent)>,
+    rx: Receiver<(u64, PtyEvent)>,
 }
 impl App {
     pub fn new(path: PathBuf, config: Option<PathBuf>) -> Self {
         let (profiles, error, writable) = match load_sessions(&path) {
             Ok(profiles) => (profiles, String::new(), true),
-            Err(error) => (Vec::new(), format!("{error:#}. Saving disabled: repair the profile file and restart."), false),
+            Err(error) => (
+                Vec::new(),
+                format!("{error:#}. Saving disabled: repair the profile file and restart."),
+                false,
+            ),
         };
         let (tx, rx) = mpsc::channel();
-        Self { path, config, profiles, draft: Session::default(), port: String::new(), error,
-            writable, tabs: Vec::new(), active: None, next_id: 1, tx, rx }
+        Self {
+            path,
+            config,
+            profiles,
+            draft: Session::default(),
+            port: String::new(),
+            error,
+            writable,
+            tabs: Vec::new(),
+            active: None,
+            terminal_focus: None,
+            next_id: 1,
+            tx,
+            rx,
+        }
     }
-    pub fn storage_writable(&self) -> bool { self.writable }
+    pub fn storage_writable(&self) -> bool {
+        self.writable
+    }
     fn validated_draft(&self) -> anyhow::Result<Session> {
         let mut session = self.draft.clone();
-        session.port = if self.port.trim().is_empty() { None } else { Some(self.port.parse()?) };
+        session.port = if self.port.trim().is_empty() {
+            None
+        } else {
+            Some(self.port.parse()?)
+        };
         session.ssh_args()?;
         Ok(session)
     }
     pub fn ui(&mut self, ctx: &egui::Context) {
         // Remote output may set titles/clipboard requests. Do NOT forward those to host APIs.
         for _ in 0..256 {
-            let Ok((id,event)) = self.rx.try_recv() else { break; };
-            if matches!(event, PtyEvent::Exit) {
-                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) { tab.exited = true; }
+            let Ok((id, event)) = self.rx.try_recv() else {
+                break;
+            };
+            if matches!(event, PtyEvent::Exit)
+                && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id)
+            {
+                tab.exited = true;
             }
         }
         egui::SidePanel::left("connections").resizable(true).default_width(255.0).show(ctx, |ui| {
@@ -43,20 +91,26 @@ impl App {
             egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
                 for profile in &self.profiles {
                     if ui.button(&profile.name).clicked() {
+                        self.terminal_focus = None;
                         self.draft = profile.clone();
                         self.port = profile.port.map(|p| p.to_string()).unwrap_or_default();
                     }
                 }
             });
             ui.separator();
-            ui.label("Name"); ui.text_edit_singleline(&mut self.draft.name);
-            ui.label("Host / SSH config alias"); ui.text_edit_singleline(&mut self.draft.host);
-            ui.label("Username (blank: SSH config/default)"); ui.text_edit_singleline(&mut self.draft.user);
-            ui.label("Port (blank: SSH config/default)"); ui.text_edit_singleline(&mut self.port);
-            ui.checkbox(&mut self.draft.strict, "Require already trusted host key");
+            ui.label("Name");
+            if ui.text_edit_singleline(&mut self.draft.name).has_focus() { self.terminal_focus = None; }
+            ui.label("Host / SSH config alias");
+            if ui.text_edit_singleline(&mut self.draft.host).has_focus() { self.terminal_focus = None; }
+            ui.label("Username (blank: SSH config/default)");
+            if ui.text_edit_singleline(&mut self.draft.user).has_focus() { self.terminal_focus = None; }
+            ui.label("Port (blank: SSH config/default)");
+            if ui.text_edit_singleline(&mut self.port).has_focus() { self.terminal_focus = None; }
+            if ui.checkbox(&mut self.draft.strict, "Require already trusted host key").clicked() { self.terminal_focus = None; }
             ui.small("Unchecked: OpenSSH asks before trusting a new host. Changed host keys are rejected.");
             ui.horizontal(|ui| {
                 if ui.add_enabled(self.writable, egui::Button::new("Save profile")).clicked() {
+                    self.terminal_focus = None;
                     let result = self.validated_draft().and_then(|session| {
                         let mut next = self.profiles.clone();
                         if let Some(existing) = next.iter_mut().find(|p| p.name == session.name) { *existing = session; }
@@ -71,7 +125,7 @@ impl App {
                     let result = self.validated_draft().and_then(|session| {
                         let terminal = terminal::connect(self.next_id, ctx.clone(), self.tx.clone(), &session, self.config.as_deref())?;
                         self.tabs.push(Tab { id: self.next_id, name: session.name, terminal, exited: false });
-                        self.active = Some(self.next_id); self.next_id += 1;
+                        self.active = Some(self.next_id); self.terminal_focus = Some(self.next_id); self.next_id += 1;
                         Ok(())
                     });
                     self.error = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
@@ -87,26 +141,45 @@ impl App {
             let mut close = None;
             ui.horizontal_wrapped(|ui| {
                 for tab in &self.tabs {
-                    let label = format!("{}{}", tab.name, if tab.exited { " (exited)" } else { "" });
-                    if ui.selectable_label(self.active == Some(tab.id), label).clicked() { self.active = Some(tab.id); }
-                    if ui.small_button("×").on_hover_text("Disconnect and close terminal").clicked() { close = Some(tab.id); }
+                    let label =
+                        format!("{}{}", tab.name, if tab.exited { " (exited)" } else { "" });
+                    if ui
+                        .selectable_label(self.active == Some(tab.id), label)
+                        .clicked()
+                    {
+                        self.active = Some(tab.id);
+                        self.terminal_focus = Some(tab.id);
+                    }
+                    if ui
+                        .small_button("×")
+                        .on_hover_text("Disconnect and close terminal")
+                        .clicked()
+                    {
+                        close = Some(tab.id);
+                    }
                 }
             });
             if let Some(id) = close {
                 self.tabs.retain(|tab| tab.id != id);
-                if self.active == Some(id) { self.active = self.tabs.last().map(|tab| tab.id); }
+                if self.active == Some(id) {
+                    self.active = self.tabs.last().map(|tab| tab.id);
+                }
+                if self.terminal_focus == Some(id) {
+                    self.terminal_focus = self.active;
+                }
             }
         });
         egui::CentralPanel::default().show(ctx, |ui| {
+            let terminal_focus = self.terminal_focus;
             if let Some(tab) = self.tabs.iter_mut().find(|tab| Some(tab.id) == self.active) {
-                // egui_term currently requires the pointer inside its widget for keyboard input.
-                let focus = !ctx.wants_keyboard_input() || ui.rect_contains_pointer(ui.max_rect());
-                let view = TerminalView::new(ui, &mut tab.terminal).set_focus(focus && !tab.exited);
-                ui.add(view);
+                let view = TerminalView::new(ui, &mut tab.terminal)
+                    .set_focus(terminal_accepts_keyboard(terminal_focus, tab.id, tab.exited));
+                let response = ui.add(view);
+                if response.clicked() && !tab.exited { self.terminal_focus = Some(tab.id); }
             } else {
                 ui.heading("Connect to an SSH server");
                 ui.label("Enter a host or existing ~/.ssh/config alias, then Connect.");
-                ui.label("Keep the mouse pointer over the terminal to type. Close a tab to disconnect.");
+                ui.label("Click the terminal to type. Close a tab to disconnect.");
                 ui.label("Verify host key fingerprints through an independent trusted channel before accepting.");
                 ui.label("No sessions are automatically connected on startup.");
             }
@@ -114,5 +187,36 @@ impl App {
     }
 }
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) { self.ui(ctx); }
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.ui(ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_accepts_keyboard;
+    use eframe::egui::{Event, Key, Modifiers};
+
+    #[test]
+    fn form_events_are_not_terminal_input_just_because_pointer_hovers_terminal() {
+        let pointer_is_over_terminal = true;
+        let events = [
+            Event::Text("typed-in-form".into()),
+            Event::Paste("pasted-in-form".into()),
+            Event::Key {
+                key: Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::default(),
+            },
+        ];
+        let form_owns_keyboard = true;
+        let owner = if form_owns_keyboard { None } else { Some(7) };
+        for _event in events {
+            assert!(pointer_is_over_terminal);
+            assert!(!terminal_accepts_keyboard(owner, 7, false));
+        }
+        assert!(terminal_accepts_keyboard(Some(7), 7, false));
+    }
 }
