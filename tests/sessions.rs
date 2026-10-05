@@ -1,4 +1,7 @@
-use inspirum_terminal::{Session, SshOptions, load_sessions, save_sessions};
+use inspirum_terminal::{
+    Session, SshOptions, delete_session, duplicate_session_draft, load_sessions, save_session_edit,
+    save_sessions, session_matches_query,
+};
 
 fn session() -> Session {
     Session {
@@ -308,4 +311,80 @@ fn oversized_save_does_not_replace_previous_file() {
     let error = save_sessions(&path, &oversized).unwrap_err().to_string();
     assert!(error.contains("1 MiB"), "{error}");
     assert_eq!(std::fs::read(path).unwrap(), before);
+}
+
+
+#[test]
+fn saved_profile_search_matches_name_host_and_user_case_insensitively() {
+    let mut s = session();
+    s.user = "Alice".into();
+    assert!(session_matches_query(&s, ""));
+    assert!(session_matches_query(&s, "WORK LAP"));
+    assert!(session_matches_query(&s, "work-ALIAS"));
+    assert!(session_matches_query(&s, "alice"));
+    assert!(!session_matches_query(&s, "bastion"));
+}
+
+#[test]
+fn selected_profile_can_be_renamed_without_leaving_the_old_entry() {
+    let first = session();
+    let mut second = session();
+    second.name = "Backup".into();
+    second.host = "backup-host".into();
+
+    let mut edited = first.clone();
+    edited.name = "Primary".into();
+    edited.host = "primary-host".into();
+
+    let next = save_session_edit(&[first, second.clone()], Some("Work laptop"), edited.clone())
+        .unwrap();
+    assert_eq!(next, vec![edited, second]);
+    assert!(!next.iter().any(|profile| profile.name == "Work laptop"));
+}
+
+#[test]
+fn profile_rename_rejects_collision_without_mutating_the_source_list() {
+    let first = session();
+    let mut second = session();
+    second.name = "Backup".into();
+    second.host = "backup-host".into();
+    let original = vec![first.clone(), second.clone()];
+
+    let mut edited = first;
+    edited.name = "Backup".into();
+    assert!(save_session_edit(&original, Some("Work laptop"), edited).is_err());
+    assert_eq!(original, vec![session(), second]);
+}
+
+#[test]
+fn new_profile_save_rejects_existing_name() {
+    let existing = session();
+    let mut duplicate_name = existing.clone();
+    duplicate_name.host = "different-host".into();
+    assert!(save_session_edit(&[existing], None, duplicate_name).is_err());
+}
+
+#[test]
+fn duplicate_draft_uses_first_available_copy_name_without_persisting() {
+    let first = session();
+    let mut copy = first.clone();
+    copy.name = "Work laptop copy".into();
+    let mut copy2 = first.clone();
+    copy2.name = "Work laptop copy 2".into();
+
+    let draft = duplicate_session_draft(&[first.clone(), copy, copy2], &first);
+    assert_eq!(draft.name, "Work laptop copy 3");
+    assert_eq!(draft.host, first.host);
+}
+
+#[test]
+fn delete_session_removes_only_the_selected_profile() {
+    let first = session();
+    let mut second = session();
+    second.name = "Backup".into();
+    second.host = "backup-host".into();
+
+    let next = delete_session(&[first, second.clone()], "Work laptop").unwrap();
+    assert_eq!(next, vec![second]);
+    assert!(delete_session(&next, "missing").is_err());
 }
