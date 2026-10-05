@@ -1,16 +1,19 @@
 # inspirum-terminal SSH Acceptance Test Matrix (Draft)
 
-Status: Draft. Every matrix row in this document remains Pending. No row is a pass. This matrix is not a WindTerm parity claim, and it does not record Windows or macOS native execution.
+Status: Draft. Every matrix row in this document remains Pending. No row is a pass. This matrix is not a WindTerm parity claim.
 
 Separate from this matrix, and not a pass for any row:
 
 - Source review of the implementation passed.
-- A worker verified 17 Linux normal Rust tests and 3 Linux fixture tests.
-- A parent verified 11 collector tests.
-- License closure for Linux and Windows passed worker evidence. `dispatch 0.2.0` still blocks macOS distribution, not compilation.
+- PR #5 native CI passed at `f52d6297c118da4b590526b8b027a6a8353656ff` on Linux x86_64, Windows x64, and macOS Apple Silicon.
+- Linux CI additionally passed the isolated authenticated `sshd` fixture for public-key login, terminal I/O, PTY resize, changed-host-key rejection, remote exit, and disconnect cleanup.
+- Windows CI passed its native PTY child-argument-boundary test and an actual OpenSSH child-exit smoke test.
+- macOS Apple Silicon CI passed native build/tests/clippy and an actual OpenSSH child-exit smoke test.
+- Isolated authenticated SSH-server acceptance has not yet been run on Windows or macOS, and the feature-specific rows below remain Pending.
+- License closure for Linux and Windows passed existing evidence. `dispatch 0.2.0` still blocks macOS distribution, not compilation.
 - CI pins Rust 1.95.0. The defined macOS release file is a bare unsigned, unnotarized executable, not an app bundle.
 
-A Linux unit or fixture result does not close the matching cross-platform acceptance row.
+A unit, smoke, or Linux fixture result does not close the matching cross-platform acceptance row.
 
 ## Scope and status rules
 

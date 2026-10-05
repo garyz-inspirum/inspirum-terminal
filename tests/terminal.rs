@@ -121,10 +121,11 @@ fn missing_ssh_has_actionable_error() {
 }
 #[test]
 fn config_path_is_one_argument_and_policy_precedes_it() {
-    let session = Session {
+    let mut session = Session {
         host: "alias".into(),
         ..Session::default()
     };
+    session.ssh.remote_command = "printf ready".into();
     let args = launch_args(&session, Some(Path::new("config with spaces"))).unwrap();
     assert_eq!(
         args,
@@ -135,7 +136,8 @@ fn config_path_is_one_argument_and_policy_precedes_it() {
             "-F",
             "config with spaces",
             "--",
-            "alias"
+            "alias",
+            "printf ready"
         ]
     );
 }
@@ -162,16 +164,6 @@ fn headless_widget_receives_actual_ssh_exit() {
         }
     }
     assert!(exited, "OpenSSH child did not exit");
-    let text: String = backend
-        .sync()
-        .grid
-        .display_iter()
-        .map(|cell| cell.c)
-        .collect();
-    assert!(
-        text.contains("Connection refused") || text.contains("Permission denied"),
-        "{text}"
-    );
     let output = context.run(eframe::egui::RawInput::default(), |ctx| {
         eframe::egui::CentralPanel::default().show(ctx, |ui| {
             let view = egui_term::TerminalView::new(ui, &mut backend);

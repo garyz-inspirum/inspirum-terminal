@@ -7,12 +7,13 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 ## Evidence recorded with this docs snapshot
 
 - [x] Source review of the implementation passed.
-- [x] Linux: 17 normal Rust tests and 3 ignored fixture tests verified by a worker. The Windows-only PTY child-argument test is outside those 17 and has not been executed.
-- [x] Collector: 11 tests parent-verified.
-- [x] License closure for Linux and Windows passed worker evidence.
+- [x] PR #5 native CI passed at `f52d6297c118da4b590526b8b027a6a8353656ff` on Linux x86_64, Windows x64, and macOS Apple Silicon.
+- [x] Linux CI additionally passed the isolated authenticated `sshd` fixture for public-key login, I/O, resize, changed-host-key rejection, exit, and disconnect cleanup.
+- [x] Windows CI passed the native PTY child-argument-boundary test and actual OpenSSH child-exit smoke test.
+- [x] macOS Apple Silicon CI passed native build/tests/clippy and the OpenSSH child-exit smoke test.
+- [x] License closure for Linux and Windows passed existing evidence.
 - [x] CI and release workflows pin Rust 1.95.0. Their gates are unchanged by this documentation.
-- [ ] Windows native execution. Not yet run.
-- [ ] macOS native execution. Not yet run.
+- [ ] Isolated authenticated SSH-server acceptance on Windows and macOS.
 - [ ] macOS distribution. The active `dispatch 0.2.0` notice still blocks distribution, not compilation. The defined macOS artifact is a bare unsigned, unnotarized executable, not an app bundle.
 - [ ] Full WindTerm parity. Not claimed.
 
@@ -24,9 +25,10 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Locked dependency graph.
 - [x] CI definitions for Linux x64, Windows x64, and macOS Apple Silicon, pinned to Rust 1.95.0. Definitions are not successful runs.
 - [x] Release workflow definition for archives, README, full Apache-2.0 license, notices, and SHA-256 manifest. The macOS path packages a bare executable, not an app bundle.
-- [ ] Successful native CI and release runs, downloaded artifact verification.
-- [ ] Native Windows x64 execution. Not yet run.
-- [ ] Native macOS Apple Silicon execution. Not yet run.
+- [x] Successful native CI run on Linux x64, Windows x64, and macOS Apple Silicon.
+- [ ] Successful release run and downloaded artifact verification.
+- [x] Native Windows x64 CI execution, including PTY argv-boundary and OpenSSH child-exit smoke tests; broader SSH acceptance is still pending.
+- [x] Native macOS Apple Silicon CI execution, including the OpenSSH child-exit smoke test; broader SSH acceptance is still pending.
 - [ ] macOS distribution while the `dispatch 0.2.0` notice remains unresolved. Compilation is not blocked.
 - [ ] Code signing, Windows reputation, macOS signing, and notarization.
 - [ ] Installer packages and automated update policy.
@@ -41,19 +43,19 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [ ] GSSAPI authentication and credential-delegation policy, with explicit platform capability checks.
 - [ ] ControlMaster/multiplexing workflow and platform limitations.
 - [ ] HTTP and SOCKS proxy workflows and no-direct-fallback verification.
-- [ ] SSH auto-execution after authentication, with explicit user opt-in.
+- [x] Optional per-profile remote command executed by OpenSSH after authentication; it is stored as profile metadata, passed after the SSH destination, and never invoked through a local shell. Remote-command acceptance remains pending.
 - [ ] Tmux-aware integration (SSH-first scope; ordinary tmux inside a terminal is not equivalent).
 - [x] Ask-before-trusting and already-trusted-only host-key modes.
 - [x] Separate argv construction without a shell.
 - [x] Disposable Linux sshd fixture: 3 ignored tests verified for public-key session I/O, resize, changed-host-key rejection, exit, and disconnect cleanup. Not password, MFA, or Windows/macOS acceptance.
-- [ ] Friendly editor for identity files and common OpenSSH options.
-- [ ] ProxyJump and ProxyCommand UI with safe preview (OpenSSH config may already provide these; app UI is absent).
-- [ ] Local, remote, and dynamic forwarding UI and lifecycle controls.
-- [ ] Agent forwarding and X11 forwarding UI with risk explanations.
-- [ ] Connection timeout, keepalive, compression, and cipher policy UI.
-- [ ] Reconnect behavior with explicit user control.
+- [x] Identity-file path editor plus validated profile persistence; private-key contents and passphrases are never stored. Native auth acceptance is still pending.
+- [x] ProxyJump profile/UI and discrete `-J` argv support. ProxyCommand UI and safe preview remain planned.
+- [x] Local, remote, and dynamic forwarding profile/UI with discrete `-L`/`-R`/`-D` argv and `ExitOnForwardFailure=yes`. Native forwarding acceptance and richer lifecycle controls remain pending.
+- [x] Agent forwarding and X11 forwarding profile/UI with Inherit/Enable/Disable policy and explicit risk text. Native acceptance remains pending.
+- [x] Connection timeout, server keepalive interval, and compression profile/UI; compression also has Inherit/Enable/Disable policy. Cipher/algorithm policy UI remains planned.
+- [x] Explicit reconnect button for an exited SSH tab; reconnect starts a fresh OpenSSH/PTy session from the tab's original profile and does not replay terminal input. Network-loss and host-key-change reconnect acceptance remains pending.
 - [ ] Connection diagnostics and sanitized support bundle.
-- [ ] Native Windows and macOS OpenSSH/PTY integration tests.
+- [ ] Native Windows and macOS isolated SSH-server acceptance tests for authentication, trust, ProxyJump/forwarding, and lifecycle behavior.
 
 ## Sessions and workspace
 

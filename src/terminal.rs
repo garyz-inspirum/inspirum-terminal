@@ -25,7 +25,10 @@ pub fn launch_args(session: &Session, config: Option<&Path>) -> Result<Vec<Strin
             .to_str()
             .context("SSH config path must be valid Unicode")?;
         ensure!(!text.contains('\0'), "SSH config path contains NUL");
-        let index = args.len() - 2;
+        let index = args
+            .iter()
+            .position(|arg| arg == "--")
+            .context("internal SSH argv is missing option terminator")?;
         args.splice(index..index, ["-F".into(), text.to_owned()]);
     }
     Ok(args)
