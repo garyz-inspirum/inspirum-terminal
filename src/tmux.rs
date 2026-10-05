@@ -126,14 +126,27 @@ mod tests {
             ..Session::default()
         };
         assert_eq!(
-            attach_session(&session, "ops_01").unwrap().ssh.remote_command,
+            attach_session(&session, "ops_01")
+                .unwrap()
+                .ssh
+                .remote_command,
             "exec tmux attach-session -t ops_01"
         );
         assert_eq!(
-            create_session(&session, "ops-02").unwrap().ssh.remote_command,
+            create_session(&session, "ops-02")
+                .unwrap()
+                .ssh
+                .remote_command,
             "exec tmux new-session -s ops-02"
         );
-        for bad in ["", "-bad", "bad name", "bad;touch", "bad:window", "bad.session"] {
+        for bad in [
+            "",
+            "-bad",
+            "bad name",
+            "bad;touch",
+            "bad:window",
+            "bad.session",
+        ] {
             assert!(attach_session(&session, bad).is_err(), "{bad:?}");
             assert!(create_session(&session, bad).is_err(), "{bad:?}");
         }
@@ -149,10 +162,7 @@ mod tests {
         let args = list_args(&session, None).unwrap();
         assert!(args.iter().any(|arg| arg == "-T"));
         assert!(!args.iter().any(|arg| arg == "-tt"));
-        assert!(
-            args.windows(2)
-                .any(|pair| pair == ["-o", "BatchMode=yes"])
-        );
+        assert!(args.windows(2).any(|pair| pair == ["-o", "BatchMode=yes"]));
         let joined = args.join(" ");
         assert!(!joined.contains("kill-session"));
         assert!(!joined.contains("kill-server"));
