@@ -812,7 +812,7 @@ fn structured_proxy_denial_never_falls_back_to_direct_ssh() {
 #[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
 fn controlmaster_lifecycle_check_and_explicit_close() {
     let p = fixture();
-    let socket = p.join("inspirum-control-%C.sock");
+    let socket = PathBuf::from(format!("/tmp/inspirum-cm-{}-%C", std::process::id()));
     let session = Session {
         name: "ControlMaster fixture".into(),
         host: "127.0.0.1".into(),
