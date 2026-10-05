@@ -443,7 +443,9 @@ fn public_key_plus_keyboard_interactive_pam_mfa_authenticates() {
         !log.contains(&secret),
         "keyboard-interactive response was written to the sshd log"
     );
-    println!("PASS public-key plus keyboard-interactive PAM MFA authenticated through application PTY");
+    println!(
+        "PASS public-key plus keyboard-interactive PAM MFA authenticated through application PTY"
+    );
 }
 
 #[test]
