@@ -2017,7 +2017,11 @@ impl App {
             self.workspace_panes.retain(|pane| *pane != id);
             self.sync_input.remove_pane(id);
             if self.active == Some(id) {
-                self.active = self.workspace_panes.last().copied().or_else(|| self.tabs.last().map(|tab| tab.id));
+                self.active = self
+                    .workspace_panes
+                    .last()
+                    .copied()
+                    .or_else(|| self.tabs.last().map(|tab| tab.id));
             }
             if self.terminal_focus == Some(id) {
                 self.terminal_focus = self.active;
@@ -2113,9 +2117,13 @@ impl App {
                         let reconnect = layout.reconnect_on_restore;
                         self.workspace_loaded = Some(layout);
                         self.workspace_notice = if reconnect {
-                            format!("Loaded {pane_count} pane(s) as metadata only. Use Restore & reconnect to connect them.")
+                            format!(
+                                "Loaded {pane_count} pane(s) as metadata only. Use Restore & reconnect to connect them."
+                            )
                         } else {
-                            format!("Loaded {pane_count} pane(s) as metadata only. Reconnect is disabled in this layout.")
+                            format!(
+                                "Loaded {pane_count} pane(s) as metadata only. Reconnect is disabled in this layout."
+                            )
                         };
                     }
                     Err(error) => {
@@ -2173,7 +2181,8 @@ impl App {
                     self.active = self.workspace_panes.last().copied();
                     self.terminal_focus = self.active;
                     self.workspace_notice =
-                        "Workspace restored by explicit action; synchronized input is disarmed.".into();
+                        "Workspace restored by explicit action; synchronized input is disarmed."
+                            .into();
                 }
                 Err(error) => {
                     self.workspace_notice = format!("Cannot restore workspace: {error:#}");
