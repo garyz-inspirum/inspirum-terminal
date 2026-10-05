@@ -267,6 +267,18 @@ fn ssh_keygen_inspection_and_removal_use_exact_known_hosts_target() {
         format!("[example.test]:2222 {key_type} {key_body}\n"),
     )
     .unwrap();
+    let hashed = Command::new("ssh-keygen")
+        .args(["-q", "-H", "-f"])
+        .arg(&known_hosts)
+        .status()
+        .unwrap();
+    assert!(hashed.success(), "known_hosts hashing failed");
+    let _ = std::fs::remove_file(known_hosts.with_extension("old"));
+    assert!(
+        !std::fs::read_to_string(&known_hosts)
+            .unwrap()
+            .contains("example.test")
+    );
 
     let target = HostKeyTarget {
         hostname: "example.test".into(),
