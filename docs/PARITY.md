@@ -46,11 +46,11 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Ask-before-trusting and already-trusted-only host-key modes.
 - [x] Separate argv construction without a shell.
 - [x] Disposable Linux sshd fixture: 3 ignored tests verified for public-key session I/O, resize, changed-host-key rejection, exit, and disconnect cleanup. Not password, MFA, or Windows/macOS acceptance.
-- [ ] Friendly editor for identity files and common OpenSSH options.
-- [ ] ProxyJump and ProxyCommand UI with safe preview (OpenSSH config may already provide these; app UI is absent).
-- [ ] Local, remote, and dynamic forwarding UI and lifecycle controls.
-- [ ] Agent forwarding and X11 forwarding UI with risk explanations.
-- [ ] Connection timeout, keepalive, compression, and cipher policy UI.
+- [x] Identity-file path editor plus validated profile persistence; private-key contents and passphrases are never stored. Native auth acceptance is still pending.
+- [x] ProxyJump profile/UI and discrete `-J` argv support. ProxyCommand UI and safe preview remain planned.
+- [x] Local, remote, and dynamic forwarding profile/UI with discrete `-L`/`-R`/`-D` argv and `ExitOnForwardFailure=yes`. Native forwarding acceptance and richer lifecycle controls remain pending.
+- [x] Agent forwarding and X11 forwarding profile/UI with explicit risk text. Native acceptance remains pending.
+- [x] Connection timeout, server keepalive interval, and compression profile/UI. Cipher/algorithm policy UI remains planned.
 - [ ] Reconnect behavior with explicit user control.
 - [ ] Connection diagnostics and sanitized support bundle.
 - [ ] Native Windows and macOS OpenSSH/PTY integration tests.
