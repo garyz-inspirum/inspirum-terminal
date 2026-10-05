@@ -1,8 +1,8 @@
 //! Small native connection/profile interface; terminal mechanics stay upstream.
 use crate::{
-    ControlMasterMode, ProxyKind, Session, SessionImportMode, delete_session, duplicate_session_draft,
-    export_sessions, import_sessions, load_sessions, save_session_edit, save_sessions,
-    session_matches_query, terminal,
+    ControlMasterMode, ProxyKind, Session, SessionImportMode, delete_session,
+    duplicate_session_draft, export_sessions, import_sessions, load_sessions, save_session_edit,
+    save_sessions, session_matches_query, terminal,
 };
 use eframe::egui;
 use egui_term::{PtyEvent, TerminalBackend, TerminalView};
@@ -167,7 +167,11 @@ impl App {
             .proxy_port
             .map(|value| value.to_string())
             .unwrap_or_default();
-        self.control_persist = session.ssh.control_persist_seconds.map(|value| value.to_string()).unwrap_or_default();
+        self.control_persist = session
+            .ssh
+            .control_persist_seconds
+            .map(|value| value.to_string())
+            .unwrap_or_default();
         self.connect_timeout = session
             .ssh
             .connect_timeout_seconds
@@ -270,7 +274,13 @@ impl App {
         let mut session = self.draft.clone();
         session.port = parse_optional_u16(&self.port, "port")?;
         session.ssh.proxy_port = parse_optional_u16(&self.proxy_port, "proxy port")?;
-        session.ssh.control_persist_seconds = if self.control_persist.trim().is_empty() { None } else { Some(self.control_persist.trim().parse::<u32>().map_err(|_| anyhow::anyhow!("ControlPersist must be a positive whole number of seconds"))?) };
+        session.ssh.control_persist_seconds = if self.control_persist.trim().is_empty() {
+            None
+        } else {
+            Some(self.control_persist.trim().parse::<u32>().map_err(|_| {
+                anyhow::anyhow!("ControlPersist must be a positive whole number of seconds")
+            })?)
+        };
         session.ssh.connect_timeout_seconds =
             parse_optional_u16(&self.connect_timeout, "connection timeout")?;
         session.ssh.server_alive_interval_seconds =
