@@ -69,14 +69,15 @@ while IFS= read -r line; do
  esac
 done
 '''.replace('\\n','\n'))
- with socket.socket() as sock, socket.socket() as jump_sock, socket.socket() as sftp_sock, socket.socket() as password_sock, socket.socket() as mfa_sock:
+ with socket.socket() as sock, socket.socket() as jump_sock, socket.socket() as sftp_sock, socket.socket() as tmux_sock, socket.socket() as password_sock, socket.socket() as mfa_sock:
   sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
   jump_sock.bind(('127.0.0.1',0));jump_port=jump_sock.getsockname()[1]
   sftp_sock.bind(('127.0.0.1',0));sftp_port=sftp_sock.getsockname()[1]
+  tmux_sock.bind(('127.0.0.1',0));tmux_port=tmux_sock.getsockname()[1]
   password_sock.bind(('127.0.0.1',0));password_port=password_sock.getsockname()[1]
   mfa_sock.bind(('127.0.0.1',0));mfa_port=mfa_sock.getsockname()[1]
- all_ports={port,jump_port,sftp_port,password_port,mfa_port}
- assert min(all_ports)>1024 and len(all_ports)==5
+ all_ports={port,jump_port,sftp_port,tmux_port,password_port,mfa_port}
+ assert min(all_ports)>1024 and len(all_ports)==6
  (d/'sshd_config').write_text(f'''ListenAddress 127.0.0.1
 Port {port}
 HostKey {d}/host
@@ -142,6 +143,27 @@ PrintMotd no
 PrintLastLog no
 Subsystem sftp internal-sftp
 ForceCommand internal-sftp -d {d}/sftp-root
+LogLevel VERBOSE
+''')
+ (d/'tmux_sshd_config').write_text(f'''ListenAddress 127.0.0.1
+Port {tmux_port}
+HostKey {d}/host
+PidFile {d}/tmux_sshd.pid
+AuthorizedKeysFile {d}/authorized_keys
+StrictModes no
+UsePAM no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+AllowUsers {getpass.getuser()}
+AllowTcpForwarding no
+AllowAgentForwarding no
+X11Forwarding no
+PermitTunnel no
+PermitTTY yes
+PrintMotd no
+PrintLastLog no
 LogLevel VERBOSE
 ''')
  if privileged_auth:
@@ -213,11 +235,12 @@ LogLevel VERBOSE
  target_host=f'[127.0.0.1]:{port} {host_fields[0]} {host_fields[1]}\n'
  jump_host=f'[127.0.0.1]:{jump_port} {host_fields[0]} {host_fields[1]}\n'
  sftp_host=f'[127.0.0.1]:{sftp_port} {host_fields[0]} {host_fields[1]}\n'
+ tmux_host=f'[127.0.0.1]:{tmux_port} {host_fields[0]} {host_fields[1]}\n'
  password_host=f'[127.0.0.1]:{password_port} {host_fields[0]} {host_fields[1]}\n'
  mfa_host=f'[127.0.0.1]:{mfa_port} {host_fields[0]} {host_fields[1]}\n'
  changed_target=f'[127.0.0.1]:{port} {wrong_fields[0]} {wrong_fields[1]}\n'
- (d/'known_hosts').write_text(target_host+jump_host+sftp_host+password_host+mfa_host)
- (d/'changed_known_hosts').write_text(changed_target+jump_host+sftp_host+password_host+mfa_host)
+ (d/'known_hosts').write_text(target_host+jump_host+sftp_host+tmux_host+password_host+mfa_host)
+ (d/'changed_known_hosts').write_text(changed_target+jump_host+sftp_host+tmux_host+password_host+mfa_host)
  for name,known in [('config','known_hosts'),('changed-config','changed_known_hosts')]:
   (d/name).write_text(f'''Host fixture-jump
  HostName 127.0.0.1
@@ -225,6 +248,9 @@ LogLevel VERBOSE
 Host fixture-sftp
  HostName 127.0.0.1
  Port {sftp_port}
+Host fixture-tmux
+ HostName 127.0.0.1
+ Port {tmux_port}
 Host *
  HostName 127.0.0.1
  Port {port}
@@ -316,6 +342,7 @@ Host *
  subprocess.run([sshd,'-t','-f',str(d/'sshd_config')],check=True)
  subprocess.run([sshd,'-t','-f',str(d/'jump_sshd_config')],check=True)
  subprocess.run([sshd,'-t','-f',str(d/'sftp_sshd_config')],check=True)
+ subprocess.run([sshd,'-t','-f',str(d/'tmux_sshd_config')],check=True)
  if privileged_auth:
   subprocess.run(['sudo','-n',sshd,'-t','-f',str(d/'password_sshd_config')],check=True)
   subprocess.run(['sudo','-n',sshd,'-t','-f',str(d/'mfa_sshd_config')],check=True)
@@ -328,9 +355,9 @@ Host *
    except OSError:
     if time.monotonic()>deadline: raise
     time.sleep(.05)
- with (d/'sshd.log').open('w+') as log, (d/'jump_sshd.log').open('w+') as jump_log, (d/'sftp_sshd.log').open('w+') as sftp_log, (d/'password_sshd.log').open('w+') as password_log, (d/'mfa_sshd.log').open('w+') as mfa_log:
+ with (d/'sshd.log').open('w+') as log, (d/'jump_sshd.log').open('w+') as jump_log, (d/'sftp_sshd.log').open('w+') as sftp_log, (d/'tmux_sshd.log').open('w+') as tmux_log, (d/'password_sshd.log').open('w+') as password_log, (d/'mfa_sshd.log').open('w+') as mfa_log:
   processes=[]
-  server=jump_server=sftp_server=password_server=mfa_server=agent=None
+  server=jump_server=sftp_server=tmux_server=password_server=mfa_server=agent=None
   try:
    server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'sshd_config')],stdout=log,stderr=log)
    processes.append(server)
@@ -338,6 +365,8 @@ Host *
    processes.append(jump_server)
    sftp_server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'sftp_sshd_config')],stdout=sftp_log,stderr=sftp_log)
    processes.append(sftp_server)
+   tmux_server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'tmux_sshd_config')],stdout=tmux_log,stderr=tmux_log)
+   processes.append(tmux_server)
    if privileged_auth:
     password_server=subprocess.Popen(['sudo','-n',sshd,'-D','-e','-f',str(d/'password_sshd_config')],stdout=password_log,stderr=password_log)
     processes.append(password_server)
@@ -353,6 +382,7 @@ Host *
    wait_ready(server,port,'target')
    wait_ready(jump_server,jump_port,'jump')
    wait_ready(sftp_server,sftp_port,'sftp')
+   wait_ready(tmux_server,tmux_port,'tmux')
    if privileged_auth:
     wait_ready(password_server,password_port,'password')
     wait_ready(mfa_server,mfa_port,'mfa')
@@ -379,7 +409,7 @@ Host *
    cmd=['cargo','test','--locked','--test','ssh_integration','--test','sftp_policy','--','--ignored','--nocapture','--test-threads=1']
    print('RUN:',' '.join(cmd),flush=True)
    auth_summary=(f'; password sshd: 127.0.0.1:{password_port}; MFA sshd: 127.0.0.1:{mfa_port}' if privileged_auth else '; password/MFA fixture skipped (passwordless sudo unavailable)')
-   print(f'Isolated target sshd: 127.0.0.1:{port}; jump sshd: 127.0.0.1:{jump_port}; sftp sshd: 127.0.0.1:{sftp_port}{auth_summary}; credentials removed on exit',flush=True)
+   print(f'Isolated target sshd: 127.0.0.1:{port}; jump sshd: 127.0.0.1:{jump_port}; sftp sshd: 127.0.0.1:{sftp_port}; tmux sshd: 127.0.0.1:{tmux_port}{auth_summary}; credentials removed on exit',flush=True)
    subprocess.run(cmd,env=env,check=True)
   finally:
    for process in reversed(processes):
@@ -393,6 +423,7 @@ Host *
    log.seek(0);print('--- disposable target sshd log ---\n'+log.read(),flush=True)
    jump_log.seek(0);print('--- disposable jump sshd log ---\n'+jump_log.read(),flush=True)
    sftp_log.seek(0);print('--- disposable sftp sshd log ---\n'+sftp_log.read(),flush=True)
+   tmux_log.seek(0);print('--- disposable tmux sshd log ---\n'+tmux_log.read(),flush=True)
    if privileged_auth:
     password_log.seek(0);print('--- disposable password sshd log ---\n'+password_log.read(),flush=True)
     mfa_log.seek(0);print('--- disposable MFA sshd log ---\n'+mfa_log.read(),flush=True)
