@@ -735,6 +735,7 @@ fn start_http_connect_proxy(deny: bool) -> (u16, thread::JoinHandle<()>) {
         let _ = std::io::copy(&mut target, &mut client);
         let _ = client.shutdown(std::net::Shutdown::Both);
         let _ = target.shutdown(std::net::Shutdown::Both);
+        drop(client_read);
         let _ = up.join();
     });
     (port, handle)
