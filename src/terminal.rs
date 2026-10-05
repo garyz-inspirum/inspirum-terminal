@@ -1,7 +1,14 @@
 //! Native terminal adapter: egui_term owns the Alacritty parser and platform PTY.
 use crate::{ControlMasterMode, ProxyKind, Session};
 use anyhow::{Context, Result, ensure};
-use std::{path::Path, process::Command, sync::mpsc::Sender};
+use std::{
+    io::Read,
+    path::Path,
+    process::{Child, Command, Stdio},
+    sync::mpsc::Sender,
+    thread,
+    time::Duration,
+};
 
 const SSH_HELP: &str = "OpenSSH client unavailable. Install OpenSSH Client (Windows Settings > Optional features), macOS command-line tools, or your Linux openssh-clients package; ensure ssh is on PATH and restart Inspirum.";
 const SFTP_HELP: &str = "OpenSSH sftp client unavailable. Install OpenSSH Client and ensure sftp is on PATH, then restart Inspirum.";
@@ -456,6 +463,90 @@ pub fn sftp_launch_args(session: &Session, config: Option<&Path>) -> Result<Vec<
     }
     let helper = std::env::current_exe().context("locate Inspirum proxy helper executable")?;
     sftp_launch_args_with_proxy_helper(session, config, &helper)
+}
+
+pub struct TunnelProcess {
+    child: Child,
+}
+
+impl TunnelProcess {
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    pub fn is_running(&mut self) -> Result<bool> {
+        Ok(self.child.try_wait()?.is_none())
+    }
+
+    pub fn stop(&mut self) -> Result<()> {
+        if self.child.try_wait()?.is_none() {
+            self.child.kill().context("stop SSH tunnel process")?;
+        }
+        self.child.wait().context("wait for SSH tunnel process")?;
+        Ok(())
+    }
+}
+
+impl Drop for TunnelProcess {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+pub fn tunnel_launch_args(session: &Session, config: Option<&Path>) -> Result<Vec<String>> {
+    ensure!(
+        !session.ssh.local_forwards.is_empty()
+            || !session.ssh.remote_forwards.is_empty()
+            || !session.ssh.dynamic_forwards.is_empty(),
+        "at least one tunnel is required"
+    );
+    ensure!(
+        session.ssh.remote_command.is_empty(),
+        "forwarding-only tunnel manager does not run a remote command"
+    );
+    let mut args = launch_args(session, config)?;
+    if let Some(index) = args.iter().position(|arg| arg == "-tt") {
+        args[index] = "-T".into();
+    }
+    let destination = args
+        .iter()
+        .position(|arg| arg == "--")
+        .context("internal SSH argv is missing option terminator")?;
+    args.insert(destination, "-N".into());
+    Ok(args)
+}
+
+pub fn start_tunnels(session: &Session, config: Option<&Path>) -> Result<TunnelProcess> {
+    check_openssh(Path::new("ssh"))?;
+    let args = tunnel_launch_args(session, config)?;
+    let mut child = Command::new("ssh")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("start SSH tunnel process")?;
+
+    thread::sleep(Duration::from_millis(300));
+    if let Some(status) = child.try_wait()? {
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = pipe.read_to_string(&mut stderr);
+        }
+        anyhow::bail!(
+            "SSH tunnel setup failed (status {:?}): {}",
+            status.code(),
+            if stderr.trim().is_empty() {
+                "OpenSSH exited before listeners became ready"
+            } else {
+                stderr.trim()
+            }
+        );
+    }
+    Ok(TunnelProcess { child })
 }
 
 pub fn connect(
