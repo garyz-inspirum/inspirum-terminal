@@ -2117,6 +2117,61 @@ impl App {
                 }
             }
         }
+        if workspace_restore_requested {
+            let result = (|| -> anyhow::Result<(Vec<Tab>, SplitAxis)> {
+                let layout = self
+                    .workspace_loaded
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("load workspace metadata first"))?;
+                anyhow::ensure!(
+                    layout.may_reconnect(true),
+                    "this workspace was not saved with reconnect permission"
+                );
+                anyhow::ensure!(
+                    self.tabs.len() + layout.panes.len() <= 16,
+                    "restoring this workspace would exceed the 16-tab limit"
+                );
+                let axis = layout.axis;
+                let mut created = Vec::new();
+                for (offset, session) in layout.panes.into_iter().enumerate() {
+                    let id = self.next_id + offset as u64;
+                    let terminal = terminal::connect(
+                        id,
+                        ctx.clone(),
+                        self.tx.clone(),
+                        &session,
+                        self.config.as_deref(),
+                    )?;
+                    created.push(Tab {
+                        id,
+                        name: format!("{} · restored", session.name),
+                        kind: TabKind::Ssh,
+                        session,
+                        terminal,
+                        exited: false,
+                    });
+                }
+                Ok((created, axis))
+            })();
+
+            match result {
+                Ok((created, axis)) => {
+                    let ids: Vec<u64> = created.iter().map(|tab| tab.id).collect();
+                    self.next_id += created.len() as u64;
+                    self.tabs.extend(created);
+                    self.workspace_panes = ids;
+                    self.workspace_axis = axis;
+                    self.sync_input = SyncInputState::default();
+                    self.active = self.workspace_panes.last().copied();
+                    self.terminal_focus = self.active;
+                    self.workspace_notice =
+                        "Workspace restored by explicit action; synchronized input is disarmed.".into();
+                }
+                Err(error) => {
+                    self.workspace_notice = format!("Cannot restore workspace: {error:#}");
+                }
+            }
+        }
         if let Some((id, text)) = self.pending_paste.clone() {
             let mut confirm = false;
             let mut cancel = false;
