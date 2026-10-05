@@ -6,9 +6,73 @@ use inspirum_terminal::{
 use std::thread;
 use std::{
     path::Path,
+    process::Command,
     sync::mpsc,
     time::{Duration, Instant},
 };
+
+const ARGV_DUMP_HELPER: &str = r#"use std::{env, fmt::Write as _, fs};
+fn main() {
+    let mut args = env::args_os();
+    let executable = args.next().unwrap().into_string().unwrap();
+    let output = args.next().unwrap();
+    let values: Vec<_> = args.collect();
+    let mut encoded = String::from("ARGV0=");
+    for byte in executable.into_bytes() {
+        write!(&mut encoded, "{byte:02X}").unwrap();
+    }
+    write!(&mut encoded, "\nARGC={}\n", values.len()).unwrap();
+    for (index, value) in values.into_iter().enumerate() {
+        write!(&mut encoded, "ARG{index}=").unwrap();
+        for byte in value.into_string().unwrap().into_bytes() {
+            write!(&mut encoded, "{byte:02X}").unwrap();
+        }
+        encoded.push('\n');
+    }
+    fs::write(output, encoded).unwrap();
+}
+"#;
+
+fn compile_argv_dump_helper(source: &Path, executable: &Path) {
+    std::fs::write(source, ARGV_DUMP_HELPER).unwrap();
+    let compiled = Command::new("rustc")
+        .arg("--crate-name")
+        .arg("inspirum_argv_probe")
+        .arg(source)
+        .arg("-o")
+        .arg(executable)
+        .status()
+        .unwrap();
+    assert!(compiled.success(), "native argv helper did not compile");
+}
+
+#[test]
+fn native_argv_helper_source_with_spaced_filename_compiles() {
+    let dir = tempfile::Builder::new()
+        .prefix("inspirum argv compiler ")
+        .tempdir()
+        .unwrap();
+    let source = dir.path().join("argv dump helper.rs");
+    let executable = dir
+        .path()
+        .join(format!("argv dump helper{}", std::env::consts::EXE_SUFFIX));
+    compile_argv_dump_helper(&source, &executable);
+    assert!(executable.is_file());
+}
+
+#[test]
+fn windows_program_serialization_quotes_one_token_and_rejects_unsafe_input() {
+    assert_eq!(
+        egui_term::serialize_windows_program(r"C:\Program Files\OpenSSH\ssh.exe").unwrap(),
+        r#""C:\Program Files\OpenSSH\ssh.exe""#
+    );
+    assert_eq!(
+        egui_term::serialize_windows_program("ssh").unwrap(),
+        r#""ssh""#
+    );
+    assert!(egui_term::serialize_windows_program("bad\0path").is_err());
+    assert!(egui_term::serialize_windows_program("bad\"path").is_err());
+}
 
 #[cfg(unix)]
 fn wait_for_grid(backend: &mut egui_term::TerminalBackend, needle: &str) -> String {
@@ -380,7 +444,7 @@ fn disconnected_subscriber_stops_forwarding_thread() {
 #[cfg(target_os = "windows")]
 #[test]
 fn windows_pty_preserves_actual_child_argument_boundaries() {
-    use std::{fmt::Write as _, process::Command};
+    use std::fmt::Write as _;
 
     let dir = tempfile::Builder::new()
         .prefix("inspirum argv spaces ")
@@ -389,34 +453,7 @@ fn windows_pty_preserves_actual_child_argument_boundaries() {
     let source = dir.path().join("argv dump helper.rs");
     let executable = dir.path().join("argv dump helper.exe");
     let output = dir.path().join("captured argv.txt");
-    std::fs::write(
-        &source,
-        r#"use std::{env, fmt::Write as _, fs};
-fn main() {
-    let mut args = env::args_os();
-    let _executable = args.next().unwrap();
-    let output = args.next().unwrap();
-    let values: Vec<_> = args.collect();
-    let mut encoded = format!("ARGC={}\n", values.len());
-    for (index, value) in values.into_iter().enumerate() {
-        write!(&mut encoded, "ARG{index}=").unwrap();
-        for byte in value.into_string().unwrap().into_bytes() {
-            write!(&mut encoded, "{byte:02X}").unwrap();
-        }
-        encoded.push('\n');
-    }
-    fs::write(output, encoded).unwrap();
-}
-"#,
-    )
-    .unwrap();
-    let compiled = Command::new("rustc")
-        .arg(&source)
-        .arg("-o")
-        .arg(&executable)
-        .status()
-        .unwrap();
-    assert!(compiled.success(), "native argv helper did not compile");
+    compile_argv_dump_helper(&source, &executable);
 
     let expected = [
         "value with spaces",
@@ -450,7 +487,11 @@ fn main() {
     }
     assert!(exited, "native argv helper did not emit PTY exit");
 
-    let mut encoded = format!("ARGC={}\n", expected.len());
+    let mut encoded = String::from("ARGV0=");
+    for byte in executable.to_string_lossy().as_bytes() {
+        write!(&mut encoded, "{byte:02X}").unwrap();
+    }
+    write!(&mut encoded, "\nARGC={}\n", expected.len()).unwrap();
     for (index, value) in expected.iter().enumerate() {
         write!(&mut encoded, "ARG{index}=").unwrap();
         for byte in value.as_bytes() {

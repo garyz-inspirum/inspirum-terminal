@@ -30,6 +30,24 @@ pub type TerminalMode = TermMode;
 pub type PtyEvent = Event;
 pub type SelectionType = AlacrittySelectionType;
 
+/// Serializes the executable token for Alacritty's Windows command line.
+///
+/// Alacritty 0.25 appends `Shell::program` verbatim while creating ConPTY with
+/// a null application name, so the first command-line token must be quoted at
+/// this boundary. Quotes and NUL cannot be represented safely as part of a
+/// Windows executable path in that command line.
+#[doc(hidden)]
+pub fn serialize_windows_program(program: &str) -> Result<String> {
+    if program.contains('\0') || program.contains('"') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Windows PTY executable path contains a NUL or quote",
+        ));
+    }
+
+    Ok(format!("\"{program}\""))
+}
+
 #[derive(Debug, Clone)]
 pub enum BackendCommand {
     Write(Vec<u8>),
@@ -192,8 +210,12 @@ impl TerminalBackend {
     where
         F: FnOnce(thread::Builder, Box<dyn FnOnce() + Send + 'static>) -> Result<JoinHandle<()>>,
     {
+        #[cfg(target_os = "windows")]
+        let program = serialize_windows_program(&settings.shell)?;
+        #[cfg(not(target_os = "windows"))]
+        let program = settings.shell;
         let pty_config = tty::Options {
-            shell: Some(tty::Shell::new(settings.shell, settings.args)),
+            shell: Some(tty::Shell::new(program, settings.args)),
             working_directory: settings.working_directory,
             #[cfg(target_os = "windows")]
             escape_args: true,
