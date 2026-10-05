@@ -1083,7 +1083,9 @@ fn scp_binary_round_trip_checksums_match_and_failures_leave_no_success_file() {
     fs::create_dir_all(&local).unwrap();
 
     let source = local.join("source binary.bin");
-    let payload: Vec<u8> = (0..131072).map(|index| ((index * 31) % 251) as u8).collect();
+    let payload: Vec<u8> = (0..131072)
+        .map(|index| ((index * 31) % 251) as u8)
+        .collect();
     fs::write(&source, &payload).unwrap();
     let remote = "scp binary;literal.bin";
 
@@ -1099,13 +1101,7 @@ fn scp_binary_round_trip_checksums_match_and_failures_leave_no_success_file() {
     wait_scp_transfer(&mut transfer).expect("verified SCP download");
     assert_eq!(sha256(&source), sha256(&download));
 
-    let overwrite_rejected = scp::start_download(
-        &session,
-        Some(&config),
-        remote,
-        &download,
-        false,
-    );
+    let overwrite_rejected = scp::start_download(&session, Some(&config), remote, &download, false);
     assert!(
         overwrite_rejected.is_err(),
         "SCP download overwrote an existing local destination without confirmation"
@@ -1120,7 +1116,10 @@ fn scp_binary_round_trip_checksums_match_and_failures_leave_no_success_file() {
         &download,
         true,
     );
-    assert!(missing.is_err(), "missing remote SCP source unexpectedly started");
+    assert!(
+        missing.is_err(),
+        "missing remote SCP source unexpectedly started"
+    );
     assert_eq!(fs::read(&download).unwrap(), original);
 
     let existing_upload = scp::start_upload(&session, Some(&config), &source, remote, false);
@@ -1131,9 +1130,8 @@ fn scp_binary_round_trip_checksums_match_and_failures_leave_no_success_file() {
     assert_eq!(sha256(&source), sha256(&remote_path));
 
     let bad_remote = "missing-dir/final.bin";
-    let mut failed_upload =
-        scp::start_upload(&session, Some(&config), &source, bad_remote, true)
-            .expect("SCP child should start before remote path failure");
+    let mut failed_upload = scp::start_upload(&session, Some(&config), &source, bad_remote, true)
+        .expect("SCP child should start before remote path failure");
     assert!(
         wait_scp_transfer(&mut failed_upload).is_err(),
         "SCP upload to missing remote directory unexpectedly succeeded"
