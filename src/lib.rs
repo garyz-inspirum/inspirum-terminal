@@ -296,16 +296,18 @@ fn valid_proxy_jump(value: &str) -> bool {
 }
 
 pub fn forward_requires_risk_ack(spec: &str, dynamic: bool) -> bool {
-    let parts: Vec<&str> = spec.split(':').collect();
-    let bind = if dynamic {
-        (parts.len() >= 2).then_some(parts[0])
-    } else {
-        (parts.len() >= 4).then_some(parts[0])
-    };
-    bind.is_some_and(|value| {
-        let value = value.trim_matches(['[', ']']);
-        !matches!(value, "127.0.0.1" | "::1" | "localhost")
-    })
+    if spec.starts_with("127.0.0.1:")
+        || spec.starts_with("localhost:")
+        || spec.starts_with("[::1]:")
+    {
+        return false;
+    }
+    if dynamic {
+        return spec.contains(':');
+    }
+    // With no explicit bind address, -L/-R have listen-port:host:host-port (two colons).
+    // An explicit bind adds another separator; bracketed IPv6 naturally also lands here.
+    spec.bytes().filter(|byte| *byte == b':').count() > 2
 }
 
 pub fn session_requires_forward_risk_ack(session: &Session) -> bool {
