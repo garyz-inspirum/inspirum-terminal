@@ -105,12 +105,7 @@ fn socks5_connect(
         .write_all(&[0x05, 0x01, 0x00])
         .context("write SOCKS5 greeting")?;
     let mut greeting = [0_u8; 2];
-    read_exact_before(
-        &mut stream,
-        &mut greeting,
-        deadline,
-        "read SOCKS5 greeting",
-    )?;
+    read_exact_before(&mut stream, &mut greeting, deadline, "read SOCKS5 greeting")?;
     ensure!(
         greeting == [0x05, 0x00],
         "SOCKS5 proxy does not allow unauthenticated tunnelling"
