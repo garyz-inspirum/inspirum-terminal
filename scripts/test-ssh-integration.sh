@@ -205,7 +205,7 @@ PermitTunnel no
 PermitTTY yes
 PrintMotd no
 PrintLastLog no
-ForceCommand /bin/sh {d}/auth_remote.sh
+ForceCommand /bin/sh {auth_public_dir}/auth_remote.sh
 LogLevel VERBOSE
 ''')
  host_fields=(d/'host.pub').read_text().split()
