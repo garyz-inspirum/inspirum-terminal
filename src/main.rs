@@ -1,8 +1,8 @@
 mod diagnostics;
 
 use anyhow::{Context, Result, bail, ensure};
-use inspirum_terminal::app::App;
-use std::path::PathBuf;
+use inspirum_terminal::{ProxyKind, app::App};
+use std::{ffi::OsString, path::PathBuf};
 
 fn default_profiles() -> Result<PathBuf> {
     Ok(
@@ -13,13 +13,62 @@ fn default_profiles() -> Result<PathBuf> {
     )
 }
 
+fn parse_proxy_helper(args: &[OsString]) -> Result<()> {
+    let mut mode = None;
+    let mut proxy_host = None;
+    let mut proxy_port = None;
+    let mut target_host = None;
+    let mut target_port = None;
+    let mut index = 0;
+    while index < args.len() {
+        let name = args[index]
+            .to_str()
+            .context("proxy helper arguments must be valid Unicode")?;
+        index += 1;
+        let value = args
+            .get(index)
+            .context("proxy helper option requires a value")?
+            .to_str()
+            .context("proxy helper values must be valid Unicode")?;
+        index += 1;
+        match name {
+            "--mode" => {
+                mode = Some(match value {
+                    "http-connect" => ProxyKind::HttpConnect,
+                    "socks5" => ProxyKind::Socks5,
+                    _ => bail!("unsupported proxy helper mode"),
+                })
+            }
+            "--proxy-host" => proxy_host = Some(value.to_owned()),
+            "--proxy-port" => proxy_port = Some(value.parse::<u16>().context("invalid proxy port")?),
+            "--target-host" => target_host = Some(value.to_owned()),
+            "--target-port" => {
+                target_port = Some(value.parse::<u16>().context("invalid target port")?)
+            }
+            _ => bail!("unknown proxy helper option"),
+        }
+    }
+    inspirum_terminal::proxy::run_stdio(
+        mode.context("proxy helper mode is required")?,
+        proxy_host.as_deref().context("proxy host is required")?,
+        proxy_port.context("proxy port is required")?,
+        target_host.as_deref().context("target host is required")?,
+        target_port.context("target port is required")?,
+    )
+}
+
 fn main() -> Result<()> {
+    let raw_args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if raw_args.first().and_then(|arg| arg.to_str()) == Some("--proxy-helper") {
+        return parse_proxy_helper(&raw_args[1..]);
+    }
+
     let mut config = None;
     let mut profiles = None;
     let mut diagnostics = false;
     let mut diagnostics_output = None;
     let mut diagnostic_profile = None;
-    let mut args = std::env::args_os().skip(1);
+    let mut args = raw_args.into_iter();
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--help" | "-h") => {
