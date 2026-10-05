@@ -256,12 +256,8 @@ fn local_remote_and_dynamic_forwarding_round_trip_and_teardown() {
     let [local_port, remote_port, socks_port] = reserve_forward_ports();
 
     let ssh = SshOptions {
-        local_forwards: vec![format!(
-            "127.0.0.1:{local_port}:127.0.0.1:{local_target}"
-        )],
-        remote_forwards: vec![format!(
-            "127.0.0.1:{remote_port}:127.0.0.1:{remote_target}"
-        )],
+        local_forwards: vec![format!("127.0.0.1:{local_port}:127.0.0.1:{local_target}")],
+        remote_forwards: vec![format!("127.0.0.1:{remote_port}:127.0.0.1:{remote_target}")],
         dynamic_forwards: vec![format!("127.0.0.1:{socks_port}")],
         ..SshOptions::default()
     };
