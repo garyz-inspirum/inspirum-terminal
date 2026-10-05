@@ -14,21 +14,22 @@ Current scope:
 
 ## Verification status
 
-Source review of the implementation passed. That does not mean every platform or acceptance row has been executed.
+Native CI for PR #5 completed successfully on Linux x86_64, Windows x64, and macOS Apple Silicon at commit `f52d6297c118da4b590526b8b027a6a8353656ff`. This is useful platform evidence, but it is not full SSH acceptance.
 
 Verified evidence:
 
-- Linux: a worker verified 17 normal Rust tests and 3 ignored fixture tests. The 17 are the non-ignored tests that run on Linux. They do not include the Windows-only PTY child-argument test, which has not been executed. The 3 fixture tests run only through `scripts/test-ssh-integration.sh`.
-- Collector: a parent verified 11 tests in `scripts/tests/test_collect_third_party_notices.py`.
-- License closure: Linux and Windows passed worker evidence. The active `dispatch 0.2.0` notice still blocks macOS distribution. It does not block compilation.
+- Linux x86_64: formatting, build/check, Rust tests, clippy, helper-script tests, and the isolated authenticated `sshd` fixture passed. The fixture verifies public-key login, terminal input/output, PTY resize, changed-host-key rejection, remote exit, and cleanup when a backend is dropped.
+- Windows x64: formatting, build/check, Rust tests, and clippy passed. The native suite includes the Windows PTY child-argument-boundary test and an actual OpenSSH child-exit smoke test.
+- macOS Apple Silicon: formatting, build/check, Rust tests, and clippy passed natively on arm64. The suite includes an actual OpenSSH child-exit smoke test.
+- License closure: Linux and Windows remain clear for the current dependency graph. The active `dispatch 0.2.0` notice still blocks macOS distribution; it does not block compilation or tests.
 
 Not yet run:
 
-- Windows native execution.
-- macOS native execution.
-- A completed native CI run, a release run, and downloaded-artifact verification.
+- isolated authenticated SSH-server acceptance on Windows or macOS;
+- the broader authentication, ProxyJump/forwarding, X11/agent-forwarding acceptance matrix on all three platforms;
+- manual GUI/device acceptance, a release workflow, and downloaded-artifact verification.
 
-The CI and release workflows pin Rust 1.95.0. A workflow definition, and compilation if it later succeeds, are not runtime validation and are not a support claim.
+The CI and release workflows pin Rust 1.95.0. Passing native CI proves the exercised code paths on those runners; it does not by itself establish complete SSH or WindTerm parity.
 
 macOS release packaging is a bare executable in a `.tar.gz`, not an app bundle. It is unsigned and unnotarized. Do not distribute a macOS archive while the `dispatch 0.2.0` notice gap remains. No release artifact is code-signed.
 
@@ -38,9 +39,9 @@ These are the targets the release workflow is defined to build. A row is not a s
 
 | Platform | Rust target | Archive | Current limit |
 | --- | --- | --- | --- |
-| Linux x64 | `x86_64-unknown-linux-gnu` | `.tar.gz` | 17 normal tests and 3 fixture tests verified on Linux; native CI has not yet run |
-| Windows x64 | `x86_64-pc-windows-msvc` | `.zip` | license closure passed; native execution not yet run |
-| macOS Apple Silicon | `aarch64-apple-darwin` | `.tar.gz` bare executable, not an `.app` bundle | compilation is not blocked; distribution is blocked by `dispatch 0.2.0`; unsigned and unnotarized; native execution not yet run |
+| Linux x64 | `x86_64-unknown-linux-gnu` | `.tar.gz` | native CI passed, including the isolated authenticated `sshd` fixture; broader SSH acceptance remains pending |
+| Windows x64 | `x86_64-pc-windows-msvc` | `.zip` | native CI passed, including PTY argv-boundary and OpenSSH child-exit smoke tests; isolated authenticated server acceptance remains pending |
+| macOS Apple Silicon | `aarch64-apple-darwin` | `.tar.gz` bare executable, not an `.app` bundle | native arm64 CI passed; distribution is still blocked by `dispatch 0.2.0`; unsigned and unnotarized |
 
 Early artifacts are unsigned prereleases because no code-signing or notarization credentials are available.
 
@@ -100,7 +101,7 @@ This is an early slice, not a security audit. Review `docs/ARCHITECTURE.md` for 
 
 Tags and manual release requests must use `vMAJOR.MINOR.PATCH` and must exactly match `package.version` in `Cargo.toml`. The workflow packages the executable with this README, the full Apache-2.0 `LICENSE`, and target-specific `THIRD_PARTY_NOTICES`, publishes `SHA256SUMS`, and marks the GitHub Release as an unsigned prerelease.
 
-Workflow success would still not authorize macOS distribution while `dispatch 0.2.0` blocks that distribution. A macOS archive is a bare unsigned, unnotarized executable, not an app bundle. Windows and macOS native execution have not been run.
+Workflow success still does not authorize macOS distribution while `dispatch 0.2.0` blocks that distribution. A macOS archive is a bare unsigned, unnotarized executable, not an app bundle. Native CI has run on Windows and Apple Silicon, but manual GUI/device acceptance and isolated authenticated SSH-server acceptance on those platforms remain pending.
 
 Verify downloads with the platform's SHA-256 tooling before running them. Checksums do not authenticate an unsigned publisher.
 
