@@ -1,6 +1,6 @@
 use inspirum_terminal::{
     Session,
-    terminal::{check_openssh, connect, launch_args},
+    terminal::{check_openssh, check_sftp, connect, launch_args, sftp_launch_args},
 };
 #[cfg(unix)]
 use std::thread;
@@ -141,6 +141,60 @@ fn config_path_is_one_argument_and_policy_precedes_it() {
         ]
     );
 }
+#[test]
+fn missing_sftp_has_actionable_error() {
+    let error = check_sftp(Path::new("inspirum-nonexistent-sftp-7e65"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("sftp"));
+    assert!(error.contains("OpenSSH"));
+}
+
+#[test]
+fn sftp_args_reuse_auth_routing_and_connection_policy() {
+    let mut session = Session {
+        host: "work-alias".into(),
+        user: "alice".into(),
+        port: Some(2222),
+        strict: true,
+        ..Session::default()
+    };
+    session.ssh.identity_file = "/keys/work key".into();
+    session.ssh.proxy_jump = "bastion".into();
+    session.ssh.compression = Some(false);
+    session.ssh.connect_timeout_seconds = Some(12);
+    session.ssh.server_alive_interval_seconds = Some(30);
+    session.ssh.agent_forwarding = Some(true);
+    session.ssh.x11_forwarding = Some(true);
+    session.ssh.remote_command = "ignored for sftp".into();
+    session.ssh.local_forwards = vec!["127.0.0.1:8080:internal:80".into()];
+
+    assert_eq!(
+        sftp_launch_args(&session, Some(Path::new("config with spaces"))).unwrap(),
+        [
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-F",
+            "config with spaces",
+            "-i",
+            "/keys/work key",
+            "-J",
+            "bastion",
+            "-o",
+            "Compression=no",
+            "-o",
+            "ConnectTimeout=12",
+            "-o",
+            "ServerAliveInterval=30",
+            "-o",
+            "User=alice",
+            "-P",
+            "2222",
+            "work-alias"
+        ]
+    );
+}
+
 #[test]
 fn headless_widget_receives_actual_ssh_exit() {
     let (tx, rx) = mpsc::channel();

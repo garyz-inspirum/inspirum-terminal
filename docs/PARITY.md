@@ -88,7 +88,8 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 
 ## Files and remote workflows
 
-- [ ] Integrated SFTP browser and transfers.
+- [x] Interactive SFTP terminal tabs backed by the system OpenSSH `sftp` client, reusing host trust, SSH config, identity, ProxyJump and connection-policy inputs. A disposable Linux upload/download fixture is present; green verification is tracked separately.
+- [ ] Integrated graphical SFTP browser, transfer queue, progress, resume/cancel/retry, and overwrite/conflict UX.
 - [ ] SCP operations.
 - [ ] Local file browser and drag/drop policy.
 - [ ] Transfer queue, progress, resume, conflict handling, and integrity checks.
