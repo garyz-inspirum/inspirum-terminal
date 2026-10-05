@@ -109,8 +109,11 @@ impl SftpBrowser {
     }
 
     fn refresh_remote(&mut self) -> anyhow::Result<()> {
-        self.remote_entries =
-            sftp::list_remote(&self.session, self.config.as_deref(), self.remote_path.trim())?;
+        self.remote_entries = sftp::list_remote(
+            &self.session,
+            self.config.as_deref(),
+            self.remote_path.trim(),
+        )?;
         self.selected_remote = None;
         Ok(())
     }
@@ -298,36 +301,36 @@ impl SftpBrowser {
                 self.error = format!("{error:#}");
             }
         });
-        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-            let mut enter = None;
-            for path in &self.local_entries {
-                let name = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy())
-                    .unwrap_or_default();
-                let label = if path.is_dir() {
-                    format!("📁 {name}")
-                } else {
-                    format!("📄 {name}")
-                };
-                let response = ui.selectable_label(
-                    self.selected_local.as_ref() == Some(path),
-                    label,
-                );
-                if response.clicked() {
-                    self.selected_local = Some(path.clone());
+        egui::ScrollArea::vertical()
+            .max_height(260.0)
+            .show(ui, |ui| {
+                let mut enter = None;
+                for path in &self.local_entries {
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy())
+                        .unwrap_or_default();
+                    let label = if path.is_dir() {
+                        format!("📁 {name}")
+                    } else {
+                        format!("📄 {name}")
+                    };
+                    let response =
+                        ui.selectable_label(self.selected_local.as_ref() == Some(path), label);
+                    if response.clicked() {
+                        self.selected_local = Some(path.clone());
+                    }
+                    if response.double_clicked() && path.is_dir() {
+                        enter = Some(path.clone());
+                    }
                 }
-                if response.double_clicked() && path.is_dir() {
-                    enter = Some(path.clone());
+                if let Some(path) = enter {
+                    self.local_path = path.to_string_lossy().into_owned();
+                    if let Err(error) = self.refresh_local() {
+                        self.error = format!("{error:#}");
+                    }
                 }
-            }
-            if let Some(path) = enter {
-                self.local_path = path.to_string_lossy().into_owned();
-                if let Err(error) = self.refresh_local() {
-                    self.error = format!("{error:#}");
-                }
-            }
-        });
+            });
     }
 
     fn render_remote(&mut self, ui: &mut egui::Ui) {
@@ -346,41 +349,41 @@ impl SftpBrowser {
                 self.error = format!("{error:#}");
             }
         });
-        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-            let mut enter = None;
-            for entry in &self.remote_entries {
-                let label = if entry.is_dir {
-                    format!("📁 {}", entry.name)
-                } else {
-                    format!(
-                        "📄 {}{}",
-                        entry.name,
-                        entry
-                            .size
-                            .map(|size| format!("  ({size} B)"))
-                            .unwrap_or_default()
-                    )
-                };
-                let response = ui.selectable_label(
-                    self.selected_remote.as_ref() == Some(entry),
-                    label,
-                );
-                if response.clicked() {
-                    self.rename_name = entry.name.clone();
-                    self.selected_remote = Some(entry.clone());
-                    self.delete_confirm = false;
+        egui::ScrollArea::vertical()
+            .max_height(260.0)
+            .show(ui, |ui| {
+                let mut enter = None;
+                for entry in &self.remote_entries {
+                    let label = if entry.is_dir {
+                        format!("📁 {}", entry.name)
+                    } else {
+                        format!(
+                            "📄 {}{}",
+                            entry.name,
+                            entry
+                                .size
+                                .map(|size| format!("  ({size} B)"))
+                                .unwrap_or_default()
+                        )
+                    };
+                    let response =
+                        ui.selectable_label(self.selected_remote.as_ref() == Some(entry), label);
+                    if response.clicked() {
+                        self.rename_name = entry.name.clone();
+                        self.selected_remote = Some(entry.clone());
+                        self.delete_confirm = false;
+                    }
+                    if response.double_clicked() && entry.is_dir {
+                        enter = Some(entry.name.clone());
+                    }
                 }
-                if response.double_clicked() && entry.is_dir {
-                    enter = Some(entry.name.clone());
+                if let Some(name) = enter {
+                    self.remote_path = sftp::join_remote(self.remote_path.trim(), &name);
+                    if let Err(error) = self.refresh_remote() {
+                        self.error = format!("{error:#}");
+                    }
                 }
-            }
-            if let Some(name) = enter {
-                self.remote_path = sftp::join_remote(self.remote_path.trim(), &name);
-                if let Err(error) = self.refresh_remote() {
-                    self.error = format!("{error:#}");
-                }
-            }
-        });
+            });
     }
 
     fn render_remote_actions(&mut self, ui: &mut egui::Ui) {
