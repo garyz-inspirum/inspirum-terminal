@@ -376,7 +376,7 @@ Host *
     INSPIRUM_PRIV_AUTH_FIXTURE='1' if privileged_auth else '0',
     INSPIRUM_FIXTURE_PASSWORD=fixture_password,
    )
-   cmd=['cargo','test','--locked','--test','ssh_integration','--','--ignored','--nocapture','--test-threads=1']
+   cmd=['cargo','test','--locked','--test','ssh_integration','--test','sftp_policy','--','--ignored','--nocapture','--test-threads=1']
    print('RUN:',' '.join(cmd),flush=True)
    auth_summary=(f'; password sshd: 127.0.0.1:{password_port}; MFA sshd: 127.0.0.1:{mfa_port}' if privileged_auth else '; password/MFA fixture skipped (passwordless sudo unavailable)')
    print(f'Isolated target sshd: 127.0.0.1:{port}; jump sshd: 127.0.0.1:{jump_port}; sftp sshd: 127.0.0.1:{sftp_port}{auth_summary}; credentials removed on exit',flush=True)
