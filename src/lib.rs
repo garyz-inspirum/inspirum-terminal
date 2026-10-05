@@ -20,6 +20,9 @@ pub struct SshOptions {
     pub compression: Option<bool>,
     pub connect_timeout_seconds: Option<u16>,
     pub server_alive_interval_seconds: Option<u16>,
+    /// Optional command sent to the remote account after authentication.
+    /// It is never executed by a local shell.
+    pub remote_command: String,
     /// OpenSSH -L specifications. Each entry is passed as one argv token.
     pub local_forwards: Vec<String>,
     /// OpenSSH -R specifications. Each entry is passed as one argv token.
@@ -49,6 +52,12 @@ impl SshOptions {
             if let Some(value) = value {
                 ensure!(value > 0, "{name} must be greater than zero");
             }
+        }
+        if !self.remote_command.is_empty() {
+            ensure!(
+                valid_single_argument(&self.remote_command, 8192),
+                "remote command must be at most 8192 bytes and contain no control characters"
+            );
         }
         validate_forward_specs("local forward", &self.local_forwards)?;
         validate_forward_specs("remote forward", &self.remote_forwards)?;
@@ -162,6 +171,9 @@ impl Session {
             args.extend(["-p".into(), port.to_string()]);
         }
         args.extend(["--".into(), self.host.clone()]);
+        if !self.ssh.remote_command.is_empty() {
+            args.push(self.ssh.remote_command.clone());
+        }
         Ok(args)
     }
 }
