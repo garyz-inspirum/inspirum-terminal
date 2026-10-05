@@ -119,10 +119,10 @@ impl SftpBrowser {
     }
 
     fn remote_parent(path: &str) -> String {
-        let path = path.trim_end_matches('/');
-        if path.is_empty() || path == "." || path == "/" {
+        if path == "/" || path == "." || path.is_empty() {
             return path.to_owned();
         }
+        let path = path.trim_end_matches('/');
         match path.rsplit_once('/') {
             Some(("", _)) => "/".into(),
             Some((parent, _)) if !parent.is_empty() => parent.into(),
