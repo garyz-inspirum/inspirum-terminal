@@ -160,6 +160,22 @@ fn wait_listener_closed(port: u16) {
         thread::sleep(Duration::from_millis(50));
     }
 }
+
+fn wait_file_contains(path: &std::path::Path, needle: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let text = fs::read_to_string(path).unwrap_or_default();
+        if text.contains(needle) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "missing {needle:?} in {}: {text}",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
 fn fixture() -> PathBuf {
     let p = PathBuf::from(
         std::env::var_os("INSPIRUM_SSH_FIXTURE")
@@ -246,6 +262,26 @@ fn changed_host_key_rejected_even_in_ask_mode() {
     assert!(!text.contains("FIXTURE_AUTHENTICATED"), "{text}");
     println!("PASS changed pinned host key rejected with StrictHostKeyChecking=ask");
 }
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn proxy_jump_authenticates_through_disposable_bastion() {
+    let p = fixture();
+    let ssh = SshOptions {
+        proxy_jump: "fixture-jump".into(),
+        ..SshOptions::default()
+    };
+    let (mut backend, rx) = open_with_ssh(&p, 707, true, "config", ssh);
+    wait_text(&mut backend, "FIXTURE_AUTHENTICATED");
+    write(&mut backend, "echo:proxy-jump-707\n");
+    wait_text(&mut backend, "REMOTE_ECHO:proxy-jump-707");
+    write(&mut backend, "exit\n");
+    wait_exit(&rx, 707);
+    drop(backend);
+
+    wait_file_contains(&p.join("jump_sshd.log"), "Accepted publickey");
+    println!("PASS ProxyJump authenticated through disposable bastion and reached target");
+}
+
 #[test]
 #[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
 fn local_remote_and_dynamic_forwarding_round_trip_and_teardown() {
