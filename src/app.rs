@@ -1004,14 +1004,23 @@ impl App {
                                 ui.small(&self.tunnel_notice);
                             }
                             if let Some(session) = preview {
+                                let status = if self
+                                    .tunnel_process
+                                    .as_mut()
+                                    .is_some_and(|process| process.is_running().unwrap_or(false))
+                                {
+                                    "running"
+                                } else {
+                                    "stopped"
+                                };
                                 for spec in &session.ssh.local_forwards {
-                                    ui.small(format!("Local  {spec}  • {}", if self.tunnel_process.is_some() { "managed" } else { "stopped" }));
+                                    ui.small(format!("Local  {spec}  • {status}"));
                                 }
                                 for spec in &session.ssh.remote_forwards {
-                                    ui.small(format!("Remote {spec}  • {}", if self.tunnel_process.is_some() { "managed" } else { "stopped" }));
+                                    ui.small(format!("Remote {spec}  • {status}"));
                                 }
                                 for spec in &session.ssh.dynamic_forwards {
-                                    ui.small(format!("SOCKS  {spec}  • {}", if self.tunnel_process.is_some() { "managed" } else { "stopped" }));
+                                    ui.small(format!("SOCKS  {spec}  • {status}"));
                                 }
                             }
                         });
