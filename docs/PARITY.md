@@ -11,6 +11,8 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Linux CI additionally passed the isolated authenticated `sshd` fixture for public-key login, I/O, resize, changed-host-key rejection, exit, and disconnect cleanup.
 - [x] Windows CI passed the native PTY child-argument-boundary test and actual OpenSSH child-exit smoke test.
 - [x] macOS Apple Silicon CI passed native build/tests/clippy and the OpenSSH child-exit smoke test.
+- [x] PR #30 profile-import safety regressions passed all three native targets in CI run `37289535816` at `f5662def628728735eaef7caa3d66b388e90dc06`.
+- [x] PR #32 SFTP policy and IPv6 argument regressions passed all three native targets in CI run `37290183042` at `03d07bf50f0c9d3e6eef4edb0b13cbc15cd5e7db`; Linux additionally passed three SFTP policy/trust fixture tests. This is not IPv6 network or Windows/macOS authenticated-server acceptance.
 - [x] License closure for Linux and Windows passed existing evidence.
 - [x] CI and release workflows pin Rust 1.95.0. Their gates are unchanged by this documentation.
 - [ ] Isolated authenticated SSH-server acceptance on Windows and macOS.
@@ -39,13 +41,13 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] System OpenSSH process in a native PTY.
 - [x] Host/config alias, username, port, and optional config path.
 - [x] Delegate identity/agent/authentication prompts to OpenSSH (not a claim every method is tested).
-- [x] Public-key, password, keyboard-interactive/MFA and `IdentitiesOnly` profile policy controls with Inherit/Enable/Disable semantics. Authentication prompts and secrets remain inside OpenSSH; method-specific acceptance tests are still pending.
+- [x] Public-key, password, keyboard-interactive/MFA and `IdentitiesOnly` profile policy controls with Inherit/Enable/Disable semantics. Authentication prompts and secrets remain inside OpenSSH; complete cross-platform method acceptance remains pending.
 - [x] GSSAPI authentication and credential-delegation profile policy controls with Inherit/Enable/Disable semantics and an explicit delegation risk warning. Runtime support is platform/OpenSSH-build dependent and capability acceptance remains pending.
 - [x] Linux CI run #78 at `1a8716d0d9ed45e3c1d43c1db5918cc5725b2186` verified password authentication, encrypted private key, SSH agent, public-key + keyboard-interactive PAM MFA, disabled-method negative cases, password-prompt cancellation, and stalled-handshake timeout through the application PTY path.
 - [ ] GSSAPI authentication acceptance with a real Kerberos realm, plus isolated authenticated-server acceptance for applicable methods on Windows and macOS.
 - [ ] ControlMaster/multiplexing workflow and platform limitations.
 - [ ] HTTP and SOCKS proxy workflows and no-direct-fallback verification.
-- [x] Optional per-profile remote command executed by OpenSSH after authentication; it is stored as profile metadata, passed after the SSH destination, and never invoked through a local shell. Remote-command acceptance remains pending.
+- [x] Optional per-profile remote command executed by OpenSSH after authentication; it is stored as profile metadata, passed after the SSH destination, and never invoked through a local shell. Full remote-command acceptance remains pending.
 - [ ] Tmux-aware integration (SSH-first scope; ordinary tmux inside a terminal is not equivalent).
 - [x] Ask-before-trusting and already-trusted-only host-key modes.
 - [x] Host-key trust panel resolves effective `Hostname`/`Port`/`HostKeyAlias` with `ssh -G`, inspects `known_hosts` via `ssh-keygen -F`, and requires explicit confirmation before `ssh-keygen -R` removal. It does not auto-accept replacement keys; custom `UserKnownHostsFile` paths must be selected explicitly.
@@ -53,11 +55,12 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Disposable Linux sshd fixture covers public-key session I/O, resize, changed-host-key rejection, exit, disconnect cleanup, encrypted-key and agent authentication, password/PAM-MFA policy cases, password-prompt cancellation, and stalled-handshake timeout. Password/PAM cases use disposable users only when passwordless sudo is available; CI run #78 passed all 15 fixture tests. Windows/macOS isolated-server acceptance remains pending.
 - [x] Identity-file path editor plus validated profile persistence; private-key contents and passphrases are never stored. Linux encrypted-key and agent authentication are verified; Windows/macOS isolated auth acceptance remains pending.
 - [x] ProxyJump profile/UI and discrete `-J` argv support. ProxyCommand UI and safe preview remain planned.
-- [x] Local, remote, and dynamic forwarding profile/UI with discrete `-L`/`-R`/`-D` argv and `ExitOnForwardFailure=yes`. Native forwarding acceptance and richer lifecycle controls remain pending.
+- [x] Local, remote, and dynamic forwarding profile/UI with discrete `-L`/`-R`/`-D` argv and `ExitOnForwardFailure=yes`. Complete native forwarding acceptance and richer lifecycle controls remain pending.
 - [x] Agent forwarding and X11 forwarding profile/UI with Inherit/Enable/Disable policy and explicit risk text. Native acceptance remains pending.
 - [x] Connection timeout, server keepalive interval, and compression profile/UI; compression also has Inherit/Enable/Disable policy. Cipher/algorithm policy UI remains planned.
 - [x] Explicit reconnect button for an exited SSH tab; reconnect starts a fresh OpenSSH/PTy session from the tab's original profile and does not replay terminal input. Network-loss and host-key-change reconnect acceptance remains pending.
-- [ ] Connection diagnostics and sanitized support bundle.
+- [x] Local-only `--diagnostics` and no-clobber support-text export, with allowlisted tool/platform status and optional profile policy flags/counts. No SSH connection, SSH config evaluation, session payload or raw-error export. See [diagnostics](diagnostics.md), issue #33 and PR #34 for scope and verification evidence.
+- [ ] Graphical connection diagnostics, effective-connection display and safe recent-error history (issue #20 remains open).
 - [ ] Native Windows and macOS isolated SSH-server acceptance tests for authentication, trust, ProxyJump/forwarding, and lifecycle behavior.
 
 ## Sessions and workspace
@@ -66,7 +69,7 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Saved profile selection and update by profile name.
 - [x] Multiple terminal tabs and explicit close/disconnect.
 - [x] Search, rename-on-save, editable duplicate, and confirmed delete for saved profiles; operations preserve atomic persistence and do not disconnect already-open tabs.
-- [x] Validated non-secret JSON profile import/export with collision-safe merge and confirmed replace; imported local identity paths may require adjustment on another machine.
+- [x] Validated non-secret JSON profile import/export with collision-safe merge and confirmed replace; missing import sources are errors and the complete merged candidate must fit the file-size limit before any store change. Imported local identity paths may require adjustment on another machine.
 - [ ] Group and tag profiles.
 - [ ] Split panes and flexible layouts.
 - [ ] Restore selected layouts with opt-in reconnect.
@@ -93,6 +96,7 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 ## Files and remote workflows
 
 - [x] Interactive SFTP terminal tabs backed by the system OpenSSH `sftp` client, reusing host trust, SSH config, identity, ProxyJump and connection-policy inputs. A disposable Linux upload/download fixture is present; green verification is tracked separately.
+- [x] All six explicit authentication policies apply to SFTP; inherited policies remain inherited. IPv6/scoped IPv6 destinations are bracketed for the SFTP grammar. Portable regressions and Linux success/disabled-key/changed-trust fixtures passed in PR #32; broader platform acceptance remains open. See [SFTP](sftp.md).
 - [ ] Integrated graphical SFTP browser, transfer queue, progress, resume/cancel/retry, and overwrite/conflict UX.
 - [ ] SCP operations.
 - [ ] Local file browser and drag/drop policy.
