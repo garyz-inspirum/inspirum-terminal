@@ -138,7 +138,10 @@ pub fn upload_args_with_proxy_helper(
     let local = local
         .to_str()
         .context("local SCP path must be valid Unicode")?;
-    ensure!(!local.chars().any(char::is_control), "local SCP path is invalid");
+    ensure!(
+        !local.chars().any(char::is_control),
+        "local SCP path is invalid"
+    );
     let mut args = common_args_with_proxy_helper(session, config, helper)?;
     args.extend(["--".into(), local.to_owned(), remote_spec(session, remote)?]);
     Ok(args)
@@ -207,12 +210,7 @@ impl Transfer {
         let _ = self.child.wait();
         self.staging.take();
         if let Some(staging) = self.remote_staging.take() {
-            let _ = sftp::delete_remote(
-                &self.session,
-                self.config.as_deref(),
-                &staging,
-                false,
-            );
+            let _ = sftp::delete_remote(&self.session, self.config.as_deref(), &staging, false);
         }
         Ok(())
     }
@@ -265,12 +263,8 @@ impl Transfer {
                     .context("SCP remote destination is missing")?;
                 let actual = sftp::remote_size(&self.session, self.config.as_deref(), &staging)?;
                 if actual != self.total {
-                    let _ = sftp::delete_remote(
-                        &self.session,
-                        self.config.as_deref(),
-                        &staging,
-                        false,
-                    );
+                    let _ =
+                        sftp::delete_remote(&self.session, self.config.as_deref(), &staging, false);
                     anyhow::bail!(
                         "SCP upload size verification failed: expected {} bytes, found {actual}",
                         self.total
@@ -300,12 +294,8 @@ impl Transfer {
                     &staging,
                     destination,
                 ) {
-                    let _ = sftp::delete_remote(
-                        &self.session,
-                        self.config.as_deref(),
-                        &staging,
-                        false,
-                    );
+                    let _ =
+                        sftp::delete_remote(&self.session, self.config.as_deref(), &staging, false);
                     return Err(error).context("commit verified SCP upload");
                 }
             }
@@ -322,12 +312,7 @@ impl Drop for Transfer {
         }
         self.staging.take();
         if let Some(staging) = self.remote_staging.take() {
-            let _ = sftp::delete_remote(
-                &self.session,
-                self.config.as_deref(),
-                &staging,
-                false,
-            );
+            let _ = sftp::delete_remote(&self.session, self.config.as_deref(), &staging, false);
         }
     }
 }
