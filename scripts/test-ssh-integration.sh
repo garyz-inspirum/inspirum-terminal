@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Linux-only unprivileged disposable loopback sshd; no production config touched.
-# Runs the three ignored fixture tests only. Not Windows or macOS native execution.
+# Runs the SSH integration fixture tests only. Not Windows or macOS native execution.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Respect standard Cargo overrides; keep generated credentials outside the checkout.
@@ -29,9 +29,10 @@ while IFS= read -r line; do
  esac
 done
 '''.replace('\\n','\n'))
- with socket.socket() as sock:
+ with socket.socket() as sock, socket.socket() as jump_sock:
   sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
- assert port>1024
+  jump_sock.bind(('127.0.0.1',0));jump_port=jump_sock.getsockname()[1]
+ assert port>1024 and jump_port>1024 and port!=jump_port
  (d/'sshd_config').write_text(f'''ListenAddress 127.0.0.1
 Port {port}
 HostKey {d}/host
@@ -54,11 +55,39 @@ PrintLastLog no
 ForceCommand /bin/sh {d}/remote.sh
 LogLevel VERBOSE
 ''')
- for name,key in [('known_hosts','host'),('changed_known_hosts','wrong-host')]:
-  fields=(d/(key+'.pub')).read_text().split()
-  (d/name).write_text(f'[127.0.0.1]:{port} {fields[0]} {fields[1]}\n')
+ (d/'jump_sshd_config').write_text(f'''ListenAddress 127.0.0.1
+Port {jump_port}
+HostKey {d}/host
+PidFile {d}/jump_sshd.pid
+AuthorizedKeysFile {d}/authorized_keys
+StrictModes no
+UsePAM no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+AllowUsers {getpass.getuser()}
+AllowTcpForwarding yes
+AllowAgentForwarding no
+X11Forwarding no
+PermitTunnel no
+PermitTTY no
+PrintMotd no
+PrintLastLog no
+LogLevel VERBOSE
+''')
+ host_fields=(d/'host.pub').read_text().split()
+ wrong_fields=(d/'wrong-host.pub').read_text().split()
+ target_host=f'[127.0.0.1]:{port} {host_fields[0]} {host_fields[1]}\n'
+ jump_host=f'[127.0.0.1]:{jump_port} {host_fields[0]} {host_fields[1]}\n'
+ changed_target=f'[127.0.0.1]:{port} {wrong_fields[0]} {wrong_fields[1]}\n'
+ (d/'known_hosts').write_text(target_host+jump_host)
+ (d/'changed_known_hosts').write_text(changed_target+jump_host)
  for name,known in [('config','known_hosts'),('changed-config','changed_known_hosts')]:
-  (d/name).write_text(f'''Host *
+  (d/name).write_text(f'''Host fixture-jump
+ HostName 127.0.0.1
+ Port {jump_port}
+Host *
  HostName 127.0.0.1
  Port {port}
  User {getpass.getuser()}
@@ -75,25 +104,33 @@ LogLevel VERBOSE
  ProxyCommand none
 ''')
  subprocess.run([sshd,'-t','-f',str(d/'sshd_config')],check=True)
- with (d/'sshd.log').open('w+') as log:
+ subprocess.run([sshd,'-t','-f',str(d/'jump_sshd_config')],check=True)
+ def wait_ready(server,listen_port,label):
+  deadline=time.monotonic()+5
+  while True:
+   if server.poll() is not None: raise RuntimeError(f'{label} sshd exited at startup')
+   try:
+    with socket.create_connection(('127.0.0.1',listen_port),timeout=.2): return
+   except OSError:
+    if time.monotonic()>deadline: raise
+    time.sleep(.05)
+ with (d/'sshd.log').open('w+') as log, (d/'jump_sshd.log').open('w+') as jump_log:
   server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'sshd_config')],stdout=log,stderr=log)
+  jump_server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'jump_sshd_config')],stdout=jump_log,stderr=jump_log)
   try:
-   deadline=time.monotonic()+5
-   while True:
-    if server.poll() is not None: raise RuntimeError('isolated sshd exited at startup')
-    try:
-     with socket.create_connection(('127.0.0.1',port),timeout=.2): break
-    except OSError:
-     if time.monotonic()>deadline: raise
-     time.sleep(.05)
+   wait_ready(server,port,'target')
+   wait_ready(jump_server,jump_port,'jump')
    env=dict(os.environ,INSPIRUM_SSH_FIXTURE=str(d))
    cmd=['cargo','test','--locked','--test','ssh_integration','--','--ignored','--nocapture','--test-threads=1']
    print('RUN:',' '.join(cmd),flush=True)
-   print(f'Isolated unprivileged sshd: 127.0.0.1:{port}; keys removed on exit',flush=True)
+   print(f'Isolated target sshd: 127.0.0.1:{port}; jump sshd: 127.0.0.1:{jump_port}; keys removed on exit',flush=True)
    subprocess.run(cmd,env=env,check=True)
   finally:
-   server.terminate()
-   try: server.wait(timeout=5)
-   except subprocess.TimeoutExpired: server.kill();server.wait()
-   log.seek(0);print('--- disposable sshd log ---\n'+log.read(),flush=True)
+   for process in (server,jump_server):
+    process.terminate()
+   for process in (server,jump_server):
+    try: process.wait(timeout=5)
+    except subprocess.TimeoutExpired: process.kill();process.wait()
+   log.seek(0);print('--- disposable target sshd log ---\n'+log.read(),flush=True)
+   jump_log.seek(0);print('--- disposable jump sshd log ---\n'+jump_log.read(),flush=True)
 PY
