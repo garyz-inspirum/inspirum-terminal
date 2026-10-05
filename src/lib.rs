@@ -298,17 +298,30 @@ pub fn delete_session(sessions: &[Session], name: &str) -> Result<Vec<Session>> 
     Ok(next)
 }
 
+fn copy_name_candidate(source: &str, number: Option<u32>) -> String {
+    let suffix = match number {
+        Some(number) => format!(" copy {number}"),
+        None => " copy".to_owned(),
+    };
+    let max_source_bytes = 256 - suffix.len();
+    let mut end = source.len().min(max_source_bytes);
+    while !source.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &source[..end], suffix)
+}
+
 /// Build a unique editable duplicate without persisting it.
 pub fn duplicate_session_draft(sessions: &[Session], source: &Session) -> Session {
     let mut copy = source.clone();
-    let base = format!("{} copy", source.name);
-    if !sessions.iter().any(|profile| profile.name == base) {
-        copy.name = base;
+    let first = copy_name_candidate(&source.name, None);
+    if !sessions.iter().any(|profile| profile.name == first) {
+        copy.name = first;
         return copy;
     }
     let mut suffix = 2_u32;
     loop {
-        let candidate = format!("{base} {suffix}");
+        let candidate = copy_name_candidate(&source.name, Some(suffix));
         if !sessions.iter().any(|profile| profile.name == candidate) {
             copy.name = candidate;
             return copy;
