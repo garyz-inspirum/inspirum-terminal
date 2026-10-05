@@ -7,7 +7,7 @@ Current scope:
 - native `eframe`/egui desktop window;
 - terminal rendering and PTY integration through `egui_term`;
 - SSH sessions and interactive SFTP tabs launched as argument vectors through the system OpenSSH client tools;
-- saved, non-secret connection profiles;
+- saved, non-secret connection profiles with search, rename-on-save, editable duplication, and confirmed deletion;
 - first-class profile controls for identity-file paths, ProxyJump, authentication-method policy, GSSAPI delegation policy, `IdentitiesOnly`, agent/X11 forwarding, compression, connect timeout, keepalive, remote auto-command, and local/remote/dynamic port forwarding;
 - multiple SSH/SFTP terminal tabs, explicit disconnect by closing a tab, and explicit reconnect after a remote/session exit;
 - OpenSSH configuration, key material, agent, authentication prompts, host-key database, proxy transport, and forwarding implementation remain owned by OpenSSH.

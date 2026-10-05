@@ -1,5 +1,8 @@
 //! Small native connection/profile interface; terminal mechanics stay upstream.
-use crate::{Session, load_sessions, save_sessions, terminal};
+use crate::{
+    Session, delete_session, duplicate_session_draft, load_sessions, save_session_edit,
+    save_sessions, session_matches_query, terminal,
+};
 use eframe::egui;
 use egui_term::{PtyEvent, TerminalBackend, TerminalView};
 use std::{
@@ -78,6 +81,9 @@ pub struct App {
     path: PathBuf,
     config: Option<PathBuf>,
     profiles: Vec<Session>,
+    profile_query: String,
+    selected_profile: Option<String>,
+    delete_confirm: Option<String>,
     draft: Session,
     port: String,
     connect_timeout: String,
@@ -110,6 +116,9 @@ impl App {
             path,
             config,
             profiles,
+            profile_query: String::new(),
+            selected_profile: None,
+            delete_confirm: None,
             draft: Session::default(),
             port: String::new(),
             connect_timeout: String::new(),
@@ -186,20 +195,100 @@ impl App {
                     ui.label("SSH-first • system OpenSSH");
                     ui.separator();
                     ui.label("Saved sessions");
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.profile_query)
+                                    .hint_text("Search name, host or user"),
+                            )
+                            .has_focus()
+                        {
+                            self.terminal_focus = None;
+                        }
+                        if ui.small_button("New").clicked() {
+                            self.terminal_focus = None;
+                            self.selected_profile = None;
+                            self.delete_confirm = None;
+                            self.load_draft(Session::default());
+                        }
+                    });
 
                     let mut selected = None;
                     egui::ScrollArea::vertical()
                         .max_height(150.0)
                         .show(ui, |ui| {
-                            for profile in &self.profiles {
-                                if ui.button(&profile.name).clicked() {
+                            for profile in self
+                                .profiles
+                                .iter()
+                                .filter(|profile| session_matches_query(profile, &self.profile_query))
+                            {
+                                let is_selected =
+                                    self.selected_profile.as_deref() == Some(profile.name.as_str());
+                                if ui.selectable_label(is_selected, &profile.name).clicked() {
                                     selected = Some(profile.clone());
                                 }
                             }
                         });
                     if let Some(profile) = selected {
                         self.terminal_focus = None;
+                        self.selected_profile = Some(profile.name.clone());
+                        self.delete_confirm = None;
                         self.load_draft(profile);
+                    }
+
+                    if let Some(selected_name) = self.selected_profile.clone() {
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Duplicate").clicked()
+                                && let Some(source) = self
+                                    .profiles
+                                    .iter()
+                                    .find(|profile| profile.name == selected_name)
+                                    .cloned()
+                            {
+                                let draft = duplicate_session_draft(&self.profiles, &source);
+                                self.terminal_focus = None;
+                                self.selected_profile = None;
+                                self.delete_confirm = None;
+                                self.load_draft(draft);
+                            }
+                            if ui
+                                .small_button("Delete")
+                                .on_hover_text("Delete the selected saved profile")
+                                .clicked()
+                            {
+                                self.terminal_focus = None;
+                                self.delete_confirm = Some(selected_name.clone());
+                            }
+                        });
+                    }
+
+                    if let Some(name) = self.delete_confirm.clone() {
+                        ui.group(|ui| {
+                            ui.label(format!("Delete saved profile {name:?}?"));
+                            ui.small("This removes only the saved profile. Open SSH/SFTP tabs are not disconnected.");
+                            ui.horizontal(|ui| {
+                                if ui.button("Confirm delete").clicked() {
+                                    let result = (|| -> anyhow::Result<()> {
+                                        let next = delete_session(&self.profiles, &name)?;
+                                        save_sessions(&self.path, &next)?;
+                                        self.profiles = next;
+                                        self.delete_confirm = None;
+                                        if self.selected_profile.as_deref() == Some(name.as_str()) {
+                                            self.selected_profile = None;
+                                            self.load_draft(Session::default());
+                                        }
+                                        Ok(())
+                                    })();
+                                    self.error = result
+                                        .err()
+                                        .map(|error| format!("{error:#}"))
+                                        .unwrap_or_default();
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    self.delete_confirm = None;
+                                }
+                            });
+                        });
                     }
 
                     ui.separator();
@@ -413,17 +502,18 @@ impl App {
                             .clicked()
                         {
                             self.terminal_focus = None;
+                            let selected_name = self.selected_profile.clone();
                             let result = self.validated_draft().and_then(|session| {
-                                let mut next = self.profiles.clone();
-                                if let Some(existing) =
-                                    next.iter_mut().find(|p| p.name == session.name)
-                                {
-                                    *existing = session;
-                                } else {
-                                    next.push(session);
-                                }
+                                let saved_name = session.name.clone();
+                                let next = save_session_edit(
+                                    &self.profiles,
+                                    selected_name.as_deref(),
+                                    session,
+                                )?;
                                 save_sessions(&self.path, &next)?;
                                 self.profiles = next;
+                                self.selected_profile = Some(saved_name);
+                                self.delete_confirm = None;
                                 Ok(())
                             });
                             self.error =
