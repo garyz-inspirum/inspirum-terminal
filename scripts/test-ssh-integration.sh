@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Linux-only unprivileged disposable loopback sshd; no production config touched.
+# Linux-only disposable loopback SSH fixtures; no production SSH config is touched.
+# Core fixtures are unprivileged. Password/PAM MFA acceptance uses disposable OS users and
+# a root sshd only when passwordless sudo is available (as on the Linux CI runner).
 # Runs the SSH integration fixture tests only. Not Windows or macOS native execution.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Respect standard Cargo overrides; keep generated credentials outside the checkout.
 export TERM=xterm-256color
 python3 - <<'PY'
-import getpass, os, pathlib, shutil, socket, subprocess, tempfile, time
+import atexit, getpass, os, pathlib, shutil, socket, subprocess, tempfile, time
 default_tmp = str(pathlib.Path(os.environ['CARGO_TARGET_DIR']).resolve().parent) if os.environ.get('CARGO_TARGET_DIR') else tempfile.gettempdir()
 root=pathlib.Path(os.environ.get('INSPIRUM_TEST_TMPDIR', default_tmp))
 root.mkdir(parents=True, exist_ok=True)
@@ -14,6 +16,24 @@ sshd=shutil.which('sshd') or '/usr/sbin/sshd'
 if not pathlib.Path(sshd).is_file(): raise SystemExit('ERROR: fixture requires sshd')
 with tempfile.TemporaryDirectory(prefix='ssh-fixture-',dir=root) as tmp:
  d=pathlib.Path(tmp);os.chmod(d,0o700)
+ fixture_password='inspirum-fixture-password'
+ privileged_auth=(shutil.which('sudo') is not None and subprocess.run(['sudo','-n','true'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0)
+ created_users=[]
+ auth_public_dir=None
+ def cleanup_users():
+  for user in reversed(created_users):
+   subprocess.run(
+    ['sudo','-n','userdel','-f',user],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    check=False,
+   )
+  created_users.clear()
+ def cleanup_public_assets():
+  if auth_public_dir is not None:
+   shutil.rmtree(auth_public_dir, ignore_errors=True)
+ atexit.register(cleanup_users)
+ atexit.register(cleanup_public_assets)
  for key in ('host','client','wrong-host','wrong-client'):
   subprocess.run(['ssh-keygen','-q','-t','ed25519','-N','','-f',str(d/key)],check=True)
  subprocess.run(
@@ -23,6 +43,16 @@ with tempfile.TemporaryDirectory(prefix='ssh-fixture-',dir=root) as tmp:
  (d/'authorized_keys').write_text(
   (d/'client.pub').read_text()+(d/'encrypted-client.pub').read_text()
  )
+ (d/'auth_remote.sh').write_text('''#!/bin/sh
+stty -echo
+printf 'FIXTURE_AUTHENTICATED\\n'
+while IFS= read -r line; do
+ case "$line" in
+ exit) exit 0 ;;
+ esac
+done
+''')
+ os.chmod(d/'auth_remote.sh',0o755)
  (d/'remote.sh').write_text('''#!/bin/sh
 stty -echo
 printf '%s\\n' "$$" > "'''+str(d)+'''/remote.pid"
@@ -39,11 +69,14 @@ while IFS= read -r line; do
  esac
 done
 '''.replace('\\n','\n'))
- with socket.socket() as sock, socket.socket() as jump_sock, socket.socket() as sftp_sock:
+ with socket.socket() as sock, socket.socket() as jump_sock, socket.socket() as sftp_sock, socket.socket() as password_sock, socket.socket() as mfa_sock:
   sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
   jump_sock.bind(('127.0.0.1',0));jump_port=jump_sock.getsockname()[1]
   sftp_sock.bind(('127.0.0.1',0));sftp_port=sftp_sock.getsockname()[1]
- assert min(port,jump_port,sftp_port)>1024 and len({port,jump_port,sftp_port})==3
+  password_sock.bind(('127.0.0.1',0));password_port=password_sock.getsockname()[1]
+  mfa_sock.bind(('127.0.0.1',0));mfa_port=mfa_sock.getsockname()[1]
+ all_ports={port,jump_port,sftp_port,password_port,mfa_port}
+ assert min(all_ports)>1024 and len(all_ports)==5
  (d/'sshd_config').write_text(f'''ListenAddress 127.0.0.1
 Port {port}
 HostKey {d}/host
@@ -111,14 +144,80 @@ Subsystem sftp internal-sftp
 ForceCommand internal-sftp -d {d}/sftp-root
 LogLevel VERBOSE
 ''')
+ if privileged_auth:
+  suffix=str(os.getpid())
+  auth_public_dir=pathlib.Path(tempfile.mkdtemp(prefix='inspirum-auth-fixture-',dir='/tmp'))
+  os.chmod(auth_public_dir,0o755)
+  shutil.copyfile(d/'authorized_keys',auth_public_dir/'authorized_keys')
+  os.chmod(auth_public_dir/'authorized_keys',0o644)
+  shutil.copyfile(d/'auth_remote.sh',auth_public_dir/'auth_remote.sh')
+  os.chmod(auth_public_dir/'auth_remote.sh',0o755)
+  password_user=('inspw'+suffix)[-31:]
+  mfa_user=('inspmfa'+suffix)[-31:]
+  for user in (password_user,mfa_user):
+   subprocess.run(['sudo','-n','useradd','-M','-s','/bin/sh',user],check=True)
+   created_users.append(user)
+   subprocess.run(
+    ['sudo','-n','chpasswd'],
+    input=f'{user}:{fixture_password}\n',
+    text=True,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    check=True,
+   )
+  (d/'password_sshd_config').write_text(f'''ListenAddress 127.0.0.1
+Port {password_port}
+HostKey {d}/host
+PidFile {d}/password-sshd.pid
+StrictModes no
+UsePAM yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+PubkeyAuthentication no
+AuthenticationMethods password
+AllowUsers {password_user}
+AllowTcpForwarding no
+AllowAgentForwarding no
+X11Forwarding no
+PermitTunnel no
+PermitTTY yes
+PrintMotd no
+PrintLastLog no
+ForceCommand /bin/sh {auth_public_dir}/auth_remote.sh
+LogLevel VERBOSE
+''')
+  (d/'mfa_sshd_config').write_text(f'''ListenAddress 127.0.0.1
+Port {mfa_port}
+HostKey {d}/host
+PidFile {d}/mfa-sshd.pid
+AuthorizedKeysFile {auth_public_dir}/authorized_keys
+StrictModes no
+UsePAM yes
+PasswordAuthentication no
+KbdInteractiveAuthentication yes
+PubkeyAuthentication yes
+AuthenticationMethods publickey,keyboard-interactive:pam
+AllowUsers {mfa_user}
+AllowTcpForwarding no
+AllowAgentForwarding no
+X11Forwarding no
+PermitTunnel no
+PermitTTY yes
+PrintMotd no
+PrintLastLog no
+ForceCommand /bin/sh {auth_public_dir}/auth_remote.sh
+LogLevel VERBOSE
+''')
  host_fields=(d/'host.pub').read_text().split()
  wrong_fields=(d/'wrong-host.pub').read_text().split()
  target_host=f'[127.0.0.1]:{port} {host_fields[0]} {host_fields[1]}\n'
  jump_host=f'[127.0.0.1]:{jump_port} {host_fields[0]} {host_fields[1]}\n'
  sftp_host=f'[127.0.0.1]:{sftp_port} {host_fields[0]} {host_fields[1]}\n'
+ password_host=f'[127.0.0.1]:{password_port} {host_fields[0]} {host_fields[1]}\n'
+ mfa_host=f'[127.0.0.1]:{mfa_port} {host_fields[0]} {host_fields[1]}\n'
  changed_target=f'[127.0.0.1]:{port} {wrong_fields[0]} {wrong_fields[1]}\n'
- (d/'known_hosts').write_text(target_host+jump_host+sftp_host)
- (d/'changed_known_hosts').write_text(changed_target+jump_host+sftp_host)
+ (d/'known_hosts').write_text(target_host+jump_host+sftp_host+password_host+mfa_host)
+ (d/'changed_known_hosts').write_text(changed_target+jump_host+sftp_host+password_host+mfa_host)
  for name,known in [('config','known_hosts'),('changed-config','changed_known_hosts')]:
   (d/name).write_text(f'''Host fixture-jump
  HostName 127.0.0.1
@@ -173,9 +272,53 @@ Host *
  ControlPath none
  ProxyCommand none
 ''')
+ if privileged_auth:
+  (d/'password-config').write_text(f'''Host *
+ HostName 127.0.0.1
+ Port {password_port}
+ User {password_user}
+ PubkeyAuthentication no
+ PasswordAuthentication yes
+ KbdInteractiveAuthentication no
+ PreferredAuthentications password
+ IdentityAgent none
+ UserKnownHostsFile {d}/known_hosts
+ GlobalKnownHostsFile /dev/null
+ BatchMode no
+ NumberOfPasswordPrompts 1
+ ConnectTimeout 3
+ UpdateHostKeys no
+ ControlMaster no
+ ControlPath none
+ ProxyCommand none
+''')
+  (d/'mfa-config').write_text(f'''Host *
+ HostName 127.0.0.1
+ Port {mfa_port}
+ User {mfa_user}
+ IdentityFile {d}/client
+ IdentitiesOnly yes
+ IdentityAgent none
+ PubkeyAuthentication yes
+ PasswordAuthentication no
+ KbdInteractiveAuthentication yes
+ PreferredAuthentications publickey,keyboard-interactive
+ UserKnownHostsFile {d}/known_hosts
+ GlobalKnownHostsFile /dev/null
+ BatchMode no
+ NumberOfPasswordPrompts 1
+ ConnectTimeout 3
+ UpdateHostKeys no
+ ControlMaster no
+ ControlPath none
+ ProxyCommand none
+''')
  subprocess.run([sshd,'-t','-f',str(d/'sshd_config')],check=True)
  subprocess.run([sshd,'-t','-f',str(d/'jump_sshd_config')],check=True)
  subprocess.run([sshd,'-t','-f',str(d/'sftp_sshd_config')],check=True)
+ if privileged_auth:
+  subprocess.run(['sudo','-n',sshd,'-t','-f',str(d/'password_sshd_config')],check=True)
+  subprocess.run(['sudo','-n',sshd,'-t','-f',str(d/'mfa_sshd_config')],check=True)
  def wait_ready(server,listen_port,label):
   deadline=time.monotonic()+5
   while True:
@@ -185,20 +328,34 @@ Host *
    except OSError:
     if time.monotonic()>deadline: raise
     time.sleep(.05)
- with (d/'sshd.log').open('w+') as log, (d/'jump_sshd.log').open('w+') as jump_log, (d/'sftp_sshd.log').open('w+') as sftp_log:
-  server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'sshd_config')],stdout=log,stderr=log)
-  jump_server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'jump_sshd_config')],stdout=jump_log,stderr=jump_log)
-  sftp_server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'sftp_sshd_config')],stdout=sftp_log,stderr=sftp_log)
-  agent_sock=d/'agent.sock'
-  agent=subprocess.Popen(
-   ['ssh-agent','-D','-a',str(agent_sock)],
-   stdout=subprocess.DEVNULL,
-   stderr=subprocess.DEVNULL,
-  )
+ with (d/'sshd.log').open('w+') as log, (d/'jump_sshd.log').open('w+') as jump_log, (d/'sftp_sshd.log').open('w+') as sftp_log, (d/'password_sshd.log').open('w+') as password_log, (d/'mfa_sshd.log').open('w+') as mfa_log:
+  processes=[]
+  server=jump_server=sftp_server=password_server=mfa_server=agent=None
   try:
+   server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'sshd_config')],stdout=log,stderr=log)
+   processes.append(server)
+   jump_server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'jump_sshd_config')],stdout=jump_log,stderr=jump_log)
+   processes.append(jump_server)
+   sftp_server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'sftp_sshd_config')],stdout=sftp_log,stderr=sftp_log)
+   processes.append(sftp_server)
+   if privileged_auth:
+    password_server=subprocess.Popen(['sudo','-n',sshd,'-D','-e','-f',str(d/'password_sshd_config')],stdout=password_log,stderr=password_log)
+    processes.append(password_server)
+    mfa_server=subprocess.Popen(['sudo','-n',sshd,'-D','-e','-f',str(d/'mfa_sshd_config')],stdout=mfa_log,stderr=mfa_log)
+    processes.append(mfa_server)
+   agent_sock=d/'agent.sock'
+   agent=subprocess.Popen(
+    ['ssh-agent','-D','-a',str(agent_sock)],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+   )
+   processes.append(agent)
    wait_ready(server,port,'target')
    wait_ready(jump_server,jump_port,'jump')
    wait_ready(sftp_server,sftp_port,'sftp')
+   if privileged_auth:
+    wait_ready(password_server,password_port,'password')
+    wait_ready(mfa_server,mfa_port,'mfa')
    deadline=time.monotonic()+5
    while not agent_sock.exists():
     if agent.poll() is not None: raise RuntimeError('ssh-agent exited at startup')
@@ -216,18 +373,27 @@ Host *
     os.environ,
     INSPIRUM_SSH_FIXTURE=str(d),
     SSH_AUTH_SOCK=str(agent_sock),
+    INSPIRUM_PRIV_AUTH_FIXTURE='1' if privileged_auth else '0',
+    INSPIRUM_FIXTURE_PASSWORD=fixture_password,
    )
    cmd=['cargo','test','--locked','--test','ssh_integration','--','--ignored','--nocapture','--test-threads=1']
    print('RUN:',' '.join(cmd),flush=True)
-   print(f'Isolated target sshd: 127.0.0.1:{port}; jump sshd: 127.0.0.1:{jump_port}; sftp sshd: 127.0.0.1:{sftp_port}; keys removed on exit',flush=True)
+   auth_summary=(f'; password sshd: 127.0.0.1:{password_port}; MFA sshd: 127.0.0.1:{mfa_port}' if privileged_auth else '; password/MFA fixture skipped (passwordless sudo unavailable)')
+   print(f'Isolated target sshd: 127.0.0.1:{port}; jump sshd: 127.0.0.1:{jump_port}; sftp sshd: 127.0.0.1:{sftp_port}{auth_summary}; credentials removed on exit',flush=True)
    subprocess.run(cmd,env=env,check=True)
   finally:
-   for process in (server,jump_server,sftp_server,agent):
-    process.terminate()
-   for process in (server,jump_server,sftp_server,agent):
+   for process in reversed(processes):
+    if process.poll() is None:
+     process.terminate()
+   for process in reversed(processes):
     try: process.wait(timeout=5)
     except subprocess.TimeoutExpired: process.kill();process.wait()
+   cleanup_users()
+   cleanup_public_assets()
    log.seek(0);print('--- disposable target sshd log ---\n'+log.read(),flush=True)
    jump_log.seek(0);print('--- disposable jump sshd log ---\n'+jump_log.read(),flush=True)
    sftp_log.seek(0);print('--- disposable sftp sshd log ---\n'+sftp_log.read(),flush=True)
+   if privileged_auth:
+    password_log.seek(0);print('--- disposable password sshd log ---\n'+password_log.read(),flush=True)
+    mfa_log.seek(0);print('--- disposable MFA sshd log ---\n'+mfa_log.read(),flush=True)
 PY

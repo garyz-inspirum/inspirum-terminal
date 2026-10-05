@@ -41,7 +41,8 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Delegate identity/agent/authentication prompts to OpenSSH (not a claim every method is tested).
 - [x] Public-key, password, keyboard-interactive/MFA and `IdentitiesOnly` profile policy controls with Inherit/Enable/Disable semantics. Authentication prompts and secrets remain inside OpenSSH; method-specific acceptance tests are still pending.
 - [x] GSSAPI authentication and credential-delegation profile policy controls with Inherit/Enable/Disable semantics and an explicit delegation risk warning. Runtime support is platform/OpenSSH-build dependent and capability acceptance remains pending.
-- [ ] Password, encrypted-private-key, keyboard-interactive/MFA, agent and GSSAPI authentication acceptance tests across applicable platforms.
+- [x] Linux CI run #78 at `1a8716d0d9ed45e3c1d43c1db5918cc5725b2186` verified password authentication, encrypted private key, SSH agent, public-key + keyboard-interactive PAM MFA, disabled-method negative cases, password-prompt cancellation, and stalled-handshake timeout through the application PTY path.
+- [ ] GSSAPI authentication acceptance with a real Kerberos realm, plus isolated authenticated-server acceptance for applicable methods on Windows and macOS.
 - [ ] ControlMaster/multiplexing workflow and platform limitations.
 - [ ] HTTP and SOCKS proxy workflows and no-direct-fallback verification.
 - [x] Optional per-profile remote command executed by OpenSSH after authentication; it is stored as profile metadata, passed after the SSH destination, and never invoked through a local shell. Remote-command acceptance remains pending.
@@ -49,8 +50,8 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Ask-before-trusting and already-trusted-only host-key modes.
 - [x] Host-key trust panel resolves effective `Hostname`/`Port`/`HostKeyAlias` with `ssh -G`, inspects `known_hosts` via `ssh-keygen -F`, and requires explicit confirmation before `ssh-keygen -R` removal. It does not auto-accept replacement keys; custom `UserKnownHostsFile` paths must be selected explicitly.
 - [x] Separate argv construction without a shell.
-- [x] Disposable Linux sshd fixture: 3 ignored tests verified for public-key session I/O, resize, changed-host-key rejection, exit, and disconnect cleanup. Not password, MFA, or Windows/macOS acceptance.
-- [x] Identity-file path editor plus validated profile persistence; private-key contents and passphrases are never stored. Native auth acceptance is still pending.
+- [x] Disposable Linux sshd fixture covers public-key session I/O, resize, changed-host-key rejection, exit, disconnect cleanup, encrypted-key and agent authentication, password/PAM-MFA policy cases, password-prompt cancellation, and stalled-handshake timeout. Password/PAM cases use disposable users only when passwordless sudo is available; CI run #78 passed all 15 fixture tests. Windows/macOS isolated-server acceptance remains pending.
+- [x] Identity-file path editor plus validated profile persistence; private-key contents and passphrases are never stored. Linux encrypted-key and agent authentication are verified; Windows/macOS isolated auth acceptance remains pending.
 - [x] ProxyJump profile/UI and discrete `-J` argv support. ProxyCommand UI and safe preview remain planned.
 - [x] Local, remote, and dynamic forwarding profile/UI with discrete `-L`/`-R`/`-D` argv and `ExitOnForwardFailure=yes`. Native forwarding acceptance and richer lifecycle controls remain pending.
 - [x] Agent forwarding and X11 forwarding profile/UI with Inherit/Enable/Disable policy and explicit risk text. Native acceptance remains pending.
