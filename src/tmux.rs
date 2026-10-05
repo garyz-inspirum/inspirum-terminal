@@ -54,7 +54,7 @@ pub fn create_session(session: &Session, name: &str) -> Result<Session> {
 }
 
 fn list_command() -> &'static str {
-    "command -v tmux >/dev/null 2>&1 || exit 127; tmux list-sessions -F '#{session_name}\t#{session_attached}' 2>/dev/null || true"
+    "command -v tmux >/dev/null 2>&1 || exit 127; tmux list-sessions -F '#{session_name}|#{session_attached}' 2>/dev/null || true"
 }
 
 pub fn list_args(session: &Session, config: Option<&Path>) -> Result<Vec<String>> {
@@ -80,7 +80,7 @@ pub fn parse_sessions(output: &str) -> Result<Vec<TmuxSession>> {
     let mut sessions = Vec::new();
     for line in output.lines().filter(|line| !line.trim().is_empty()) {
         let (name, attached) = line
-            .split_once('\t')
+            .split_once('|')
             .context("unexpected tmux list-sessions output")?;
         validate_tmux_name(name)?;
         let attached_clients = attached
@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn parser_returns_selectable_session_state() {
         assert_eq!(
-            parse_sessions("alpha\t0\nbeta-2\t3\n").unwrap(),
+            parse_sessions("alpha|0\nbeta-2|3\n").unwrap(),
             vec![
                 TmuxSession {
                     name: "alpha".into(),
