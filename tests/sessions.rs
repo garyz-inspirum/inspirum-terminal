@@ -50,9 +50,9 @@ fn advanced_ssh_fields_map_to_discrete_openssh_arguments() {
     s.ssh = SshOptions {
         identity_file: "/keys/work key".into(),
         proxy_jump: "jump-user@bastion:2200,second-hop".into(),
-        agent_forwarding: true,
-        x11_forwarding: true,
-        compression: true,
+        agent_forwarding: Some(true),
+        x11_forwarding: Some(true),
+        compression: Some(true),
         connect_timeout_seconds: Some(12),
         server_alive_interval_seconds: Some(30),
         local_forwards: vec![
@@ -93,6 +93,28 @@ fn advanced_ssh_fields_map_to_discrete_openssh_arguments() {
             "alice",
             "-p",
             "2222",
+            "--",
+            "work-alias"
+        ]
+    );
+}
+
+#[test]
+fn advanced_ssh_policies_can_explicitly_disable_configured_features() {
+    let mut s = session();
+    s.ssh.agent_forwarding = Some(false);
+    s.ssh.x11_forwarding = Some(false);
+    s.ssh.compression = Some(false);
+    assert_eq!(
+        s.ssh_args().unwrap(),
+        [
+            "-tt",
+            "-o",
+            "StrictHostKeyChecking=ask",
+            "-a",
+            "-x",
+            "-o",
+            "Compression=no",
             "--",
             "work-alias"
         ]
