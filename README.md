@@ -126,4 +126,4 @@ Verify downloads with the platform's SHA-256 tooling before running them. Checks
 
 See `CONTRIBUTING.md`. Inspirum Terminal's own source is licensed under the Apache License 2.0; the full terms are in `LICENSE`. Third-party dependencies remain under their respective licenses and are not relicensed by the project. Release archives include their collected license and notice material in `THIRD_PARTY_NOTICES/`.
 
-- [SSH connection multiplexing](docs/controlmaster.md)
+- [SSH connection multiplexing](docs/controlmaster.md)\n- [SSH tunnel manager](docs/tunnels.md)

@@ -67,6 +67,29 @@ fn parse_forward_lines(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn forward_editor(ui: &mut egui::Ui, label: &str, value: &mut String, default_spec: &str) -> bool {
+    ui.label(label);
+    let mut rows = parse_forward_lines(value);
+    let mut remove = None;
+    let mut focused = false;
+    for (index, row) in rows.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            focused |= ui.text_edit_singleline(row).has_focus();
+            if ui.small_button("Remove").clicked() {
+                remove = Some(index);
+            }
+        });
+    }
+    if let Some(index) = remove {
+        rows.remove(index);
+    }
+    if ui.small_button(format!("Add {label}")).clicked() {
+        rows.push(default_spec.to_owned());
+    }
+    *value = rows.join("\n");
+    focused
+}
+
 fn ssh_policy_control(ui: &mut egui::Ui, label: &str, value: &mut Option<bool>) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
@@ -98,6 +121,9 @@ pub struct App {
     local_forwards: String,
     remote_forwards: String,
     dynamic_forwards: String,
+    forward_risk_ack: bool,
+    tunnel_process: Option<terminal::TunnelProcess>,
+    tunnel_notice: String,
     known_hosts_path: String,
     host_key_notice: String,
     host_key_remove_confirm: Option<(terminal::HostKeyTarget, Option<PathBuf>)>,
@@ -142,6 +168,9 @@ impl App {
             local_forwards: String::new(),
             remote_forwards: String::new(),
             dynamic_forwards: String::new(),
+            forward_risk_ack: false,
+            tunnel_process: None,
+            tunnel_notice: String::new(),
             known_hosts_path: String::new(),
             host_key_notice: String::new(),
             host_key_remove_confirm: None,
@@ -185,6 +214,8 @@ impl App {
         self.local_forwards = session.ssh.local_forwards.join("\n");
         self.remote_forwards = session.ssh.remote_forwards.join("\n");
         self.dynamic_forwards = session.ssh.dynamic_forwards.join("\n");
+        self.forward_risk_ack = false;
+        self.tunnel_notice.clear();
         self.draft = session;
     }
 
@@ -899,40 +930,110 @@ impl App {
                                 "One OpenSSH forwarding specification per line. These are added to any forwards from OpenSSH config. Profile forwarding is tied to this SSH session and fails the connection if setup fails.",
                             );
 
-                            ui.label("Local forwards (-L)");
-                            if ui
-                                .add(
-                                    egui::TextEdit::multiline(&mut self.local_forwards)
-                                        .desired_rows(2)
-                                        .hint_text("127.0.0.1:8080:internal.example:80"),
-                                )
-                                .has_focus()
-                            {
+                            if forward_editor(
+                                ui,
+                                "Local forward (-L)",
+                                &mut self.local_forwards,
+                                "127.0.0.1:8080:internal.example:80",
+                            ) {
+                                self.terminal_focus = None;
+                            }
+                            if forward_editor(
+                                ui,
+                                "Remote forward (-R)",
+                                &mut self.remote_forwards,
+                                "127.0.0.1:9000:127.0.0.1:3000",
+                            ) {
+                                self.terminal_focus = None;
+                            }
+                            if forward_editor(
+                                ui,
+                                "Dynamic forward (-D)",
+                                &mut self.dynamic_forwards,
+                                "127.0.0.1:1080",
+                            ) {
                                 self.terminal_focus = None;
                             }
 
-                            ui.label("Remote forwards (-R)");
-                            if ui
-                                .add(
-                                    egui::TextEdit::multiline(&mut self.remote_forwards)
-                                        .desired_rows(2)
-                                        .hint_text("127.0.0.1:9000:127.0.0.1:3000"),
-                                )
-                                .has_focus()
-                            {
-                                self.terminal_focus = None;
+                            let preview = self.validated_draft().ok();
+                            let exposed = preview
+                                .as_ref()
+                                .is_some_and(crate::session_requires_forward_risk_ack);
+                            if exposed {
+                                ui.checkbox(
+                                    &mut self.forward_risk_ack,
+                                    "I understand one or more listeners bind beyond loopback",
+                                );
+                                ui.small(
+                                    "Non-loopback listeners may expose local or remote services to other hosts. This acknowledgement is required each time the tunnel manager is started.",
+                                );
                             }
 
-                            ui.label("Dynamic forwards (-D)");
-                            if ui
-                                .add(
-                                    egui::TextEdit::multiline(&mut self.dynamic_forwards)
-                                        .desired_rows(2)
-                                        .hint_text("127.0.0.1:1080"),
-                                )
-                                .has_focus()
-                            {
-                                self.terminal_focus = None;
+                            ui.horizontal(|ui| {
+                                let running = self
+                                    .tunnel_process
+                                    .as_mut()
+                                    .is_some_and(|process| process.is_running().unwrap_or(false));
+                                if ui
+                                    .add_enabled(!running, egui::Button::new("Start tunnels"))
+                                    .clicked()
+                                {
+                                    let result = self.validated_draft().and_then(|session| {
+                                        anyhow::ensure!(
+                                            !crate::session_requires_forward_risk_ack(&session)
+                                                || self.forward_risk_ack,
+                                            "non-loopback tunnel binds require explicit risk acknowledgement"
+                                        );
+                                        let process = terminal::start_tunnels(
+                                            &session,
+                                            self.config.as_deref(),
+                                        )?;
+                                        let count = session.ssh.local_forwards.len()
+                                            + session.ssh.remote_forwards.len()
+                                            + session.ssh.dynamic_forwards.len();
+                                        self.tunnel_notice = format!(
+                                            "{count} tunnel(s) running in SSH process {}",
+                                            process.id()
+                                        );
+                                        self.tunnel_process = Some(process);
+                                        Ok(())
+                                    });
+                                    self.error =
+                                        result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+                                }
+                                if ui
+                                    .add_enabled(running, egui::Button::new("Stop tunnels"))
+                                    .clicked()
+                                    && let Some(mut process) = self.tunnel_process.take()
+                                {
+                                    match process.stop() {
+                                        Ok(()) => self.tunnel_notice = "Tunnels stopped; listeners closed.".into(),
+                                        Err(error) => self.error = format!("{error:#}"),
+                                    }
+                                }
+                            });
+                            if !self.tunnel_notice.is_empty() {
+                                ui.small(&self.tunnel_notice);
+                            }
+                            if let Some(session) = preview {
+                                let status = if self
+                                    .tunnel_process
+                                    .as_mut()
+                                    .is_some_and(|process| process.is_running().unwrap_or(false))
+                                {
+                                    "running"
+                                } else {
+                                    "stopped"
+                                };
+                                for spec in &session.ssh.local_forwards {
+                                    ui.small(format!("Local  {spec}  • {status}"));
+                                }
+                                for spec in &session.ssh.remote_forwards {
+                                    ui.small(format!("Remote {spec}  • {status}"));
+                                }
+                                for spec in &session.ssh.dynamic_forwards {
+                                    ui.small(format!("SOCKS  {spec}  • {status}"));
+                                }
                             }
                         });
 

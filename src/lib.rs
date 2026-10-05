@@ -295,6 +295,35 @@ fn valid_proxy_jump(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"._-@:,%[]".contains(&b))
 }
 
+pub fn forward_requires_risk_ack(spec: &str, dynamic: bool) -> bool {
+    if spec.starts_with("127.0.0.1:")
+        || spec.starts_with("localhost:")
+        || spec.starts_with("[::1]:")
+    {
+        return false;
+    }
+    if dynamic {
+        return spec.contains(':');
+    }
+    // With no explicit bind address, -L/-R have listen-port:host:host-port (two colons).
+    // An explicit bind adds another separator; bracketed IPv6 naturally also lands here.
+    spec.bytes().filter(|byte| *byte == b':').count() > 2
+}
+
+pub fn session_requires_forward_risk_ack(session: &Session) -> bool {
+    session
+        .ssh
+        .local_forwards
+        .iter()
+        .chain(session.ssh.remote_forwards.iter())
+        .any(|spec| forward_requires_risk_ack(spec, false))
+        || session
+            .ssh
+            .dynamic_forwards
+            .iter()
+            .any(|spec| forward_requires_risk_ack(spec, true))
+}
+
 fn validate_forward_specs(label: &str, specs: &[String]) -> Result<()> {
     ensure!(specs.len() <= 32, "at most 32 {label}s are supported");
     for spec in specs {
