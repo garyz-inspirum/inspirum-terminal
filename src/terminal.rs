@@ -56,7 +56,7 @@ fn safe_proxy_target(value: &str) -> bool {
         && !value.starts_with('-')
         && value
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._-:%".contains(&byte))
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-:".contains(&byte))
 }
 
 fn quote_proxy_program(path: &Path) -> Result<String> {
@@ -87,6 +87,7 @@ pub fn proxy_command_for_target(
     target_host: &str,
     target_port: u16,
 ) -> Result<Option<String>> {
+    session.ssh_args()?;
     if session.ssh.proxy_kind == ProxyKind::None {
         return Ok(None);
     }
