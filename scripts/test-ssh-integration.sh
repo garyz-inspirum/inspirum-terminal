@@ -14,6 +14,7 @@ root=pathlib.Path(os.environ.get('INSPIRUM_TEST_TMPDIR', default_tmp))
 root.mkdir(parents=True, exist_ok=True)
 sshd=shutil.which('sshd') or '/usr/sbin/sshd'
 if not pathlib.Path(sshd).is_file(): raise SystemExit('ERROR: fixture requires sshd')
+if shutil.which('tmux') is None: raise SystemExit('ERROR: fixture requires tmux')
 with tempfile.TemporaryDirectory(prefix='ssh-fixture-',dir=root) as tmp:
  d=pathlib.Path(tmp);os.chmod(d,0o700)
  fixture_password='inspirum-fixture-password'
