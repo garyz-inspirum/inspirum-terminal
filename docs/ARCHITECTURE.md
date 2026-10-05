@@ -10,11 +10,11 @@ Inspirum Terminal is an early SSH-only native desktop slice. The architecture de
 
 `src/main.rs` parses `--profiles` and `--ssh-config`, resolves the default platform configuration directory, sets `TERM=xterm-256color` before threads start, and launches an `eframe` window.
 
-`src/app.rs` owns the egui connection form, saved-profile list, active terminal tabs, error display, explicit keyboard-focus ownership, and PTY event channel. A terminal acquires keyboard ownership only after connect, tab selection, or a click in the terminal; pointer hover cannot take focus from a form field. Closing a tab drops its terminal backend and is the current disconnect operation.
+`src/app.rs` owns the egui connection form, searchable saved-profile list, selected-profile edit state, active terminal tabs, error display, explicit keyboard-focus ownership, and PTY event channel. A terminal acquires keyboard ownership only after connect, tab selection, or a click in the terminal; pointer hover cannot take focus from a form field. Closing a tab drops its terminal backend and is the current disconnect operation.
 
 ### Profiles and launch policy
 
-`src/lib.rs` defines the non-secret `Session` model and JSON persistence. Profile fields are validated before save and load. Both directions enforce the same 1 MiB serialized-file limit. Writes validate and serialize before creating a temporary file, then use replacement so a failed save does not truncate a prior profile file. Unknown JSON fields are rejected.
+`src/lib.rs` defines the non-secret `Session` model and JSON persistence. Profile fields are validated before save and load. Saved-profile rename, duplicate-draft, delete, and search operations use pure library helpers: rename collisions are rejected, deletion requires an exact selected name, duplication chooses an unused editable name, and persistence still goes through the same atomic replacement path. Both directions enforce the same 1 MiB serialized-file limit. Writes validate and serialize before creating a temporary file, then use replacement so a failed save does not truncate a prior profile file. Unknown JSON fields are rejected.
 
 A profile can contain a display name, host/config alias, username, port, strict-host-key flag, identity-file path, ProxyJump route, tri-state agent/X11 forwarding and compression policies (inherit/enable/disable), connection timeout, server keepalive interval, and local/remote/dynamic forwarding specifications. It cannot contain a password, passphrase, private-key contents, arbitrary OpenSSH option, remote command, or shell fragment. Forwarding is launched with `ExitOnForwardFailure=yes` so a requested listener failure is surfaced instead of silently producing a partially configured session.
 
