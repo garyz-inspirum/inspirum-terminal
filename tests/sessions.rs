@@ -403,7 +403,6 @@ fn delete_session_removes_only_the_selected_profile() {
     assert!(delete_session(&next, "missing").is_err());
 }
 
-
 #[test]
 fn profile_export_round_trips_the_validated_nonsecret_model() {
     let dir = tempfile::tempdir().unwrap();
@@ -419,6 +418,17 @@ fn profile_export_round_trips_the_validated_nonsecret_model() {
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     assert!(value[0].get("password").is_none());
     assert!(value[0].get("passphrase").is_none());
+}
+
+#[test]
+fn profile_export_refuses_to_overwrite_existing_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("export.json");
+    std::fs::write(&path, b"keep-me").unwrap();
+
+    let error = export_sessions(&path, &[session()]).unwrap_err().to_string();
+    assert!(error.contains("already exists"), "{error}");
+    assert_eq!(std::fs::read(path).unwrap(), b"keep-me");
 }
 
 #[test]
