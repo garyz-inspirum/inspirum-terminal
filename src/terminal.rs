@@ -156,6 +156,11 @@ fn ssh_keygen_args(action: &str, lookup: &str, known_hosts: Option<&Path>) -> Re
     );
     let mut args = vec![action.to_owned(), lookup.to_owned()];
     if let Some(path) = known_hosts {
+        ensure!(
+            path.is_file(),
+            "known_hosts override does not exist or is not a regular file: {}",
+            path.display()
+        );
         let value = path
             .to_str()
             .context("known_hosts path must be valid Unicode")?;
@@ -171,14 +176,34 @@ pub fn inspect_known_host(target: &HostKeyTarget, known_hosts: Option<&Path>) ->
         .args(args)
         .output()
         .context(SSH_KEYGEN_HELP)?;
-    match output.status.code() {
-        Some(0) => Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned()),
-        Some(1) => Ok(String::new()),
+    let matches = match output.status.code() {
+        Some(0) => String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        Some(1) => return Ok(String::new()),
         _ => anyhow::bail!(
             "ssh-keygen -F failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ),
-    }
+    };
+
+    let mut matched_file = tempfile::NamedTempFile::new()
+        .context("create temporary host-key fingerprint input")?;
+    std::io::Write::write_all(&mut matched_file, matches.as_bytes())?;
+    matched_file.as_file().sync_all()?;
+    let fingerprint_output = Command::new("ssh-keygen")
+        .arg("-l")
+        .arg("-f")
+        .arg(matched_file.path())
+        .output()
+        .context(SSH_KEYGEN_HELP)?;
+    ensure!(
+        fingerprint_output.status.success(),
+        "ssh-keygen fingerprint failed: {}",
+        String::from_utf8_lossy(&fingerprint_output.stderr).trim()
+    );
+    let fingerprints = String::from_utf8_lossy(&fingerprint_output.stdout)
+        .trim()
+        .to_owned();
+    Ok(format!("{matches}\nFingerprints:\n{fingerprints}"))
 }
 
 pub fn remove_known_host(target: &HostKeyTarget, known_hosts: Option<&Path>) -> Result<String> {
