@@ -455,9 +455,7 @@ impl App {
         }
 
         let search_shortcut = ctx.input(|input| {
-            input.key_pressed(egui::Key::F)
-                && input.modifiers.command
-                && input.modifiers.shift
+            input.key_pressed(egui::Key::F) && input.modifiers.command && input.modifiers.shift
         });
         if search_shortcut {
             self.search_open = true;
@@ -1787,7 +1785,8 @@ impl App {
                     self.paste_notice = "Paste sent after explicit confirmation.".into();
                     self.terminal_focus = Some(id);
                 } else {
-                    self.paste_notice = "Paste cancelled because the terminal is no longer active.".into();
+                    self.paste_notice =
+                        "Paste cancelled because the terminal is no longer active.".into();
                 }
                 self.pending_paste = None;
             } else if cancel {
