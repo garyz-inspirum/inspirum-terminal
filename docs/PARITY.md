@@ -7,12 +7,13 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 ## Evidence recorded with this docs snapshot
 
 - [x] Source review of the implementation passed.
-- [x] Linux: 17 normal Rust tests and 3 ignored fixture tests verified by a worker. The Windows-only PTY child-argument test is outside those 17 and has not been executed.
-- [x] Collector: 11 tests parent-verified.
-- [x] License closure for Linux and Windows passed worker evidence.
+- [x] PR #5 native CI passed at `f52d6297c118da4b590526b8b027a6a8353656ff` on Linux x86_64, Windows x64, and macOS Apple Silicon.
+- [x] Linux CI additionally passed the isolated authenticated `sshd` fixture for public-key login, I/O, resize, changed-host-key rejection, exit, and disconnect cleanup.
+- [x] Windows CI passed the native PTY child-argument-boundary test and actual OpenSSH child-exit smoke test.
+- [x] macOS Apple Silicon CI passed native build/tests/clippy and the OpenSSH child-exit smoke test.
+- [x] License closure for Linux and Windows passed existing evidence.
 - [x] CI and release workflows pin Rust 1.95.0. Their gates are unchanged by this documentation.
-- [ ] Windows native execution. Not yet run.
-- [ ] macOS native execution. Not yet run.
+- [ ] Isolated authenticated SSH-server acceptance on Windows and macOS.
 - [ ] macOS distribution. The active `dispatch 0.2.0` notice still blocks distribution, not compilation. The defined macOS artifact is a bare unsigned, unnotarized executable, not an app bundle.
 - [ ] Full WindTerm parity. Not claimed.
 
@@ -24,9 +25,10 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Locked dependency graph.
 - [x] CI definitions for Linux x64, Windows x64, and macOS Apple Silicon, pinned to Rust 1.95.0. Definitions are not successful runs.
 - [x] Release workflow definition for archives, README, full Apache-2.0 license, notices, and SHA-256 manifest. The macOS path packages a bare executable, not an app bundle.
-- [ ] Successful native CI and release runs, downloaded artifact verification.
-- [ ] Native Windows x64 execution. Not yet run.
-- [ ] Native macOS Apple Silicon execution. Not yet run.
+- [x] Successful native CI run on Linux x64, Windows x64, and macOS Apple Silicon.
+- [ ] Successful release run and downloaded artifact verification.
+- [x] Native Windows x64 CI execution, including PTY argv-boundary and OpenSSH child-exit smoke tests; broader SSH acceptance is still pending.
+- [x] Native macOS Apple Silicon CI execution, including the OpenSSH child-exit smoke test; broader SSH acceptance is still pending.
 - [ ] macOS distribution while the `dispatch 0.2.0` notice remains unresolved. Compilation is not blocked.
 - [ ] Code signing, Windows reputation, macOS signing, and notarization.
 - [ ] Installer packages and automated update policy.
@@ -53,7 +55,7 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Connection timeout, server keepalive interval, and compression profile/UI. Cipher/algorithm policy UI remains planned.
 - [ ] Reconnect behavior with explicit user control.
 - [ ] Connection diagnostics and sanitized support bundle.
-- [ ] Native Windows and macOS OpenSSH/PTY integration tests.
+- [ ] Native Windows and macOS isolated SSH-server acceptance tests for authentication, trust, ProxyJump/forwarding, and lifecycle behavior.
 
 ## Sessions and workspace
 
