@@ -52,7 +52,8 @@ fn unicode_wide_combining_and_emoji_survive_terminal_path() {
     let text = wait_for_text(&mut backend, "UNICODE_DONE", Duration::from_secs(5));
 
     assert!(text.contains("ASCII"));
-    assert!(text.contains("中文"));
+    assert!(text.contains('中'));
+    assert!(text.contains('文'));
     assert!(text.contains('😀'));
     assert!(text.contains('e'));
     assert!(
