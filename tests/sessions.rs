@@ -1,7 +1,7 @@
 use inspirum_terminal::{
     Session, SessionImportMode, SshOptions, delete_session, duplicate_session_draft,
     export_sessions, import_sessions, load_sessions, save_session_edit, save_sessions,
-    session_matches_query,
+    session_matches_query, session_profile_key,
 };
 
 fn session() -> Session {
@@ -11,6 +11,9 @@ fn session() -> Session {
         user: String::new(),
         port: None,
         strict: false,
+        folder: String::new(),
+        tags: Vec::new(),
+        favorite: false,
         ssh: SshOptions::default(),
     }
 }
@@ -243,7 +246,7 @@ fn saves_nonsecret_sessions_atomically_and_round_trips() {
     assert_eq!(load_sessions(&path).unwrap(), vec![next]);
 
     let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    assert_eq!(value[0].as_object().unwrap().len(), 6);
+    assert_eq!(value[0].as_object().unwrap().len(), 9);
 }
 
 #[test]
@@ -301,6 +304,9 @@ fn oversized_save_does_not_replace_previous_file() {
         user: "u".repeat(253),
         port: Some(65535),
         strict: true,
+        folder: String::new(),
+        tags: Vec::new(),
+        favorite: false,
         ssh: SshOptions {
             identity_file: "i".repeat(4096),
             ..SshOptions::default()
@@ -323,6 +329,70 @@ fn saved_profile_search_matches_name_host_and_user_case_insensitively() {
     assert!(session_matches_query(&s, "work-ALIAS"));
     assert!(session_matches_query(&s, "alice"));
     assert!(!session_matches_query(&s, "bastion"));
+}
+
+#[test]
+fn organization_metadata_migrates_and_searches_without_affecting_ssh_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sessions.json");
+    std::fs::write(
+        &path,
+        r#"[{"name":"legacy","host":"legacy-host","user":"","port":null,"strict":false}]"#,
+    )
+    .unwrap();
+    let legacy = load_sessions(&path).unwrap();
+    assert_eq!(legacy[0].folder, "");
+    assert!(legacy[0].tags.is_empty());
+    assert!(!legacy[0].favorite);
+
+    let mut organized = session();
+    organized.folder = "Production/Core".into();
+    organized.tags = vec!["router".into(), "Sydney".into()];
+    organized.favorite = true;
+    assert!(session_matches_query(&organized, "production"));
+    assert!(session_matches_query(&organized, "sydney"));
+    assert!(session_matches_query(&organized, "router"));
+    assert_eq!(
+        organized.ssh_args().unwrap(),
+        ["-tt", "-o", "StrictHostKeyChecking=ask", "--", "work-alias"]
+    );
+}
+
+#[test]
+fn duplicate_names_in_different_folders_have_deterministic_identity() {
+    let mut prod = session();
+    prod.folder = "prod".into();
+    let mut lab = session();
+    lab.folder = "lab".into();
+    lab.host = "lab-alias".into();
+
+    let saved = save_session_edit(&[prod.clone()], None, lab.clone()).unwrap();
+    assert_eq!(saved.len(), 2);
+    assert_ne!(session_profile_key(&prod), session_profile_key(&lab));
+
+    let mut moved = prod.clone();
+    moved.folder = "archive".into();
+    let next = save_session_edit(
+        &saved,
+        Some(&session_profile_key(&prod)),
+        moved.clone(),
+    )
+    .unwrap();
+    assert_eq!(next[0], moved);
+    assert_eq!(next[1], lab);
+}
+
+#[test]
+fn same_name_in_same_folder_is_rejected_but_different_folder_is_allowed() {
+    let mut first = session();
+    first.folder = "team-a".into();
+    let mut same_slot = first.clone();
+    same_slot.host = "other-host".into();
+    assert!(save_session_edit(&[first.clone()], None, same_slot).is_err());
+
+    let mut other_folder = first.clone();
+    other_folder.folder = "team-b".into();
+    assert!(save_session_edit(&[first], None, other_folder).is_ok());
 }
 
 #[test]
