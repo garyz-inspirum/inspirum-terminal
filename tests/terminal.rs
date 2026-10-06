@@ -143,20 +143,20 @@ fn retained_history_snapshot_includes_scrollback_and_survives_viewport_navigatio
         thread::sleep(Duration::from_millis(20));
     };
 
-    let first = history
+    let retained_scrollback = history
         .iter()
-        .position(|line| line.contains("HIST-001"))
-        .expect("oldest generated line retained");
+        .position(|line| line.contains("HIST-040"))
+        .expect("offscreen generated line retained");
     assert!(
         history.iter().any(|line| line.contains("HIST-080")),
         "newest generated line retained"
     );
-    assert!(backend.scroll_to_history_index(first));
+    assert!(backend.scroll_to_history_index(retained_scrollback));
     assert!(
         backend
             .history_lines()
             .iter()
-            .any(|line| line.contains("HIST-001")),
+            .any(|line| line.contains("HIST-040")),
         "scrolling the viewport must not alter retained history"
     );
 }
