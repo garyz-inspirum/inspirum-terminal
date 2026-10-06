@@ -45,3 +45,31 @@ Closing or reconnecting a participating pane disarms synchronization.
 The first workspace implementation intentionally supports at most two simultaneous split
 panes. Existing tabs outside the workspace remain available but are not synchronized
 unless they are part of the current two-pane workspace.
+
+
+## Advanced tab management
+
+Feature #56 extends the workspace with deterministic tab-management controls:
+
+- **Quick switcher** searches open tab names and is keyboard accessible with
+  **Ctrl/Cmd+Shift+K**, Arrow Up/Down, Enter and Escape.
+- Tabs can be moved left or right without reconnecting their PTYs.
+- Each open tab can carry a runtime visual label. Labels are presentation-only and do
+  not alter SSH policy or connection state.
+- Checkboxes provide multi-select for **Close selected**. **Close right** and
+  **Close others** provide bounded bulk actions around the active tab.
+- Bulk close always presents the complete affected list and explicitly counts live
+  sessions before any PTY is removed.
+- Split-pane headers show a visible **FOCUSED** marker for the pane currently receiving
+  terminal keyboard input.
+
+All close paths use one ownership-removal path. Each removed tab owns exactly one
+`TerminalBackend`; removing it drops that backend once, which performs the existing
+PTY/process cleanup.
+
+Changing synchronized-input target membership or closing a participating tab always
+disarms synchronized input. Reordering tabs never replays input and never reconnects a
+session.
+
+Saved workspace metadata remains non-connecting on load. The explicit
+**Restore & reconnect** safeguard and saved reconnect permission are unchanged.
