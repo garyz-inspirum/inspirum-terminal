@@ -20,3 +20,6 @@ egui_term = { path = "vendor/egui_term" }
 
 [profile.dev]
 debug = 0
+
+[patch.crates-io]
+dispatch = { path = "vendor/dispatch-compat" }
