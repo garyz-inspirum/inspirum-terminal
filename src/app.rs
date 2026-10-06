@@ -6,6 +6,7 @@ use crate::{
     scp_panel::ScpPanel,
     session_matches_query,
     sftp_browser::SftpBrowser,
+    startup::{self, StartupBehavior, StartupSettings},
     support::{self, SanitizedErrorHistory},
     terminal,
     terminal_ux::{self, PasteDecision, PastePolicy},
@@ -220,6 +221,11 @@ pub struct App {
     profile_transfer_path: String,
     replace_import_confirm: Option<PathBuf>,
     profile_transfer_notice: String,
+    startup_path: PathBuf,
+    startup_settings: StartupSettings,
+    startup_pending: bool,
+    startup_workspace_path: String,
+    startup_notice: String,
     draft: Session,
     port: String,
     proxy_port: String,
@@ -275,7 +281,15 @@ pub struct App {
 
 impl App {
     pub fn new(path: PathBuf, config: Option<PathBuf>) -> Self {
-        let (profiles, error, writable) = match load_sessions(&path) {
+        let startup_path = startup::settings_path(&path);
+        let (startup_settings, startup_error) = match startup::load_settings(&startup_path) {
+            Ok(settings) => (settings, String::new()),
+            Err(error) => (
+                StartupSettings::default(),
+                format!("Startup settings ignored: {error:#}"),
+            ),
+        };
+        let (profiles, mut error, writable) = match load_sessions(&path) {
             Ok(profiles) => (profiles, String::new(), true),
             Err(error) => (
                 Vec::new(),
@@ -284,6 +298,18 @@ impl App {
             ),
         };
         let (tx, rx) = mpsc::channel();
+        if !startup_error.is_empty() {
+            if !error.is_empty() {
+                error.push_str("\n");
+            }
+            error.push_str(&startup_error);
+        }
+
+        let startup_workspace_path = match &startup_settings.behavior {
+            StartupBehavior::Workspace { path } => path.clone(),
+            _ => String::new(),
+        };
+
         Self {
             path,
             config,
@@ -294,6 +320,11 @@ impl App {
             profile_transfer_path: String::new(),
             replace_import_confirm: None,
             profile_transfer_notice: String::new(),
+            startup_path,
+            startup_settings,
+            startup_pending: true,
+            startup_workspace_path,
+            startup_notice: String::new(),
             draft: Session::default(),
             port: String::new(),
             proxy_port: String::new(),
@@ -493,6 +524,63 @@ impl App {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context) {
+        if self.startup_pending {
+            self.startup_pending = false;
+            match self.startup_settings.behavior.clone() {
+                StartupBehavior::None => {}
+                StartupBehavior::Profile { profile } => {
+                    let result = (|| -> anyhow::Result<()> {
+                        let session = self
+                            .profiles
+                            .iter()
+                            .find(|session| session_profile_key(session) == profile)
+                            .cloned()
+                            .ok_or_else(|| anyhow::anyhow!("configured startup profile no longer exists"))?;
+                        anyhow::ensure!(self.tabs.len() < 16, "tab limit reached");
+                        let terminal = terminal::connect(
+                            self.next_id,
+                            ctx.clone(),
+                            self.tx.clone(),
+                            &session,
+                            self.config.as_deref(),
+                        )?;
+                        self.tabs.push(Tab {
+                            id: self.next_id,
+                            name: session.name.clone(),
+                            kind: TabKind::Ssh,
+                            session,
+                            terminal,
+                            exited: false,
+                        });
+                        self.active = Some(self.next_id);
+                        self.terminal_focus = Some(self.next_id);
+                        self.next_id += 1;
+                        Ok(())
+                    })();
+                    self.startup_notice = match result {
+                        Ok(()) => "Opened configured startup profile.".into(),
+                        Err(error) => format!("Startup profile not opened: {error:#}"),
+                    };
+                }
+                StartupBehavior::Workspace { path } => {
+                    match workspace::load_layout(&PathBuf::from(&path)) {
+                        Ok(layout) => {
+                            self.workspace_path = path;
+                            self.workspace_axis = layout.axis;
+                            self.workspace_reconnect_on_restore = layout.reconnect_on_restore;
+                            self.workspace_loaded = Some(layout);
+                            self.startup_notice =
+                                "Loaded startup workspace metadata. Reconnect still requires the explicit Restore & reconnect action.".into();
+                        }
+                        Err(error) => {
+                            self.startup_notice =
+                                format!("Startup workspace metadata not loaded: {error:#}");
+                        }
+                    }
+                }
+            }
+        }
+
         // Remote output may set titles/clipboard requests. Do NOT forward those to host APIs.
         for _ in 0..256 {
             let Ok((id, event)) = self.rx.try_recv() else {
@@ -727,7 +815,82 @@ impl App {
                         });
                     }
 
-                    egui::CollapsingHeader::new("Profile import / export")
+                    egui::CollapsingHeader::new("Startup behavior")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.small(
+                                "Startup choices are stored separately from profile imports. A workspace choice loads metadata only; reconnect remains an explicit action.",
+                            );
+                            if ui.button("Start with no session").clicked() {
+                                let settings = StartupSettings {
+                                    behavior: StartupBehavior::None,
+                                };
+                                match startup::save_settings(&self.startup_path, &settings) {
+                                    Ok(()) => {
+                                        self.startup_settings = settings;
+                                        self.startup_notice = "Startup action disabled.".into();
+                                    }
+                                    Err(error) => {
+                                        self.startup_notice =
+                                            format!("Cannot save startup settings: {error:#}");
+                                    }
+                                }
+                            }
+                            let can_use_selected = self.selected_profile.is_some();
+                            if ui
+                                .add_enabled(
+                                    can_use_selected,
+                                    egui::Button::new("Open selected profile on startup"),
+                                )
+                                .clicked()
+                                && let Some(profile) = self.selected_profile.clone()
+                            {
+                                let settings = StartupSettings {
+                                    behavior: StartupBehavior::Profile { profile },
+                                };
+                                match startup::save_settings(&self.startup_path, &settings) {
+                                    Ok(()) => {
+                                        self.startup_settings = settings;
+                                        self.startup_notice =
+                                            "Selected profile will open on next startup using normal host-key and authentication policy.".into();
+                                    }
+                                    Err(error) => {
+                                        self.startup_notice =
+                                            format!("Cannot save startup settings: {error:#}");
+                                    }
+                                }
+                            }
+                            ui.label("Workspace layout path");
+                            if ui
+                                .text_edit_singleline(&mut self.startup_workspace_path)
+                                .has_focus()
+                            {
+                                self.terminal_focus = None;
+                            }
+                            if ui.button("Load workspace metadata on startup").clicked() {
+                                let settings = StartupSettings {
+                                    behavior: StartupBehavior::Workspace {
+                                        path: self.startup_workspace_path.trim().to_owned(),
+                                    },
+                                };
+                                match startup::save_settings(&self.startup_path, &settings) {
+                                    Ok(()) => {
+                                        self.startup_settings = settings;
+                                        self.startup_notice =
+                                            "Workspace metadata will load on next startup; it will not reconnect automatically.".into();
+                                    }
+                                    Err(error) => {
+                                        self.startup_notice =
+                                            format!("Cannot save startup settings: {error:#}");
+                                    }
+                                }
+                            }
+                            if !self.startup_notice.is_empty() {
+                                ui.small(&self.startup_notice);
+                            }
+                        });
+
+                                        egui::CollapsingHeader::new("Profile import / export")
                         .default_open(false)
                         .show(ui, |ui| {
                             ui.small(
