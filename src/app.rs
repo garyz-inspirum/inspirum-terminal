@@ -1,7 +1,9 @@
 //! Small native connection/profile interface; terminal mechanics stay upstream.
 use crate::{
     ControlMasterMode, ProxyKind, Session, SessionImportMode,
-    appearance::{self, AppearanceSettings, CursorStyle, FontFamilyChoice, MousePasteAction, ThemePreset},
+    appearance::{
+        self, AppearanceSettings, CursorStyle, FontFamilyChoice, MousePasteAction, ThemePreset,
+    },
     delete_session, duplicate_session_draft, export_sessions,
     history::{HistoryRow, HistoryState},
     import_sessions, load_sessions, save_session_edit, save_sessions,
@@ -177,7 +179,12 @@ fn render_terminal_tab(
     copy_selected: bool,
     show_pane_header: bool,
     appearance: &AppearanceSettings,
-) -> (Option<(u64, TabKind, Session)>, bool, bool, Option<egui::PointerButton>) {
+) -> (
+    Option<(u64, TabKind, Session)>,
+    bool,
+    bool,
+    Option<egui::PointerButton>,
+) {
     let mut reconnect = None;
     let mut focus = false;
     let mut close = false;
@@ -204,7 +211,11 @@ fn render_terminal_tab(
         ui.separator();
     }
     let view = TerminalView::new(ui, &mut tab.terminal)
-        .set_focus(terminal_accepts_keyboard(terminal_focus, tab.id, tab.exited))
+        .set_focus(terminal_accepts_keyboard(
+            terminal_focus,
+            tab.id,
+            tab.exited,
+        ))
         .set_font(terminal_font(appearance))
         .set_theme(terminal_theme(appearance))
         .set_cursor_style(terminal_cursor(appearance.cursor_style))
@@ -686,8 +697,7 @@ impl App {
             PasteDecision::Confirm => {
                 self.pending_paste = Some((id, text));
                 self.terminal_focus = None;
-                self.paste_notice =
-                    "Clipboard paste is waiting for explicit confirmation.".into();
+                self.paste_notice = "Clipboard paste is waiting for explicit confirmation.".into();
             }
             PasteDecision::Block => {
                 self.paste_notice =
