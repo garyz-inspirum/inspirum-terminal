@@ -149,6 +149,52 @@ class CollectorTests(unittest.TestCase):
         path.write_text(json.dumps(manifest))
         return path
 
+    def canonical_checksum_supplement_manifest(
+        self, root: Path, *, checksum: str = "b" * 64
+    ) -> Path:
+        standard_path = root / "files" / "spdx" / "MIT.txt"
+        standard_path.parent.mkdir(parents=True)
+        standard_data = b"canonical MIT terms\n"
+        standard_path.write_bytes(standard_data)
+
+        declaration_path = root / "evidence" / "dep-Cargo.toml"
+        declaration_path.parent.mkdir(parents=True)
+        declaration_data = (
+            b"[package]\nname='dep'\nversion='2.0.0'\n"
+            b"repository='https://example.invalid/dep'\nlicense='MIT'\n"
+        )
+        declaration_path.write_bytes(declaration_data)
+        revision = "c" * 40
+        manifest = {
+            "format": 1,
+            "files": [{
+                "id": "spdx/MIT.txt",
+                "origin": "canonical_standard_text",
+                "path": "files/spdx/MIT.txt",
+                "publisher": "SPDX",
+                "sha256": hashlib.sha256(standard_data).hexdigest(),
+                "source_url": "https://spdx.org/licenses/MIT.txt",
+                "standard": "MIT",
+            }],
+            "packages": [{
+                "name": "dep",
+                "version": "2.0.0",
+                "metadata_repository": "https://example.invalid/dep",
+                "revision": revision,
+                "revision_provenance": "registry checksum plus pinned declaration",
+                "registry_checksum": checksum,
+                "declared_license": "MIT",
+                "declaration_path": "evidence/dep-Cargo.toml",
+                "declaration_sha256": hashlib.sha256(declaration_data).hexdigest(),
+                "declaration_url": f"https://example.invalid/dep/raw/{revision}/Cargo.toml",
+                "files": ["spdx/MIT.txt"],
+            }],
+            "unresolved": [],
+        }
+        path = root / "manifest.json"
+        path.write_text(json.dumps(manifest))
+        return path
+
     def test_confinement_rejects_symlink_escape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -212,6 +258,39 @@ class CollectorTests(unittest.TestCase):
                 json.dumps({"git": {"sha1": "a" * 40}})
             )
             with self.assertRaisesRegex(SystemExit, r"publication is blocked:[\s\S]*dep 2.0.0"):
+                self.run_main(metadata, root / "notices", supplements)
+
+    def test_checksum_pinned_canonical_license_supplement_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            metadata = self.metadata(root / "fixture", with_notice=False)
+            dependency = Path(metadata["packages"][1]["manifest_path"]).parent
+            checksum = "b" * 64
+            (dependency / ".cargo-checksum.json").write_text(
+                json.dumps({"package": checksum, "files": {}})
+            )
+            supplements = self.canonical_checksum_supplement_manifest(
+                root / "supplements", checksum=checksum
+            )
+            output = root / "notices"
+            self.assertEqual(self.run_main(metadata, output, supplements), 0)
+            generated = json.loads((output / "manifest.json").read_text())
+            files = generated["packages"][0]["files"]
+            self.assertEqual(files[0]["standard"], "MIT")
+            self.assertEqual(files[0]["origin"], "canonical_standard_text")
+
+    def test_checksum_pinned_supplement_rejects_registry_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            metadata = self.metadata(root / "fixture", with_notice=False)
+            dependency = Path(metadata["packages"][1]["manifest_path"]).parent
+            (dependency / ".cargo-checksum.json").write_text(
+                json.dumps({"package": "d" * 64, "files": {}})
+            )
+            supplements = self.canonical_checksum_supplement_manifest(
+                root / "supplements", checksum="b" * 64
+            )
+            with self.assertRaisesRegex(SystemExit, "supplemental registry checksum mismatch"):
                 self.run_main(metadata, root / "notices", supplements)
 
     def test_deterministic_metadata_and_provenance_collection(self) -> None:
