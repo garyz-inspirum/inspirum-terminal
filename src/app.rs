@@ -2505,19 +2505,9 @@ impl App {
         }
 
         if let Some(id) = close_pane {
-            self.tabs.retain(|tab| tab.id != id);
-            self.workspace_panes.retain(|pane| *pane != id);
-            self.sync_input.remove_pane(id);
-            if self.active == Some(id) {
-                self.active = self
-                    .workspace_panes
-                    .last()
-                    .copied()
-                    .or_else(|| self.tabs.last().map(|tab| tab.id));
-            }
-            if self.terminal_focus == Some(id) {
-                self.terminal_focus = self.active;
-            }
+            let removed = self.close_tabs(&[id]);
+            self.workspace_notice =
+                format!("Closed {removed} pane(s); synchronized input is disarmed.");
         }
         if let Some(axis) = split_requested {
             let source = self.active.and_then(|id| {
