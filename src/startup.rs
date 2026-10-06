@@ -1,7 +1,11 @@
 //! Safe startup behavior for saved profiles and workspaces.
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use std::{fs, io::Read, path::{Path, PathBuf}};
+use std::{
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 const MAX_STARTUP_BYTES: usize = 65_536;
 
@@ -10,10 +14,14 @@ const MAX_STARTUP_BYTES: usize = 65_536;
 pub enum StartupBehavior {
     #[default]
     None,
-    Profile { profile: String },
+    Profile {
+        profile: String,
+    },
     /// Startup workspace handling is metadata-only. Reconnection still requires the
     /// existing explicit Restore & reconnect action and persisted reconnect permission.
-    Workspace { path: String },
+    Workspace {
+        path: String,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,13 +37,17 @@ impl StartupSettings {
             StartupBehavior::None => {}
             StartupBehavior::Profile { profile } => {
                 ensure!(
-                    !profile.is_empty() && profile.len() <= 1024 && !profile.chars().any(char::is_control),
+                    !profile.is_empty()
+                        && profile.len() <= 1024
+                        && !profile.chars().any(char::is_control),
                     "startup profile selector is invalid"
                 );
             }
             StartupBehavior::Workspace { path } => {
                 ensure!(
-                    !path.trim().is_empty() && path.len() <= 4096 && !path.chars().any(char::is_control),
+                    !path.trim().is_empty()
+                        && path.len() <= 4096
+                        && !path.chars().any(char::is_control),
                     "startup workspace path is invalid"
                 );
             }
@@ -61,8 +73,12 @@ pub fn load_settings(path: &Path) -> Result<StartupSettings> {
         Err(error) => return Err(error).context("open startup settings"),
     };
     let mut bytes = Vec::new();
-    file.take((MAX_STARTUP_BYTES + 1) as u64).read_to_end(&mut bytes)?;
-    ensure!(bytes.len() <= MAX_STARTUP_BYTES, "startup settings exceed 64 KiB");
+    file.take((MAX_STARTUP_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= MAX_STARTUP_BYTES,
+        "startup settings exceed 64 KiB"
+    );
     let settings: StartupSettings =
         serde_json::from_slice(&bytes).context("parse startup settings")?;
     settings.validate()?;
@@ -78,7 +94,10 @@ pub fn save_settings(path: &Path, settings: &StartupSettings) -> Result<()> {
     fs::create_dir_all(parent).context("create startup settings directory")?;
     let mut bytes = serde_json::to_vec_pretty(settings)?;
     bytes.push(b'\n');
-    ensure!(bytes.len() <= MAX_STARTUP_BYTES, "startup settings exceed 64 KiB");
+    ensure!(
+        bytes.len() <= MAX_STARTUP_BYTES,
+        "startup settings exceed 64 KiB"
+    );
     let mut temp =
         tempfile::NamedTempFile::new_in(parent).context("create startup settings temp file")?;
     use std::io::Write;
@@ -109,7 +128,7 @@ mod tests {
         let path = dir.path().join("startup.json");
         let settings = StartupSettings {
             behavior: StartupBehavior::Profile {
-                profile: "prod\u{1f}router".into(),
+                profile: "4:prodrouter".into(),
             },
         };
         save_settings(&path, &settings).unwrap();
