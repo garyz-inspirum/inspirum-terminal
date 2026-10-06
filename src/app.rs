@@ -1195,6 +1195,90 @@ impl App {
             self.terminal_focus = self.active;
         }
 
+        if self.command_palette_open {
+            let items = command_palette::palette_items(&self.command_palette_query, &self.snippets);
+            if items.is_empty() {
+                self.command_palette_index = 0;
+            } else {
+                self.command_palette_index = self.command_palette_index.min(items.len() - 1);
+            }
+            if ctx.input(|input| input.key_pressed(egui::Key::ArrowDown)) && !items.is_empty() {
+                self.command_palette_index = (self.command_palette_index + 1) % items.len();
+            }
+            if ctx.input(|input| input.key_pressed(egui::Key::ArrowUp)) && !items.is_empty() {
+                self.command_palette_index =
+                    (self.command_palette_index + items.len() - 1) % items.len();
+            }
+            let activate = ctx.input(|input| input.key_pressed(egui::Key::Enter));
+            let escape = ctx.input(|input| input.key_pressed(egui::Key::Escape));
+            let mut chosen = None;
+            egui::Window::new("Command palette")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.command_palette_query)
+                            .hint_text("Search application actions or snippets"),
+                    );
+                    response.request_focus();
+                    ui.small("Local actions are labeled [APP]. Snippets are [REMOTE TEXT] and only stage text.");
+                    for (index, item) in items.iter().enumerate() {
+                        let label = match item {
+                            PaletteItem::LocalAction { label, .. } => format!("[APP] {label}"),
+                            PaletteItem::Snippet { name, .. } => format!("[REMOTE TEXT] {name}"),
+                        };
+                        if ui
+                            .selectable_label(index == self.command_palette_index, label)
+                            .clicked()
+                        {
+                            chosen = Some(index);
+                        }
+                    }
+                });
+            let selected = chosen.or_else(|| {
+                (activate && !items.is_empty()).then_some(self.command_palette_index)
+            });
+            if let Some(index) = selected {
+                match items[index].clone() {
+                    PaletteItem::Snippet { index, name } => {
+                        if let Some(snippet) = self.snippets.snippets.get(index) {
+                            self.command_sender_text = snippet.body.clone();
+                            self.snippet_notice =
+                                format!("Snippet '{name}' staged; press Send explicitly.");
+                        }
+                    }
+                    PaletteItem::LocalAction { id, .. } => match id {
+                        "connect" => {
+                            if self.terminal_focus.is_none() {
+                                self.connect_draft(ctx);
+                            }
+                        }
+                        "quick-switch" => {
+                            self.tab_switcher_open = true;
+                            self.tab_switcher_query.clear();
+                            self.tab_switcher_index = 0;
+                        }
+                        "search-history" => self.search_open = true,
+                        "close-active" => {
+                            if let Some(id) = self.active {
+                                self.close_tab_ids(&[id]);
+                            }
+                        }
+                        "toggle-sync" => {
+                            let next = !self.sync_input.armed();
+                            self.sync_input.set_armed(next);
+                        }
+                        _ => {}
+                    },
+                }
+                self.command_palette_open = false;
+                self.terminal_focus = self.active;
+            } else if escape {
+                self.command_palette_open = false;
+                self.terminal_focus = self.active;
+            }
+        }
+
         egui::SidePanel::left("connections")
             .resizable(true)
             .default_width(330.0)
@@ -1216,6 +1300,161 @@ impl App {
                             ui.small(
                                 "IME pre-edit and screen-reader integration depend on egui/winit and the native platform; committed Unicode text is forwarded unchanged.",
                             );
+                        });
+                    egui::CollapsingHeader::new("Command palette & snippets")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.small("Command palette: Ctrl/Cmd+Shift+P. Selecting a snippet only stages its text; it never executes automatically.");
+                            ui.label("Command sender");
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.command_sender_text)
+                                    .desired_rows(3)
+                                    .hint_text("Remote-shell text to send explicitly"),
+                            );
+                            ui.horizontal_wrapped(|ui| {
+                                ui.selectable_value(
+                                    &mut self.command_sender_target,
+                                    SendTarget::CurrentPane,
+                                    "Current pane",
+                                );
+                                ui.selectable_value(
+                                    &mut self.command_sender_target,
+                                    SendTarget::SelectedSyncPanes,
+                                    "Selected sync panes",
+                                );
+                                if ui.button("Send").clicked() {
+                                    self.stage_command_send();
+                                }
+                            });
+
+                            ui.separator();
+                            ui.label("Reusable snippets");
+                            ui.text_edit_singleline(&mut self.snippet_name);
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.snippet_body)
+                                    .desired_rows(3)
+                                    .hint_text("Snippet body; do not store secrets"),
+                            );
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("Save snippet").clicked() {
+                                    let candidate = Snippet {
+                                        name: self.snippet_name.trim().to_owned(),
+                                        body: self.snippet_body.clone(),
+                                    };
+                                    match candidate.validate() {
+                                        Ok(()) if self
+                                            .snippets
+                                            .snippets
+                                            .iter()
+                                            .any(|snippet| snippet.name.eq_ignore_ascii_case(&candidate.name)) =>
+                                        {
+                                            self.snippet_notice =
+                                                "Snippet name already exists.".into();
+                                        }
+                                        Ok(()) => {
+                                            self.snippets.snippets.push(candidate);
+                                            match command_palette::save_library(
+                                                &self.snippets_path,
+                                                &self.snippets,
+                                            ) {
+                                                Ok(()) => {
+                                                    self.snippet_name.clear();
+                                                    self.snippet_body.clear();
+                                                    self.snippet_notice =
+                                                        "Snippet saved.".into();
+                                                }
+                                                Err(error) => {
+                                                    self.snippets.snippets.pop();
+                                                    self.snippet_notice =
+                                                        format!("Cannot save snippet: {error:#}");
+                                                }
+                                            }
+                                        }
+                                        Err(error) => {
+                                            self.snippet_notice =
+                                                format!("Invalid snippet: {error:#}");
+                                        }
+                                    }
+                                }
+                                if ui.button("Complete by name").clicked()
+                                    && let Some(body) = command_palette::complete_snippet(
+                                        &self.snippet_name,
+                                        &self.snippets,
+                                    )
+                                {
+                                    self.command_sender_text = body;
+                                    self.snippet_notice =
+                                        "Snippet completion staged text only; press Send explicitly."
+                                            .into();
+                                }
+                            });
+
+                            let mut stage_index = None;
+                            for (index, snippet) in self.snippets.snippets.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("Stage").clicked() {
+                                        stage_index = Some(index);
+                                    }
+                                    ui.label(&snippet.name);
+                                });
+                            }
+                            if let Some(index) = stage_index
+                                && let Some(snippet) = self.snippets.snippets.get(index)
+                            {
+                                self.command_sender_text = snippet.body.clone();
+                                self.snippet_notice =
+                                    format!("Snippet '{}' staged; not executed.", snippet.name);
+                            }
+
+                            ui.separator();
+                            ui.label("Snippet import/export JSON path");
+                            ui.text_edit_singleline(&mut self.snippet_transfer_path);
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("Import").clicked() {
+                                    match command_palette::import_library(&PathBuf::from(
+                                        self.snippet_transfer_path.trim(),
+                                    )) {
+                                        Ok(library) => {
+                                            self.snippets = library;
+                                            match command_palette::save_library(
+                                                &self.snippets_path,
+                                                &self.snippets,
+                                            ) {
+                                                Ok(()) => {
+                                                    self.snippet_notice =
+                                                        "Snippet library imported.".into();
+                                                }
+                                                Err(error) => {
+                                                    self.snippet_notice =
+                                                        format!("Cannot persist imported snippets: {error:#}");
+                                                }
+                                            }
+                                        }
+                                        Err(error) => {
+                                            self.snippet_notice =
+                                                format!("Cannot import snippets: {error:#}");
+                                        }
+                                    }
+                                }
+                                if ui.button("Export").clicked() {
+                                    match command_palette::export_library(
+                                        &PathBuf::from(self.snippet_transfer_path.trim()),
+                                        &self.snippets,
+                                    ) {
+                                        Ok(()) => {
+                                            self.snippet_notice =
+                                                "Snippet library exported without overwrite.".into();
+                                        }
+                                        Err(error) => {
+                                            self.snippet_notice =
+                                                format!("Cannot export snippets: {error:#}");
+                                        }
+                                    }
+                                }
+                            });
+                            if !self.snippet_notice.is_empty() {
+                                ui.small(&self.snippet_notice);
+                            }
                         });
                     ui.separator();
                     ui.label("Saved sessions");
@@ -3451,6 +3690,41 @@ impl App {
             } else if cancel {
                 self.pending_paste = None;
                 self.paste_notice = "Paste cancelled.".into();
+                self.terminal_focus = self.active;
+            }
+        }
+
+        if let Some((targets, text)) = self.pending_command_send.clone() {
+            let mut send = false;
+            let mut cancel = false;
+            egui::Window::new("Confirm command send")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.strong(format!("Send multiline text to {} explicit target(s)?", targets.len()));
+                    ui.monospace(&text);
+                    ui.horizontal(|ui| {
+                        if ui.button("Send confirmed text").clicked() {
+                            send = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            if send {
+                for id in &targets {
+                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == *id && !tab.exited) {
+                        tab.terminal
+                            .process_command(BackendCommand::Write(text.as_bytes().to_vec()));
+                    }
+                }
+                self.pending_command_send = None;
+                self.snippet_notice = "Confirmed command text sent.".into();
+                self.terminal_focus = self.active;
+            } else if cancel {
+                self.pending_command_send = None;
+                self.snippet_notice = "Command send cancelled.".into();
                 self.terminal_focus = self.active;
             }
         }
