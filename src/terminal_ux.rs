@@ -47,6 +47,11 @@ pub fn classify_paste(policy: PastePolicy, text: &str) -> PasteDecision {
     }
 }
 
+pub fn classify_mouse_paste(policy: PastePolicy, text: &str) -> PasteDecision {
+    // Pointer shortcuts intentionally share the exact same policy as keyboard/OS paste.
+    classify_paste(policy, text)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SearchHit {
     pub line: usize,
@@ -158,6 +163,27 @@ mod tests {
         assert_ne!(
             classify_paste(PastePolicy::BlockMultiline, payload),
             PasteDecision::Send
+        );
+    }
+
+    #[test]
+    fn mouse_triggered_paste_cannot_bypass_guarded_multiline_policy() {
+        let multiline = "echo one\necho two";
+        assert_eq!(
+            classify_mouse_paste(PastePolicy::ConfirmMultiline, multiline),
+            PasteDecision::Confirm
+        );
+        assert_eq!(
+            classify_mouse_paste(PastePolicy::BlockMultiline, multiline),
+            PasteDecision::Block
+        );
+        assert_eq!(
+            classify_mouse_paste(PastePolicy::ConfirmAll, "single line"),
+            PasteDecision::Confirm
+        );
+        assert_eq!(
+            classify_mouse_paste(PastePolicy::ConfirmMultiline, "hello\0world"),
+            PasteDecision::Block
         );
     }
 
