@@ -277,16 +277,24 @@ fn appearance_controls(
 
     ui.horizontal_wrapped(|ui| {
         let mut custom_foreground = appearance.foreground.is_some();
-        if ui.checkbox(&mut custom_foreground, "Custom foreground").changed() {
-            appearance.foreground = custom_foreground.then(|| appearance.palette_defaults().0.into());
+        if ui
+            .checkbox(&mut custom_foreground, "Custom foreground")
+            .changed()
+        {
+            appearance.foreground =
+                custom_foreground.then(|| appearance.palette_defaults().0.into());
         }
         if let Some(value) = appearance.foreground.as_mut() {
             ui.add(egui::TextEdit::singleline(value).desired_width(90.0));
         }
 
         let mut custom_background = appearance.background.is_some();
-        if ui.checkbox(&mut custom_background, "Custom background").changed() {
-            appearance.background = custom_background.then(|| appearance.palette_defaults().1.into());
+        if ui
+            .checkbox(&mut custom_background, "Custom background")
+            .changed()
+        {
+            appearance.background =
+                custom_background.then(|| appearance.palette_defaults().1.into());
         }
         if let Some(value) = appearance.background.as_mut() {
             ui.add(egui::TextEdit::singleline(value).desired_width(90.0));
