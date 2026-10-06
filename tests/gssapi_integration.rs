@@ -10,7 +10,7 @@ use std::{
 fn fixture() -> PathBuf {
     let path = PathBuf::from(
         std::env::var_os("INSPIRUM_GSSAPI_FIXTURE")
-            .expect("run scripts/test-gssapi-integration.sh; missing fixture is not a skip"),
+            .expect("run scripts/test-gssapi-integration.py; missing fixture is not a skip"),
     );
     assert!(path.join("config").is_file());
     path
@@ -76,7 +76,7 @@ fn open(fixture: &Path, id: u64) -> (TerminalBackend, mpsc::Receiver<(u64, PtyEv
 }
 
 #[test]
-#[ignore = "requires scripts/test-gssapi-integration.sh"]
+#[ignore = "requires scripts/test-gssapi-integration.py"]
 fn gssapi_authenticates_with_disposable_ticket_and_no_delegation() {
     let fixture = fixture();
     let (mut backend, receiver) = open(&fixture, 821);
@@ -88,7 +88,7 @@ fn gssapi_authenticates_with_disposable_ticket_and_no_delegation() {
 }
 
 #[test]
-#[ignore = "requires scripts/test-gssapi-integration.sh with an empty credential cache"]
+#[ignore = "requires scripts/test-gssapi-integration.py with an empty credential cache"]
 fn gssapi_missing_ticket_fails_without_auth_fallback() {
     let fixture = fixture();
     let (mut backend, receiver) = open(&fixture, 822);
