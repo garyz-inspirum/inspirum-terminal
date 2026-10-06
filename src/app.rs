@@ -1,7 +1,8 @@
 //! Small native connection/profile interface; terminal mechanics stay upstream.
 use crate::{
-    ControlMasterMode, ProxyKind, Session, SessionImportMode, delete_session,
-    duplicate_session_draft, export_sessions,
+    ControlMasterMode, ProxyKind, Session, SessionImportMode,
+    appearance::{self, AppearanceSettings, CursorStyle, FontFamilyChoice, MousePasteAction, ThemePreset},
+    delete_session, duplicate_session_draft, export_sessions,
     history::{HistoryRow, HistoryState},
     import_sessions, load_sessions, save_session_edit, save_sessions,
     scp_panel::ScpPanel,
@@ -16,7 +17,10 @@ use crate::{
     workspace::{self, SplitAxis, SyncInputState, WorkspaceLayout},
 };
 use eframe::egui;
-use egui_term::{BackendCommand, PtyEvent, TerminalBackend, TerminalView};
+use egui_term::{
+    BackendCommand, ColorPalette, CursorStyle as EguiCursorStyle, FontSettings, PtyEvent,
+    TerminalBackend, TerminalFont, TerminalTheme, TerminalView,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -113,6 +117,56 @@ fn synchronized_event_bytes(event: &egui::Event) -> Option<Vec<u8>> {
     }
 }
 
+fn terminal_font(settings: &AppearanceSettings) -> TerminalFont {
+    let family = match settings.font_family {
+        FontFamilyChoice::Monospace => egui::FontFamily::Monospace,
+        FontFamilyChoice::Proportional => egui::FontFamily::Proportional,
+    };
+    TerminalFont::new(FontSettings {
+        font_type: egui::FontId::new(settings.font_size, family),
+    })
+}
+
+fn terminal_theme(settings: &AppearanceSettings) -> TerminalTheme {
+    let values = appearance::preset_palette(settings.theme);
+    let mut palette = ColorPalette {
+        foreground: values[0].into(),
+        background: values[1].into(),
+        black: values[2].into(),
+        red: values[3].into(),
+        green: values[4].into(),
+        yellow: values[5].into(),
+        blue: values[6].into(),
+        magenta: values[7].into(),
+        cyan: values[8].into(),
+        white: values[9].into(),
+        bright_black: values[10].into(),
+        bright_red: values[11].into(),
+        bright_green: values[12].into(),
+        bright_yellow: values[13].into(),
+        bright_blue: values[14].into(),
+        bright_magenta: values[15].into(),
+        bright_cyan: values[16].into(),
+        bright_white: values[17].into(),
+        ..ColorPalette::default()
+    };
+    if let Some(value) = &settings.foreground {
+        palette.foreground = value.clone();
+    }
+    if let Some(value) = &settings.background {
+        palette.background = value.clone();
+    }
+    TerminalTheme::new(Box::new(palette))
+}
+
+fn terminal_cursor(style: CursorStyle) -> EguiCursorStyle {
+    match style {
+        CursorStyle::Block => EguiCursorStyle::Block,
+        CursorStyle::Underline => EguiCursorStyle::Underline,
+        CursorStyle::Beam => EguiCursorStyle::Beam,
+    }
+}
+
 fn render_terminal_tab(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
@@ -120,10 +174,12 @@ fn render_terminal_tab(
     terminal_focus: Option<u64>,
     copy_selected: bool,
     show_pane_header: bool,
-) -> (Option<(u64, TabKind, Session)>, bool, bool) {
+    appearance: &AppearanceSettings,
+) -> (Option<(u64, TabKind, Session)>, bool, bool, Option<egui::PointerButton>) {
     let mut reconnect = None;
     let mut focus = false;
     let mut close = false;
+    let mut mouse_paste = None;
 
     if show_pane_header {
         ui.horizontal(|ui| {
@@ -145,11 +201,12 @@ fn render_terminal_tab(
         });
         ui.separator();
     }
-    let view = TerminalView::new(ui, &mut tab.terminal).set_focus(terminal_accepts_keyboard(
-        terminal_focus,
-        tab.id,
-        tab.exited,
-    ));
+    let view = TerminalView::new(ui, &mut tab.terminal)
+        .set_focus(terminal_accepts_keyboard(terminal_focus, tab.id, tab.exited))
+        .set_font(terminal_font(appearance))
+        .set_theme(terminal_theme(appearance))
+        .set_cursor_style(terminal_cursor(appearance.cursor_style))
+        .set_hide_pointer_while_typing(appearance.hide_pointer_while_typing);
     let response = ui.add(view);
     if copy_selected {
         let selected = tab.terminal.selectable_content();
@@ -160,7 +217,27 @@ fn render_terminal_tab(
     if response.clicked() && !tab.exited {
         focus = true;
     }
-    (reconnect, focus, close)
+    if response.hovered() && !tab.exited {
+        let pointer = ctx.input(|input| {
+            if input.pointer.button_clicked(egui::PointerButton::Middle) {
+                Some(egui::PointerButton::Middle)
+            } else if input.pointer.button_clicked(egui::PointerButton::Secondary) {
+                Some(egui::PointerButton::Secondary)
+            } else {
+                None
+            }
+        });
+        if pointer.is_some() {
+            mouse_paste = pointer;
+        }
+    }
+    if appearance.select_to_copy && response.drag_stopped() {
+        let selected = tab.terminal.selectable_content();
+        if !selected.is_empty() {
+            ctx.copy_text(selected);
+        }
+    }
+    (reconnect, focus, close, mouse_paste)
 }
 
 fn parse_optional_u16(value: &str, label: &str) -> anyhow::Result<Option<u16>> {
@@ -233,6 +310,9 @@ pub struct App {
     startup_pending: bool,
     startup_workspace_path: String,
     startup_notice: String,
+    appearance_path: PathBuf,
+    appearance: AppearanceSettings,
+    appearance_notice: String,
     draft: Session,
     profile_tags: String,
     port: String,
@@ -306,6 +386,14 @@ impl App {
                 format!("Startup settings ignored: {error:#}"),
             ),
         };
+        let appearance_path = appearance::settings_path(&path);
+        let (appearance, appearance_error) = match appearance::load_settings(&appearance_path) {
+            Ok(settings) => (settings, String::new()),
+            Err(error) => (
+                AppearanceSettings::default(),
+                format!("Appearance settings ignored: {error:#}"),
+            ),
+        };
         let (profiles, mut error, writable) = match load_sessions(&path) {
             Ok(profiles) => (profiles, String::new(), true),
             Err(error) => (
@@ -320,6 +408,12 @@ impl App {
                 error.push('\n');
             }
             error.push_str(&startup_error);
+        }
+        if !appearance_error.is_empty() {
+            if !error.is_empty() {
+                error.push('\n');
+            }
+            error.push_str(&appearance_error);
         }
 
         let startup_workspace_path = match &startup_settings.behavior {
@@ -342,6 +436,9 @@ impl App {
             startup_pending: true,
             startup_workspace_path,
             startup_notice: String::new(),
+            appearance_path,
+            appearance,
+            appearance_notice: String::new(),
             draft: Session::default(),
             profile_tags: String::new(),
             port: String::new(),
