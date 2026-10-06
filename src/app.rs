@@ -1,7 +1,11 @@
 //! Small native connection/profile interface; terminal mechanics stay upstream.
 use crate::{
-    ControlMasterMode, ProxyKind, Session, SessionImportMode, delete_session,
-    duplicate_session_draft, export_sessions,
+    ControlMasterMode, ProxyKind, Session, SessionImportMode,
+    appearance::{
+        self, AppearanceOverride, AppearanceSettings, TerminalAppearance, TerminalCursorStyle,
+        TerminalFontFamily, TerminalPalette,
+    },
+    delete_session, duplicate_session_draft, export_sessions,
     history::{HistoryRow, HistoryState},
     import_sessions, load_sessions, save_session_edit, save_sessions,
     scp_panel::ScpPanel,
@@ -16,7 +20,10 @@ use crate::{
     workspace::{self, SplitAxis, SyncInputState, WorkspaceLayout},
 };
 use eframe::egui;
-use egui_term::{BackendCommand, PtyEvent, TerminalBackend, TerminalView};
+use egui_term::{
+    BackendCommand, ColorPalette, CursorStyle, FontSettings, InteractionSettings, PtyEvent,
+    TerminalBackend, TerminalFont, TerminalTheme, TerminalView,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -113,6 +120,87 @@ fn synchronized_event_bytes(event: &egui::Event) -> Option<Vec<u8>> {
     }
 }
 
+fn terminal_theme(appearance: &TerminalAppearance) -> TerminalTheme {
+    let mut palette = ColorPalette::default();
+    match appearance.palette {
+        TerminalPalette::DefaultDark => {}
+        TerminalPalette::Light => {
+            palette.foreground = "#202124".into();
+            palette.background = "#f7f7f7".into();
+            palette.black = "#202124".into();
+            palette.red = "#b3261e".into();
+            palette.green = "#2e7d32".into();
+            palette.yellow = "#8a6d00".into();
+            palette.blue = "#1565c0".into();
+            palette.magenta = "#8e24aa".into();
+            palette.cyan = "#00796b".into();
+            palette.white = "#eceff1".into();
+            palette.bright_black = "#5f6368".into();
+            palette.bright_red = "#d93025".into();
+            palette.bright_green = "#188038".into();
+            palette.bright_yellow = "#a86f00".into();
+            palette.bright_blue = "#1a73e8".into();
+            palette.bright_magenta = "#a142f4".into();
+            palette.bright_cyan = "#00897b".into();
+            palette.bright_white = "#ffffff".into();
+            palette.dim_foreground = "#5f6368".into();
+        }
+        TerminalPalette::HighContrast => {
+            palette.foreground = "#ffffff".into();
+            palette.background = "#000000".into();
+            palette.black = "#000000".into();
+            palette.red = "#ff5555".into();
+            palette.green = "#55ff55".into();
+            palette.yellow = "#ffff55".into();
+            palette.blue = "#5555ff".into();
+            palette.magenta = "#ff55ff".into();
+            palette.cyan = "#55ffff".into();
+            palette.white = "#ffffff".into();
+            palette.bright_black = "#808080".into();
+            palette.bright_red = "#ff8080".into();
+            palette.bright_green = "#80ff80".into();
+            palette.bright_yellow = "#ffff80".into();
+            palette.bright_blue = "#8080ff".into();
+            palette.bright_magenta = "#ff80ff".into();
+            palette.bright_cyan = "#80ffff".into();
+            palette.bright_white = "#ffffff".into();
+            palette.dim_foreground = "#b0b0b0".into();
+        }
+    }
+    if let Some(foreground) = &appearance.foreground {
+        palette.foreground = foreground.clone();
+    }
+    if let Some(background) = &appearance.background {
+        palette.background = background.clone();
+    }
+    TerminalTheme::new(Box::new(palette))
+}
+
+fn terminal_font(appearance: &TerminalAppearance) -> TerminalFont {
+    let font_type = match appearance.font_family {
+        TerminalFontFamily::Monospace => egui::FontId::monospace(appearance.font_size),
+        TerminalFontFamily::Proportional => egui::FontId::proportional(appearance.font_size),
+    };
+    TerminalFont::new(FontSettings { font_type })
+}
+
+fn terminal_cursor_style(style: TerminalCursorStyle) -> CursorStyle {
+    match style {
+        TerminalCursorStyle::Block => CursorStyle::Block,
+        TerminalCursorStyle::Underline => CursorStyle::Underline,
+        TerminalCursorStyle::Beam => CursorStyle::Beam,
+    }
+}
+
+fn terminal_interaction(appearance: &TerminalAppearance) -> InteractionSettings {
+    InteractionSettings {
+        select_to_copy: appearance.select_to_copy,
+        middle_click_paste: appearance.middle_click_paste,
+        right_click_paste: appearance.right_click_paste,
+        hide_pointer_while_typing: appearance.hide_pointer_while_typing,
+    }
+}
+
 fn render_terminal_tab(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
@@ -120,6 +208,7 @@ fn render_terminal_tab(
     terminal_focus: Option<u64>,
     copy_selected: bool,
     show_pane_header: bool,
+    appearance: &TerminalAppearance,
 ) -> (Option<(u64, TabKind, Session)>, bool, bool) {
     let mut reconnect = None;
     let mut focus = false;
@@ -145,11 +234,16 @@ fn render_terminal_tab(
         });
         ui.separator();
     }
-    let view = TerminalView::new(ui, &mut tab.terminal).set_focus(terminal_accepts_keyboard(
-        terminal_focus,
-        tab.id,
-        tab.exited,
-    ));
+    let view = TerminalView::new(ui, &mut tab.terminal)
+        .set_theme(terminal_theme(appearance))
+        .set_font(terminal_font(appearance))
+        .set_cursor_style(terminal_cursor_style(appearance.cursor_style))
+        .set_interaction(terminal_interaction(appearance))
+        .set_focus(terminal_accepts_keyboard(
+            terminal_focus,
+            tab.id,
+            tab.exited,
+        ));
     let response = ui.add(view);
     if copy_selected {
         let selected = tab.terminal.selectable_content();
@@ -233,6 +327,9 @@ pub struct App {
     startup_pending: bool,
     startup_workspace_path: String,
     startup_notice: String,
+    appearance_path: PathBuf,
+    appearance_settings: AppearanceSettings,
+    appearance_notice: String,
     draft: Session,
     profile_tags: String,
     port: String,
@@ -306,6 +403,15 @@ impl App {
                 format!("Startup settings ignored: {error:#}"),
             ),
         };
+        let appearance_path = appearance::settings_path(&path);
+        let (appearance_settings, appearance_error) =
+            match appearance::load_settings(&appearance_path) {
+                Ok(settings) => (settings, String::new()),
+                Err(error) => (
+                    AppearanceSettings::default(),
+                    format!("Appearance settings ignored: {error:#}"),
+                ),
+            };
         let (profiles, mut error, writable) = match load_sessions(&path) {
             Ok(profiles) => (profiles, String::new(), true),
             Err(error) => (
@@ -315,11 +421,13 @@ impl App {
             ),
         };
         let (tx, rx) = mpsc::channel();
-        if !startup_error.is_empty() {
-            if !error.is_empty() {
-                error.push('\n');
+        for settings_error in [&startup_error, &appearance_error] {
+            if !settings_error.is_empty() {
+                if !error.is_empty() {
+                    error.push('\n');
+                }
+                error.push_str(settings_error);
             }
-            error.push_str(&startup_error);
         }
 
         let startup_workspace_path = match &startup_settings.behavior {
@@ -342,6 +450,9 @@ impl App {
             startup_pending: true,
             startup_workspace_path,
             startup_notice: String::new(),
+            appearance_path,
+            appearance_settings,
+            appearance_notice: String::new(),
             draft: Session::default(),
             profile_tags: String::new(),
             port: String::new(),
