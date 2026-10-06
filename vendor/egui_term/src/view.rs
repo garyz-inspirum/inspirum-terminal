@@ -675,7 +675,6 @@ fn process_mouse_move(
 
     actions
 }
-
 #[cfg(test)]
 mod appearance_interaction_tests {
     use super::*;
