@@ -48,10 +48,7 @@ fn wait_exit(receiver: &mpsc::Receiver<(u64, PtyEvent)>, id: u64) {
     panic!("PTY {id} never emitted Exit");
 }
 
-fn open(
-    fixture: &Path,
-    id: u64,
-) -> (TerminalBackend, mpsc::Receiver<(u64, PtyEvent)>) {
+fn open(fixture: &Path, id: u64) -> (TerminalBackend, mpsc::Receiver<(u64, PtyEvent)>) {
     let (sender, receiver) = mpsc::channel();
     let session = Session {
         name: "Disposable GSSAPI".into(),
