@@ -38,8 +38,11 @@ fn wait_text(backend: &mut TerminalBackend, needle: &str) {
     }
 }
 
-fn write(backend: &mut TerminalBackend, text: &str) {
-    backend.process_command(BackendCommand::Write(text.as_bytes().to_vec()));
+fn write_line(backend: &mut TerminalBackend, text: &str) {
+    let ending = if cfg!(windows) { "\r" } else { "\n" };
+    backend.process_command(BackendCommand::Write(
+        format!("{text}{ending}").into_bytes(),
+    ));
 }
 
 fn wait_exit(receiver: &mpsc::Receiver<(u64, PtyEvent)>, id: u64) {
