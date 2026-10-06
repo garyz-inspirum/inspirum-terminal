@@ -348,8 +348,10 @@ mod tests {
 
     #[test]
     fn invalid_and_low_contrast_colors_are_handled_safely() {
-        let mut appearance = TerminalAppearance::default();
-        appearance.foreground = Some("not-a-color".into());
+        let mut appearance = TerminalAppearance {
+            foreground: Some("not-a-color".into()),
+            ..TerminalAppearance::default()
+        };
         assert!(appearance.validate().is_err());
 
         appearance.foreground = Some("#202020".into());
