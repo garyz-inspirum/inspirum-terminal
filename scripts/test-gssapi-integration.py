@@ -67,6 +67,7 @@ def main() -> int:
     krb5kdc = tool("krb5kdc")
     kinit = tool("kinit")
     kdestroy = tool("kdestroy")
+    klist = tool("klist")
     ssh_keygen = tool("ssh-keygen")
     ssh = tool("ssh")
 
@@ -167,6 +168,8 @@ def main() -> int:
         try:
             wait_tcp(kdc, kdc_port, "Kerberos KDC")
             run([kinit, principal], env, input_text=fixture_password + "\n")
+            run([klist, "-s"], env)
+            print("PASS disposable Kerberos client ticket acquired", flush=True)
 
             for name in ("host", "wrong-host"):
                 run(
@@ -235,6 +238,7 @@ LogLevel VERBOSE
  GSSAPIAuthentication yes
  GSSAPIDelegateCredentials no
  GSSAPITrustDns no
+ GSSAPIServerIdentity host@localhost
  PreferredAuthentications gssapi-with-mic
  PubkeyAuthentication no
  PasswordAuthentication no
