@@ -150,11 +150,13 @@ fn terminal_theme(settings: &AppearanceSettings) -> TerminalTheme {
         bright_white: values[17].into(),
         ..ColorPalette::default()
     };
-    if let Some(value) = &settings.foreground {
-        palette.foreground = value.clone();
-    }
-    if let Some(value) = &settings.background {
-        palette.background = value.clone();
+    if settings.validate().is_ok() {
+        if let Some(value) = &settings.foreground {
+            palette.foreground = value.clone();
+        }
+        if let Some(value) = &settings.background {
+            palette.background = value.clone();
+        }
     }
     TerminalTheme::new(Box::new(palette))
 }
@@ -231,7 +233,10 @@ fn render_terminal_tab(
             mouse_paste = pointer;
         }
     }
-    if appearance.select_to_copy && response.drag_stopped() {
+    if appearance.select_to_copy
+        && response.hovered()
+        && ctx.input(|input| input.pointer.any_released())
+    {
         let selected = tab.terminal.selectable_content();
         if !selected.is_empty() {
             ctx.copy_text(selected);
@@ -669,7 +674,7 @@ impl App {
     }
 
     fn paste_text_with_policy(&mut self, id: u64, text: String) {
-        match terminal_ux::classify_paste(self.paste_policy, &text) {
+        match terminal_ux::classify_mouse_paste(self.paste_policy, &text) {
             PasteDecision::Send => {
                 if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id && !tab.exited) {
                     tab.terminal
@@ -1166,7 +1171,9 @@ impl App {
                                 "Native whole-window opacity is not exposed by the current cross-platform eframe window path, so opacity is explicitly unsupported rather than simulated inconsistently.",
                             );
 
-                            if let Some(warning) = self.appearance.contrast_warning() {
+                            if let Err(error) = self.appearance.validate() {
+                                ui.colored_label(egui::Color32::LIGHT_RED, format!("{error:#}"));
+                            } else if let Some(warning) = self.appearance.contrast_warning() {
                                 ui.colored_label(egui::Color32::YELLOW, warning);
                             }
 
