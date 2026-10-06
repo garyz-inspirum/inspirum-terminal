@@ -99,7 +99,7 @@ jobs:
           if (-not (Test-Path $sshd)) {
             throw "OpenSSH Server installation did not provide $sshd"
           }
-          & $sshd -V
+          Write-Host "OpenSSH server ready: $sshd"
       - name: Native authenticated SSH acceptance (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
