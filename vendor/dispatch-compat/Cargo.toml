@@ -1,0 +1,11 @@
+[package]
+name = "dispatch"
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Minimal libdispatch compatibility surface used by inspirum-terminal"
+repository = "https://github.com/garyz-inspirum/inspirum-terminal"
+publish = false
+
+[lib]
+path = "src/lib.rs"

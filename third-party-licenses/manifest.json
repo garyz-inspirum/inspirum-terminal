@@ -619,13 +619,6 @@
       "version": "0.1.6"
     },
     {
-      "name": "dispatch",
-      "reason": "exact upstream revision contains no license, copying, or notice text",
-      "repository": "http://github.com/SSheldon/rust-dispatch",
-      "revision": "82d6c7a5b75dc0c71c3f46f87bb6c16a476f7748",
-      "version": "0.2.0"
-    },
-    {
       "name": "malloc_buf",
       "reason": "exact upstream tag contains no license, copying, or notice text",
       "repository": "https://github.com/SSheldon/malloc_buf",
