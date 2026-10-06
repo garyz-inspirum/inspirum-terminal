@@ -48,9 +48,7 @@ fn wait_for_text(backend: &mut TerminalBackend, needle: &str, timeout: Duration)
 
 #[test]
 fn unicode_wide_combining_and_emoji_survive_terminal_path() {
-    let mut backend = backend_for(
-        "printf '%s\\n' 'ASCII 中文 é 😀' 'UNICODE_DONE'; sleep 1",
-    );
+    let mut backend = backend_for("printf '%s\\n' 'ASCII 中文 é 😀' 'UNICODE_DONE'; sleep 1");
     let text = wait_for_text(&mut backend, "UNICODE_DONE", Duration::from_secs(5));
 
     assert!(text.contains("ASCII"));
@@ -85,7 +83,10 @@ fn alternate_screen_switches_and_restores_primary_screen() {
     assert!(saw_alt, "alternate screen mode was never observed");
     let text = wait_for_text(&mut backend, "MAIN_SCREEN", Duration::from_secs(5));
     assert!(
-        !backend.sync().terminal_mode.contains(TerminalMode::ALT_SCREEN),
+        !backend
+            .sync()
+            .terminal_mode
+            .contains(TerminalMode::ALT_SCREEN),
         "alternate screen mode remained enabled after ?1049l"
     );
     assert!(text.contains("MAIN_SCREEN"));
@@ -113,7 +114,10 @@ fn sgr_mouse_mode_is_observable_and_can_be_disabled() {
     assert!(saw_sgr, "SGR mouse mode was never observed");
     let _ = wait_for_text(&mut backend, "MOUSE_OFF", Duration::from_secs(5));
     assert!(
-        !backend.sync().terminal_mode.contains(TerminalMode::SGR_MOUSE),
+        !backend
+            .sync()
+            .terminal_mode
+            .contains(TerminalMode::SGR_MOUSE),
         "SGR mouse mode remained enabled after ?1006l"
     );
 }
@@ -126,7 +130,10 @@ fn representative_vt_cursor_and_erase_sequences_render_expected_state() {
     );
     let text = wait_for_text(&mut backend, "VT_DONE", Duration::from_secs(5));
 
-    assert!(text.contains("abcXYZ"), "cursor-back overwrite failed: {text:?}");
+    assert!(
+        text.contains("abcXYZ"),
+        "cursor-back overwrite failed: {text:?}"
+    );
     assert!(
         !text.contains("ERASE_ME"),
         "CSI 2K did not erase the target line: {text:?}"
@@ -141,15 +148,14 @@ fn high_volume_output_keeps_terminal_responsive_and_scrollback_navigable() {
          i=$((i + 1)); done; printf 'HIGH_VOLUME_DONE\\n'; sleep 1",
     );
 
-    let _ = wait_for_text(
-        &mut backend,
-        "HIGH_VOLUME_DONE",
-        Duration::from_secs(15),
-    );
+    let _ = wait_for_text(&mut backend, "HIGH_VOLUME_DONE", Duration::from_secs(15));
     backend.process_command(BackendCommand::Scroll(80));
     let scrolled = grid_text(&mut backend);
 
-    assert!(scrolled.contains("line-"), "scrollback did not retain earlier output");
+    assert!(
+        scrolled.contains("line-"),
+        "scrollback did not retain earlier output"
+    );
     assert!(
         !scrolled.contains("HIGH_VOLUME_DONE"),
         "scrolling did not move away from the live bottom"
