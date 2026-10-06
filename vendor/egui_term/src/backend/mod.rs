@@ -221,7 +221,10 @@ impl TerminalBackend {
             escape_args: true,
             ..tty::Options::default()
         };
-        let config = term::Config::default();
+        let config = term::Config {
+            scrolling_history: 10_000,
+            ..term::Config::default()
+        };
         let terminal_size = TerminalSize::default();
         let pty = tty::new(&pty_config, terminal_size.into(), id)?;
         let (event_sender, event_receiver) = mpsc::channel();
@@ -353,6 +356,55 @@ impl TerminalBackend {
 
     pub fn last_content(&self) -> &RenderableContent {
         &self.last_content
+    }
+
+    /// Snapshot retained scrollback plus the visible screen without changing viewport state.
+    ///
+    /// Lines are returned oldest-to-newest and trailing blank cells are trimmed. This reads the
+    /// terminal's existing in-memory grid; it does not capture keyboard input or write to disk.
+    pub fn history_lines(&self) -> Vec<String> {
+        let term = self.term.clone();
+        let terminal = term.lock();
+        let grid = terminal.grid();
+        let start = Point::new(terminal.topmost_line(), Column(0));
+        let end_line = terminal.bottommost_line();
+
+        let mut lines = Vec::with_capacity(terminal.total_lines());
+        // Grid::iter_from advances from the supplied point, so seed the first retained cell.
+        let mut current_line = Some(start.line);
+        let mut current = String::from(grid.index(start).c);
+        for indexed in grid.iter_from(start) {
+            if indexed.point.line > end_line {
+                break;
+            }
+            if current_line != Some(indexed.point.line) {
+                lines.push(current.trim_end_matches(' ').to_owned());
+                current.clear();
+                current_line = Some(indexed.point.line);
+            }
+            current.push(indexed.c);
+        }
+        lines.push(current.trim_end_matches(' ').to_owned());
+        lines
+    }
+
+    /// Scroll the viewport so a retained-history line is visible.
+    ///
+    /// `index` is zero-based from the oldest retained line returned by `history_lines`.
+    pub fn scroll_to_history_index(&mut self, index: usize) -> bool {
+        let term = self.term.clone();
+        let mut terminal = term.lock();
+        if index >= terminal.total_lines() {
+            return false;
+        }
+
+        let history_size = terminal.history_size();
+        terminal.grid_mut().scroll_display(Scroll::Bottom);
+        if index < history_size {
+            let delta = history_size.saturating_sub(index).min(i32::MAX as usize) as i32;
+            terminal.grid_mut().scroll_display(Scroll::Delta(delta));
+        }
+        true
     }
 
     fn process_link_action(

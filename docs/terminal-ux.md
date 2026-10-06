@@ -41,3 +41,34 @@ but anything printed by the remote program can appear in a screen snapshot.
 - Paste: Command-V on macOS; Ctrl-Shift-V on Windows/Linux.
 - Search: Ctrl/Cmd-Shift-F.
 - Confirmation: Enter sends; Escape cancels.
+
+
+## Retained history search, marks and navigation
+
+Issue #57 extends search from the visible viewport to the terminal emulator's existing
+in-memory scrollback buffer. Inspirum does not create a parallel keystroke log and does
+not write retained history to disk. Disk output still requires the separate explicit
+**Start logging** action.
+
+Open **Search** or press **Ctrl/Cmd+Shift+F**. Search covers retained scrollback plus the
+visible screen. Results are shown with retained line and column positions, and the
+selected result is visibly highlighted in the result list. **F3** selects the next
+result and **Shift+F3** selects the previous result; navigation wraps and scrolls the
+terminal viewport so the selected retained line is visible.
+
+**Mark output boundary** bookmarks the newest retained non-empty output line. Optional
+timestamps store only a Unix timestamp alongside the in-memory mark. Marks survive
+normal viewport movement and appended output while their retained line remains in
+scrollback. When terminal scrollback truncation removes a marked line, that mark is
+removed deterministically and the inspector reports the cumulative truncated-line
+count.
+
+A mark can fold the bounded region after it up to the next mark. Folding affects only
+the **History inspector** presentation; it never changes terminal parser state, deletes
+scrollback, reconnects a session, or replays input. The inspector limits rendering to
+its last 200 presentation rows even when the retained terminal buffer is much larger.
+
+Search is bounded to 500 displayed matches per active tab. Tests cover ASCII,
+Unicode/CJK, combining-character and emoji queries, deterministic mark/truncation
+behavior, bounded folding, navigation wrapping, and a 50,000-line retained-history
+regression.

@@ -114,6 +114,53 @@ fn line_capture_backend(id: u64) -> egui_term::TerminalBackend {
     .unwrap()
 }
 
+#[cfg(unix)]
+#[test]
+fn retained_history_snapshot_includes_scrollback_and_survives_viewport_navigation() {
+    let (tx, _rx) = mpsc::channel();
+    let mut backend = egui_term::TerminalBackend::new(
+        91,
+        eframe::egui::Context::default(),
+        tx,
+        egui_term::BackendSettings {
+            shell: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                r#"i=1; while [ $i -le 80 ]; do printf 'HIST-%03d\n' "$i"; i=$((i+1)); done; sleep 1"#.into(),
+            ],
+            working_directory: None,
+        },
+    )
+    .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let history = loop {
+        let lines = backend.history_lines();
+        if lines.iter().any(|line| line.contains("HIST-080")) {
+            break lines;
+        }
+        assert!(Instant::now() < deadline, "retained history did not fill");
+        thread::sleep(Duration::from_millis(20));
+    };
+
+    let retained_scrollback = history
+        .iter()
+        .position(|line| line.contains("HIST-040"))
+        .expect("offscreen generated line retained");
+    assert!(
+        history.iter().any(|line| line.contains("HIST-080")),
+        "newest generated line retained"
+    );
+    assert!(backend.scroll_to_history_index(retained_scrollback));
+    assert!(
+        backend
+            .history_lines()
+            .iter()
+            .any(|line| line.contains("HIST-040")),
+        "scrolling the viewport must not alter retained history"
+    );
+}
+
 #[test]
 fn missing_ssh_has_actionable_error() {
     let error = check_openssh(Path::new("inspirum-nonexistent-ssh-7e65"))
