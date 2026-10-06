@@ -668,6 +668,38 @@ impl App {
         });
     }
 
+    fn paste_text_with_policy(&mut self, id: u64, text: String) {
+        match terminal_ux::classify_paste(self.paste_policy, &text) {
+            PasteDecision::Send => {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id && !tab.exited) {
+                    tab.terminal
+                        .process_command(BackendCommand::Write(text.into_bytes()));
+                    self.paste_notice = "Clipboard paste sent.".into();
+                    self.terminal_focus = Some(id);
+                }
+            }
+            PasteDecision::Confirm => {
+                self.pending_paste = Some((id, text));
+                self.terminal_focus = None;
+                self.paste_notice =
+                    "Clipboard paste is waiting for explicit confirmation.".into();
+            }
+            PasteDecision::Block => {
+                self.paste_notice =
+                    "Paste blocked by policy (multiline or NUL-containing payload).".into();
+            }
+        }
+    }
+
+    fn paste_from_clipboard(&mut self, id: u64) {
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+            Ok(text) => self.paste_text_with_policy(id, text),
+            Err(error) => {
+                self.paste_notice = format!("Clipboard paste unavailable: {error}");
+            }
+        }
+    }
+
     fn close_tab_ids(&mut self, ids: &[u64]) {
         if ids.is_empty() {
             return;
@@ -1006,6 +1038,175 @@ impl App {
                             });
                         });
                     }
+
+                    egui::CollapsingHeader::new("Terminal appearance & interaction")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.small(
+                                "These are global terminal preferences. Saved SSH profiles inherit them; profile-specific appearance overrides are not stored, so imports cannot silently alter local presentation or pointer behavior.",
+                            );
+                            ui.horizontal(|ui| {
+                                ui.label("Font");
+                                ui.selectable_value(
+                                    &mut self.appearance.font_family,
+                                    FontFamilyChoice::Monospace,
+                                    "Monospace",
+                                );
+                                ui.selectable_value(
+                                    &mut self.appearance.font_family,
+                                    FontFamilyChoice::Proportional,
+                                    "Proportional",
+                                );
+                            });
+                            ui.add(
+                                egui::Slider::new(&mut self.appearance.font_size, 8.0..=48.0)
+                                    .text("Font size"),
+                            );
+
+                            ui.label("ANSI palette theme");
+                            ui.horizontal_wrapped(|ui| {
+                                ui.selectable_value(
+                                    &mut self.appearance.theme,
+                                    ThemePreset::ClassicDark,
+                                    "Classic dark",
+                                );
+                                ui.selectable_value(
+                                    &mut self.appearance.theme,
+                                    ThemePreset::Light,
+                                    "Light",
+                                );
+                                ui.selectable_value(
+                                    &mut self.appearance.theme,
+                                    ThemePreset::SolarizedDark,
+                                    "Solarized dark",
+                                );
+                            });
+
+                            let mut foreground =
+                                self.appearance.foreground.clone().unwrap_or_default();
+                            let fg = ui.add(
+                                egui::TextEdit::singleline(&mut foreground)
+                                    .hint_text("Custom foreground #RRGGBB (optional)"),
+                            );
+                            if fg.changed() {
+                                let value = foreground.trim();
+                                self.appearance.foreground =
+                                    (!value.is_empty()).then(|| value.to_owned());
+                            }
+                            let mut background =
+                                self.appearance.background.clone().unwrap_or_default();
+                            let bg = ui.add(
+                                egui::TextEdit::singleline(&mut background)
+                                    .hint_text("Custom background #RRGGBB (optional)"),
+                            );
+                            if bg.changed() {
+                                let value = background.trim();
+                                self.appearance.background =
+                                    (!value.is_empty()).then(|| value.to_owned());
+                            }
+
+                            ui.label("Cursor");
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(
+                                    &mut self.appearance.cursor_style,
+                                    CursorStyle::Block,
+                                    "Block",
+                                );
+                                ui.selectable_value(
+                                    &mut self.appearance.cursor_style,
+                                    CursorStyle::Underline,
+                                    "Underline",
+                                );
+                                ui.selectable_value(
+                                    &mut self.appearance.cursor_style,
+                                    CursorStyle::Beam,
+                                    "Beam",
+                                );
+                            });
+
+                            ui.checkbox(
+                                &mut self.appearance.select_to_copy,
+                                "Copy selection when mouse drag ends",
+                            );
+                            ui.checkbox(
+                                &mut self.appearance.hide_pointer_while_typing,
+                                "Hide pointer while typing in terminal",
+                            );
+
+                            ui.label("Middle click");
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(
+                                    &mut self.appearance.middle_click,
+                                    MousePasteAction::Disabled,
+                                    "Disabled",
+                                );
+                                ui.selectable_value(
+                                    &mut self.appearance.middle_click,
+                                    MousePasteAction::PasteClipboard,
+                                    "Paste clipboard",
+                                );
+                            });
+                            ui.label("Right click");
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(
+                                    &mut self.appearance.right_click,
+                                    MousePasteAction::Disabled,
+                                    "Disabled",
+                                );
+                                ui.selectable_value(
+                                    &mut self.appearance.right_click,
+                                    MousePasteAction::PasteClipboard,
+                                    "Paste clipboard",
+                                );
+                            });
+                            ui.small(
+                                "Mouse-triggered paste always uses the Paste safety policy shown above the terminal. It cannot bypass multiline confirmation/blocking.",
+                            );
+                            ui.small(
+                                "Native whole-window opacity is not exposed by the current cross-platform eframe window path, so opacity is explicitly unsupported rather than simulated inconsistently.",
+                            );
+
+                            if let Some(warning) = self.appearance.contrast_warning() {
+                                ui.colored_label(egui::Color32::YELLOW, warning);
+                            }
+
+                            ui.horizontal(|ui| {
+                                if ui.button("Save appearance").clicked() {
+                                    match appearance::save_settings(
+                                        &self.appearance_path,
+                                        &self.appearance,
+                                    ) {
+                                        Ok(()) => {
+                                            self.appearance_notice =
+                                                "Appearance preferences saved.".into();
+                                        }
+                                        Err(error) => {
+                                            self.appearance_notice =
+                                                format!("Cannot save appearance settings: {error:#}");
+                                        }
+                                    }
+                                }
+                                if ui.button("Reset defaults").clicked() {
+                                    self.appearance = AppearanceSettings::default();
+                                    match appearance::save_settings(
+                                        &self.appearance_path,
+                                        &self.appearance,
+                                    ) {
+                                        Ok(()) => {
+                                            self.appearance_notice =
+                                                "Default terminal appearance restored.".into();
+                                        }
+                                        Err(error) => {
+                                            self.appearance_notice =
+                                                format!("Cannot save appearance settings: {error:#}");
+                                        }
+                                    }
+                                }
+                            });
+                            if !self.appearance_notice.is_empty() {
+                                ui.small(&self.appearance_notice);
+                            }
+                        });
 
                     egui::CollapsingHeader::new("Startup behavior")
                         .default_open(false)
@@ -2281,6 +2482,7 @@ impl App {
         let mut workspace_load_requested = false;
         let mut workspace_restore_requested = false;
         let mut copy_selected = false;
+        let mut mouse_paste_request = None;
         let mut history_scroll_request = None;
 
         if self.search_open
@@ -2712,13 +2914,14 @@ impl App {
                     };
                     let active = self.active;
                     let mut render = |ui: &mut egui::Ui, tab: &mut Tab| {
-                        let (next_reconnect, focused, close) = render_terminal_tab(
+                        let (next_reconnect, focused, close, mouse_paste) = render_terminal_tab(
                             ui,
                             ctx,
                             tab,
                             terminal_focus,
                             copy_selected && active == Some(tab.id),
                             true,
+                            &self.appearance,
                         );
                         if reconnect.is_none() {
                             reconnect = next_reconnect;
@@ -2728,6 +2931,9 @@ impl App {
                         }
                         if close {
                             close_pane = Some(tab.id);
+                        }
+                        if let Some(button) = mouse_paste {
+                            mouse_paste_request = Some((tab.id, button));
                         }
                     };
                     match self.workspace_axis {
@@ -2752,13 +2958,14 @@ impl App {
                     }
                 }
             } else if let Some(tab) = self.tabs.iter_mut().find(|tab| Some(tab.id) == self.active) {
-                let (next_reconnect, focused, close) = render_terminal_tab(
+                let (next_reconnect, focused, close, mouse_paste) = render_terminal_tab(
                     ui,
                     ctx,
                     tab,
                     terminal_focus,
                     copy_selected,
                     false,
+                    &self.appearance,
                 );
                 reconnect = next_reconnect;
                 if focused {
@@ -2766,6 +2973,9 @@ impl App {
                 }
                 if close {
                     close_pane = Some(tab.id);
+                }
+                if let Some(button) = mouse_paste {
+                    mouse_paste_request = Some((tab.id, button));
                 }
             } else {
                 ui.heading("Connect to an SSH server");
@@ -2780,6 +2990,17 @@ impl App {
                 ui.label("No sessions are automatically connected on startup.");
             }
         });
+        if let Some((id, button)) = mouse_paste_request {
+            let action = match button {
+                egui::PointerButton::Middle => self.appearance.middle_click,
+                egui::PointerButton::Secondary => self.appearance.right_click,
+                _ => MousePasteAction::Disabled,
+            };
+            if action == MousePasteAction::PasteClipboard {
+                self.paste_from_clipboard(id);
+            }
+        }
+
         if let Some((id, history_index)) = history_scroll_request
             && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id)
         {
