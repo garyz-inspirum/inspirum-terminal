@@ -1013,19 +1013,43 @@ fn graphical_sftp_operations_are_verified_conflict_safe_and_cancellable() {
         Some(payload.len() as u64),
     )
     .unwrap();
-    cancelled.cancel().unwrap();
+    let cancelled_partial = cancelled
+        .cancel()
+        .unwrap()
+        .expect("cancelled download should preserve its staging file");
     drop(cancelled);
     assert!(!cancel_destination.exists());
-    assert!(
-        fs::read_dir(&local)
-            .unwrap()
-            .filter_map(Result::ok)
-            .all(|entry| !entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".inspirum-download-")),
-        "cancelled download left a staging file"
+    assert!(cancelled_partial.exists());
+    fs::remove_file(cancelled_partial).unwrap();
+
+    let resume_destination = local.join("resumed download.bin");
+    let resume_partial = local.join(".resume-download-partial");
+    fs::write(&resume_partial, &payload[..8192]).unwrap();
+    let mut resumed_download = sftp::start_download_resume(
+        &session,
+        Some(&config),
+        remote,
+        &resume_destination,
+        &resume_partial,
+        false,
+        Some(payload.len() as u64),
+    )
+    .expect("start resumable SFTP download");
+    wait_managed_transfer(&mut resumed_download).expect("complete resumable SFTP download");
+    assert_eq!(fs::read(&resume_destination).unwrap(), payload);
+    assert!(!resume_partial.exists(), "successful resume left its partial file");
+
+    let resume_remote = "browser resume upload.bin";
+    fs::write(p.join("sftp-root").join(resume_remote), &payload[..8192]).unwrap();
+    let mut resumed_upload =
+        sftp::start_upload_resume(&session, Some(&config), &source, resume_remote)
+            .expect("start resumable SFTP upload");
+    wait_managed_transfer(&mut resumed_upload).expect("complete resumable SFTP upload");
+    assert_eq!(
+        fs::read(p.join("sftp-root").join(resume_remote)).unwrap(),
+        payload
     );
+    sftp::delete_remote(&session, Some(&config), resume_remote, false).unwrap();
 
     sftp::mkdir_remote(&session, Some(&config), "browser-dir").unwrap();
     sftp::rename_remote(&session, Some(&config), "browser-dir", "browser-renamed").unwrap();
@@ -1042,7 +1066,7 @@ fn graphical_sftp_operations_are_verified_conflict_safe_and_cancellable() {
         "negative remote delete unexpectedly succeeded"
     );
     println!(
-        "PASS graphical SFTP browse/mutate, binary transfer, conflict safety, verification and cancellation"
+        "PASS graphical SFTP browse/mutate, binary transfer, conflict safety, verification, cancellation and upload/download resume"
     );
 }
 
