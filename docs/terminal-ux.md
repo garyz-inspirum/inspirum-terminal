@@ -109,3 +109,36 @@ opacity.
 Appearance settings are JSON schema version 1, limited to 64 KiB, validated before use,
 and replaced atomically. Missing fields migrate to defaults; unknown fields and unknown
 schema versions are rejected.
+
+
+## Command palette, command sender and snippets
+
+Issue #60 adds keyboard-first operator shortcuts without making convenience features execute
+remote commands implicitly.
+
+Press **Ctrl/Cmd+Shift+P** to open the command palette. Palette entries are explicitly
+separated into **[APP]** actions and **[REMOTE TEXT]** snippets:
+
+- application actions run only when the user explicitly activates the selected palette item;
+- snippet selection or completion only copies the snippet body into the command sender;
+- staged snippet text is never sent merely because it was selected, searched, or completed.
+
+The command sender supports an explicit target choice:
+
+- **Current pane** sends only to the active terminal;
+- **Selected sync panes** resolves the currently selected synchronized-input targets and sends
+  only to that deterministic set.
+
+Every remote-text send goes through the existing paste-safety classifier. Multiline content
+still requires confirmation (or is blocked, depending on the configured paste policy), and
+NUL-containing payloads remain blocked. Confirmation dialogs suppress application shortcuts so
+they cannot be bypassed by the command palette.
+
+Snippets are stored in a separate bounded JSON file beside the profile store. The library is
+validated before persistence, writes are atomic, duplicate names are rejected, individual
+snippet bodies are bounded, and exports refuse to overwrite an existing destination. Snippet
+metadata is intended for non-secret operational text; passwords, private keys, passphrases and
+other secrets should not be stored in snippets.
+
+Import and export never auto-execute snippet bodies. Completion by snippet name only stages text
+in the sender and requires a separate **Send** action.
