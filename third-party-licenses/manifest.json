@@ -218,6 +218,15 @@
       "source_url": "https://raw.githubusercontent.com/gfx-rs/rspirv/e91a5debc10c395b36db7721dfff6326d697a1e2/LICENSE"
     },
     {
+      "id": "spdx/MIT.txt",
+      "origin": "canonical_standard_text",
+      "path": "files/spdx/MIT.txt",
+      "publisher": "SPDX",
+      "sha256": "a306b08221195a76a7c37ffeb370dde0948993091e8b10f454b17fda1673d885",
+      "source_url": "https://spdx.org/licenses/MIT.txt",
+      "standard": "MIT"
+    },
+    {
       "id": "wgpu-dc1e50e0/LICENSE.APACHE",
       "path": "files/wgpu-dc1e50e0/LICENSE.APACHE",
       "repository": "https://github.com/gfx-rs/wgpu",
@@ -236,6 +245,21 @@
   ],
   "format": 1,
   "packages": [
+    {
+      "declaration_path": "evidence/block-0.1.6-Cargo.toml",
+      "declaration_sha256": "24df2f33b48c9e756a4f864f882c1ab07a159b6c2b790f45af2e8162499b6719",
+      "declaration_url": "https://raw.githubusercontent.com/SSheldon/rust-block/47178790cfc9d4a8b092051d8b413b78bd31254a/Cargo.toml",
+      "declared_license": "MIT",
+      "files": [
+        "spdx/MIT.txt"
+      ],
+      "metadata_repository": "http://github.com/SSheldon/rust-block",
+      "name": "block",
+      "registry_checksum": "0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a",
+      "revision": "47178790cfc9d4a8b092051d8b413b78bd31254a",
+      "revision_provenance": "Cargo.lock/.cargo-checksum.json package checksum; exact upstream Cargo.toml pinned to revision",
+      "version": "0.1.6"
+    },
     {
       "files": [
         "objc2-4fc083f1/LICENSE.txt"
@@ -265,6 +289,21 @@
       "revision": "fd389a13f5bb6d625b71e2e4694b26e127f393f9",
       "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
       "version": "0.11.1"
+    },
+    {
+      "declaration_path": "evidence/dispatch-0.2.0-Cargo.toml",
+      "declaration_sha256": "05c60b829931ef7f1f130735843c11f5cf9cc69546eca5fc941d014781c68e31",
+      "declaration_url": "https://raw.githubusercontent.com/SSheldon/rust-dispatch/82d6c7a5b75dc0c71c3f46f87bb6c16a476f7748/Cargo.toml",
+      "declared_license": "MIT",
+      "files": [
+        "spdx/MIT.txt"
+      ],
+      "metadata_repository": "http://github.com/SSheldon/rust-dispatch",
+      "name": "dispatch",
+      "registry_checksum": "bd0c93bb4b0c6d9b77f4435b0ae98c24d17f1c45b2ff844c6151a07256ca923b",
+      "revision": "82d6c7a5b75dc0c71c3f46f87bb6c16a476f7748",
+      "revision_provenance": "Cargo.lock/.cargo-checksum.json package checksum; exact upstream Cargo.toml pinned to revision",
+      "version": "0.2.0"
     },
     {
       "files": [
@@ -303,8 +342,8 @@
         "egui-1669e52a/LICENSE-APACHE",
         "egui-1669e52a/LICENSE-MIT"
       ],
-      "metadata_repository": "https://github.com/emilk/egui",
-      "name": "egui",
+      "metadata_repository": "https://github.com/emilk/egui/tree/master/crates/egui_glow",
+      "name": "egui_glow",
       "revision": "1669e52a7ccfc3489c1b0999b9ed48894a0b3887",
       "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
       "version": "0.31.1"
@@ -336,8 +375,8 @@
         "egui-1669e52a/LICENSE-APACHE",
         "egui-1669e52a/LICENSE-MIT"
       ],
-      "metadata_repository": "https://github.com/emilk/egui/tree/master/crates/egui_glow",
-      "name": "egui_glow",
+      "metadata_repository": "https://github.com/emilk/egui",
+      "name": "egui",
       "revision": "1669e52a7ccfc3489c1b0999b9ed48894a0b3887",
       "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
       "version": "0.31.1"
@@ -376,18 +415,6 @@
     },
     {
       "files": [
-        "gpu-alloc-61020bdc/COPYING",
-        "gpu-alloc-61020bdc/license/APACHE",
-        "gpu-alloc-61020bdc/license/MIT"
-      ],
-      "metadata_repository": "https://github.com/zakarumych/gpu-alloc",
-      "name": "gpu-alloc",
-      "revision": "61020bdcb4eb04fca6bbf748aeb9570e859236e0",
-      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
-      "version": "0.6.2"
-    },
-    {
-      "files": [
         "gpu-alloc-7ddd1fe5/COPYING",
         "gpu-alloc-7ddd1fe5/license/APACHE",
         "gpu-alloc-7ddd1fe5/license/MIT"
@@ -400,15 +427,15 @@
     },
     {
       "files": [
-        "gpu-descriptor-bb28b4e5/COPYING",
-        "gpu-descriptor-bb28b4e5/license/APACHE",
-        "gpu-descriptor-bb28b4e5/license/MIT"
+        "gpu-alloc-61020bdc/COPYING",
+        "gpu-alloc-61020bdc/license/APACHE",
+        "gpu-alloc-61020bdc/license/MIT"
       ],
-      "metadata_repository": "https://github.com/zakarumych/gpu-descriptor",
-      "name": "gpu-descriptor",
-      "revision": "bb28b4e55b742e0ea3e7a0968e7ee6287ba0e06a",
+      "metadata_repository": "https://github.com/zakarumych/gpu-alloc",
+      "name": "gpu-alloc",
+      "revision": "61020bdcb4eb04fca6bbf748aeb9570e859236e0",
       "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
-      "version": "0.3.2"
+      "version": "0.6.2"
     },
     {
       "files": [
@@ -421,6 +448,18 @@
       "revision": "9f2fb9546591322e7b77ee1e79385e01effd85e4",
       "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
       "version": "0.2.0"
+    },
+    {
+      "files": [
+        "gpu-descriptor-bb28b4e5/COPYING",
+        "gpu-descriptor-bb28b4e5/license/APACHE",
+        "gpu-descriptor-bb28b4e5/license/MIT"
+      ],
+      "metadata_repository": "https://github.com/zakarumych/gpu-descriptor",
+      "name": "gpu-descriptor",
+      "revision": "bb28b4e55b742e0ea3e7a0968e7ee6287ba0e06a",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "version": "0.3.2"
     },
     {
       "declaration_path": "evidence/hexf-parse-0.2.1-Cargo.toml",
@@ -447,6 +486,21 @@
       "version": "3.1.0"
     },
     {
+      "declaration_path": "evidence/malloc_buf-0.0.6-Cargo.toml",
+      "declaration_sha256": "1c70c91688d9850272e43cee9b189ffe3fe667151d7caf576a36a720f8b28194",
+      "declaration_url": "https://raw.githubusercontent.com/SSheldon/malloc_buf/a7811e5f4c6f9685dd57ad9bfe34e9bf6b0ba4f9/Cargo.toml",
+      "declared_license": "MIT",
+      "files": [
+        "spdx/MIT.txt"
+      ],
+      "metadata_repository": "https://github.com/SSheldon/malloc_buf",
+      "name": "malloc_buf",
+      "registry_checksum": "62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb",
+      "revision": "a7811e5f4c6f9685dd57ad9bfe34e9bf6b0ba4f9",
+      "revision_provenance": "Cargo.lock/.cargo-checksum.json package checksum; exact upstream Cargo.toml pinned to revision",
+      "version": "0.0.6"
+    },
+    {
       "files": [
         "wgpu-dc1e50e0/LICENSE.APACHE",
         "wgpu-dc1e50e0/LICENSE.MIT"
@@ -466,26 +520,6 @@
       "revision": "4fc083f1c6d6784577e38b0ee8dbd344481e2fd2",
       "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
       "version": "0.3.5"
-    },
-    {
-      "files": [
-        "objc2-4fc083f1/LICENSE.txt"
-      ],
-      "metadata_repository": "https://github.com/madsmtm/objc2",
-      "name": "objc2",
-      "revision": "4fc083f1c6d6784577e38b0ee8dbd344481e2fd2",
-      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
-      "version": "0.5.2"
-    },
-    {
-      "files": [
-        "objc2-8852b424/LICENSE.md"
-      ],
-      "metadata_repository": "https://github.com/madsmtm/objc2",
-      "name": "objc2",
-      "revision": "8852b424193ca41602281b3d7540d7c8ed51e49a",
-      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
-      "version": "0.6.4"
     },
     {
       "files": [
@@ -589,6 +623,26 @@
     },
     {
       "files": [
+        "objc2-4fc083f1/LICENSE.txt"
+      ],
+      "metadata_repository": "https://github.com/madsmtm/objc2",
+      "name": "objc2",
+      "revision": "4fc083f1c6d6784577e38b0ee8dbd344481e2fd2",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "version": "0.5.2"
+    },
+    {
+      "files": [
+        "objc2-8852b424/LICENSE.md"
+      ],
+      "metadata_repository": "https://github.com/madsmtm/objc2",
+      "name": "objc2",
+      "revision": "8852b424193ca41602281b3d7540d7c8ed51e49a",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "version": "0.6.4"
+    },
+    {
+      "files": [
         "profiling-82715511/LICENSE-APACHE",
         "profiling-82715511/LICENSE-MIT"
       ],
@@ -609,29 +663,5 @@
       "version": "0.3.0+sdk-1.3.268.0"
     }
   ],
-  "unresolved": [
-    {
-      "name": "block",
-      "reason": "exact upstream tag contains no license, copying, or notice text",
-      "repository": "http://github.com/SSheldon/rust-block",
-      "revision": "47178790cfc9d4a8b092051d8b413b78bd31254a",
-      "revision_provenance": "repository tag 0.1.6; registry package has no .cargo_vcs_info.json",
-      "version": "0.1.6"
-    },
-    {
-      "name": "dispatch",
-      "reason": "exact upstream revision contains no license, copying, or notice text",
-      "repository": "http://github.com/SSheldon/rust-dispatch",
-      "revision": "82d6c7a5b75dc0c71c3f46f87bb6c16a476f7748",
-      "version": "0.2.0"
-    },
-    {
-      "name": "malloc_buf",
-      "reason": "exact upstream tag contains no license, copying, or notice text",
-      "repository": "https://github.com/SSheldon/malloc_buf",
-      "revision": "a7811e5f4c6f9685dd57ad9bfe34e9bf6b0ba4f9",
-      "revision_provenance": "repository tag 0.0.6; registry package has no .cargo_vcs_info.json",
-      "version": "0.0.6"
-    }
-  ]
+  "unresolved": []
 }
