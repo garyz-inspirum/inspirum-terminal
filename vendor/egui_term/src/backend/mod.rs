@@ -355,6 +355,39 @@ impl TerminalBackend {
         &self.last_content
     }
 
+    /// Snapshot retained scrollback plus the visible screen without changing viewport state.
+    ///
+    /// Lines are returned oldest-to-newest and trailing blank cells are trimmed. This reads the
+    /// terminal's existing in-memory grid; it does not capture keyboard input or write to disk.
+    pub fn history_lines(&self) -> Vec<String> {
+        let term = self.term.clone();
+        let terminal = term.lock();
+        let grid = terminal.grid();
+        let start = Point::new(terminal.topmost_line(), Column(0));
+        let end_line = terminal.bottommost_line();
+
+        let mut lines = Vec::with_capacity(terminal.total_lines());
+        let mut current_line = None;
+        let mut current = String::new();
+        for indexed in grid.iter_from(start) {
+            if indexed.point.line > end_line {
+                break;
+            }
+            if current_line != Some(indexed.point.line) {
+                if current_line.is_some() {
+                    lines.push(current.trim_end_matches(' ').to_owned());
+                    current.clear();
+                }
+                current_line = Some(indexed.point.line);
+            }
+            current.push(indexed.c);
+        }
+        if current_line.is_some() {
+            lines.push(current.trim_end_matches(' ').to_owned());
+        }
+        lines
+    }
+
     fn process_link_action(
         &mut self,
         terminal: &Term<EventProxy>,
