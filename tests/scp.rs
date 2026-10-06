@@ -11,6 +11,9 @@ fn session() -> Session {
         user: "alice".into(),
         port: Some(2222),
         strict: true,
+        folder: String::new(),
+        tags: Vec::new(),
+        favorite: false,
         ssh: SshOptions {
             identity_file: "/keys/id test".into(),
             proxy_jump: "bastion".into(),
