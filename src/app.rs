@@ -1,9 +1,9 @@
 //! Small native connection/profile interface; terminal mechanics stay upstream.
 use crate::{
     ControlMasterMode, ProxyKind, Session, SessionImportMode, delete_session,
-    duplicate_session_draft, export_sessions, import_sessions, load_sessions, save_session_edit,
-    save_sessions,
+    duplicate_session_draft, export_sessions,
     history::{HistoryRow, HistoryState},
+    import_sessions, load_sessions, save_session_edit, save_sessions,
     scp_panel::ScpPanel,
     session_matches_query, session_profile_key,
     sftp_browser::SftpBrowser,
