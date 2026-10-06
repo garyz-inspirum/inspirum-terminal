@@ -8,6 +8,7 @@ use crate::{
     sftp_browser::SftpBrowser,
     startup::{self, StartupBehavior, StartupSettings},
     support::{self, SanitizedErrorHistory},
+    tab_management::{self, CloseScope, TabMarker},
     terminal,
     terminal_ux::{self, PasteDecision, PastePolicy},
     tmux::{self, TmuxSession},
@@ -16,6 +17,7 @@ use crate::{
 use eframe::egui;
 use egui_term::{BackendCommand, PtyEvent, TerminalBackend, TerminalView};
 use std::{
+    collections::BTreeSet,
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
 };
@@ -49,6 +51,7 @@ struct Tab {
     session: Session,
     terminal: TerminalBackend,
     exited: bool,
+    marker: TabMarker,
 }
 
 fn terminal_accepts_keyboard(owner: Option<u64>, id: u64, exited: bool) -> bool {
@@ -259,6 +262,12 @@ pub struct App {
     tabs: Vec<Tab>,
     active: Option<u64>,
     terminal_focus: Option<u64>,
+    selected_tabs: BTreeSet<u64>,
+    bulk_close_confirm: Option<Vec<u64>>,
+    tab_switcher_open: bool,
+    tab_switcher_query: String,
+    tab_switcher_index: usize,
+    tab_action_notice: String,
     paste_policy: PastePolicy,
     pending_paste: Option<(u64, String)>,
     paste_notice: String,
@@ -359,6 +368,12 @@ impl App {
             tabs: Vec::new(),
             active: None,
             terminal_focus: None,
+            selected_tabs: BTreeSet::new(),
+            bulk_close_confirm: None,
+            tab_switcher_open: false,
+            tab_switcher_query: String::new(),
+            tab_switcher_index: 0,
+            tab_action_notice: String::new(),
             paste_policy: PastePolicy::default(),
             pending_paste: None,
             paste_notice: String::new(),
@@ -383,6 +398,41 @@ impl App {
 
     pub fn storage_writable(&self) -> bool {
         self.writable
+    }
+
+    fn close_tabs(&mut self, ids: &[u64]) -> usize {
+        let closing: BTreeSet<u64> = ids.iter().copied().collect();
+        if closing.is_empty() {
+            return 0;
+        }
+
+        let order: Vec<u64> = self.tabs.iter().map(|tab| tab.id).collect();
+        let next_active = tab_management::next_active_after_close(&order, self.active, &closing);
+        self.sync_input.set_armed(false);
+        for id in &closing {
+            self.sync_input.remove_pane(*id);
+        }
+        self.workspace_panes.retain(|id| !closing.contains(id));
+        self.selected_tabs.retain(|id| !closing.contains(id));
+        if self.logging_tab.is_some_and(|id| closing.contains(&id)) {
+            self.logging_tab = None;
+            self.last_logged_screen.clear();
+        }
+        if self
+            .pending_paste
+            .as_ref()
+            .is_some_and(|(id, _)| closing.contains(id))
+        {
+            self.pending_paste = None;
+        }
+
+        let removed =
+            tab_management::close_items_by_id(&mut self.tabs, &closing, |tab| tab.id);
+        self.active = next_active.filter(|id| self.tabs.iter().any(|tab| tab.id == *id));
+        if self.terminal_focus.is_some_and(|id| closing.contains(&id)) {
+            self.terminal_focus = self.active;
+        }
+        removed
     }
 
     fn load_draft(&mut self, session: Session) {
@@ -563,6 +613,7 @@ impl App {
                             session,
                             terminal,
                             exited: false,
+                            marker: TabMarker::default(),
                         });
                         self.active = Some(self.next_id);
                         self.terminal_focus = Some(self.next_id);
@@ -1463,6 +1514,7 @@ impl App {
                                             session: attach,
                                             terminal,
                                             exited: false,
+                                            marker: TabMarker::default(),
                                         });
                                         self.active = Some(self.next_id);
                                         self.terminal_focus = Some(self.next_id);
@@ -1501,6 +1553,7 @@ impl App {
                                             session: reconnect,
                                             terminal,
                                             exited: false,
+                                            marker: TabMarker::default(),
                                         });
                                         self.active = Some(self.next_id);
                                         self.terminal_focus = Some(self.next_id);
@@ -2281,6 +2334,7 @@ impl App {
                                 session,
                                 terminal,
                                 exited: false,
+                                marker: TabMarker::default(),
                             });
                             self.workspace_panes = vec![source_id, id];
                             self.workspace_axis = axis;
@@ -2392,6 +2446,7 @@ impl App {
                         session,
                         terminal,
                         exited: false,
+                        marker: TabMarker::default(),
                     });
                 }
                 Ok((created, axis))
