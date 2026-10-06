@@ -376,7 +376,12 @@ fn validate_profile_metadata(session: &Session) -> Result<()> {
 
 /// Stable selector used by the UI and import logic. Names may repeat in different folders.
 pub fn session_profile_key(session: &Session) -> String {
-    format!("{}:{}{}", session.folder.len(), session.folder, session.name)
+    format!(
+        "{}:{}{}",
+        session.folder.len(),
+        session.folder,
+        session.name
+    )
 }
 
 fn selector_matches(session: &Session, selector: &str) -> bool {
