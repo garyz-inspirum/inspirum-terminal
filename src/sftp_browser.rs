@@ -34,6 +34,8 @@ struct TransferJob {
     state: JobState,
     error: String,
     transfer: Option<Transfer>,
+    partial: Option<tempfile::TempPath>,
+    resume: bool,
 }
 
 impl TransferJob {
@@ -146,6 +148,8 @@ impl SftpBrowser {
             state: JobState::Queued,
             error: String::new(),
             transfer: None,
+            partial: None,
+            resume: false,
         });
         self.notice = "Transfer queued.".into();
     }
@@ -198,7 +202,7 @@ impl SftpBrowser {
     }
 
     fn start_job(&mut self, index: usize) {
-        let (direction, local, remote, overwrite, expected_size) = {
+        let (direction, local, remote, overwrite, expected_size, resume) = {
             let job = &self.jobs[index];
             (
                 job.direction,
@@ -206,18 +210,44 @@ impl SftpBrowser {
                 job.remote.clone(),
                 job.overwrite,
                 job.expected_size,
+                job.resume,
             )
         };
-        let result = match direction {
-            Direction::Download => sftp::start_download(
-                &self.session,
-                self.config.as_deref(),
-                &remote,
-                &local,
-                overwrite,
-                expected_size,
-            ),
-            Direction::Upload => {
+        let partial = if direction == Direction::Download {
+            self.jobs[index].partial.take()
+        } else {
+            None
+        };
+        self.jobs[index].resume = false;
+
+        let result = match (direction, resume) {
+            (Direction::Download, true) => match partial {
+                Some(partial) => sftp::resume_download(
+                    &self.session,
+                    self.config.as_deref(),
+                    &remote,
+                    &local,
+                    overwrite,
+                    expected_size,
+                    partial,
+                ),
+                None => Err(anyhow::anyhow!("download partial is no longer available")),
+            },
+            (Direction::Download, false) => {
+                drop(partial);
+                sftp::start_download(
+                    &self.session,
+                    self.config.as_deref(),
+                    &remote,
+                    &local,
+                    overwrite,
+                    expected_size,
+                )
+            }
+            (Direction::Upload, true) => {
+                sftp::resume_upload(&self.session, self.config.as_deref(), &local, &remote)
+            }
+            (Direction::Upload, false) => {
                 sftp::start_upload(&self.session, self.config.as_deref(), &local, &remote)
             }
         };
@@ -267,6 +297,9 @@ impl SftpBrowser {
                 }
                 Err(error) => {
                     let job = &mut self.jobs[index];
+                    if let Some(transfer) = job.transfer.as_mut() {
+                        job.partial = transfer.take_download_partial();
+                    }
                     job.transfer = None;
                     job.state = JobState::Failed;
                     job.error = format!("{error:#}");
@@ -506,6 +539,7 @@ impl SftpBrowser {
         for index in 0..self.jobs.len() {
             let mut cancel = false;
             let mut retry = false;
+            let mut resume = false;
             let job = &self.jobs[index];
             ui.group(|ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -528,10 +562,17 @@ impl SftpBrowser {
                     if job.state == JobState::Running && ui.button("Cancel").clicked() {
                         cancel = true;
                     }
-                    if matches!(job.state, JobState::Failed | JobState::Cancelled)
-                        && ui.button("Retry").clicked()
-                    {
-                        retry = true;
+                    if matches!(job.state, JobState::Failed | JobState::Cancelled) {
+                        let can_resume = match job.direction {
+                            Direction::Download => job.partial.is_some(),
+                            Direction::Upload => !job.overwrite,
+                        };
+                        if can_resume && ui.button("Resume").clicked() {
+                            resume = true;
+                        }
+                        if ui.button("Retry from start").clicked() {
+                            retry = true;
+                        }
                     }
                 });
                 if !job.error.is_empty() {
@@ -540,10 +581,11 @@ impl SftpBrowser {
             });
             if cancel {
                 let job = &mut self.jobs[index];
-                if let Some(transfer) = job.transfer.as_mut()
-                    && let Err(error) = transfer.cancel()
-                {
-                    job.error = format!("{error:#}");
+                if let Some(transfer) = job.transfer.as_mut() {
+                    if let Err(error) = transfer.cancel() {
+                        job.error = format!("{error:#}");
+                    }
+                    job.partial = transfer.take_download_partial();
                 }
                 job.transfer = None;
                 job.state = JobState::Cancelled;
@@ -551,8 +593,22 @@ impl SftpBrowser {
             if retry {
                 let job = &mut self.jobs[index];
                 job.transfer = None;
+                job.partial = None;
+                job.resume = false;
                 job.state = JobState::Queued;
                 job.transferred = 0;
+                job.error.clear();
+            }
+            if resume {
+                let job = &mut self.jobs[index];
+                job.transfer = None;
+                job.resume = true;
+                job.state = JobState::Queued;
+                if let Some(partial) = job.partial.as_ref() {
+                    job.transferred = std::fs::metadata(partial)
+                        .map(|metadata| metadata.len())
+                        .unwrap_or(0);
+                }
                 job.error.clear();
             }
         }
