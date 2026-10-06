@@ -90,6 +90,14 @@ pub fn bulk_close_ids(order: &[u64], selected: &BTreeSet<u64>, mode: BulkCloseMo
     }
 }
 
+pub fn remove_items_by_id<T>(
+    items: &mut Vec<T>,
+    closing: &BTreeSet<u64>,
+    id_of: impl Fn(&T) -> u64,
+) {
+    items.retain(|item| !closing.contains(&id_of(item)));
+}
+
 pub fn next_active_after_close(order: &[u64], active: Option<u64>, closing: &[u64]) -> Option<u64> {
     let closing: BTreeSet<u64> = closing.iter().copied().collect();
     if let Some(active) = active
@@ -146,6 +154,34 @@ mod tests {
             bulk_close_ids(&order, &selected, BulkCloseMode::Others(3)),
             vec![1, 2, 4]
         );
+    }
+
+    #[test]
+    fn ownership_removal_drops_each_removed_item_exactly_once() {
+        use std::{cell::Cell, rc::Rc};
+
+        struct Owned {
+            id: u64,
+            drops: Rc<Cell<usize>>,
+        }
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                self.drops.set(self.drops.get() + 1);
+            }
+        }
+
+        let drops = Rc::new(Cell::new(0));
+        let mut items = vec![
+            Owned { id: 1, drops: drops.clone() },
+            Owned { id: 2, drops: drops.clone() },
+            Owned { id: 3, drops: drops.clone() },
+        ];
+        remove_items_by_id(&mut items, &BTreeSet::from([1, 3]), |item| item.id);
+        assert_eq!(drops.get(), 2);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, 2);
+        drop(items);
+        assert_eq!(drops.get(), 3);
     }
 
     #[test]
