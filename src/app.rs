@@ -2207,17 +2207,6 @@ impl App {
             }
         }
 
-        let active_screen = if self.logging_tab.is_some() {
-            self.active.and_then(|id| {
-                self.tabs
-                    .iter_mut()
-                    .find(|tab| tab.id == id)
-                    .map(|tab| terminal_screen_text(&mut tab.terminal))
-            })
-        } else {
-            None
-        };
-
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(panel) = self.scp_panel.as_mut() {
                 ui.horizontal(|ui| {
@@ -2694,14 +2683,14 @@ impl App {
                 ui.label("No sessions are automatically connected on startup.");
             }
         });
-        if let Some((id, history_index)) = history_scroll_request {
-            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
-                if !tab.terminal.scroll_to_history_index(history_index) {
-                    self.history_notice =
-                        "Selected history result was truncated before navigation.".into();
-                }
-                ctx.request_repaint();
+        if let Some((id, history_index)) = history_scroll_request
+            && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id)
+        {
+            if !tab.terminal.scroll_to_history_index(history_index) {
+                self.history_notice =
+                    "Selected history result was truncated before navigation.".into();
             }
+            ctx.request_repaint();
         }
 
         if let Some(id) = focus_pane {
