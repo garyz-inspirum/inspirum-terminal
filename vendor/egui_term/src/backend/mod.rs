@@ -388,6 +388,25 @@ impl TerminalBackend {
         lines
     }
 
+    /// Scroll the viewport so a retained-history line is visible.
+    ///
+    /// `index` is zero-based from the oldest retained line returned by `history_lines`.
+    pub fn scroll_to_history_index(&mut self, index: usize) -> bool {
+        let term = self.term.clone();
+        let mut terminal = term.lock();
+        if index >= terminal.total_lines() {
+            return false;
+        }
+
+        let history_size = terminal.history_size();
+        terminal.grid_mut().scroll_display(Scroll::Bottom);
+        if index < history_size {
+            let delta = history_size.saturating_sub(index).min(i32::MAX as usize) as i32;
+            terminal.grid_mut().scroll_display(Scroll::Delta(delta));
+        }
+        true
+    }
+
     fn process_link_action(
         &mut self,
         terminal: &Term<EventProxy>,
