@@ -195,13 +195,27 @@ impl Transfer {
         self.expected_size
     }
 
-    pub fn cancel(&mut self) -> Result<()> {
+    /// Preserve a partial download so a later `reget` can continue it.
+    ///
+    /// Uploads write to the remote target and therefore have no local staging
+    /// path to return; OpenSSH's `reput` resumes those from the remote size.
+    pub fn preserve_partial(&mut self) -> Result<Option<PathBuf>> {
+        let Some(staging) = self.staging.take() else {
+            return Ok(None);
+        };
+        staging
+            .keep()
+            .map(Some)
+            .map_err(|error| error.error)
+            .context("preserve partial SFTP download")
+    }
+
+    pub fn cancel(&mut self) -> Result<Option<PathBuf>> {
         if self.child.try_wait()?.is_none() {
             self.child.kill().context("cancel SFTP transfer")?;
         }
         let _ = self.child.wait();
-        self.staging.take();
-        Ok(())
+        self.preserve_partial()
     }
 
     fn finalize_success(&mut self) -> Result<()> {
@@ -330,6 +344,63 @@ pub fn start_download(
     })
 }
 
+/// Resume a download from a partial file previously preserved by this module.
+///
+/// Resume is size-based because OpenSSH SFTP `reget` does not provide an
+/// end-to-end content hash. Callers must only offer this for a partial created
+/// by the same transfer job. The final byte-length verification and atomic
+/// destination commit are identical to a fresh download.
+pub fn start_download_resume(
+    session: &Session,
+    config: Option<&Path>,
+    remote: &str,
+    local: &Path,
+    partial: &Path,
+    overwrite: bool,
+    expected_size: Option<u64>,
+) -> Result<Transfer> {
+    if local.exists() && !overwrite {
+        anyhow::bail!("local destination already exists; explicit overwrite is required");
+    }
+    ensure!(partial.is_file(), "resumable download partial is missing");
+    let partial_size = fs::metadata(partial)?.len();
+    if let Some(expected) = expected_size {
+        ensure!(
+            partial_size <= expected,
+            "resumable download partial is larger than the expected remote file"
+        );
+    }
+
+    let staging =
+        TempPath::try_from_path(partial.to_owned()).context("track resumable download partial")?;
+    let staging_text = staging
+        .to_str()
+        .context("local staging path must be valid Unicode")?;
+    let command = format!(
+        "reget {} {}",
+        quote_batch_arg(remote)?,
+        quote_batch_arg(staging_text)?
+    );
+    let child = match spawn_batch(session, config, command) {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = staging.keep();
+            return Err(error);
+        }
+    };
+    Ok(Transfer {
+        child,
+        kind: TransferKind::Download,
+        staging: Some(staging),
+        destination: Some(local.to_owned()),
+        overwrite,
+        expected_size,
+        session: session.clone(),
+        config: config.map(Path::to_owned),
+        remote: remote.to_owned(),
+    })
+}
+
 pub fn start_upload(
     session: &Session,
     config: Option<&Path>,
@@ -354,6 +425,47 @@ pub fn start_upload(
         staging: None,
         destination: None,
         overwrite: false,
+        expected_size: Some(expected_size),
+        session: session.clone(),
+        config: config.map(Path::to_owned),
+        remote: remote.to_owned(),
+    })
+}
+
+/// Resume an upload to a known partial remote file using OpenSSH SFTP `reput`.
+///
+/// The operation validates that the existing remote length does not exceed the
+/// local source and re-validates the complete remote length before success.
+pub fn start_upload_resume(
+    session: &Session,
+    config: Option<&Path>,
+    local: &Path,
+    remote: &str,
+) -> Result<Transfer> {
+    ensure!(local.is_file(), "upload source must be a regular file");
+    let expected_size = fs::metadata(local)?.len();
+    let existing = remote_size(session, config, remote)
+        .context("resumable upload remote partial is missing")?;
+    ensure!(
+        existing <= expected_size,
+        "resumable upload remote file is larger than the local source"
+    );
+    let local_text = local.to_str().context("local path must be valid Unicode")?;
+    let child = spawn_batch(
+        session,
+        config,
+        format!(
+            "reput {} {}",
+            quote_batch_arg(local_text)?,
+            quote_batch_arg(remote)?
+        ),
+    )?;
+    Ok(Transfer {
+        child,
+        kind: TransferKind::Upload,
+        staging: None,
+        destination: None,
+        overwrite: true,
         expected_size: Some(expected_size),
         session: session.clone(),
         config: config.map(Path::to_owned),
