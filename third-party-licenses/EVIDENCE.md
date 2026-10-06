@@ -4,7 +4,7 @@ This note records provenance research for supplemental release notices. It is no
 
 ## Closure check
 
-`cargo tree --locked --target TARGET -i PACKAGE` was run with the release lockfile and default features. `hexf-parse 0.2.1`, `block 0.1.6`, and `malloc_buf 0.0.6` did not appear in the active default-feature tree. `dispatch 0.2.0` did appear on macOS through `objc2-foundation 0.2.2 -> eframe 0.31.1 -> inspirum-terminal`. Target-filtered `cargo metadata`, which intentionally provides the release notice gate's broader inventory, contains `hexf-parse` on all three targets and all three MIT packages on macOS. Coverage was not reduced based on this distinction.
+`cargo tree --locked --target TARGET -i PACKAGE` was run with the release lockfile and default features. `hexf-parse 0.2.1`, `block 0.1.6`, and `malloc_buf 0.0.6` do not appear in the active default-feature tree. The previously active crates.io `dispatch 0.2.0` edge on macOS has been replaced with the project-owned `vendor/dispatch-compat` package via `[patch.crates-io]`. The compatibility package implements only the `Queue::main().exec_sync(...)` surface required by `objc2-foundation 0.2.2`, is Apache-2.0 licensed, and carries its package-local `LICENSE`. The unresolved upstream `rust-dispatch 0.2.0` bytes are therefore no longer in the production dependency closure or release notices. Target-filtered `cargo metadata` remains the broader inventory used by the release notice gate.
 
 ## hexf-parse 0.2.1 — resolved with canonical CC0 text
 
@@ -27,7 +27,7 @@ This note records provenance research for supplemental release notices. It is no
   https://github.com/SSheldon/rust-block/blob/47178790cfc9d4a8b092051d8b413b78bd31254a/src/lib.rs
 - Repository history contains no `LICENSE`, `LICENSE.md`, `LICENSE.txt`, or `COPYING` addition. A holder/year cannot be derived without invention, so no supplement was added.
 
-## dispatch 0.2.0 — unresolved
+## dispatch 0.2.0 — retired from the active release graph
 
 - Registry provenance revision: `82d6c7a5b75dc0c71c3f46f87bb6c16a476f7748`.
 - Exact Cargo declaration (`license = "MIT"`, author `Steven Sheldon`):
@@ -36,6 +36,7 @@ This note records provenance research for supplemental release notices. It is no
   https://github.com/SSheldon/rust-dispatch/blob/82d6c7a5b75dc0c71c3f46f87bb6c16a476f7748/README.md
   https://github.com/SSheldon/rust-dispatch/blob/82d6c7a5b75dc0c71c3f46f87bb6c16a476f7748/src/lib.rs
 - Repository history contains no license-file addition. A holder/year cannot be derived without invention, so no supplement was added.
+- This exact registry package is retained here only as historical provenance. The release graph now resolves `dispatch 0.2.0` to the project-owned Apache-2.0 `vendor/dispatch-compat` package, so these unresolved upstream bytes are not distributed.
 
 ## malloc_buf 0.0.6 — unresolved
 
@@ -48,6 +49,6 @@ This note records provenance research for supplemental release notices. It is no
   https://github.com/SSheldon/malloc_buf/commit/d9a3e539642bd90e07df458d226b19cdfa606863
 - That commit is a descendant of version 0.0.6 and names `Copyright (c) 2020 Steven Sheldon`, but it was authored by a third party and does not expressly state retroactive scope for 0.0.6. It was therefore not silently applied to the older release.
 
-## Astra decision options for unresolved MIT packages
+## Remaining historical unresolved MIT packages
 
-Keep publication blocked; obtain a version-specific license/attribution clarification from the copyright holder; or separately review replacing/updating the dependency to a release carrying complete license text. Dependency replacement or updates are outside this notice-only change.
+`block 0.1.6` and `malloc_buf 0.0.6` remain documented for provenance but are not selected by the active production tree. If either becomes active in a future release graph, publication must fail closed until version-specific license/attribution evidence is resolved.
