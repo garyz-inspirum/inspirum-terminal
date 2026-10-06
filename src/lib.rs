@@ -635,6 +635,7 @@ fn read_sessions(file: fs::File) -> Result<Vec<Session>> {
     Ok(sessions)
 }
 
+pub mod appearance;
 pub mod history;
 pub mod proxy;
 pub mod scp;
