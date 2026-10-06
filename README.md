@@ -1,6 +1,6 @@
 # Inspirum Terminal
 
-Inspirum Terminal is an early, fully open-source Apache-2.0 slice of a native SSH terminal. It is not a complete terminal suite. It does not have WindTerm feature parity, and this repository does not claim full WindTerm parity.
+Inspirum Terminal is a fully open-source Apache-2.0, cross-platform native SSH client at an SSH-first release-candidate stage. Its core SSH, transfer, workspace and native packaging workflows are functional and continuously verified, but it is not yet a complete terminal suite and does not claim full WindTerm feature parity.
 
 Current scope:
 
