@@ -588,8 +588,8 @@ impl App {
             }
         }
 
-        // Retaining is the sole ownership-removal point: each TerminalBackend is dropped once.
-        self.tabs.retain(|tab| !closing.contains(&tab.id));
+        // This is the sole ownership-removal point: each TerminalBackend is dropped once.
+        tab_management::remove_items_by_id(&mut self.tabs, &closing, |tab| tab.id);
         self.active = next_active;
         if self.terminal_focus.is_some_and(|id| closing.contains(&id)) {
             self.terminal_focus = self.active;
