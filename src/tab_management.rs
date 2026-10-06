@@ -59,6 +59,17 @@ pub fn search_tab_ids<'a>(
         .collect()
 }
 
+pub fn move_search_selection(len: usize, current: usize, direction: isize) -> usize {
+    if len == 0 || direction == 0 {
+        return 0;
+    }
+    if direction.is_negative() {
+        (current + len - 1) % len
+    } else {
+        (current + 1) % len
+    }
+}
+
 pub fn close_plan(
     order: &[u64],
     selected: &BTreeSet<u64>,
@@ -150,6 +161,15 @@ mod tests {
         let tabs = [(30, "Prod router"), (10, "Dev shell"), (20, "prod db")];
         assert_eq!(search_tab_ids(tabs, "PROD"), vec![30, 20]);
         assert_eq!(search_tab_ids(tabs, ""), vec![30, 10, 20]);
+    }
+
+    #[test]
+    fn quick_switcher_keyboard_navigation_wraps_deterministically() {
+        assert_eq!(move_search_selection(0, 0, 1), 0);
+        assert_eq!(move_search_selection(3, 0, 1), 1);
+        assert_eq!(move_search_selection(3, 2, 1), 0);
+        assert_eq!(move_search_selection(3, 0, -1), 2);
+        assert_eq!(move_search_selection(3, 1, -1), 0);
     }
 
     #[test]
