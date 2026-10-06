@@ -371,8 +371,8 @@ pub fn start_download_resume(
         );
     }
 
-    let staging = TempPath::try_from_path(partial.to_owned())
-        .context("track resumable download partial")?;
+    let staging =
+        TempPath::try_from_path(partial.to_owned()).context("track resumable download partial")?;
     let staging_text = staging
         .to_str()
         .context("local staging path must be valid Unicode")?;
