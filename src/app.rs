@@ -2085,13 +2085,20 @@ impl App {
             if ctx.input(|input| input.key_pressed(egui::Key::ArrowDown))
                 && !switch_hits.is_empty()
             {
-                self.tab_switcher_index = (self.tab_switcher_index + 1) % switch_hits.len();
+                self.tab_switcher_index = tab_management::move_search_selection(
+                    switch_hits.len(),
+                    self.tab_switcher_index,
+                    1,
+                );
             }
             if ctx.input(|input| input.key_pressed(egui::Key::ArrowUp))
                 && !switch_hits.is_empty()
             {
-                self.tab_switcher_index =
-                    (self.tab_switcher_index + switch_hits.len() - 1) % switch_hits.len();
+                self.tab_switcher_index = tab_management::move_search_selection(
+                    switch_hits.len(),
+                    self.tab_switcher_index,
+                    -1,
+                );
             }
             if ctx.input(|input| input.key_pressed(egui::Key::Enter))
                 && let Some(id) = switch_hits.get(self.tab_switcher_index)
