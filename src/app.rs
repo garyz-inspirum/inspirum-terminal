@@ -2,9 +2,9 @@
 use crate::{
     ControlMasterMode, ProxyKind, Session, SessionImportMode, delete_session,
     duplicate_session_draft, export_sessions, import_sessions, load_sessions, save_session_edit,
-    save_sessions, session_profile_key,
+    save_sessions,
     scp_panel::ScpPanel,
-    session_matches_query,
+    session_matches_query, session_profile_key,
     sftp_browser::SftpBrowser,
     startup::{self, StartupBehavior, StartupSettings},
     support::{self, SanitizedErrorHistory},
@@ -535,7 +535,9 @@ impl App {
                             .iter()
                             .find(|session| session_profile_key(session) == profile)
                             .cloned()
-                            .ok_or_else(|| anyhow::anyhow!("configured startup profile no longer exists"))?;
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("configured startup profile no longer exists")
+                            })?;
                         anyhow::ensure!(self.tabs.len() < 16, "tab limit reached");
                         let terminal = terminal::connect(
                             self.next_id,
