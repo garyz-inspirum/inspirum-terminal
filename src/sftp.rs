@@ -187,13 +187,11 @@ impl Transfer {
                 .and_then(|path| fs::metadata(path).ok())
                 .map(|metadata| metadata.len())
                 .unwrap_or(0),
-            TransferKind::Upload => remote_size(
-                &self.session,
-                self.config.as_deref(),
-                &self.remote,
-            )
-            .unwrap_or(0)
-            .min(self.expected_size.unwrap_or(u64::MAX)),
+            TransferKind::Upload => {
+                remote_size(&self.session, self.config.as_deref(), &self.remote)
+                    .unwrap_or(0)
+                    .min(self.expected_size.unwrap_or(u64::MAX))
+            }
         }
     }
 
