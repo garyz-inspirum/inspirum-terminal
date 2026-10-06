@@ -1062,7 +1062,12 @@ impl App {
         }
         if let Some(action) = self.shortcut_action(ctx) {
             match action {
-                ShortcutAction::Connect => self.connect_draft(ctx),
+                ShortcutAction::Connect => {
+                    // Ctrl/Cmd+Enter is a form shortcut only. Never steal it from a focused PTY.
+                    if self.terminal_focus.is_none() {
+                        self.connect_draft(ctx);
+                    }
+                }
                 ShortcutAction::QuickSwitch => {
                     self.tab_switcher_open = true;
                     self.tab_switcher_query.clear();
