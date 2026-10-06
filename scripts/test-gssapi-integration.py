@@ -91,6 +91,14 @@ def main() -> int:
         cache = root / "ccache"
         keytab = root / "sshd.keytab"
 
+        canonical_domain = canonical_host.partition(".")[2]
+        domain_realm_lines = [
+            f" localhost = {REALM}",
+            f" .localhost = {REALM}",
+            f" {canonical_host} = {REALM}",
+        ]
+        if canonical_domain:
+            domain_realm_lines.append(f" .{canonical_domain} = {REALM}")
         krb5_conf.write_text(
             f"""[libdefaults]
  default_realm = {REALM}
@@ -107,8 +115,7 @@ def main() -> int:
  }}
 
 [domain_realm]
- localhost = {REALM}
- .localhost = {REALM}
+{chr(10).join(domain_realm_lines)}
 """,
             encoding="utf-8",
         )
