@@ -187,7 +187,13 @@ impl Transfer {
                 .and_then(|path| fs::metadata(path).ok())
                 .map(|metadata| metadata.len())
                 .unwrap_or(0),
-            TransferKind::Upload => 0,
+            TransferKind::Upload => remote_size(
+                &self.session,
+                self.config.as_deref(),
+                &self.remote,
+            )
+            .unwrap_or(0)
+            .min(self.expected_size.unwrap_or(u64::MAX)),
         }
     }
 
@@ -200,8 +206,17 @@ impl Transfer {
             self.child.kill().context("cancel SFTP transfer")?;
         }
         let _ = self.child.wait();
-        self.staging.take();
         Ok(())
+    }
+
+    /// Detach a cancelled or failed download's temporary file so a caller can
+    /// explicitly resume it. If the caller does not take it, Drop removes it.
+    pub fn take_download_partial(&mut self) -> Option<TempPath> {
+        if self.kind == TransferKind::Download {
+            self.staging.take()
+        } else {
+            None
+        }
     }
 
     fn finalize_success(&mut self) -> Result<()> {
@@ -289,26 +304,29 @@ fn spawn_batch(session: &Session, config: Option<&Path>, command: String) -> Res
     Ok(child)
 }
 
-pub fn start_download(
+fn start_download_command(
     session: &Session,
     config: Option<&Path>,
     remote: &str,
     local: &Path,
     overwrite: bool,
     expected_size: Option<u64>,
+    staging: TempPath,
+    resume: bool,
 ) -> Result<Transfer> {
     if local.exists() && !overwrite {
         anyhow::bail!("local destination already exists; explicit overwrite is required");
     }
-    let parent = local.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).context("create local download directory")?;
-    let staging = tempfile::Builder::new()
-        .prefix(".inspirum-download-")
-        .tempfile_in(parent)
-        .context("create download staging file")?
-        .into_temp_path();
+    if let Some(expected) = expected_size {
+        let partial = fs::metadata(&staging)?.len();
+        ensure!(
+            partial <= expected,
+            "download partial is larger than the expected remote file"
+        );
+    }
+    let operation = if resume { "reget" } else { "get" };
     let command = format!(
-        "get {} {}",
+        "{operation} {} {}",
         quote_batch_arg(remote)?,
         quote_batch_arg(
             staging
@@ -330,20 +348,88 @@ pub fn start_download(
     })
 }
 
-pub fn start_upload(
+pub fn start_download(
+    session: &Session,
+    config: Option<&Path>,
+    remote: &str,
+    local: &Path,
+    overwrite: bool,
+    expected_size: Option<u64>,
+) -> Result<Transfer> {
+    let parent = local.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).context("create local download directory")?;
+    let staging = tempfile::Builder::new()
+        .prefix(".inspirum-download-")
+        .tempfile_in(parent)
+        .context("create download staging file")?
+        .into_temp_path();
+    start_download_command(
+        session,
+        config,
+        remote,
+        local,
+        overwrite,
+        expected_size,
+        staging,
+        false,
+    )
+}
+
+/// Resume a download from a queue-owned staging file created by start_download.
+///
+/// The temporary path remains under the selected destination directory and is
+/// still committed only after the final size check succeeds.
+pub fn resume_download(
+    session: &Session,
+    config: Option<&Path>,
+    remote: &str,
+    local: &Path,
+    overwrite: bool,
+    expected_size: Option<u64>,
+    staging: TempPath,
+) -> Result<Transfer> {
+    let parent = local.parent().unwrap_or_else(|| Path::new("."));
+    ensure!(
+        staging.parent() == Some(parent),
+        "download partial is outside the selected destination directory"
+    );
+    ensure!(staging.exists(), "download partial no longer exists");
+    start_download_command(
+        session,
+        config,
+        remote,
+        local,
+        overwrite,
+        expected_size,
+        staging,
+        true,
+    )
+}
+
+fn start_upload_command(
     session: &Session,
     config: Option<&Path>,
     local: &Path,
     remote: &str,
+    resume: bool,
 ) -> Result<Transfer> {
     ensure!(local.is_file(), "upload source must be a regular file");
     let expected_size = fs::metadata(local)?.len();
+    if resume {
+        let partial = remote_size(session, config, remote)
+            .context("remote upload partial is unavailable for resume")?;
+        ensure!(
+            partial <= expected_size,
+            "remote upload partial is larger than the local source"
+        );
+    }
     let local_text = local.to_str().context("local path must be valid Unicode")?;
+    let operation = if resume { "reput" } else { "put" };
     let child = spawn_batch(
         session,
         config,
         format!(
-            "put {} {}",
+            "{operation} {} {}",
             quote_batch_arg(local_text)?,
             quote_batch_arg(remote)?
         ),
@@ -359,6 +445,30 @@ pub fn start_upload(
         config: config.map(Path::to_owned),
         remote: remote.to_owned(),
     })
+}
+
+pub fn start_upload(
+    session: &Session,
+    config: Option<&Path>,
+    local: &Path,
+    remote: &str,
+) -> Result<Transfer> {
+    start_upload_command(session, config, local, remote, false)
+}
+
+/// Resume an upload previously started by this transfer queue.
+///
+/// Callers must only offer this for a job that originally targeted a new remote
+/// path. Confirmed overwrites intentionally do not expose resume because an
+/// interrupted overwrite cannot prove that an existing remote prefix belongs
+/// to the local source.
+pub fn resume_upload(
+    session: &Session,
+    config: Option<&Path>,
+    local: &Path,
+    remote: &str,
+) -> Result<Transfer> {
+    start_upload_command(session, config, local, remote, true)
 }
 
 pub fn local_entries(path: &Path) -> Result<Vec<PathBuf>> {
