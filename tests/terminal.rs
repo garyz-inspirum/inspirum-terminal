@@ -514,6 +514,78 @@ fn focused_terminal_dispatches_keyboard_events_after_pointer_leaves() {
 
 #[cfg(unix)]
 #[test]
+fn ime_preedit_is_not_written_and_commit_is_sent_once() {
+    use eframe::egui::{Event, ImeEvent, Key, Modifiers, Pos2, RawInput, Rect, vec2};
+
+    let context = eframe::egui::Context::default();
+    let mut backend = line_capture_backend(83);
+    let screen = Rect::from_min_size(Pos2::ZERO, vec2(640.0, 480.0));
+
+    let _ = context.run(
+        RawInput {
+            screen_rect: Some(screen),
+            events: vec![Event::Ime(ImeEvent::Preedit("ce shi".into()))],
+            ..RawInput::default()
+        },
+        |ctx| {
+            eframe::egui::CentralPanel::default().show(ctx, |ui| {
+                let view = egui_term::TerminalView::new(ui, &mut backend)
+                    .set_size(vec2(200.0, 100.0))
+                    .set_focus(true);
+                ui.add(view);
+            });
+        },
+    );
+
+    let _ = context.run(
+        RawInput {
+            screen_rect: Some(screen),
+            events: vec![Event::Ime(ImeEvent::Commit("测试".into()))],
+            ..RawInput::default()
+        },
+        |ctx| {
+            eframe::egui::CentralPanel::default().show(ctx, |ui| {
+                let view = egui_term::TerminalView::new(ui, &mut backend)
+                    .set_size(vec2(200.0, 100.0))
+                    .set_focus(true);
+                ui.add(view);
+            });
+        },
+    );
+
+    let _ = context.run(
+        RawInput {
+            screen_rect: Some(screen),
+            events: vec![Event::Key {
+                key: Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::default(),
+            }],
+            ..RawInput::default()
+        },
+        |ctx| {
+            eframe::egui::CentralPanel::default().show(ctx, |ui| {
+                let view = egui_term::TerminalView::new(ui, &mut backend)
+                    .set_size(vec2(200.0, 100.0))
+                    .set_focus(true);
+                ui.add(view);
+            });
+        },
+    );
+
+    let text = wait_for_grid(&mut backend, "CAPTURE=<测试>");
+    assert!(!text.contains("ce shi"), "IME preedit leaked to PTY: {text:?}");
+    assert_eq!(
+        text.matches("CAPTURE=<测试>").count(),
+        1,
+        "IME commit must be delivered exactly once: {text:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn focused_form_dispatch_does_not_leak_into_hovered_terminal() {
     use eframe::egui::{Event, Key, Modifiers, Pos2, RawInput, Rect, vec2};
 
