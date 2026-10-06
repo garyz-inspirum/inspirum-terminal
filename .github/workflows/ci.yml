@@ -84,6 +84,11 @@ jobs:
           }
       - name: Clippy
         run: cargo clippy --locked --all-targets --target ${{ matrix.target }} -- -D warnings
+      - name: Verify macOS release notice closure
+        if: matrix.target == 'aarch64-apple-darwin'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python3 scripts/collect-third-party-notices.py --target "$TARGET" --output "${{ runner.temp }}/release-notices"
       - name: Install native SSH fixture dependency (Linux)
         if: runner.os == 'Linux'
         run: python3 -m pip install --disable-pip-version-check "asyncssh==2.24.0"
