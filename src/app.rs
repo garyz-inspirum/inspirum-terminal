@@ -227,6 +227,7 @@ pub struct App {
     startup_workspace_path: String,
     startup_notice: String,
     draft: Session,
+    profile_tags: String,
     port: String,
     proxy_port: String,
     control_persist: String,
@@ -326,6 +327,7 @@ impl App {
             startup_workspace_path,
             startup_notice: String::new(),
             draft: Session::default(),
+            profile_tags: String::new(),
             port: String::new(),
             proxy_port: String::new(),
             control_persist: String::new(),
@@ -384,6 +386,7 @@ impl App {
     }
 
     fn load_draft(&mut self, session: Session) {
+        self.profile_tags = session.tags.join(", ");
         self.port = session.port.map(|p| p.to_string()).unwrap_or_default();
         self.proxy_port = session
             .ssh
@@ -518,6 +521,13 @@ impl App {
             parse_optional_u16(&self.keepalive, "keepalive interval")?;
         session.ssh.local_forwards = parse_forward_lines(&self.local_forwards);
         session.ssh.remote_forwards = parse_forward_lines(&self.remote_forwards);
+        session.tags = self
+            .profile_tags
+            .split(',')
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
         session.ssh.dynamic_forwards = parse_forward_lines(&self.dynamic_forwards);
         session.ssh_args()?;
         Ok(session)
@@ -1634,18 +1644,8 @@ impl App {
                         ui.checkbox(&mut self.draft.favorite, "Favorite / pin");
                     });
                     ui.label("Tags (comma separated)");
-                    let mut profile_tags = self.draft.tags.join(", ");
-                    let tags_response = ui.text_edit_singleline(&mut profile_tags);
-                    if tags_response.has_focus() {
+                    if ui.text_edit_singleline(&mut self.profile_tags).has_focus() {
                         self.terminal_focus = None;
-                    }
-                    if tags_response.changed() {
-                        self.draft.tags = profile_tags
-                            .split(',')
-                            .map(str::trim)
-                            .filter(|tag| !tag.is_empty())
-                            .map(ToOwned::to_owned)
-                            .collect();
                     }
                     ui.small("Folders and tags are non-secret metadata. Moving or renaming a saved profile never disconnects already-open tabs.");
 
