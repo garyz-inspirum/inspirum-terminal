@@ -361,12 +361,13 @@ fn validate_profile_metadata(session: &Session) -> Result<()> {
         session.folder.len() <= 512 && !session.folder.chars().any(char::is_control),
         "profile folder must be at most 512 bytes without control characters"
     );
-    ensure!(session.tags.len() <= 32, "at most 32 profile tags are supported");
+    ensure!(
+        session.tags.len() <= 32,
+        "at most 32 profile tags are supported"
+    );
     for tag in &session.tags {
         ensure!(
-            !tag.trim().is_empty()
-                && tag.len() <= 64
-                && !tag.chars().any(char::is_control),
+            !tag.trim().is_empty() && tag.len() <= 64 && !tag.chars().any(char::is_control),
             "profile tags must be 1–64 bytes without control characters"
         );
     }
@@ -375,11 +376,11 @@ fn validate_profile_metadata(session: &Session) -> Result<()> {
 
 /// Stable selector used by the UI and import logic. Names may repeat in different folders.
 pub fn session_profile_key(session: &Session) -> String {
-    format!("{}\u{1f}{}", session.folder, session.name)
+    format!("{}:{}{}", session.folder.len(), session.folder, session.name)
 }
 
 fn selector_matches(session: &Session, selector: &str) -> bool {
-    selector == session_profile_key(session) || (!selector.contains('\u{1f}') && selector == session.name)
+    selector == session_profile_key(session) || selector == session.name
 }
 
 fn same_profile_slot(left: &Session, right: &Session) -> bool {
@@ -394,7 +395,10 @@ pub fn session_matches_query(session: &Session, query: &str) -> bool {
         || session.host.to_lowercase().contains(&query)
         || session.user.to_lowercase().contains(&query)
         || session.folder.to_lowercase().contains(&query)
-        || session.tags.iter().any(|tag| tag.to_lowercase().contains(&query))
+        || session
+            .tags
+            .iter()
+            .any(|tag| tag.to_lowercase().contains(&query))
 }
 
 /// Replace the selected profile, or save a new profile when no selection is active.
@@ -428,7 +432,9 @@ pub fn save_session_edit(
     }
 
     ensure!(
-        !next.iter().any(|profile| same_profile_slot(profile, &session)),
+        !next
+            .iter()
+            .any(|profile| same_profile_slot(profile, &session)),
         "a profile named {:?} already exists in folder {:?}",
         session.name,
         session.folder
@@ -527,7 +533,9 @@ pub fn import_sessions(
             );
             for session in &imported {
                 ensure!(
-                    !existing.iter().any(|profile| same_profile_slot(profile, session)),
+                    !existing
+                        .iter()
+                        .any(|profile| same_profile_slot(profile, session)),
                     "profile import conflicts with existing profile {:?} in folder {:?}",
                     session.name,
                     session.folder
