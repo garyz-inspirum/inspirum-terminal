@@ -17,36 +17,36 @@ Current scope:
 
 ## Verification status
 
-Native CI for PR #5 completed successfully on Linux x86_64, Windows x64, and macOS Apple Silicon at commit `f52d6297c118da4b590526b8b027a6a8353656ff`. This is useful platform evidence, but it is not full SSH acceptance.
+The current `main` release-candidate baseline is merge commit `17d353d3166f8c5a85f44329114530d3338462c9`. Post-merge CI run #214 (`37443065634`) passed the full native matrix on Linux x86_64, Windows x64, and macOS Apple Silicon.
 
 Verified evidence:
 
-- Linux x86_64: formatting, build/check, Rust tests, clippy, helper-script tests, and the isolated authenticated `sshd` fixture passed. CI run #78 at `1a8716d0d9ed45e3c1d43c1db5918cc5725b2186` additionally verified password authentication, encrypted-key prompts, SSH-agent authentication, public-key + keyboard-interactive PAM MFA, disabled-method negative cases, password-prompt cancellation, and a stalled-handshake `ConnectTimeout` path. The fixture log contained the expected PASS markers and did not contain the synthetic fixture password.
-- Windows x64: formatting, build/check, Rust tests, and clippy passed. The native suite includes the Windows PTY child-argument-boundary test and an actual OpenSSH child-exit smoke test.
-- macOS Apple Silicon: formatting, build/check, Rust tests, and clippy passed natively on arm64. The suite includes an actual OpenSSH child-exit smoke test.
-- License closure: Linux and Windows remain clear for the current dependency graph. The active `dispatch 0.2.0` notice still blocks macOS distribution; it does not block compilation or tests.
+- Linux x86_64: formatting, build/check, Rust tests, Clippy, target-specific third-party notice collection, native authenticated SSH smoke, the deeper disposable `sshd` integration suite, release-candidate packaging/upload, and downloaded clean-install verification passed.
+- Windows x64: formatting, build/check, bounded Rust tests, Clippy, target-specific third-party notice collection, native authenticated SSH smoke, release-candidate packaging/upload, and downloaded clean-install verification passed.
+- macOS Apple Silicon: formatting, build/check, Rust tests, Clippy, target-specific third-party notice collection, native authenticated SSH smoke, release-candidate packaging/upload, and downloaded clean-install verification passed natively on arm64.
+- The native SSH smoke exercises the Inspirum -> system OpenSSH path for authentication, terminal I/O, PTY resize, changed-host-key rejection before authentication, reconnect, and process cleanup on all three supported platforms.
+- The downloaded-artifact gate independently inspects the packaged executable bytes as ELF x86_64, PE32+ AMD64, or thin Mach-O ARM64, validates release metadata, clean-extracts the archive, and runs the extracted executable with `--version`.
+- The previous macOS `dispatch 0.2.0` notice blocker is no longer in the distributed dependency closure; the compatibility edge is supplied by the project-owned Apache-2.0 `vendor/dispatch-compat` patch and the target-specific notice collector passes on Apple Silicon.
 
-Not yet run:
+Known limits:
 
-- isolated authenticated SSH-server acceptance on Windows or macOS;
-- GSSAPI authentication acceptance and the broader ProxyJump/forwarding, X11/agent-forwarding acceptance matrix on all three platforms;
-- manual GUI/device acceptance, a release workflow, and downloaded-artifact verification.
+- release archives are intentionally unsigned and unnotarized until credential-backed signing is enabled and verified;
+- macOS packaging is currently a bare executable in a `.tar.gz`, not an `.app`/DMG;
+- GSSAPI controls delegate to the installed OpenSSH build and real Kerberos-environment compatibility is not claimed universally;
+- keyboard/IME/accessibility, richer terminal/workspace polish, local file management and remote editing are Phase 3 work;
+- full WindTerm parity is not claimed.
 
-The CI and release workflows pin Rust 1.95.0. Passing native CI proves the exercised code paths on those runners; it does not by itself establish complete SSH or WindTerm parity.
-
-macOS release packaging is a bare executable in a `.tar.gz`, not an app bundle. It is unsigned and unnotarized. Do not distribute a macOS archive while the `dispatch 0.2.0` notice gap remains. No release artifact is code-signed.
+The CI and release workflows pin Rust 1.95.0. Native CI proves the exercised paths above; it does not imply support for every OpenSSH build, desktop environment, locale, or future WindTerm-class feature.
 
 ## Release workflow targets
 
-These are the targets the release workflow is defined to build. A row is not a statement that native execution has passed or that distribution is allowed.
-
-| Platform | Rust target | Archive | Current limit |
+| Platform | Rust target | Archive | Verified state |
 | --- | --- | --- | --- |
-| Linux x64 | `x86_64-unknown-linux-gnu` | `.tar.gz` | native CI passed, including the isolated authenticated `sshd` fixture; broader SSH acceptance remains pending |
-| Windows x64 | `x86_64-pc-windows-msvc` | `.zip` | native CI passed, including PTY argv-boundary and OpenSSH child-exit smoke tests; isolated authenticated server acceptance remains pending |
-| macOS Apple Silicon | `aarch64-apple-darwin` | `.tar.gz` bare executable, not an `.app` bundle | native arm64 CI passed; distribution is still blocked by `dispatch 0.2.0`; unsigned and unnotarized |
+| Linux x64 | `x86_64-unknown-linux-gnu` | `.tar.gz` | native SSH acceptance, package upload/download, binary architecture inspection and clean `--version` execution pass |
+| Windows x64 | `x86_64-pc-windows-msvc` | `.zip` | native SSH acceptance, package upload/download, PE32+ AMD64 inspection and clean `--version` execution pass |
+| macOS Apple Silicon | `aarch64-apple-darwin` | `.tar.gz` bare executable | native SSH acceptance, package upload/download, thin Mach-O ARM64 inspection and clean `--version` execution pass; unsigned/unnotarized |
 
-Early artifacts are unsigned prereleases because no code-signing or notarization credentials are available.
+Early artifacts remain unsigned prereleases because code-signing and notarization credentials are not configured.
 
 ## Requirements
 
@@ -123,11 +123,13 @@ This is an early slice, not a security audit. Review `docs/ARCHITECTURE.md` for 
 
 ## Releases
 
-Tags and manual release requests must use `vMAJOR.MINOR.PATCH` and must exactly match `package.version` in `Cargo.toml`. The workflow packages the executable with this README, the full Apache-2.0 `LICENSE`, and target-specific `THIRD_PARTY_NOTICES`, publishes `SHA256SUMS`, and marks the GitHub Release as an unsigned prerelease.
+Tags and manual release requests must use `vMAJOR.MINOR.PATCH` and must exactly match `package.version` in `Cargo.toml`. The workflow packages the executable with this README, the full Apache-2.0 `LICENSE`, target-specific `THIRD_PARTY_NOTICES`, and `RELEASE_METADATA.json`; it publishes `SHA256SUMS` and marks the GitHub Release as an unsigned prerelease.
 
-Workflow success still does not authorize macOS distribution while `dispatch 0.2.0` blocks that distribution. A macOS archive is a bare unsigned, unnotarized executable, not an app bundle. Native CI has run on Windows and Apple Silicon, but manual GUI/device acceptance and isolated authenticated SSH-server acceptance on those platforms remain pending.
+Before publication, each platform archive is uploaded as a workflow artifact and then downloaded into a separate native verification job. That job clean-extracts the archive, rejects unsafe archive layouts, verifies the executable architecture from its bytes, validates release metadata, and runs the extracted executable with `--version`. Publication depends on all three verification jobs.
 
-Verify downloads with the platform's SHA-256 tooling before running them. Checksums do not authenticate an unsigned publisher.
+Current archives are **not code-signed**. macOS artifacts are **not notarized** and remain bare executable archives rather than app bundles/DMGs. The repository includes signing-readiness hooks, but no release should be described as signed or notarized until credential-backed signing is enabled and the resulting signatures/notarization are independently verified.
+
+Verify downloads with the platform's SHA-256 tooling before running them. Checksums detect changed bytes relative to the published manifest; while releases are unsigned, checksums do not independently authenticate the publisher.
 
 ## Contributing and license
 
