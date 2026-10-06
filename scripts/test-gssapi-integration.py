@@ -81,6 +81,8 @@ def main() -> int:
         ssh_port = reserve_port()
         user = getpass.getuser()
         principal = f"{user}@{REALM}"
+        canonical_host = socket.getfqdn().lower().rstrip(".")
+        service_principal = f"host/{canonical_host}@{REALM}"
         fixture_password = "inspirum-gssapi-fixture-password"
         master_password = "inspirum-gssapi-master-password"
 
@@ -142,20 +144,21 @@ def main() -> int:
             [kadmin_local, "-r", REALM, "-q", f"addprinc -pw {fixture_password} {principal}"],
             env,
         )
-        run(
-            [kadmin_local, "-r", REALM, "-q", f"addprinc -randkey host/localhost@{REALM}"],
-            env,
-        )
-        run(
-            [
-                kadmin_local,
-                "-r",
-                REALM,
-                "-q",
-                f"ktadd -k {keytab} host/localhost@{REALM}",
-            ],
-            env,
-        )
+        for spn in (f"host/localhost@{REALM}", service_principal):
+            run(
+                [kadmin_local, "-r", REALM, "-q", f"addprinc -randkey {spn}"],
+                env,
+            )
+            run(
+                [
+                    kadmin_local,
+                    "-r",
+                    REALM,
+                    "-q",
+                    f"ktadd -k {keytab} {spn}",
+                ],
+                env,
+            )
 
         kdc_log = (root / "kdc.log").open("w+", encoding="utf-8")
         sshd_log = (root / "sshd.log").open("w+", encoding="utf-8")
@@ -170,7 +173,6 @@ def main() -> int:
             wait_tcp(kdc, kdc_port, "Kerberos KDC")
             run([kinit, principal], env, input_text=fixture_password + "\n")
             run([klist, "-s"], env)
-            service_principal = f"host/localhost@{REALM}"
             service = subprocess.run(
                 [kvno, service_principal],
                 env=env,
@@ -196,7 +198,7 @@ def main() -> int:
                 )
             host_fields = (root / "host.pub").read_text(encoding="utf-8").split()
             (root / "known_hosts").write_text(
-                f"[localhost]:{ssh_port} {host_fields[0]} {host_fields[1]}\n",
+                f"[127.0.0.1]:{ssh_port} {host_fields[0]} {host_fields[1]}\n",
                 encoding="utf-8",
             )
 
@@ -250,13 +252,13 @@ LogLevel DEBUG3
             config = root / "config"
             config.write_text(
                 f"""Host gssapi-fixture
- HostName localhost
+ HostName 127.0.0.1
  Port {ssh_port}
  User {user}
  GSSAPIAuthentication yes
  GSSAPIDelegateCredentials no
  GSSAPITrustDns no
- GSSAPIServerIdentity host@localhost
+ GSSAPIServerIdentity host@{canonical_host}
  PreferredAuthentications gssapi-with-mic
  PubkeyAuthentication no
  PasswordAuthentication no
