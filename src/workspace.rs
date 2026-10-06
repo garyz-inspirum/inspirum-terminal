@@ -114,13 +114,14 @@ impl SyncInputState {
     }
 
     pub fn set_target(&mut self, id: u64, selected: bool) {
-        if selected {
-            self.targets.insert(id);
+        let changed = if selected {
+            self.targets.insert(id)
         } else {
-            self.targets.remove(&id);
-            if self.targets.len() < 2 {
-                self.armed = false;
-            }
+            self.targets.remove(&id)
+        };
+        if changed {
+            // Changing the target set always requires a fresh explicit arm action.
+            self.armed = false;
         }
     }
 
@@ -206,6 +207,25 @@ mod tests {
         sync.remove_pane(20);
         assert!(!sync.armed());
         assert!(sync.destinations(10).is_empty());
+    }
+
+    #[test]
+    fn synchronized_input_disarms_on_any_target_set_change() {
+        let mut sync = SyncInputState::default();
+        sync.set_target(10, true);
+        sync.set_target(20, true);
+        sync.set_target(30, true);
+        sync.set_armed(true);
+        assert!(sync.armed());
+
+        sync.set_target(30, false);
+        assert!(!sync.armed());
+        assert_eq!(sync.selected_count(), 2);
+
+        sync.set_armed(true);
+        assert!(sync.armed());
+        sync.set_target(40, true);
+        assert!(!sync.armed());
     }
 
     #[test]
