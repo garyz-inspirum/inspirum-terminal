@@ -94,6 +94,14 @@ impl HistoryState {
         self.hits.get(self.selected_hit)
     }
 
+    pub fn selected_hit_index(&self) -> usize {
+        self.selected_hit
+    }
+
+    pub fn line(&self, line_id: u64) -> Option<&HistoryLine> {
+        self.lines.iter().find(|line| line.id == line_id)
+    }
+
     pub fn truncated_lines(&self) -> u64 {
         self.truncated_lines
     }
@@ -181,6 +189,23 @@ impl HistoryState {
         };
         mark.collapsed = !mark.collapsed;
         true
+    }
+
+    pub fn folded_count_after(&self, line_id: u64) -> usize {
+        let Some(mark) = self.marks.get(&line_id) else {
+            return 0;
+        };
+        if !mark.collapsed {
+            return 0;
+        }
+        let next_mark = self.marks.keys().copied().find(|id| *id > line_id);
+        let Some(index) = self.lines.iter().position(|line| line.id == line_id) else {
+            return 0;
+        };
+        self.lines[index + 1..]
+            .iter()
+            .take_while(|line| next_mark.is_none_or(|next_id| line.id < next_id))
+            .count()
     }
 
     /// Render rows for the history inspector. A collapsed mark hides lines until the next mark.
