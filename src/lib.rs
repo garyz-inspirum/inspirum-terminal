@@ -504,7 +504,7 @@ fn ensure_unique_profile_slots(sessions: &[Session], label: &str) -> Result<()> 
             !sessions[..index]
                 .iter()
                 .any(|profile| same_profile_slot(profile, session)),
-            "{label} contains duplicate profile {:?} in folder {:?}",
+            "{label} contains duplicate profile name {:?} in folder {:?}",
             session.name,
             session.folder
         );
