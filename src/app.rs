@@ -4,8 +4,9 @@ use crate::{
     duplicate_session_draft, export_sessions, import_sessions, load_sessions, save_session_edit,
     save_sessions,
     scp_panel::ScpPanel,
-    session_matches_query,
+    session_matches_query, session_profile_key,
     sftp_browser::SftpBrowser,
+    startup::{self, StartupBehavior, StartupSettings},
     support::{self, SanitizedErrorHistory},
     terminal,
     terminal_ux::{self, PasteDecision, PastePolicy},
@@ -220,7 +221,13 @@ pub struct App {
     profile_transfer_path: String,
     replace_import_confirm: Option<PathBuf>,
     profile_transfer_notice: String,
+    startup_path: PathBuf,
+    startup_settings: StartupSettings,
+    startup_pending: bool,
+    startup_workspace_path: String,
+    startup_notice: String,
     draft: Session,
+    profile_tags: String,
     port: String,
     proxy_port: String,
     control_persist: String,
@@ -275,7 +282,15 @@ pub struct App {
 
 impl App {
     pub fn new(path: PathBuf, config: Option<PathBuf>) -> Self {
-        let (profiles, error, writable) = match load_sessions(&path) {
+        let startup_path = startup::settings_path(&path);
+        let (startup_settings, startup_error) = match startup::load_settings(&startup_path) {
+            Ok(settings) => (settings, String::new()),
+            Err(error) => (
+                StartupSettings::default(),
+                format!("Startup settings ignored: {error:#}"),
+            ),
+        };
+        let (profiles, mut error, writable) = match load_sessions(&path) {
             Ok(profiles) => (profiles, String::new(), true),
             Err(error) => (
                 Vec::new(),
@@ -284,6 +299,18 @@ impl App {
             ),
         };
         let (tx, rx) = mpsc::channel();
+        if !startup_error.is_empty() {
+            if !error.is_empty() {
+                error.push('\n');
+            }
+            error.push_str(&startup_error);
+        }
+
+        let startup_workspace_path = match &startup_settings.behavior {
+            StartupBehavior::Workspace { path } => path.clone(),
+            _ => String::new(),
+        };
+
         Self {
             path,
             config,
@@ -294,7 +321,13 @@ impl App {
             profile_transfer_path: String::new(),
             replace_import_confirm: None,
             profile_transfer_notice: String::new(),
+            startup_path,
+            startup_settings,
+            startup_pending: true,
+            startup_workspace_path,
+            startup_notice: String::new(),
             draft: Session::default(),
+            profile_tags: String::new(),
             port: String::new(),
             proxy_port: String::new(),
             control_persist: String::new(),
@@ -353,6 +386,7 @@ impl App {
     }
 
     fn load_draft(&mut self, session: Session) {
+        self.profile_tags = session.tags.join(", ");
         self.port = session.port.map(|p| p.to_string()).unwrap_or_default();
         self.proxy_port = session
             .ssh
@@ -487,12 +521,78 @@ impl App {
             parse_optional_u16(&self.keepalive, "keepalive interval")?;
         session.ssh.local_forwards = parse_forward_lines(&self.local_forwards);
         session.ssh.remote_forwards = parse_forward_lines(&self.remote_forwards);
+        session.tags = self
+            .profile_tags
+            .split(',')
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
         session.ssh.dynamic_forwards = parse_forward_lines(&self.dynamic_forwards);
         session.ssh_args()?;
         Ok(session)
     }
 
     pub fn ui(&mut self, ctx: &egui::Context) {
+        if self.startup_pending {
+            self.startup_pending = false;
+            match self.startup_settings.behavior.clone() {
+                StartupBehavior::None => {}
+                StartupBehavior::Profile { profile } => {
+                    let result = (|| -> anyhow::Result<()> {
+                        let session = self
+                            .profiles
+                            .iter()
+                            .find(|session| session_profile_key(session) == profile)
+                            .cloned()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("configured startup profile no longer exists")
+                            })?;
+                        anyhow::ensure!(self.tabs.len() < 16, "tab limit reached");
+                        let terminal = terminal::connect(
+                            self.next_id,
+                            ctx.clone(),
+                            self.tx.clone(),
+                            &session,
+                            self.config.as_deref(),
+                        )?;
+                        self.tabs.push(Tab {
+                            id: self.next_id,
+                            name: session.name.clone(),
+                            kind: TabKind::Ssh,
+                            session,
+                            terminal,
+                            exited: false,
+                        });
+                        self.active = Some(self.next_id);
+                        self.terminal_focus = Some(self.next_id);
+                        self.next_id += 1;
+                        Ok(())
+                    })();
+                    self.startup_notice = match result {
+                        Ok(()) => "Opened configured startup profile.".into(),
+                        Err(error) => format!("Startup profile not opened: {error:#}"),
+                    };
+                }
+                StartupBehavior::Workspace { path } => {
+                    match workspace::load_layout(&PathBuf::from(&path)) {
+                        Ok(layout) => {
+                            self.workspace_path = path;
+                            self.workspace_axis = layout.axis;
+                            self.workspace_reconnect_on_restore = layout.reconnect_on_restore;
+                            self.workspace_loaded = Some(layout);
+                            self.startup_notice =
+                                "Loaded startup workspace metadata. Reconnect still requires the explicit Restore & reconnect action.".into();
+                        }
+                        Err(error) => {
+                            self.startup_notice =
+                                format!("Startup workspace metadata not loaded: {error:#}");
+                        }
+                    }
+                }
+            }
+        }
+
         // Remote output may set titles/clipboard requests. Do NOT forward those to host APIs.
         for _ in 0..256 {
             let Ok((id, event)) = self.rx.try_recv() else {
@@ -598,7 +698,7 @@ impl App {
                         if ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.profile_query)
-                                    .hint_text("Search name, host or user"),
+                                    .hint_text("Search name, folder, tags, host or user"),
                             )
                             .has_focus()
                         {
@@ -616,32 +716,57 @@ impl App {
                     egui::ScrollArea::vertical()
                         .max_height(150.0)
                         .show(ui, |ui| {
-                            for profile in self
+                            let mut visible: Vec<&Session> = self
                                 .profiles
                                 .iter()
                                 .filter(|profile| session_matches_query(profile, &self.profile_query))
-                            {
+                                .collect();
+                            visible.sort_by(|left, right| {
+                                right
+                                    .favorite
+                                    .cmp(&left.favorite)
+                                    .then_with(|| left.folder.cmp(&right.folder))
+                                    .then_with(|| left.name.cmp(&right.name))
+                            });
+                            for profile in visible {
+                                let key = session_profile_key(profile);
                                 let is_selected =
-                                    self.selected_profile.as_deref() == Some(profile.name.as_str());
-                                if ui.selectable_label(is_selected, &profile.name).clicked() {
+                                    self.selected_profile.as_deref() == Some(key.as_str());
+                                let location = if profile.folder.is_empty() {
+                                    profile.name.clone()
+                                } else {
+                                    format!("{}/{}", profile.folder, profile.name)
+                                };
+                                let tags = if profile.tags.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("  [{}]", profile.tags.join(", "))
+                                };
+                                let label = format!(
+                                    "{}{}{}",
+                                    if profile.favorite { "★ " } else { "" },
+                                    location,
+                                    tags
+                                );
+                                if ui.selectable_label(is_selected, label).clicked() {
                                     selected = Some(profile.clone());
                                 }
                             }
                         });
                     if let Some(profile) = selected {
                         self.terminal_focus = None;
-                        self.selected_profile = Some(profile.name.clone());
+                        self.selected_profile = Some(session_profile_key(&profile));
                         self.delete_confirm = None;
                         self.load_draft(profile);
                     }
 
-                    if let Some(selected_name) = self.selected_profile.clone() {
+                    if let Some(selected_key) = self.selected_profile.clone() {
                         ui.horizontal(|ui| {
                             if ui.small_button("Duplicate").clicked()
                                 && let Some(source) = self
                                     .profiles
                                     .iter()
-                                    .find(|profile| profile.name == selected_name)
+                                    .find(|profile| session_profile_key(profile) == selected_key)
                                     .cloned()
                             {
                                 let draft = duplicate_session_draft(&self.profiles, &source);
@@ -656,14 +781,26 @@ impl App {
                                 .clicked()
                             {
                                 self.terminal_focus = None;
-                                self.delete_confirm = Some(selected_name.clone());
+                                self.delete_confirm = Some(selected_key.clone());
                             }
                         });
                     }
 
                     if let Some(name) = self.delete_confirm.clone() {
                         ui.group(|ui| {
-                            ui.label(format!("Delete saved profile {name:?}?"));
+                            let display_name = self
+                                .profiles
+                                .iter()
+                                .find(|profile| session_profile_key(profile) == name)
+                                .map(|profile| {
+                                    if profile.folder.is_empty() {
+                                        profile.name.clone()
+                                    } else {
+                                        format!("{}/{}", profile.folder, profile.name)
+                                    }
+                                })
+                                .unwrap_or_else(|| name.clone());
+                            ui.label(format!("Delete saved profile {display_name:?}?"));
                             ui.small("This removes only the saved profile. Open SSH/SFTP tabs are not disconnected.");
                             ui.horizontal(|ui| {
                                 if ui.button("Confirm delete").clicked() {
@@ -690,7 +827,82 @@ impl App {
                         });
                     }
 
-                    egui::CollapsingHeader::new("Profile import / export")
+                    egui::CollapsingHeader::new("Startup behavior")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.small(
+                                "Startup choices are stored separately from profile imports. A workspace choice loads metadata only; reconnect remains an explicit action.",
+                            );
+                            if ui.button("Start with no session").clicked() {
+                                let settings = StartupSettings {
+                                    behavior: StartupBehavior::None,
+                                };
+                                match startup::save_settings(&self.startup_path, &settings) {
+                                    Ok(()) => {
+                                        self.startup_settings = settings;
+                                        self.startup_notice = "Startup action disabled.".into();
+                                    }
+                                    Err(error) => {
+                                        self.startup_notice =
+                                            format!("Cannot save startup settings: {error:#}");
+                                    }
+                                }
+                            }
+                            let can_use_selected = self.selected_profile.is_some();
+                            if ui
+                                .add_enabled(
+                                    can_use_selected,
+                                    egui::Button::new("Open selected profile on startup"),
+                                )
+                                .clicked()
+                                && let Some(profile) = self.selected_profile.clone()
+                            {
+                                let settings = StartupSettings {
+                                    behavior: StartupBehavior::Profile { profile },
+                                };
+                                match startup::save_settings(&self.startup_path, &settings) {
+                                    Ok(()) => {
+                                        self.startup_settings = settings;
+                                        self.startup_notice =
+                                            "Selected profile will open on next startup using normal host-key and authentication policy.".into();
+                                    }
+                                    Err(error) => {
+                                        self.startup_notice =
+                                            format!("Cannot save startup settings: {error:#}");
+                                    }
+                                }
+                            }
+                            ui.label("Workspace layout path");
+                            if ui
+                                .text_edit_singleline(&mut self.startup_workspace_path)
+                                .has_focus()
+                            {
+                                self.terminal_focus = None;
+                            }
+                            if ui.button("Load workspace metadata on startup").clicked() {
+                                let settings = StartupSettings {
+                                    behavior: StartupBehavior::Workspace {
+                                        path: self.startup_workspace_path.trim().to_owned(),
+                                    },
+                                };
+                                match startup::save_settings(&self.startup_path, &settings) {
+                                    Ok(()) => {
+                                        self.startup_settings = settings;
+                                        self.startup_notice =
+                                            "Workspace metadata will load on next startup; it will not reconnect automatically.".into();
+                                    }
+                                    Err(error) => {
+                                        self.startup_notice =
+                                            format!("Cannot save startup settings: {error:#}");
+                                    }
+                                }
+                            }
+                            if !self.startup_notice.is_empty() {
+                                ui.small(&self.startup_notice);
+                            }
+                        });
+
+                                        egui::CollapsingHeader::new("Profile import / export")
                         .default_open(false)
                         .show(ui, |ui| {
                             ui.small(
@@ -1422,6 +1634,21 @@ impl App {
                             }
                         });
 
+                    ui.separator();
+                    ui.strong("Profile organization");
+                    ui.label("Folder");
+                    if ui.text_edit_singleline(&mut self.draft.folder).has_focus() {
+                        self.terminal_focus = None;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.draft.favorite, "Favorite / pin");
+                    });
+                    ui.label("Tags (comma separated)");
+                    if ui.text_edit_singleline(&mut self.profile_tags).has_focus() {
+                        self.terminal_focus = None;
+                    }
+                    ui.small("Folders and tags are non-secret metadata. Moving or renaming a saved profile never disconnects already-open tabs.");
+
                     ui.horizontal(|ui| {
                         if ui
                             .add_enabled(self.writable, egui::Button::new("Save profile"))
@@ -1430,7 +1657,7 @@ impl App {
                             self.terminal_focus = None;
                             let selected_name = self.selected_profile.clone();
                             let result = self.validated_draft().and_then(|session| {
-                                let saved_name = session.name.clone();
+                                let saved_key = session_profile_key(&session);
                                 let next = save_session_edit(
                                     &self.profiles,
                                     selected_name.as_deref(),
@@ -1438,7 +1665,7 @@ impl App {
                                 )?;
                                 save_sessions(&self.path, &next)?;
                                 self.profiles = next;
-                                self.selected_profile = Some(saved_name);
+                                self.selected_profile = Some(saved_key);
                                 self.delete_confirm = None;
                                 Ok(())
                             });
