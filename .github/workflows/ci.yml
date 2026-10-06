@@ -22,10 +22,16 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            python: python3
+            binary: inspirum-terminal
           - os: windows-2022
             target: x86_64-pc-windows-msvc
+            python: python
+            binary: inspirum-terminal.exe
           - os: macos-15
             target: aarch64-apple-darwin
+            python: python3
+            binary: inspirum-terminal
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out source
@@ -84,11 +90,16 @@ jobs:
           }
       - name: Clippy
         run: cargo clippy --locked --all-targets --target ${{ matrix.target }} -- -D warnings
-      - name: Verify macOS release notice closure
-        if: matrix.target == 'aarch64-apple-darwin'
+      - name: Collect release dependency notices
         env:
           TARGET: ${{ matrix.target }}
-        run: python3 scripts/collect-third-party-notices.py --target "$TARGET" --output "${{ runner.temp }}/release-notices"
+        run: ${{ matrix.python }} scripts/collect-third-party-notices.py --target "$env:TARGET" --output "dist/notices/${{ matrix.target }}/THIRD_PARTY_NOTICES"
+        if: runner.os == 'Windows'
+      - name: Collect release dependency notices (Unix)
+        env:
+          TARGET: ${{ matrix.target }}
+        run: ${{ matrix.python }} scripts/collect-third-party-notices.py --target "$TARGET" --output "dist/notices/${{ matrix.target }}/THIRD_PARTY_NOTICES"
+        if: runner.os != 'Windows'
       - name: Install native SSH fixture dependency (Linux)
         if: runner.os == 'Linux'
         run: python3 -m pip install --disable-pip-version-check "asyncssh==2.24.0"
@@ -122,3 +133,64 @@ jobs:
         env:
           INSPIRUM_TEST_TMPDIR: ${{ runner.temp }}
         run: scripts/test-ssh-integration.sh
+      - name: Build CI release candidate
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package CI release candidate
+        env:
+          CI_TAG: ci-${{ github.sha }}
+          TARGET: ${{ matrix.target }}
+        run: ${{ matrix.python }} scripts/package-release.py --target "$env:TARGET" --tag "$env:CI_TAG" --commit "${{ github.sha }}" --binary "target/${{ matrix.target }}/release/${{ matrix.binary }}" --notices "dist/notices/${{ matrix.target }}/THIRD_PARTY_NOTICES" --output-dir "dist/packages"
+        if: runner.os == 'Windows'
+      - name: Package CI release candidate (Unix)
+        env:
+          CI_TAG: ci-${{ github.sha }}
+          TARGET: ${{ matrix.target }}
+        run: ${{ matrix.python }} scripts/package-release.py --target "$TARGET" --tag "$CI_TAG" --commit "${{ github.sha }}" --binary "target/${{ matrix.target }}/release/${{ matrix.binary }}" --notices "dist/notices/${{ matrix.target }}/THIRD_PARTY_NOTICES" --output-dir "dist/packages"
+        if: runner.os != 'Windows'
+      - name: Upload CI release package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-release-${{ matrix.target }}
+          path: dist/packages/*
+          if-no-files-found: error
+          retention-days: 2
+
+  package-verify:
+    name: verify-${{ matrix.target }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            python: python3
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            python: python
+          - os: macos-15
+            target: aarch64-apple-darwin
+            python: python3
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out verifier
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Download CI release package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ci-release-${{ matrix.target }}
+          path: downloaded
+      - name: Verify downloaded clean-install package
+        env:
+          CI_TAG: ci-${{ github.sha }}
+          TARGET: ${{ matrix.target }}
+        run: ${{ matrix.python }} scripts/verify-release-package.py --archive-dir downloaded --target "$env:TARGET" --tag "$env:CI_TAG" --commit "${{ github.sha }}" --work-parent "${{ runner.temp }}"
+        if: runner.os == 'Windows'
+      - name: Verify downloaded clean-install package (Unix)
+        env:
+          CI_TAG: ci-${{ github.sha }}
+          TARGET: ${{ matrix.target }}
+        run: ${{ matrix.python }} scripts/verify-release-package.py --archive-dir downloaded --target "$TARGET" --tag "$CI_TAG" --commit "${{ github.sha }}" --work-parent "${{ runner.temp }}"
+        if: runner.os != 'Windows'
