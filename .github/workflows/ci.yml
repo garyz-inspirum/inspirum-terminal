@@ -62,7 +62,7 @@ jobs:
           cargo test --locked --target ${{ matrix.target }} --no-run
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          $targets = @('lib', 'app', 'controlmaster', 'diagnostics_cli', 'native_ssh_smoke', 'profile_import_safety', 'proxy_cli', 'proxy_transport', 'scp', 'sessions', 'sftp_policy', 'ssh_integration', 'terminal', 'terminal_compat', 'tunnel_manager')
+          $targets = @('lib', 'app', 'controlmaster', 'diagnostics_cli', 'gssapi_integration', 'native_ssh_smoke', 'profile_import_safety', 'proxy_cli', 'proxy_transport', 'scp', 'sessions', 'sftp_policy', 'ssh_integration', 'terminal', 'terminal_compat', 'tunnel_manager')
           foreach ($target in $targets) {
             Write-Host "::group::cargo test target: $target"
             if ($target -eq 'lib') {
@@ -113,12 +113,19 @@ jobs:
         run: python3 scripts/test-native-ssh-smoke.py
       - name: Install isolated SSH test prerequisites
         if: runner.os == 'Linux'
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
-          sudo apt-get install -y openssh-server tmux
+          sudo apt-get install -y openssh-server tmux krb5-kdc krb5-admin-server krb5-user
           sudo mkdir -p /run/sshd
       - name: Authenticated SSH integration
         if: runner.os == 'Linux'
         env:
           INSPIRUM_TEST_TMPDIR: ${{ runner.temp }}
         run: scripts/test-ssh-integration.sh
+      - name: GSSAPI Kerberos acceptance
+        if: runner.os == 'Linux'
+        env:
+          INSPIRUM_TEST_TMPDIR: ${{ runner.temp }}
+        run: python3 scripts/test-gssapi-integration.py
