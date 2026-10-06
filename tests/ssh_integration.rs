@@ -1049,9 +1049,8 @@ fn graphical_sftp_operations_are_verified_conflict_safe_and_cancellable() {
 
     let resume_remote = "browser resumed upload.bin";
     fs::write(p.join("sftp-root").join(resume_remote), &payload[..8192]).unwrap();
-    let mut resumed_upload =
-        sftp::resume_upload(&session, Some(&config), &source, resume_remote)
-            .expect("resume managed SFTP upload");
+    let mut resumed_upload = sftp::resume_upload(&session, Some(&config), &source, resume_remote)
+        .expect("resume managed SFTP upload");
     wait_managed_transfer(&mut resumed_upload).expect("verify resumed SFTP upload");
     assert_eq!(
         sha256(&source),
