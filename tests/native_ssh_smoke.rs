@@ -1,9 +1,6 @@
 //! Cross-platform native SSH acceptance using scripts/test-native-ssh-smoke.py.
 use egui_term::{BackendCommand, PtyEvent, TerminalBackend};
-use inspirum_terminal::{
-    Session,
-    terminal::connect,
-};
+use inspirum_terminal::{Session, terminal::connect};
 use std::{
     fs,
     path::{Path, PathBuf},
