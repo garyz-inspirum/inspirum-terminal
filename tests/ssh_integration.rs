@@ -1037,7 +1037,10 @@ fn graphical_sftp_operations_are_verified_conflict_safe_and_cancellable() {
     .expect("start resumable SFTP download");
     wait_managed_transfer(&mut resumed_download).expect("complete resumable SFTP download");
     assert_eq!(fs::read(&resume_destination).unwrap(), payload);
-    assert!(!resume_partial.exists(), "successful resume left its partial file");
+    assert!(
+        !resume_partial.exists(),
+        "successful resume left its partial file"
+    );
 
     let resume_remote = "browser resume upload.bin";
     fs::write(p.join("sftp-root").join(resume_remote), &payload[..8192]).unwrap();
