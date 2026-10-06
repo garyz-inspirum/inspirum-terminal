@@ -2,7 +2,7 @@
 use crate::{
     ControlMasterMode, ProxyKind, Session, SessionImportMode, delete_session,
     duplicate_session_draft, export_sessions, import_sessions, load_sessions, save_session_edit,
-    save_sessions,
+    save_sessions, session_profile_key,
     scp_panel::ScpPanel,
     session_matches_query,
     sftp_browser::SftpBrowser,
@@ -598,7 +598,7 @@ impl App {
                         if ui
                             .add(
                                 egui::TextEdit::singleline(&mut self.profile_query)
-                                    .hint_text("Search name, host or user"),
+                                    .hint_text("Search name, folder, tags, host or user"),
                             )
                             .has_focus()
                         {
@@ -616,32 +616,57 @@ impl App {
                     egui::ScrollArea::vertical()
                         .max_height(150.0)
                         .show(ui, |ui| {
-                            for profile in self
+                            let mut visible: Vec<&Session> = self
                                 .profiles
                                 .iter()
                                 .filter(|profile| session_matches_query(profile, &self.profile_query))
-                            {
+                                .collect();
+                            visible.sort_by(|left, right| {
+                                right
+                                    .favorite
+                                    .cmp(&left.favorite)
+                                    .then_with(|| left.folder.cmp(&right.folder))
+                                    .then_with(|| left.name.cmp(&right.name))
+                            });
+                            for profile in visible {
+                                let key = session_profile_key(profile);
                                 let is_selected =
-                                    self.selected_profile.as_deref() == Some(profile.name.as_str());
-                                if ui.selectable_label(is_selected, &profile.name).clicked() {
+                                    self.selected_profile.as_deref() == Some(key.as_str());
+                                let location = if profile.folder.is_empty() {
+                                    profile.name.clone()
+                                } else {
+                                    format!("{}/{}", profile.folder, profile.name)
+                                };
+                                let tags = if profile.tags.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("  [{}]", profile.tags.join(", "))
+                                };
+                                let label = format!(
+                                    "{}{}{}",
+                                    if profile.favorite { "★ " } else { "" },
+                                    location,
+                                    tags
+                                );
+                                if ui.selectable_label(is_selected, label).clicked() {
                                     selected = Some(profile.clone());
                                 }
                             }
                         });
                     if let Some(profile) = selected {
                         self.terminal_focus = None;
-                        self.selected_profile = Some(profile.name.clone());
+                        self.selected_profile = Some(session_profile_key(&profile));
                         self.delete_confirm = None;
                         self.load_draft(profile);
                     }
 
-                    if let Some(selected_name) = self.selected_profile.clone() {
+                    if let Some(selected_key) = self.selected_profile.clone() {
                         ui.horizontal(|ui| {
                             if ui.small_button("Duplicate").clicked()
                                 && let Some(source) = self
                                     .profiles
                                     .iter()
-                                    .find(|profile| profile.name == selected_name)
+                                    .find(|profile| session_profile_key(profile) == selected_key)
                                     .cloned()
                             {
                                 let draft = duplicate_session_draft(&self.profiles, &source);
@@ -656,14 +681,26 @@ impl App {
                                 .clicked()
                             {
                                 self.terminal_focus = None;
-                                self.delete_confirm = Some(selected_name.clone());
+                                self.delete_confirm = Some(selected_key.clone());
                             }
                         });
                     }
 
                     if let Some(name) = self.delete_confirm.clone() {
                         ui.group(|ui| {
-                            ui.label(format!("Delete saved profile {name:?}?"));
+                            let display_name = self
+                                .profiles
+                                .iter()
+                                .find(|profile| session_profile_key(profile) == name)
+                                .map(|profile| {
+                                    if profile.folder.is_empty() {
+                                        profile.name.clone()
+                                    } else {
+                                        format!("{}/{}", profile.folder, profile.name)
+                                    }
+                                })
+                                .unwrap_or_else(|| name.clone());
+                            ui.label(format!("Delete saved profile {display_name:?}?"));
                             ui.small("This removes only the saved profile. Open SSH/SFTP tabs are not disconnected.");
                             ui.horizontal(|ui| {
                                 if ui.button("Confirm delete").clicked() {
@@ -1422,6 +1459,31 @@ impl App {
                             }
                         });
 
+                    ui.separator();
+                    ui.strong("Profile organization");
+                    ui.label("Folder");
+                    if ui.text_edit_singleline(&mut self.draft.folder).has_focus() {
+                        self.terminal_focus = None;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.draft.favorite, "Favorite / pin");
+                    });
+                    ui.label("Tags (comma separated)");
+                    let mut profile_tags = self.draft.tags.join(", ");
+                    let tags_response = ui.text_edit_singleline(&mut profile_tags);
+                    if tags_response.has_focus() {
+                        self.terminal_focus = None;
+                    }
+                    if tags_response.changed() {
+                        self.draft.tags = profile_tags
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|tag| !tag.is_empty())
+                            .map(ToOwned::to_owned)
+                            .collect();
+                    }
+                    ui.small("Folders and tags are non-secret metadata. Moving or renaming a saved profile never disconnects already-open tabs.");
+
                     ui.horizontal(|ui| {
                         if ui
                             .add_enabled(self.writable, egui::Button::new("Save profile"))
@@ -1430,7 +1492,7 @@ impl App {
                             self.terminal_focus = None;
                             let selected_name = self.selected_profile.clone();
                             let result = self.validated_draft().and_then(|session| {
-                                let saved_name = session.name.clone();
+                                let saved_key = session_profile_key(&session);
                                 let next = save_session_edit(
                                     &self.profiles,
                                     selected_name.as_deref(),
@@ -1438,7 +1500,7 @@ impl App {
                                 )?;
                                 save_sessions(&self.path, &next)?;
                                 self.profiles = next;
-                                self.selected_profile = Some(saved_name);
+                                self.selected_profile = Some(saved_key);
                                 self.delete_confirm = None;
                                 Ok(())
                             });
