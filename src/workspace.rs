@@ -214,7 +214,10 @@ mod tests {
         sync.set_armed(true);
         assert!(sync.armed());
         sync.set_target(30, true);
-        assert!(!sync.armed(), "changing the target set must always disarm sync");
+        assert!(
+            !sync.armed(),
+            "changing the target set must always disarm sync"
+        );
     }
 
     #[test]
