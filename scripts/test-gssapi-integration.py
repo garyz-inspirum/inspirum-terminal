@@ -295,7 +295,7 @@ LogLevel DEBUG3
             wait_tcp(server, ssh_port, "GSSAPI sshd")
 
             baseline = subprocess.run(
-                [ssh, "-vvv", "-T", "-F", str(config), canonical_host],
+                [ssh, "-vvv", "-T", "-F", str(config), "gssapi-fixture"],
                 env=env,
                 input="exit\n",
                 text=True,
