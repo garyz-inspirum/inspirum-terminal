@@ -186,6 +186,23 @@ mod tests {
     }
 
     #[test]
+    fn mouse_triggered_paste_uses_the_same_multiline_guard() {
+        let payload = "first command\nsecond command";
+        assert_eq!(
+            classify_paste(PastePolicy::ConfirmMultiline, payload),
+            PasteDecision::Confirm
+        );
+        assert_eq!(
+            classify_paste(PastePolicy::BlockMultiline, payload),
+            PasteDecision::Block
+        );
+        assert_eq!(
+            classify_paste(PastePolicy::ConfirmAll, "safe single line"),
+            PasteDecision::Confirm
+        );
+    }
+
+    #[test]
     fn session_log_is_create_new_and_snapshot_deduplicated() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.log");
