@@ -642,6 +642,7 @@ pub mod sftp;
 pub mod sftp_browser;
 pub mod startup;
 pub mod support;
+pub mod tab_management;
 pub mod terminal;
 pub mod terminal_ux;
 pub mod tmux;
