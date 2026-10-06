@@ -34,6 +34,9 @@ struct TransferJob {
     state: JobState,
     error: String,
     transfer: Option<Transfer>,
+    resume_path: Option<PathBuf>,
+    resume_available: bool,
+    resume_requested: bool,
 }
 
 impl TransferJob {
@@ -146,6 +149,9 @@ impl SftpBrowser {
             state: JobState::Queued,
             error: String::new(),
             transfer: None,
+            resume_path: None,
+            resume_available: false,
+            resume_requested: false,
         });
         self.notice = "Transfer queued.".into();
     }
@@ -198,7 +204,7 @@ impl SftpBrowser {
     }
 
     fn start_job(&mut self, index: usize) {
-        let (direction, local, remote, overwrite, expected_size) = {
+        let (direction, local, remote, overwrite, expected_size, resume_requested, resume_path) = {
             let job = &self.jobs[index];
             (
                 job.direction,
@@ -206,10 +212,28 @@ impl SftpBrowser {
                 job.remote.clone(),
                 job.overwrite,
                 job.expected_size,
+                job.resume_requested,
+                job.resume_path.clone(),
             )
         };
-        let result = match direction {
-            Direction::Download => sftp::start_download(
+        let result = match (direction, resume_requested) {
+            (Direction::Download, true) => {
+                let partial = resume_path
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("resumable download partial is unavailable"));
+                partial.and_then(|partial| {
+                    sftp::start_download_resume(
+                        &self.session,
+                        self.config.as_deref(),
+                        &remote,
+                        &local,
+                        partial,
+                        overwrite,
+                        expected_size,
+                    )
+                })
+            }
+            (Direction::Download, false) => sftp::start_download(
                 &self.session,
                 self.config.as_deref(),
                 &remote,
@@ -217,7 +241,10 @@ impl SftpBrowser {
                 overwrite,
                 expected_size,
             ),
-            Direction::Upload => {
+            (Direction::Upload, true) => {
+                sftp::start_upload_resume(&self.session, self.config.as_deref(), &local, &remote)
+            }
+            (Direction::Upload, false) => {
                 sftp::start_upload(&self.session, self.config.as_deref(), &local, &remote)
             }
         };
@@ -256,6 +283,9 @@ impl SftpBrowser {
                     let job = &mut self.jobs[index];
                     job.transferred = job.total.unwrap_or(job.transferred);
                     job.transfer = None;
+                    job.resume_path = None;
+                    job.resume_available = false;
+                    job.resume_requested = false;
                     job.state = JobState::Completed;
                     self.notice = format!("{} completed and verified.", job.label());
                     let _ = self.refresh_local();
@@ -267,9 +297,27 @@ impl SftpBrowser {
                 }
                 Err(error) => {
                     let job = &mut self.jobs[index];
+                    let mut message = format!("{error:#}");
+                    if let Some(transfer) = job.transfer.as_mut() {
+                        match transfer.preserve_partial() {
+                            Ok(partial) => {
+                                if partial.is_some() {
+                                    job.resume_path = partial;
+                                }
+                            }
+                            Err(preserve_error) => {
+                                message.push_str(&format!(
+                                    "; preserving resumable partial also failed: {preserve_error:#}"
+                                ));
+                            }
+                        }
+                    }
                     job.transfer = None;
+                    job.resume_available =
+                        job.direction == Direction::Upload || job.resume_path.is_some();
+                    job.resume_requested = false;
                     job.state = JobState::Failed;
-                    job.error = format!("{error:#}");
+                    job.error = message;
                 }
             }
         }
@@ -506,6 +554,7 @@ impl SftpBrowser {
         for index in 0..self.jobs.len() {
             let mut cancel = false;
             let mut retry = false;
+            let mut resume = false;
             let job = &self.jobs[index];
             ui.group(|ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -533,6 +582,12 @@ impl SftpBrowser {
                     {
                         retry = true;
                     }
+                    if matches!(job.state, JobState::Failed | JobState::Cancelled)
+                        && job.resume_available
+                        && ui.button("Resume").clicked()
+                    {
+                        resume = true;
+                    }
                 });
                 if !job.error.is_empty() {
                     ui.colored_label(egui::Color32::LIGHT_RED, &job.error);
@@ -540,19 +595,39 @@ impl SftpBrowser {
             });
             if cancel {
                 let job = &mut self.jobs[index];
-                if let Some(transfer) = job.transfer.as_mut()
-                    && let Err(error) = transfer.cancel()
-                {
-                    job.error = format!("{error:#}");
+                if let Some(transfer) = job.transfer.as_mut() {
+                    match transfer.cancel() {
+                        Ok(partial) => {
+                            if partial.is_some() {
+                                job.resume_path = partial;
+                            }
+                        }
+                        Err(error) => job.error = format!("{error:#}"),
+                    }
                 }
                 job.transfer = None;
+                job.resume_available =
+                    job.direction == Direction::Upload || job.resume_path.is_some();
+                job.resume_requested = false;
                 job.state = JobState::Cancelled;
             }
             if retry {
                 let job = &mut self.jobs[index];
                 job.transfer = None;
+                if let Some(partial) = job.resume_path.take() {
+                    let _ = std::fs::remove_file(partial);
+                }
+                job.resume_available = false;
+                job.resume_requested = false;
                 job.state = JobState::Queued;
                 job.transferred = 0;
+                job.error.clear();
+            }
+            if resume {
+                let job = &mut self.jobs[index];
+                job.transfer = None;
+                job.resume_requested = true;
+                job.state = JobState::Queued;
                 job.error.clear();
             }
         }
