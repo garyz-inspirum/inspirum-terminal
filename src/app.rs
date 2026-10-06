@@ -3,6 +3,7 @@ use crate::{
     ControlMasterMode, ProxyKind, Session, SessionImportMode, delete_session,
     duplicate_session_draft, export_sessions, import_sessions, load_sessions, save_session_edit,
     save_sessions,
+    history::{HistoryRow, HistoryState},
     scp_panel::ScpPanel,
     session_matches_query, session_profile_key,
     sftp_browser::SftpBrowser,
@@ -20,6 +21,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Clone, Copy)]
@@ -275,6 +277,9 @@ pub struct App {
     paste_notice: String,
     search_open: bool,
     search_query: String,
+    history_states: BTreeMap<u64, HistoryState>,
+    history_timestamps: bool,
+    history_notice: String,
     logging_tab: Option<u64>,
     session_log_path: String,
     last_logged_screen: String,
@@ -381,6 +386,9 @@ impl App {
             paste_notice: String::new(),
             search_open: false,
             search_query: String::new(),
+            history_states: BTreeMap::new(),
+            history_timestamps: false,
+            history_notice: String::new(),
             logging_tab: None,
             session_log_path: String::new(),
             last_logged_screen: String::new(),
@@ -576,6 +584,7 @@ impl App {
             self.sync_input.remove_pane(*id);
             self.tab_selected.remove(id);
             self.tab_labels.remove(id);
+            self.history_states.remove(id);
             if self.logging_tab == Some(*id) {
                 self.logging_tab = None;
             }
@@ -2175,7 +2184,30 @@ impl App {
         let mut workspace_load_requested = false;
         let mut workspace_restore_requested = false;
         let mut copy_selected = false;
-        let active_screen = if self.search_open || self.logging_tab.is_some() {
+        let mut history_scroll_request = None;
+
+        if self.search_open
+            && let Some(id) = self.active
+            && let Some(tab) = self.tabs.iter().find(|tab| tab.id == id)
+        {
+            let snapshot = tab.terminal.history_lines();
+            let state = self.history_states.entry(id).or_default();
+            state.update_snapshot(snapshot);
+            state.set_query(self.search_query.clone());
+
+            if ctx.input(|input| input.key_pressed(egui::Key::F3)) {
+                if ctx.input(|input| input.modifiers.shift) {
+                    state.select_previous_hit();
+                } else {
+                    state.select_next_hit();
+                }
+                if let Some(hit) = state.selected_hit() {
+                    history_scroll_request = Some((id, hit.line_number.saturating_sub(1)));
+                }
+            }
+        }
+
+        let active_screen = if self.logging_tab.is_some() {
             self.active.and_then(|id| {
                 self.tabs
                     .iter_mut()
@@ -2185,10 +2217,6 @@ impl App {
         } else {
             None
         };
-        let search_hits = active_screen
-            .as_deref()
-            .map(|screen| terminal_ux::find_text(screen, &self.search_query, 50))
-            .unwrap_or_default();
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(panel) = self.scp_panel.as_mut() {
@@ -2250,27 +2278,196 @@ impl App {
                 }
 
                 if self.search_open {
-                    ui.horizontal(|ui| {
-                        ui.label("Find");
+                    let active_id = self.active;
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Find retained history");
                         let response = ui.add(
                             egui::TextEdit::singleline(&mut self.search_query)
-                                .hint_text("Search current terminal viewport"),
+                                .hint_text("Search retained scrollback"),
                         );
                         if response.has_focus() {
                             self.terminal_focus = None;
                         }
-                        ui.label(format!("{} match(es)", search_hits.len()));
-                    });
-                    egui::ScrollArea::vertical()
-                        .max_height(110.0)
-                        .show(ui, |ui| {
-                            for hit in &search_hits {
-                                ui.monospace(format!(
-                                    "{}:{}  {}",
-                                    hit.line, hit.column, hit.preview
-                                ));
+
+                        if let Some(id) = active_id {
+                            let state = self.history_states.entry(id).or_default();
+                            state.set_query(self.search_query.clone());
+
+                            if ui.button("Previous").on_hover_text("Shift+F3").clicked() {
+                                state.select_previous_hit();
+                                if let Some(hit) = state.selected_hit() {
+                                    history_scroll_request =
+                                        Some((id, hit.line_number.saturating_sub(1)));
+                                }
                             }
+                            if ui.button("Next").on_hover_text("F3").clicked() {
+                                state.select_next_hit();
+                                if let Some(hit) = state.selected_hit() {
+                                    history_scroll_request =
+                                        Some((id, hit.line_number.saturating_sub(1)));
+                                }
+                            }
+                            ui.label(format!(
+                                "{} match(es) · {} retained line(s) · {} truncated",
+                                state.hits().len(),
+                                state.lines().len(),
+                                state.truncated_lines()
+                            ));
+                        }
+                    });
+
+                    if let Some(id) = active_id {
+                        let state = self.history_states.entry(id).or_default();
+                        let selected_index = state.selected_hit_index();
+                        let hits = state.hits().to_vec();
+                        let mut clicked_hit = None;
+                        egui::ScrollArea::vertical()
+                            .max_height(130.0)
+                            .show(ui, |ui| {
+                                for (index, hit) in hits.iter().enumerate() {
+                                    let label = format!(
+                                        "{}:{}  {}",
+                                        hit.line_number, hit.column, hit.preview
+                                    );
+                                    if ui
+                                        .selectable_label(index == selected_index, label)
+                                        .clicked()
+                                    {
+                                        clicked_hit = Some(index);
+                                    }
+                                }
+                            });
+                        if let Some(index) = clicked_hit {
+                            let state = self.history_states.entry(id).or_default();
+                            state.select_hit(index);
+                            if let Some(hit) = state.selected_hit() {
+                                history_scroll_request =
+                                    Some((id, hit.line_number.saturating_sub(1)));
+                            }
+                        }
+
+                        ui.horizontal_wrapped(|ui| {
+                            ui.checkbox(
+                                &mut self.history_timestamps,
+                                "Timestamp new marks",
+                            );
+                            if ui.button("Mark output boundary").clicked() {
+                                let timestamp = self.history_timestamps.then(|| {
+                                    SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs()
+                                });
+                                let state = self.history_states.entry(id).or_default();
+                                self.history_notice = match state.mark_newest_nonempty(timestamp) {
+                                    Some(line_id) => format!("Marked retained line {line_id}."),
+                                    None => "No retained output is available to mark.".into(),
+                                };
+                            }
+                            ui.small(
+                                "Marks and timestamps stay in memory only. Terminal content is written to disk only by explicit session logging.",
+                            );
                         });
+
+                        let marks: Vec<_> = self
+                            .history_states
+                            .get(&id)
+                            .map(|state| state.marks().cloned().collect())
+                            .unwrap_or_default();
+                        let mut toggle_fold = None;
+                        let mut remove_mark = None;
+                        if !marks.is_empty() {
+                            ui.group(|ui| {
+                                ui.strong("History marks");
+                                for mark in &marks {
+                                    let state = self.history_states.get(&id).unwrap();
+                                    let preview = state
+                                        .line(mark.line_id)
+                                        .map(|line| line.text.as_str())
+                                        .unwrap_or("<truncated>");
+                                    let folded = state.folded_count_after(mark.line_id);
+                                    ui.horizontal_wrapped(|ui| {
+                                        let timestamp = mark
+                                            .timestamp_epoch_seconds
+                                            .map(|value| format!(" · unix {value}"))
+                                            .unwrap_or_default();
+                                        ui.monospace(format!(
+                                            "#{}{}  {}",
+                                            mark.line_id, timestamp, preview
+                                        ));
+                                        if ui
+                                            .small_button(if mark.collapsed {
+                                                format!("Unfold ({folded})")
+                                            } else {
+                                                "Fold region".into()
+                                            })
+                                            .clicked()
+                                        {
+                                            toggle_fold = Some(mark.line_id);
+                                        }
+                                        if ui.small_button("Remove mark").clicked() {
+                                            remove_mark = Some(mark.line_id);
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                        if let Some(line_id) = toggle_fold {
+                            self.history_states
+                                .entry(id)
+                                .or_default()
+                                .toggle_fold(line_id);
+                        }
+                        if let Some(line_id) = remove_mark {
+                            self.history_states
+                                .entry(id)
+                                .or_default()
+                                .remove_mark(line_id);
+                        }
+
+                        egui::CollapsingHeader::new("History inspector (last 200 rows)")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                let rows = self
+                                    .history_states
+                                    .get(&id)
+                                    .map(HistoryState::display_rows)
+                                    .unwrap_or_default();
+                                let start = rows.len().saturating_sub(200);
+                                egui::ScrollArea::vertical()
+                                    .max_height(180.0)
+                                    .show(ui, |ui| {
+                                        for row in &rows[start..] {
+                                            match row {
+                                                HistoryRow::Line(line) => {
+                                                    let marked = self
+                                                        .history_states
+                                                        .get(&id)
+                                                        .is_some_and(|state| {
+                                                            state
+                                                                .marks()
+                                                                .any(|mark| mark.line_id == line.id)
+                                                        });
+                                                    ui.monospace(format!(
+                                                        "{}{}",
+                                                        if marked { "◆ " } else { "  " },
+                                                        line.text
+                                                    ));
+                                                }
+                                                HistoryRow::Folded { hidden_lines, .. } => {
+                                                    ui.strong(format!(
+                                                        "  … {hidden_lines} folded retained line(s) …"
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    });
+                            });
+                    }
+
+                    if !self.history_notice.is_empty() {
+                        ui.small(&self.history_notice);
+                    }
                 }
 
                 ui.separator();
@@ -2497,6 +2694,16 @@ impl App {
                 ui.label("No sessions are automatically connected on startup.");
             }
         });
+        if let Some((id, history_index)) = history_scroll_request {
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                if !tab.terminal.scroll_to_history_index(history_index) {
+                    self.history_notice =
+                        "Selected history result was truncated before navigation.".into();
+                }
+                ctx.request_repaint();
+            }
+        }
+
         if let Some(id) = focus_pane {
             self.active = Some(id);
             self.terminal_focus = Some(id);
