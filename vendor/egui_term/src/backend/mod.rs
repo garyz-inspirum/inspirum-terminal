@@ -370,24 +370,21 @@ impl TerminalBackend {
         let end_line = terminal.bottommost_line();
 
         let mut lines = Vec::with_capacity(terminal.total_lines());
-        let mut current_line = None;
-        let mut current = String::new();
+        // Grid::iter_from advances from the supplied point, so seed the first retained cell.
+        let mut current_line = Some(start.line);
+        let mut current = String::from(grid.index(start).c);
         for indexed in grid.iter_from(start) {
             if indexed.point.line > end_line {
                 break;
             }
             if current_line != Some(indexed.point.line) {
-                if current_line.is_some() {
-                    lines.push(current.trim_end_matches(' ').to_owned());
-                    current.clear();
-                }
+                lines.push(current.trim_end_matches(' ').to_owned());
+                current.clear();
                 current_line = Some(indexed.point.line);
             }
             current.push(indexed.c);
         }
-        if current_line.is_some() {
-            lines.push(current.trim_end_matches(' ').to_owned());
-        }
+        lines.push(current.trim_end_matches(' ').to_owned());
         lines
     }
 
