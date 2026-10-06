@@ -579,7 +579,11 @@ impl App {
             if self.logging_tab == Some(*id) {
                 self.logging_tab = None;
             }
-            if self.pending_paste.as_ref().is_some_and(|(owner, _)| owner == id) {
+            if self
+                .pending_paste
+                .as_ref()
+                .is_some_and(|(owner, _)| owner == id)
+            {
                 self.pending_paste = None;
             }
         }
@@ -734,9 +738,7 @@ impl App {
             }
         }
         let tab_switcher_shortcut = ctx.input(|input| {
-            input.key_pressed(egui::Key::K)
-                && input.modifiers.command
-                && input.modifiers.shift
+            input.key_pressed(egui::Key::K) && input.modifiers.command && input.modifiers.shift
         });
         if tab_switcher_shortcut {
             self.tab_switcher_open = true;
@@ -1940,7 +1942,11 @@ impl App {
 
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Quick switch…").on_hover_text("Ctrl/Cmd+Shift+K").clicked() {
+                if ui
+                    .button("Quick switch…")
+                    .on_hover_text("Ctrl/Cmd+Shift+K")
+                    .clicked()
+                {
                     self.tab_switcher_open = true;
                     self.tab_switcher_query.clear();
                     self.tab_switcher_index = 0;
@@ -1959,7 +1965,10 @@ impl App {
                     move_active = Some(1);
                 }
                 if ui
-                    .add_enabled(!self.tab_selected.is_empty(), egui::Button::new("Close selected"))
+                    .add_enabled(
+                        !self.tab_selected.is_empty(),
+                        egui::Button::new("Close selected"),
+                    )
                     .clicked()
                 {
                     bulk_mode = Some(BulkCloseMode::Selected);
@@ -2009,15 +2018,26 @@ impl App {
                     let label = format!(
                         "{}{}{}{}",
                         marker,
-                        if self.terminal_focus == Some(*id) { "● " } else { "" },
+                        if self.terminal_focus == Some(*id) {
+                            "● "
+                        } else {
+                            ""
+                        },
                         name,
                         if *exited { " (exited)" } else { "" }
                     );
-                    if ui.selectable_label(self.active == Some(*id), label).clicked() {
+                    if ui
+                        .selectable_label(self.active == Some(*id), label)
+                        .clicked()
+                    {
                         self.active = Some(*id);
                         self.terminal_focus = Some(*id);
                     }
-                    if ui.small_button("×").on_hover_text("Disconnect and close terminal").clicked() {
+                    if ui
+                        .small_button("×")
+                        .on_hover_text("Disconnect and close terminal")
+                        .clicked()
+                    {
                         close_one = Some(*id);
                     }
                 }
@@ -2047,10 +2067,13 @@ impl App {
             let names: Vec<String> = ids
                 .iter()
                 .filter_map(|id| {
-                    self.tabs
-                        .iter()
-                        .find(|tab| tab.id == *id)
-                        .map(|tab| format!("{}{}", tab.name, if tab.exited { " (exited)" } else { " (live)" }))
+                    self.tabs.iter().find(|tab| tab.id == *id).map(|tab| {
+                        format!(
+                            "{}{}",
+                            tab.name,
+                            if tab.exited { " (exited)" } else { " (live)" }
+                        )
+                    })
                 })
                 .collect();
             let live_count = ids
