@@ -29,6 +29,22 @@ enum InputAction {
     Ignore,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorStyle {
+    #[default]
+    Block,
+    Underline,
+    Beam,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InteractionSettings {
+    pub select_to_copy: bool,
+    pub middle_click_paste: bool,
+    pub right_click_paste: bool,
+    pub hide_pointer_while_typing: bool,
+}
+
 #[derive(Clone, Default)]
 pub struct TerminalViewState {
     is_dragged: bool,
@@ -43,6 +59,8 @@ pub struct TerminalView<'a> {
     backend: &'a mut TerminalBackend,
     font: TerminalFont,
     theme: TerminalTheme,
+    cursor_style: CursorStyle,
+    interaction: InteractionSettings,
     bindings_layout: BindingsLayout,
 }
 
@@ -79,6 +97,8 @@ impl<'a> TerminalView<'a> {
             backend,
             font: TerminalFont::default(),
             theme: TerminalTheme::default(),
+            cursor_style: CursorStyle::default(),
+            interaction: InteractionSettings::default(),
             bindings_layout: BindingsLayout::new(),
         }
     }
@@ -92,6 +112,18 @@ impl<'a> TerminalView<'a> {
     #[inline]
     pub fn set_font(mut self, font: TerminalFont) -> Self {
         self.font = font;
+        self
+    }
+
+    #[inline]
+    pub fn set_cursor_style(mut self, cursor_style: CursorStyle) -> Self {
+        self.cursor_style = cursor_style;
+        self
+    }
+
+    #[inline]
+    pub fn set_interaction(mut self, interaction: InteractionSettings) -> Self {
+        self.interaction = interaction;
         self
     }
 
@@ -147,12 +179,21 @@ impl<'a> TerminalView<'a> {
                 egui::Event::Text(_)
                 | egui::Event::Key { .. }
                 | egui::Event::Copy
-                | egui::Event::Paste(_) => input_actions.push(process_keyboard_event(
-                    event,
-                    self.backend,
-                    &self.bindings_layout,
-                    modifiers,
-                )),
+                | egui::Event::Paste(_) => {
+                    if self.interaction.hide_pointer_while_typing
+                        && matches!(event, egui::Event::Text(_) | egui::Event::Key { .. })
+                    {
+                        layout
+                            .ctx
+                            .send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
+                    }
+                    input_actions.push(process_keyboard_event(
+                        event,
+                        self.backend,
+                        &self.bindings_layout,
+                        modifiers,
+                    ));
+                }
                 egui::Event::MouseWheel { unit, delta, .. } if pointer_is_over_terminal => {
                     input_actions.push(process_mouse_wheel(
                         state,
@@ -172,12 +213,18 @@ impl<'a> TerminalView<'a> {
                     layout,
                     self.backend,
                     &self.bindings_layout,
+                    self.interaction,
                     button,
                     pos,
                     &modifiers,
                     pressed,
                 )),
                 egui::Event::PointerMoved(pos) if layout.rect.contains(pos) => {
+                    if self.interaction.hide_pointer_while_typing {
+                        layout
+                            .ctx
+                            .send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+                    }
                     input_actions = process_mouse_move(state, layout, self.backend, pos, &modifiers)
                 }
                 _ => {}
@@ -278,8 +325,21 @@ impl<'a> TerminalView<'a> {
             // Handle cursor rendering
             if content.grid.cursor.point == indexed.point {
                 let cursor_color = self.theme.get_color(content.cursor.fg);
+                let cursor_rect = match self.cursor_style {
+                    CursorStyle::Block => {
+                        Rect::from_min_size(Pos2::new(x, y), Vec2::new(cell_width, cell_height))
+                    }
+                    CursorStyle::Underline => Rect::from_min_size(
+                        Pos2::new(x, y + cell_height * 0.85),
+                        Vec2::new(cell_width, (cell_height * 0.15).max(1.0)),
+                    ),
+                    CursorStyle::Beam => Rect::from_min_size(
+                        Pos2::new(x, y),
+                        Vec2::new((cell_width * 0.12).max(1.0), cell_height),
+                    ),
+                };
                 shapes.push(Shape::Rect(RectShape::filled(
-                    Rect::from_min_size(Pos2::new(x, y), Vec2::new(cell_width, cell_height)),
+                    cursor_rect,
                     CornerRadius::default(),
                     cursor_color,
                 )));
@@ -430,11 +490,18 @@ fn process_mouse_wheel(
     }
 }
 
+fn requests_paste(interaction: InteractionSettings, button: PointerButton, pressed: bool) -> bool {
+    pressed
+        && ((button == PointerButton::Middle && interaction.middle_click_paste)
+            || (button == PointerButton::Secondary && interaction.right_click_paste))
+}
+
 fn process_button_click(
     state: &mut TerminalViewState,
     layout: &Response,
     backend: &TerminalBackend,
     bindings_layout: &BindingsLayout,
+    interaction: InteractionSettings,
     button: PointerButton,
     position: Pos2,
     modifiers: &Modifiers,
@@ -446,10 +513,23 @@ fn process_button_click(
             layout,
             backend,
             bindings_layout,
+            interaction.select_to_copy,
             position,
             modifiers,
             pressed,
         ),
+        PointerButton::Middle if requests_paste(interaction, button, pressed) => {
+            layout
+                .ctx
+                .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            InputAction::Ignore
+        }
+        PointerButton::Secondary if requests_paste(interaction, button, pressed) => {
+            layout
+                .ctx
+                .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            InputAction::Ignore
+        }
         _ => InputAction::Ignore,
     }
 }
@@ -459,6 +539,7 @@ fn process_left_button(
     layout: &Response,
     backend: &TerminalBackend,
     bindings_layout: &BindingsLayout,
+    select_to_copy: bool,
     position: Pos2,
     modifiers: &Modifiers,
     pressed: bool,
@@ -474,7 +555,15 @@ fn process_left_button(
     } else if pressed {
         process_left_button_pressed(state, layout, position)
     } else {
-        process_left_button_released(state, layout, backend, bindings_layout, position, modifiers)
+        process_left_button_released(
+            state,
+            layout,
+            backend,
+            bindings_layout,
+            select_to_copy,
+            position,
+            modifiers,
+        )
     }
 }
 
@@ -492,6 +581,7 @@ fn process_left_button_released(
     layout: &Response,
     backend: &TerminalBackend,
     bindings_layout: &BindingsLayout,
+    select_to_copy: bool,
     position: Pos2,
     modifiers: &Modifiers,
 ) -> InputAction {
@@ -511,6 +601,13 @@ fn process_left_button_released(
                 LinkAction::Open,
                 state.current_mouse_position_on_grid,
             ))
+        } else if select_to_copy {
+            let content = backend.selectable_content();
+            if content.is_empty() {
+                InputAction::Ignore
+            } else {
+                InputAction::WriteToClipboard(content)
+            }
         } else {
             InputAction::Ignore
         }
@@ -577,4 +674,39 @@ fn process_mouse_move(
     }
 
     actions
+}
+#[cfg(test)]
+mod appearance_interaction_tests {
+    use super::*;
+
+    #[test]
+    fn mouse_paste_is_opt_in_and_only_on_button_press() {
+        let disabled = InteractionSettings::default();
+        assert!(!requests_paste(disabled, PointerButton::Middle, true));
+        assert!(!requests_paste(disabled, PointerButton::Secondary, true));
+
+        let enabled = InteractionSettings {
+            middle_click_paste: true,
+            right_click_paste: true,
+            ..InteractionSettings::default()
+        };
+        assert!(requests_paste(enabled, PointerButton::Middle, true));
+        assert!(requests_paste(enabled, PointerButton::Secondary, true));
+        assert!(!requests_paste(enabled, PointerButton::Middle, false));
+        assert!(!requests_paste(enabled, PointerButton::Primary, true));
+    }
+
+    #[test]
+    fn defaults_preserve_existing_terminal_interaction_behavior() {
+        assert_eq!(CursorStyle::default(), CursorStyle::Block);
+        assert_eq!(
+            InteractionSettings::default(),
+            InteractionSettings {
+                select_to_copy: false,
+                middle_click_paste: false,
+                right_click_paste: false,
+                hide_pointer_while_typing: false,
+            }
+        );
+    }
 }

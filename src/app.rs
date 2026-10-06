@@ -1,7 +1,11 @@
 //! Small native connection/profile interface; terminal mechanics stay upstream.
 use crate::{
-    ControlMasterMode, ProxyKind, Session, SessionImportMode, delete_session,
-    duplicate_session_draft, export_sessions,
+    ControlMasterMode, ProxyKind, Session, SessionImportMode,
+    appearance::{
+        self, AppearanceOverride, AppearanceSettings, TerminalAppearance, TerminalCursorStyle,
+        TerminalFontFamily, TerminalPalette,
+    },
+    delete_session, duplicate_session_draft, export_sessions,
     history::{HistoryRow, HistoryState},
     import_sessions, load_sessions, save_session_edit, save_sessions,
     scp_panel::ScpPanel,
@@ -16,7 +20,10 @@ use crate::{
     workspace::{self, SplitAxis, SyncInputState, WorkspaceLayout},
 };
 use eframe::egui;
-use egui_term::{BackendCommand, PtyEvent, TerminalBackend, TerminalView};
+use egui_term::{
+    BackendCommand, ColorPalette, CursorStyle, FontSettings, InteractionSettings, PtyEvent,
+    TerminalBackend, TerminalFont, TerminalTheme, TerminalView,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -113,6 +120,225 @@ fn synchronized_event_bytes(event: &egui::Event) -> Option<Vec<u8>> {
     }
 }
 
+fn terminal_theme(appearance: &TerminalAppearance) -> TerminalTheme {
+    let mut palette = ColorPalette::default();
+    match appearance.palette {
+        TerminalPalette::DefaultDark => {}
+        TerminalPalette::Light => {
+            palette.foreground = "#202124".into();
+            palette.background = "#f7f7f7".into();
+            palette.black = "#202124".into();
+            palette.red = "#b3261e".into();
+            palette.green = "#2e7d32".into();
+            palette.yellow = "#8a6d00".into();
+            palette.blue = "#1565c0".into();
+            palette.magenta = "#8e24aa".into();
+            palette.cyan = "#00796b".into();
+            palette.white = "#eceff1".into();
+            palette.bright_black = "#5f6368".into();
+            palette.bright_red = "#d93025".into();
+            palette.bright_green = "#188038".into();
+            palette.bright_yellow = "#a86f00".into();
+            palette.bright_blue = "#1a73e8".into();
+            palette.bright_magenta = "#a142f4".into();
+            palette.bright_cyan = "#00897b".into();
+            palette.bright_white = "#ffffff".into();
+            palette.dim_foreground = "#5f6368".into();
+        }
+        TerminalPalette::HighContrast => {
+            palette.foreground = "#ffffff".into();
+            palette.background = "#000000".into();
+            palette.black = "#000000".into();
+            palette.red = "#ff5555".into();
+            palette.green = "#55ff55".into();
+            palette.yellow = "#ffff55".into();
+            palette.blue = "#5555ff".into();
+            palette.magenta = "#ff55ff".into();
+            palette.cyan = "#55ffff".into();
+            palette.white = "#ffffff".into();
+            palette.bright_black = "#808080".into();
+            palette.bright_red = "#ff8080".into();
+            palette.bright_green = "#80ff80".into();
+            palette.bright_yellow = "#ffff80".into();
+            palette.bright_blue = "#8080ff".into();
+            palette.bright_magenta = "#ff80ff".into();
+            palette.bright_cyan = "#80ffff".into();
+            palette.bright_white = "#ffffff".into();
+            palette.dim_foreground = "#b0b0b0".into();
+        }
+    }
+    if let Some(foreground) = &appearance.foreground {
+        palette.foreground = foreground.clone();
+    }
+    if let Some(background) = &appearance.background {
+        palette.background = background.clone();
+    }
+    TerminalTheme::new(Box::new(palette))
+}
+
+fn terminal_font(appearance: &TerminalAppearance) -> TerminalFont {
+    let font_type = match appearance.font_family {
+        TerminalFontFamily::Monospace => egui::FontId::monospace(appearance.font_size),
+        TerminalFontFamily::Proportional => egui::FontId::proportional(appearance.font_size),
+    };
+    TerminalFont::new(FontSettings { font_type })
+}
+
+fn terminal_cursor_style(style: TerminalCursorStyle) -> CursorStyle {
+    match style {
+        TerminalCursorStyle::Block => CursorStyle::Block,
+        TerminalCursorStyle::Underline => CursorStyle::Underline,
+        TerminalCursorStyle::Beam => CursorStyle::Beam,
+    }
+}
+
+fn terminal_interaction(appearance: &TerminalAppearance) -> InteractionSettings {
+    InteractionSettings {
+        select_to_copy: appearance.select_to_copy,
+        middle_click_paste: appearance.middle_click_paste,
+        right_click_paste: appearance.right_click_paste,
+        hide_pointer_while_typing: appearance.hide_pointer_while_typing,
+    }
+}
+
+fn appearance_controls(
+    ui: &mut egui::Ui,
+    appearance: &mut TerminalAppearance,
+    id_source: &str,
+    show_opacity: bool,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Font");
+        egui::ComboBox::from_id_salt(format!("{id_source}_terminal_font_family"))
+            .selected_text(match appearance.font_family {
+                TerminalFontFamily::Monospace => "Monospace",
+                TerminalFontFamily::Proportional => "Proportional",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut appearance.font_family,
+                    TerminalFontFamily::Monospace,
+                    "Monospace",
+                );
+                ui.selectable_value(
+                    &mut appearance.font_family,
+                    TerminalFontFamily::Proportional,
+                    "Proportional",
+                );
+            });
+        ui.add(egui::Slider::new(&mut appearance.font_size, 8.0..=36.0).text("size"));
+
+        ui.label("Theme");
+        egui::ComboBox::from_id_salt(format!("{id_source}_terminal_palette"))
+            .selected_text(match appearance.palette {
+                TerminalPalette::DefaultDark => "Default dark",
+                TerminalPalette::Light => "Light",
+                TerminalPalette::HighContrast => "High contrast",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut appearance.palette,
+                    TerminalPalette::DefaultDark,
+                    "Default dark",
+                );
+                ui.selectable_value(&mut appearance.palette, TerminalPalette::Light, "Light");
+                ui.selectable_value(
+                    &mut appearance.palette,
+                    TerminalPalette::HighContrast,
+                    "High contrast",
+                );
+            });
+
+        ui.label("Cursor");
+        egui::ComboBox::from_id_salt(format!("{id_source}_terminal_cursor_style"))
+            .selected_text(match appearance.cursor_style {
+                TerminalCursorStyle::Block => "Block",
+                TerminalCursorStyle::Underline => "Underline",
+                TerminalCursorStyle::Beam => "Beam",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut appearance.cursor_style,
+                    TerminalCursorStyle::Block,
+                    "Block",
+                );
+                ui.selectable_value(
+                    &mut appearance.cursor_style,
+                    TerminalCursorStyle::Underline,
+                    "Underline",
+                );
+                ui.selectable_value(
+                    &mut appearance.cursor_style,
+                    TerminalCursorStyle::Beam,
+                    "Beam",
+                );
+            });
+    });
+
+    ui.horizontal_wrapped(|ui| {
+        let mut custom_foreground = appearance.foreground.is_some();
+        if ui
+            .checkbox(&mut custom_foreground, "Custom foreground")
+            .changed()
+        {
+            appearance.foreground =
+                custom_foreground.then(|| appearance.palette_defaults().0.into());
+        }
+        if let Some(value) = appearance.foreground.as_mut() {
+            ui.add(egui::TextEdit::singleline(value).desired_width(90.0));
+        }
+
+        let mut custom_background = appearance.background.is_some();
+        if ui
+            .checkbox(&mut custom_background, "Custom background")
+            .changed()
+        {
+            appearance.background =
+                custom_background.then(|| appearance.palette_defaults().1.into());
+        }
+        if let Some(value) = appearance.background.as_mut() {
+            ui.add(egui::TextEdit::singleline(value).desired_width(90.0));
+        }
+    });
+
+    ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut appearance.select_to_copy, "Select to copy");
+        ui.checkbox(&mut appearance.middle_click_paste, "Middle-click paste");
+        ui.checkbox(&mut appearance.right_click_paste, "Right-click paste");
+        ui.checkbox(
+            &mut appearance.hide_pointer_while_typing,
+            "Hide pointer while typing",
+        );
+    });
+
+    if show_opacity {
+        ui.add(egui::Slider::new(&mut appearance.opacity, 0.35..=1.0).text("window opacity"));
+        ui.small(
+            "Window opacity is saved, but the current native eframe window stack does not expose portable runtime opacity; it is not applied on this build.",
+        );
+    } else {
+        ui.small("Window opacity is a global-only preference.");
+    }
+    if let Some(warning) = appearance.contrast_warning() {
+        ui.colored_label(egui::Color32::YELLOW, warning);
+    }
+}
+
+fn full_profile_override(appearance: &TerminalAppearance) -> AppearanceOverride {
+    AppearanceOverride {
+        font_family: Some(appearance.font_family),
+        font_size: Some(appearance.font_size),
+        palette: Some(appearance.palette),
+        foreground: appearance.foreground.clone(),
+        background: appearance.background.clone(),
+        cursor_style: Some(appearance.cursor_style),
+        select_to_copy: Some(appearance.select_to_copy),
+        middle_click_paste: Some(appearance.middle_click_paste),
+        right_click_paste: Some(appearance.right_click_paste),
+        hide_pointer_while_typing: Some(appearance.hide_pointer_while_typing),
+    }
+}
+
 fn render_terminal_tab(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
@@ -120,6 +346,7 @@ fn render_terminal_tab(
     terminal_focus: Option<u64>,
     copy_selected: bool,
     show_pane_header: bool,
+    appearance: &TerminalAppearance,
 ) -> (Option<(u64, TabKind, Session)>, bool, bool) {
     let mut reconnect = None;
     let mut focus = false;
@@ -145,11 +372,16 @@ fn render_terminal_tab(
         });
         ui.separator();
     }
-    let view = TerminalView::new(ui, &mut tab.terminal).set_focus(terminal_accepts_keyboard(
-        terminal_focus,
-        tab.id,
-        tab.exited,
-    ));
+    let view = TerminalView::new(ui, &mut tab.terminal)
+        .set_theme(terminal_theme(appearance))
+        .set_font(terminal_font(appearance))
+        .set_cursor_style(terminal_cursor_style(appearance.cursor_style))
+        .set_interaction(terminal_interaction(appearance))
+        .set_focus(terminal_accepts_keyboard(
+            terminal_focus,
+            tab.id,
+            tab.exited,
+        ));
     let response = ui.add(view);
     if copy_selected {
         let selected = tab.terminal.selectable_content();
@@ -233,6 +465,9 @@ pub struct App {
     startup_pending: bool,
     startup_workspace_path: String,
     startup_notice: String,
+    appearance_path: PathBuf,
+    appearance_settings: AppearanceSettings,
+    appearance_notice: String,
     draft: Session,
     profile_tags: String,
     port: String,
@@ -306,6 +541,15 @@ impl App {
                 format!("Startup settings ignored: {error:#}"),
             ),
         };
+        let appearance_path = appearance::settings_path(&path);
+        let (appearance_settings, appearance_error) =
+            match appearance::load_settings(&appearance_path) {
+                Ok(settings) => (settings, String::new()),
+                Err(error) => (
+                    AppearanceSettings::default(),
+                    format!("Appearance settings ignored: {error:#}"),
+                ),
+            };
         let (profiles, mut error, writable) = match load_sessions(&path) {
             Ok(profiles) => (profiles, String::new(), true),
             Err(error) => (
@@ -315,11 +559,13 @@ impl App {
             ),
         };
         let (tx, rx) = mpsc::channel();
-        if !startup_error.is_empty() {
-            if !error.is_empty() {
-                error.push('\n');
+        for settings_error in [&startup_error, &appearance_error] {
+            if !settings_error.is_empty() {
+                if !error.is_empty() {
+                    error.push('\n');
+                }
+                error.push_str(settings_error);
             }
-            error.push_str(&startup_error);
         }
 
         let startup_workspace_path = match &startup_settings.behavior {
@@ -342,6 +588,9 @@ impl App {
             startup_pending: true,
             startup_workspace_path,
             startup_notice: String::new(),
+            appearance_path,
+            appearance_settings,
+            appearance_notice: String::new(),
             draft: Session::default(),
             profile_tags: String::new(),
             port: String::new(),
@@ -2266,6 +2515,96 @@ impl App {
                     ui.small(&self.paste_notice);
                 }
 
+                let active_profile_name = self.active.and_then(|id| {
+                    self.tabs
+                        .iter()
+                        .find(|tab| tab.id == id)
+                        .map(|tab| tab.session.name.clone())
+                });
+                egui::CollapsingHeader::new("Appearance & interaction")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.strong("Global defaults");
+                        appearance_controls(
+                            ui,
+                            &mut self.appearance_settings.global,
+                            "global",
+                            true,
+                        );
+
+                        if let Some(profile_name) = active_profile_name.as_deref() {
+                            ui.separator();
+                            let effective_before =
+                                self.appearance_settings.effective_for(profile_name);
+                            let mut override_enabled =
+                                self.appearance_settings.profiles.contains_key(profile_name);
+                            if ui
+                                .checkbox(
+                                    &mut override_enabled,
+                                    format!("Override global settings for profile {profile_name:?}"),
+                                )
+                                .changed()
+                            {
+                                if override_enabled {
+                                    self.appearance_settings.profiles.insert(
+                                        profile_name.to_owned(),
+                                        full_profile_override(&effective_before),
+                                    );
+                                } else {
+                                    self.appearance_settings.profiles.remove(profile_name);
+                                }
+                            }
+
+                            if override_enabled {
+                                let mut effective =
+                                    self.appearance_settings.effective_for(profile_name);
+                                appearance_controls(
+                                    ui,
+                                    &mut effective,
+                                    "active_profile",
+                                    false,
+                                );
+                                self.appearance_settings.profiles.insert(
+                                    profile_name.to_owned(),
+                                    full_profile_override(&effective),
+                                );
+                            }
+                        } else {
+                            ui.small(
+                                "Open a terminal tab to configure an optional profile-level override.",
+                            );
+                        }
+
+                        ui.horizontal(|ui| {
+                            if ui.button("Save appearance settings").clicked() {
+                                self.appearance_notice =
+                                    match appearance::save_settings(
+                                        &self.appearance_path,
+                                        &self.appearance_settings,
+                                    ) {
+                                        Ok(()) => {
+                                            "Appearance settings saved atomically.".into()
+                                        }
+                                        Err(error) => {
+                                            format!("Cannot save appearance settings: {error:#}")
+                                        }
+                                    };
+                            }
+                            if ui.button("Reset global defaults").clicked() {
+                                self.appearance_settings.global = TerminalAppearance::default();
+                                self.appearance_notice =
+                                    "Global appearance reset in memory; press Save to persist."
+                                        .into();
+                            }
+                        });
+                        ui.small(
+                            "Profile overrides apply only to that profile. Unset profiles inherit global preferences. Mouse-triggered paste requests still enter the same guarded paste policy shown above.",
+                        );
+                        if !self.appearance_notice.is_empty() {
+                            ui.small(&self.appearance_notice);
+                        }
+                    });
+
                 if self.search_open {
                     let active_id = self.active;
                     ui.horizontal_wrapped(|ui| {
@@ -2614,7 +2953,9 @@ impl App {
                         (&mut right[0], &mut left[second_index])
                     };
                     let active = self.active;
+                    let appearance_settings = self.appearance_settings.clone();
                     let mut render = |ui: &mut egui::Ui, tab: &mut Tab| {
+                        let appearance = appearance_settings.effective_for(&tab.session.name);
                         let (next_reconnect, focused, close) = render_terminal_tab(
                             ui,
                             ctx,
@@ -2622,6 +2963,7 @@ impl App {
                             terminal_focus,
                             copy_selected && active == Some(tab.id),
                             true,
+                            &appearance,
                         );
                         if reconnect.is_none() {
                             reconnect = next_reconnect;
@@ -2655,6 +2997,7 @@ impl App {
                     }
                 }
             } else if let Some(tab) = self.tabs.iter_mut().find(|tab| Some(tab.id) == self.active) {
+                let appearance = self.appearance_settings.effective_for(&tab.session.name);
                 let (next_reconnect, focused, close) = render_terminal_tab(
                     ui,
                     ctx,
@@ -2662,6 +3005,7 @@ impl App {
                     terminal_focus,
                     copy_selected,
                     false,
+                    &appearance,
                 );
                 reconnect = next_reconnect;
                 if focused {
