@@ -86,20 +86,28 @@ jobs:
         run: cargo clippy --locked --all-targets --target ${{ matrix.target }} -- -D warnings
       - name: Install native SSH fixture dependency (Unix)
         if: runner.os != 'Windows'
-        run: python3 -m pip install --disable-pip-version-check "asyncssh==2.24.0"
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/native-ssh-venv"
+          "$RUNNER_TEMP/native-ssh-venv/bin/python" -m pip install --disable-pip-version-check "asyncssh==2.24.0"
       - name: Install native SSH fixture dependency (Windows)
         if: runner.os == 'Windows'
-        run: python -m pip install --disable-pip-version-check "asyncssh==2.24.0"
+        shell: pwsh
+        run: |
+          python -m venv "$env:RUNNER_TEMP/native-ssh-venv"
+          & "$env:RUNNER_TEMP/native-ssh-venv/Scripts/python.exe" -m pip install --disable-pip-version-check "asyncssh==2.24.0"
       - name: Native authenticated SSH smoke (Unix)
         if: runner.os != 'Windows'
+        shell: bash
         env:
           INSPIRUM_TEST_TMPDIR: ${{ runner.temp }}
-        run: python3 scripts/test-native-ssh-smoke.py
+        run: "$RUNNER_TEMP/native-ssh-venv/bin/python" scripts/test-native-ssh-smoke.py
       - name: Native authenticated SSH smoke (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         env:
           INSPIRUM_TEST_TMPDIR: ${{ runner.temp }}
-        run: python scripts/test-native-ssh-smoke.py
+        run: '& "$env:RUNNER_TEMP/native-ssh-venv/Scripts/python.exe" scripts/test-native-ssh-smoke.py'
       - name: Test workflow helper scripts
         if: runner.os == 'Linux'
         run: python3 -B -m unittest discover -s scripts/tests -p 'test_*.py'
