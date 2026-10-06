@@ -107,7 +107,8 @@ jobs:
         shell: pwsh
         env:
           INSPIRUM_TEST_TMPDIR: ${{ runner.temp }}
-        run: '& "$env:RUNNER_TEMP/native-ssh-venv/Scripts/python.exe" scripts/test-native-ssh-smoke.py'
+        run: |
+          & "$env:RUNNER_TEMP/native-ssh-venv/Scripts/python.exe" scripts/test-native-ssh-smoke.py
       - name: Test workflow helper scripts
         if: runner.os == 'Linux'
         run: python3 -B -m unittest discover -s scripts/tests -p 'test_*.py'
