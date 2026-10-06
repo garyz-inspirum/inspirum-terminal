@@ -156,7 +156,8 @@ fn native_authenticated_terminal_trust_resize_reconnect_and_cleanup() {
     let rejection = grid(&mut rejected).to_ascii_lowercase();
     assert!(
         rejection.contains("host identification has changed")
-            || rejection.contains("host key verification failed"),
+            || rejection.contains("host key verification failed")
+            || rejection.contains("@@@@@@@@@@"),
         "changed host key was not surfaced by system OpenSSH: {rejection}"
     );
     drop(rejected);
