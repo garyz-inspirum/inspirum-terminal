@@ -62,7 +62,7 @@ jobs:
           cargo test --locked --target ${{ matrix.target }} --no-run
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          $targets = @('lib', 'app', 'controlmaster', 'diagnostics_cli', 'profile_import_safety', 'proxy_cli', 'proxy_transport', 'scp', 'sessions', 'sftp_policy', 'ssh_integration', 'terminal', 'terminal_compat', 'tunnel_manager')
+          $targets = @('lib', 'app', 'controlmaster', 'diagnostics_cli', 'native_ssh_smoke', 'profile_import_safety', 'proxy_cli', 'proxy_transport', 'scp', 'sessions', 'sftp_policy', 'ssh_integration', 'terminal', 'terminal_compat', 'tunnel_manager')
           foreach ($target in $targets) {
             Write-Host "::group::cargo test target: $target"
             if ($target -eq 'lib') {
@@ -84,6 +84,25 @@ jobs:
           }
       - name: Clippy
         run: cargo clippy --locked --all-targets --target ${{ matrix.target }} -- -D warnings
+      - name: Install native SSH fixture dependency (Linux)
+        if: runner.os == 'Linux'
+        run: python3 -m pip install --disable-pip-version-check "asyncssh==2.24.0"
+      - name: Install native SSH fixture dependency (macOS)
+        if: runner.os == 'macOS'
+        run: python3 -m pip install --disable-pip-version-check --break-system-packages "asyncssh==2.24.0"
+      - name: Install native SSH fixture dependency (Windows)
+        if: runner.os == 'Windows'
+        run: python -m pip install --disable-pip-version-check "asyncssh==2.24.0"
+      - name: Native authenticated SSH smoke (Unix)
+        if: runner.os != 'Windows'
+        env:
+          INSPIRUM_TEST_TMPDIR: ${{ runner.temp }}
+        run: python3 scripts/test-native-ssh-smoke.py
+      - name: Native authenticated SSH smoke (Windows)
+        if: runner.os == 'Windows'
+        env:
+          INSPIRUM_TEST_TMPDIR: ${{ runner.temp }}
+        run: python scripts/test-native-ssh-smoke.py
       - name: Test workflow helper scripts
         if: runner.os == 'Linux'
         run: python3 -B -m unittest discover -s scripts/tests -p 'test_*.py'

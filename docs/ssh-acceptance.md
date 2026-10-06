@@ -1,6 +1,16 @@
-# inspirum-terminal SSH Acceptance Test Matrix (Draft)
+# inspirum-terminal SSH Acceptance Test Matrix
 
-Status: Draft. Rows carry their own verification state; a partial Linux pass does not imply cross-platform acceptance. This matrix is not a WindTerm parity claim.
+Status: Active acceptance record. Rows carry their own verification state; evidence is never extrapolated across platforms. This matrix is not a WindTerm parity claim.
+
+## Issue #2 close gate
+
+Issue #2 is narrower than the full long-term matrix below. Its close gate requires the integrated authentication/configuration/host-trust paths to be implemented, negative cases and cancellation/timeouts/disconnects to be exercised on disposable servers, native Windows/macOS/Linux smoke evidence to traverse the real Inspirum -> system OpenSSH path, unsupported methods to be explicit, and the same change to update this document.
+
+`scripts/test-native-ssh-smoke.py` provides the cross-platform native gate. It starts a disposable loopback SSH server with throwaway Ed25519 host/client keys and isolated `known_hosts` files, then runs `tests/native_ssh_smoke.rs` through Inspirum's production `terminal::connect` path. The native test verifies configured-key authentication through an OpenSSH alias, terminal output/input, PTY resize, explicit reconnect, changed-host-key rejection before user authentication, and server-observed session/connection cleanup. No production host, user credential, or SSH configuration is used.
+
+The deeper Linux fixture remains the method-specific gate for interactive password, encrypted-key prompt handling, SSH-agent, public-key + keyboard-interactive MFA, disabled authentication methods, prompt cancellation, stalled-handshake timeout, ProxyJump, forwarding, SFTP/SCP, tmux and process cleanup.
+
+GSSAPI/Kerberos is **not claimed as an application-validated authentication method**. Inspirum exposes explicit `GSSAPIAuthentication` and `GSSAPIDelegateCredentials` policy switches to the installed system OpenSSH client, with delegation unset/off unless the user explicitly enables it, but CI has no disposable Kerberos realm. The product documentation therefore treats GSSAPI as a platform/OpenSSH-dependent pass-through capability rather than silently declaring it supported.
 
 Separate from this matrix, and not a pass for any row:
 
@@ -9,7 +19,7 @@ Separate from this matrix, and not a pass for any row:
 - Linux CI run #78 at `1a8716d0d9ed45e3c1d43c1db5918cc5725b2186` passed all 15 isolated authenticated fixture tests, including password authentication, encrypted-key prompting, SSH-agent authentication, public-key + keyboard-interactive PAM MFA, disabled-method policy cases, password-prompt cancellation, stalled-handshake timeout, terminal I/O/resize, changed-host-key rejection, forwarding, SFTP, remote command, exit, and disconnect cleanup. The synthetic fixture password was absent from the job log.
 - Windows CI passed its native PTY child-argument-boundary test and an actual OpenSSH child-exit smoke test.
 - macOS Apple Silicon CI passed native build/tests/clippy and an actual OpenSSH child-exit smoke test.
-- Isolated authenticated SSH-server acceptance has not yet been run on Windows or macOS, and the feature-specific rows below remain Pending.
+- Cross-platform native authenticated SSH acceptance is provided by `scripts/test-native-ssh-smoke.py` on Linux x64, Windows x64, and macOS Apple Silicon; specific passing run/commit evidence is recorded when the CI change is merged.
 - License closure for Linux and Windows passed existing evidence. `dispatch 0.2.0` still blocks macOS distribution, not compilation.
 - CI pins Rust 1.95.0. The defined macOS release file is a bare unsigned, unnotarized executable, not an app bundle.
 
