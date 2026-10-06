@@ -114,18 +114,20 @@ impl SyncInputState {
     }
 
     pub fn set_target(&mut self, id: u64, selected: bool) {
-        if selected {
-            self.targets.insert(id);
+        let changed = if selected {
+            self.targets.insert(id)
         } else {
-            self.targets.remove(&id);
-            if self.targets.len() < 2 {
-                self.armed = false;
-            }
+            self.targets.remove(&id)
+        };
+        if changed {
+            self.armed = false;
         }
     }
 
     pub fn remove_pane(&mut self, id: u64) {
-        self.set_target(id, false);
+        if self.targets.remove(&id) {
+            self.armed = false;
+        }
     }
 
     /// Mirroring is only allowed when armed and the source was explicitly selected.
@@ -197,6 +199,7 @@ mod tests {
         assert!(sync.destinations(10).is_empty());
 
         sync.set_target(20, true);
+        assert!(!sync.armed());
         sync.set_armed(true);
         assert!(sync.armed());
         assert_eq!(sync.destinations(10), vec![20]);
@@ -206,6 +209,12 @@ mod tests {
         sync.remove_pane(20);
         assert!(!sync.armed());
         assert!(sync.destinations(10).is_empty());
+
+        sync.set_target(20, true);
+        sync.set_armed(true);
+        assert!(sync.armed());
+        sync.set_target(30, true);
+        assert!(!sync.armed(), "changing the target set must always disarm sync");
     }
 
     #[test]
