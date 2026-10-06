@@ -8,6 +8,7 @@ use crate::{
     sftp_browser::SftpBrowser,
     startup::{self, StartupBehavior, StartupSettings},
     support::{self, SanitizedErrorHistory},
+    tab_management::{self, BulkCloseMode, TabVisualLabel},
     terminal,
     terminal_ux::{self, PasteDecision, PastePolicy},
     tmux::{self, TmuxSession},
@@ -16,6 +17,7 @@ use crate::{
 use eframe::egui;
 use egui_term::{BackendCommand, PtyEvent, TerminalBackend, TerminalView};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
 };
@@ -124,6 +126,9 @@ fn render_terminal_tab(
     if show_pane_header {
         ui.horizontal(|ui| {
             ui.strong(&tab.name);
+            if terminal_focus == Some(tab.id) && !tab.exited {
+                ui.strong("● FOCUSED");
+            }
             if ui.small_button("Close pane").clicked() {
                 close = true;
             }
@@ -259,6 +264,12 @@ pub struct App {
     tabs: Vec<Tab>,
     active: Option<u64>,
     terminal_focus: Option<u64>,
+    tab_selected: BTreeSet<u64>,
+    tab_labels: BTreeMap<u64, TabVisualLabel>,
+    tab_switcher_open: bool,
+    tab_switcher_query: String,
+    tab_switcher_index: usize,
+    bulk_close_confirm: Vec<u64>,
     paste_policy: PastePolicy,
     pending_paste: Option<(u64, String)>,
     paste_notice: String,
@@ -359,6 +370,12 @@ impl App {
             tabs: Vec::new(),
             active: None,
             terminal_focus: None,
+            tab_selected: BTreeSet::new(),
+            tab_labels: BTreeMap::new(),
+            tab_switcher_open: false,
+            tab_switcher_query: String::new(),
+            tab_switcher_index: 0,
+            bulk_close_confirm: Vec::new(),
             paste_policy: PastePolicy::default(),
             pending_paste: None,
             paste_notice: String::new(),
@@ -533,6 +550,49 @@ impl App {
         Ok(session)
     }
 
+    fn tab_order(&self) -> Vec<u64> {
+        self.tabs.iter().map(|tab| tab.id).collect()
+    }
+
+    fn apply_tab_order(&mut self, order: &[u64]) {
+        self.tabs.sort_by_key(|tab| {
+            order
+                .iter()
+                .position(|id| *id == tab.id)
+                .unwrap_or(usize::MAX)
+        });
+    }
+
+    fn close_tab_ids(&mut self, ids: &[u64]) {
+        if ids.is_empty() {
+            return;
+        }
+        let order = self.tab_order();
+        let next_active = tab_management::next_active_after_close(&order, self.active, ids);
+        let closing: BTreeSet<u64> = ids.iter().copied().collect();
+
+        for id in ids {
+            self.workspace_panes.retain(|pane| pane != id);
+            self.sync_input.remove_pane(*id);
+            self.tab_selected.remove(id);
+            self.tab_labels.remove(id);
+            if self.logging_tab == Some(*id) {
+                self.logging_tab = None;
+            }
+            if self.pending_paste.as_ref().is_some_and(|(owner, _)| owner == id) {
+                self.pending_paste = None;
+            }
+        }
+
+        // Retaining is the sole ownership-removal point: each TerminalBackend is dropped once.
+        self.tabs.retain(|tab| !closing.contains(&tab.id));
+        self.active = next_active;
+        if self.terminal_focus.is_some_and(|id| closing.contains(&id)) {
+            self.terminal_focus = self.active;
+        }
+        self.bulk_close_confirm.clear();
+    }
+
     pub fn ui(&mut self, ctx: &egui::Context) {
         if self.startup_pending {
             self.startup_pending = false;
@@ -673,6 +733,18 @@ impl App {
                 }
             }
         }
+        let tab_switcher_shortcut = ctx.input(|input| {
+            input.key_pressed(egui::Key::K)
+                && input.modifiers.command
+                && input.modifiers.shift
+        });
+        if tab_switcher_shortcut {
+            self.tab_switcher_open = true;
+            self.tab_switcher_query.clear();
+            self.tab_switcher_index = 0;
+            self.terminal_focus = None;
+        }
+
         let search_shortcut = ctx.input(|input| {
             input.key_pressed(egui::Key::F) && input.modifiers.command && input.modifiers.shift
         });
@@ -1857,50 +1929,218 @@ impl App {
                 });
             });
 
+        let tab_snapshot: Vec<(u64, String, bool)> = self
+            .tabs
+            .iter()
+            .map(|tab| (tab.id, tab.name.clone(), tab.exited))
+            .collect();
+        let mut close_one = None;
+        let mut move_active = None;
+        let mut bulk_mode = None;
+
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-            let mut close = None;
             ui.horizontal_wrapped(|ui| {
-                for tab in &self.tabs {
-                    let label =
-                        format!("{}{}", tab.name, if tab.exited { " (exited)" } else { "" });
-                    if ui
-                        .selectable_label(self.active == Some(tab.id), label)
-                        .clicked()
-                    {
-                        self.active = Some(tab.id);
-                        self.terminal_focus = Some(tab.id);
+                if ui.button("Quick switch…").on_hover_text("Ctrl/Cmd+Shift+K").clicked() {
+                    self.tab_switcher_open = true;
+                    self.tab_switcher_query.clear();
+                    self.tab_switcher_index = 0;
+                    self.terminal_focus = None;
+                }
+                if ui
+                    .add_enabled(self.active.is_some(), egui::Button::new("← Move"))
+                    .clicked()
+                {
+                    move_active = Some(-1);
+                }
+                if ui
+                    .add_enabled(self.active.is_some(), egui::Button::new("Move →"))
+                    .clicked()
+                {
+                    move_active = Some(1);
+                }
+                if ui
+                    .add_enabled(!self.tab_selected.is_empty(), egui::Button::new("Close selected"))
+                    .clicked()
+                {
+                    bulk_mode = Some(BulkCloseMode::Selected);
+                }
+                if let Some(active) = self.active {
+                    if ui.button("Close right").clicked() {
+                        bulk_mode = Some(BulkCloseMode::RightOf(active));
                     }
-                    let close_help = if tab
-                        .session
-                        .ssh
-                        .remote_command
-                        .starts_with("exec tmux attach-session -t ")
-                    {
-                        "Disconnect/detach this tmux client and close the terminal; the server-side tmux session remains"
+                    if ui.button("Close others").clicked() {
+                        bulk_mode = Some(BulkCloseMode::Others(active));
+                    }
+                    let mut visual = self.tab_labels.get(&active).copied().unwrap_or_default();
+                    egui::ComboBox::from_id_salt("active_tab_visual_label")
+                        .selected_text(format!("Label: {}", visual.name()))
+                        .show_ui(ui, |ui| {
+                            for choice in TabVisualLabel::ALL {
+                                ui.selectable_value(&mut visual, choice, choice.name());
+                            }
+                        });
+                    if visual == TabVisualLabel::None {
+                        self.tab_labels.remove(&active);
                     } else {
-                        "Disconnect and close terminal"
-                    };
-                    if ui
-                        .small_button("×")
-                        .on_hover_text(close_help)
-                        .clicked()
-                    {
-                        close = Some(tab.id);
+                        self.tab_labels.insert(active, visual);
                     }
                 }
             });
-            if let Some(id) = close {
-                self.tabs.retain(|tab| tab.id != id);
-                self.workspace_panes.retain(|pane| *pane != id);
-                self.sync_input.remove_pane(id);
-                if self.active == Some(id) {
-                    self.active = self.tabs.last().map(|tab| tab.id);
+            ui.horizontal_wrapped(|ui| {
+                for (id, name, exited) in &tab_snapshot {
+                    let mut selected = self.tab_selected.contains(id);
+                    if ui
+                        .checkbox(&mut selected, "")
+                        .on_hover_text("Select for bulk tab actions")
+                        .changed()
+                    {
+                        if selected {
+                            self.tab_selected.insert(*id);
+                        } else {
+                            self.tab_selected.remove(id);
+                        }
+                    }
+                    let marker = self
+                        .tab_labels
+                        .get(id)
+                        .copied()
+                        .unwrap_or_default()
+                        .marker();
+                    let label = format!(
+                        "{}{}{}{}",
+                        marker,
+                        if self.terminal_focus == Some(*id) { "● " } else { "" },
+                        name,
+                        if *exited { " (exited)" } else { "" }
+                    );
+                    if ui.selectable_label(self.active == Some(*id), label).clicked() {
+                        self.active = Some(*id);
+                        self.terminal_focus = Some(*id);
+                    }
+                    if ui.small_button("×").on_hover_text("Disconnect and close terminal").clicked() {
+                        close_one = Some(*id);
+                    }
                 }
-                if self.terminal_focus == Some(id) {
-                    self.terminal_focus = self.active;
-                }
-            }
+            });
         });
+
+        if let Some(delta) = move_active
+            && let Some(active) = self.active
+        {
+            let order = self.tab_order();
+            let next = tab_management::moved_order(&order, active, delta);
+            self.apply_tab_order(&next);
+        }
+        if let Some(mode) = bulk_mode {
+            let ids = tab_management::bulk_close_ids(&self.tab_order(), &self.tab_selected, mode);
+            if !ids.is_empty() {
+                self.bulk_close_confirm = ids;
+                self.terminal_focus = None;
+            }
+        }
+        if let Some(id) = close_one {
+            self.close_tab_ids(&[id]);
+        }
+
+        if !self.bulk_close_confirm.is_empty() {
+            let ids = self.bulk_close_confirm.clone();
+            let names: Vec<String> = ids
+                .iter()
+                .filter_map(|id| {
+                    self.tabs
+                        .iter()
+                        .find(|tab| tab.id == *id)
+                        .map(|tab| format!("{}{}", tab.name, if tab.exited { " (exited)" } else { " (live)" }))
+                })
+                .collect();
+            let live_count = ids
+                .iter()
+                .filter(|id| self.tabs.iter().any(|tab| tab.id == **id && !tab.exited))
+                .count();
+            let mut confirm = false;
+            let mut cancel = false;
+            egui::Window::new("Confirm bulk tab close")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.strong(format!(
+                        "Close {} tab(s), including {} live session(s)?",
+                        ids.len(),
+                        live_count
+                    ));
+                    for name in &names {
+                        ui.label(format!("• {name}"));
+                    }
+                    ui.small("Closing drops each owned terminal/PTy once and disarms synchronized input if its target set changes.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Close listed tabs").clicked() {
+                            confirm = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            if confirm {
+                self.close_tab_ids(&ids);
+            } else if cancel {
+                self.bulk_close_confirm.clear();
+                self.terminal_focus = self.active;
+            }
+        }
+
+        if self.tab_switcher_open {
+            let matches = tab_management::matching_tab_ids(
+                self.tabs.iter().map(|tab| (tab.id, tab.name.as_str())),
+                &self.tab_switcher_query,
+            );
+            if matches.is_empty() {
+                self.tab_switcher_index = 0;
+            } else {
+                self.tab_switcher_index = self.tab_switcher_index.min(matches.len() - 1);
+            }
+            if ctx.input(|input| input.key_pressed(egui::Key::ArrowDown)) && !matches.is_empty() {
+                self.tab_switcher_index = (self.tab_switcher_index + 1) % matches.len();
+            }
+            if ctx.input(|input| input.key_pressed(egui::Key::ArrowUp)) && !matches.is_empty() {
+                self.tab_switcher_index =
+                    (self.tab_switcher_index + matches.len() - 1) % matches.len();
+            }
+            let activate = ctx.input(|input| input.key_pressed(egui::Key::Enter));
+            let escape = ctx.input(|input| input.key_pressed(egui::Key::Escape));
+            let mut clicked = None;
+            egui::Window::new("Quick tab switcher")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.tab_switcher_query)
+                            .hint_text("Search open tabs"),
+                    );
+                    response.request_focus();
+                    ui.small("Keyboard: ↑/↓ choose, Enter switch, Esc close");
+                    for (index, id) in matches.iter().enumerate() {
+                        if let Some(tab) = self.tabs.iter().find(|tab| tab.id == *id)
+                            && ui
+                                .selectable_label(index == self.tab_switcher_index, &tab.name)
+                                .clicked()
+                        {
+                            clicked = Some(*id);
+                        }
+                    }
+                });
+            let chosen = clicked.or_else(|| {
+                (activate && !matches.is_empty()).then(|| matches[self.tab_switcher_index])
+            });
+            if let Some(id) = chosen {
+                self.active = Some(id);
+                self.terminal_focus = Some(id);
+                self.tab_switcher_open = false;
+            } else if escape {
+                self.tab_switcher_open = false;
+                self.terminal_focus = self.active;
+            }
+        }
 
         let mut reconnect = None;
         let mut close_browser = false;
@@ -2240,19 +2480,7 @@ impl App {
         }
 
         if let Some(id) = close_pane {
-            self.tabs.retain(|tab| tab.id != id);
-            self.workspace_panes.retain(|pane| *pane != id);
-            self.sync_input.remove_pane(id);
-            if self.active == Some(id) {
-                self.active = self
-                    .workspace_panes
-                    .last()
-                    .copied()
-                    .or_else(|| self.tabs.last().map(|tab| tab.id));
-            }
-            if self.terminal_focus == Some(id) {
-                self.terminal_focus = self.active;
-            }
+            self.close_tab_ids(&[id]);
         }
         if let Some(axis) = split_requested {
             let source = self.active.and_then(|id| {
