@@ -262,19 +262,17 @@ LogLevel VERBOSE
             wait_tcp(server, ssh_port, "GSSAPI sshd")
 
             baseline = subprocess.run(
-                [
-                    ssh,
-                    "-F",
-                    str(config),
-                    "gssapi-fixture",
-                    "printf BASELINE_GSSAPI_OK",
-                ],
+                [ssh, "-F", str(config), "gssapi-fixture"],
                 env=env,
+                input="exit\n",
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-            if baseline.returncode != 0 or "BASELINE_GSSAPI_OK" not in baseline.stdout:
+            if (
+                baseline.returncode != 0
+                or "FIXTURE_GSSAPI_AUTHENTICATED" not in baseline.stdout
+            ):
                 raise RuntimeError(
                     "system OpenSSH GSSAPI baseline failed: "
                     + baseline.stderr.replace(fixture_password, "[redacted]")
