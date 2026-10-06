@@ -301,7 +301,7 @@ impl App {
         let (tx, rx) = mpsc::channel();
         if !startup_error.is_empty() {
             if !error.is_empty() {
-                error.push_str("\n");
+                error.push('\n');
             }
             error.push_str(&startup_error);
         }
