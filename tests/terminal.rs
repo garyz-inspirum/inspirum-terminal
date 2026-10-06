@@ -576,7 +576,10 @@ fn ime_preedit_is_not_written_and_commit_is_sent_once() {
     );
 
     let text = wait_for_grid(&mut backend, "CAPTURE=<测试>");
-    assert!(!text.contains("ce shi"), "IME preedit leaked to PTY: {text:?}");
+    assert!(
+        !text.contains("ce shi"),
+        "IME preedit leaked to PTY: {text:?}"
+    );
     assert_eq!(
         text.matches("CAPTURE=<测试>").count(),
         1,
