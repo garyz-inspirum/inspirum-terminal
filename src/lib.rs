@@ -208,6 +208,15 @@ pub struct Session {
     pub port: Option<u16>,
     /// false = ask (interactive trust); true = yes (pre-trusted keys only).
     pub strict: bool,
+    /// Optional organizational folder. This is non-secret metadata only.
+    #[serde(default)]
+    pub folder: String,
+    /// User-defined non-secret labels used for library filtering.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Pinned profiles are surfaced first by the UI.
+    #[serde(default)]
+    pub favorite: bool,
     #[serde(default)]
     pub ssh: SshOptions,
 }
@@ -219,6 +228,9 @@ impl Default for Session {
             user: String::new(),
             port: None,
             strict: false,
+            folder: String::new(),
+            tags: Vec::new(),
+            favorite: false,
             ssh: SshOptions::default(),
         }
     }
@@ -226,6 +238,7 @@ impl Default for Session {
 impl Session {
     /// Build argv, never a shell string. Configuration and agent are OpenSSH's.
     pub fn ssh_args(&self) -> Result<Vec<String>> {
+        validate_profile_metadata(self)?;
         ensure!(
             !self.name.trim().is_empty()
                 && self.name.len() <= 256
@@ -343,6 +356,36 @@ fn valid_token(value: &str, host: bool) -> bool {
             b.is_ascii_alphanumeric() || b"._-".contains(&b) || (host && b":%".contains(&b))
         })
 }
+fn validate_profile_metadata(session: &Session) -> Result<()> {
+    ensure!(
+        session.folder.len() <= 512 && !session.folder.chars().any(char::is_control),
+        "profile folder must be at most 512 bytes without control characters"
+    );
+    ensure!(session.tags.len() <= 32, "at most 32 profile tags are supported");
+    for tag in &session.tags {
+        ensure!(
+            !tag.trim().is_empty()
+                && tag.len() <= 64
+                && !tag.chars().any(char::is_control),
+            "profile tags must be 1–64 bytes without control characters"
+        );
+    }
+    Ok(())
+}
+
+/// Stable selector used by the UI and import logic. Names may repeat in different folders.
+pub fn session_profile_key(session: &Session) -> String {
+    format!("{}\u{1f}{}", session.folder, session.name)
+}
+
+fn selector_matches(session: &Session, selector: &str) -> bool {
+    selector == session_profile_key(session) || (!selector.contains('\u{1f}') && selector == session.name)
+}
+
+fn same_profile_slot(left: &Session, right: &Session) -> bool {
+    left.folder == right.folder && left.name == right.name
+}
+
 /// Return true when a saved SSH profile matches a case-insensitive library query.
 pub fn session_matches_query(session: &Session, query: &str) -> bool {
     let query = query.trim().to_lowercase();
@@ -350,51 +393,55 @@ pub fn session_matches_query(session: &Session, query: &str) -> bool {
         || session.name.to_lowercase().contains(&query)
         || session.host.to_lowercase().contains(&query)
         || session.user.to_lowercase().contains(&query)
+        || session.folder.to_lowercase().contains(&query)
+        || session.tags.iter().any(|tag| tag.to_lowercase().contains(&query))
 }
 
 /// Replace the selected profile, or save a new profile when no selection is active.
 ///
-/// Renaming is represented by `selected_name`: the old entry is replaced in place, and a
-/// collision with a different saved profile is rejected rather than silently overwriting it.
+/// The selector is the folder/name profile key. Plain names remain accepted for compatibility
+/// with older callers, but the UI always uses the deterministic composite key.
 pub fn save_session_edit(
     sessions: &[Session],
-    selected_name: Option<&str>,
+    selected_profile: Option<&str>,
     session: Session,
 ) -> Result<Vec<Session>> {
     session.ssh_args()?;
     let mut next = sessions.to_vec();
 
-    if let Some(selected_name) = selected_name {
+    if let Some(selected_profile) = selected_profile {
         let index = next
             .iter()
-            .position(|profile| profile.name == selected_name)
+            .position(|profile| selector_matches(profile, selected_profile))
             .context("selected profile no longer exists")?;
         ensure!(
             !next
                 .iter()
                 .enumerate()
-                .any(|(other, profile)| other != index && profile.name == session.name),
-            "a profile named {:?} already exists",
-            session.name
+                .any(|(other, profile)| other != index && same_profile_slot(profile, &session)),
+            "a profile named {:?} already exists in folder {:?}",
+            session.name,
+            session.folder
         );
         next[index] = session;
         return Ok(next);
     }
 
     ensure!(
-        !next.iter().any(|profile| profile.name == session.name),
-        "a profile named {:?} already exists",
-        session.name
+        !next.iter().any(|profile| same_profile_slot(profile, &session)),
+        "a profile named {:?} already exists in folder {:?}",
+        session.name,
+        session.folder
     );
     next.push(session);
     Ok(next)
 }
 
-/// Remove one saved profile by its exact name.
-pub fn delete_session(sessions: &[Session], name: &str) -> Result<Vec<Session>> {
+/// Remove one saved profile by deterministic folder/name selector.
+pub fn delete_session(sessions: &[Session], selector: &str) -> Result<Vec<Session>> {
     let index = sessions
         .iter()
-        .position(|profile| profile.name == name)
+        .position(|profile| selector_matches(profile, selector))
         .context("selected profile no longer exists")?;
     let mut next = sessions.to_vec();
     next.remove(index);
@@ -418,14 +465,20 @@ fn copy_name_candidate(source: &str, number: Option<u32>) -> String {
 pub fn duplicate_session_draft(sessions: &[Session], source: &Session) -> Session {
     let mut copy = source.clone();
     let first = copy_name_candidate(&source.name, None);
-    if !sessions.iter().any(|profile| profile.name == first) {
+    if !sessions
+        .iter()
+        .any(|profile| profile.folder == source.folder && profile.name == first)
+    {
         copy.name = first;
         return copy;
     }
     let mut suffix = 2_u32;
     loop {
         let candidate = copy_name_candidate(&source.name, Some(suffix));
-        if !sessions.iter().any(|profile| profile.name == candidate) {
+        if !sessions
+            .iter()
+            .any(|profile| profile.folder == source.folder && profile.name == candidate)
+        {
             copy.name = candidate;
             return copy;
         }
@@ -439,14 +492,15 @@ pub enum SessionImportMode {
     Replace,
 }
 
-fn ensure_unique_profile_names(sessions: &[Session], label: &str) -> Result<()> {
+fn ensure_unique_profile_slots(sessions: &[Session], label: &str) -> Result<()> {
     for (index, session) in sessions.iter().enumerate() {
         ensure!(
             !sessions[..index]
                 .iter()
-                .any(|profile| profile.name == session.name),
-            "{label} contains duplicate profile name {:?}",
-            session.name
+                .any(|profile| same_profile_slot(profile, session)),
+            "{label} contains duplicate profile {:?} in folder {:?}",
+            session.name,
+            session.folder
         );
     }
     Ok(())
@@ -462,7 +516,7 @@ pub fn import_sessions(
     // Open once and parse that handle, rather than checking existence and reopening the path.
     let file = fs::File::open(path).context("open profile import (source must exist)")?;
     let imported = read_sessions(file).context("load profile import")?;
-    ensure_unique_profile_names(&imported, "profile import")?;
+    ensure_unique_profile_slots(&imported, "profile import")?;
 
     let candidate = match mode {
         SessionImportMode::Replace => imported,
@@ -473,9 +527,10 @@ pub fn import_sessions(
             );
             for session in &imported {
                 ensure!(
-                    !existing.iter().any(|profile| profile.name == session.name),
-                    "profile import conflicts with existing profile {:?}",
-                    session.name
+                    !existing.iter().any(|profile| same_profile_slot(profile, session)),
+                    "profile import conflicts with existing profile {:?} in folder {:?}",
+                    session.name,
+                    session.folder
                 );
             }
             let mut merged = existing.to_vec();
@@ -483,7 +538,7 @@ pub fn import_sessions(
             merged
         }
     };
-    ensure_unique_profile_names(&candidate, "resulting profile library")?;
+    ensure_unique_profile_slots(&candidate, "resulting profile library")?;
     validated_session_bytes(&candidate).context("validate imported profile library")?;
     Ok(candidate)
 }
