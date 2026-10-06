@@ -7,7 +7,9 @@ use crate::{
     },
     delete_session, duplicate_session_draft, export_sessions,
     history::{HistoryRow, HistoryState},
-    import_sessions, load_sessions, save_session_edit, save_sessions,
+    import_sessions,
+    keyboard::{self, ShortcutAction, ShortcutKey, ShortcutModifiers},
+    load_sessions, save_session_edit, save_sessions,
     scp_panel::ScpPanel,
     session_matches_query, session_profile_key,
     sftp_browser::SftpBrowser,
@@ -89,8 +91,8 @@ fn terminal_screen_text(terminal: &mut TerminalBackend) -> String {
 
 fn synchronized_event_bytes(event: &egui::Event) -> Option<Vec<u8>> {
     match event {
-        egui::Event::Text(text) if !text.is_empty() && !terminal_ux::is_multiline_paste(text) => {
-            Some(text.as_bytes().to_vec())
+        egui::Event::Text(text) if !terminal_ux::is_multiline_paste(text) => {
+            keyboard::committed_text_bytes(text)
         }
         egui::Event::Paste(text)
             if terminal_ux::classify_paste(PastePolicy::ConfirmMultiline, text)
@@ -820,6 +822,72 @@ impl App {
         });
     }
 
+    fn confirmation_open(&self) -> bool {
+        self.pending_paste.is_some()
+            || self.delete_confirm.is_some()
+            || self.replace_import_confirm.is_some()
+            || self.host_key_remove_confirm.is_some()
+            || !self.bulk_close_confirm.is_empty()
+    }
+
+    fn connect_draft(&mut self, ctx: &egui::Context) {
+        if self.tabs.len() >= 16 {
+            self.error = "At most 16 terminal tabs may be open.".into();
+            return;
+        }
+        let result = self.validated_draft().and_then(|session| {
+            let terminal = terminal::connect(
+                self.next_id,
+                ctx.clone(),
+                self.tx.clone(),
+                &session,
+                self.config.as_deref(),
+            )?;
+            self.tabs.push(Tab {
+                id: self.next_id,
+                name: session.name.clone(),
+                kind: TabKind::Ssh,
+                session,
+                terminal,
+                exited: false,
+            });
+            self.active = Some(self.next_id);
+            self.terminal_focus = Some(self.next_id);
+            self.next_id += 1;
+            Ok(())
+        });
+        self.error = result
+            .err()
+            .map(|error| format!("{error:#}"))
+            .unwrap_or_default();
+    }
+
+    fn shortcut_action(&self, ctx: &egui::Context) -> Option<ShortcutAction> {
+        let confirmation_open = self.confirmation_open();
+        ctx.input(|input| {
+            let modifiers = ShortcutModifiers {
+                command: input.modifiers.command,
+                shift: input.modifiers.shift,
+                alt: input.modifiers.alt,
+            };
+            [
+                (egui::Key::Enter, ShortcutKey::Enter),
+                (egui::Key::K, ShortcutKey::K),
+                (egui::Key::F, ShortcutKey::F),
+                (egui::Key::W, ShortcutKey::W),
+                (egui::Key::ArrowLeft, ShortcutKey::ArrowLeft),
+                (egui::Key::ArrowRight, ShortcutKey::ArrowRight),
+            ]
+            .into_iter()
+            .find_map(|(egui_key, shortcut_key)| {
+                input
+                    .key_pressed(egui_key)
+                    .then(|| keyboard::action_for(shortcut_key, modifiers, confirmation_open))
+                    .flatten()
+            })
+        })
+    }
+
     fn close_tab_ids(&mut self, ids: &[u64]) {
         if ids.is_empty() {
             return;
@@ -995,22 +1063,45 @@ impl App {
                 }
             }
         }
-        let tab_switcher_shortcut = ctx.input(|input| {
-            input.key_pressed(egui::Key::K) && input.modifiers.command && input.modifiers.shift
-        });
-        if tab_switcher_shortcut {
-            self.tab_switcher_open = true;
-            self.tab_switcher_query.clear();
-            self.tab_switcher_index = 0;
-            self.terminal_focus = None;
-        }
-
-        let search_shortcut = ctx.input(|input| {
-            input.key_pressed(egui::Key::F) && input.modifiers.command && input.modifiers.shift
-        });
-        if search_shortcut {
-            self.search_open = true;
-            self.terminal_focus = None;
+        if let Some(action) = self.shortcut_action(ctx) {
+            match action {
+                ShortcutAction::Connect => {
+                    // Ctrl/Cmd+Enter is a form shortcut only. Never steal it from a focused PTY.
+                    if self.terminal_focus.is_none() {
+                        self.connect_draft(ctx);
+                    }
+                }
+                ShortcutAction::QuickSwitch => {
+                    self.tab_switcher_open = true;
+                    self.tab_switcher_query.clear();
+                    self.tab_switcher_index = 0;
+                    self.terminal_focus = None;
+                }
+                ShortcutAction::Search => {
+                    self.search_open = true;
+                    self.terminal_focus = None;
+                }
+                ShortcutAction::CloseActive => {
+                    if let Some(id) = self.active {
+                        self.close_tab_ids(&[id]);
+                    }
+                }
+                ShortcutAction::FocusPreviousPane | ShortcutAction::FocusNextPane => {
+                    let direction = if action == ShortcutAction::FocusPreviousPane {
+                        -1
+                    } else {
+                        1
+                    };
+                    if let Some(id) = keyboard::adjacent_pane(
+                        &self.workspace_panes,
+                        self.terminal_focus,
+                        direction,
+                    ) {
+                        self.active = Some(id);
+                        self.terminal_focus = Some(id);
+                    }
+                }
+            }
         }
         if self.search_open && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.search_open = false;
@@ -1024,6 +1115,21 @@ impl App {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.heading("Inspirum Terminal");
                     ui.label("SSH-first • system OpenSSH");
+                    egui::CollapsingHeader::new("Keyboard & accessibility")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.label("Connect: Ctrl/Cmd+Enter");
+                            ui.label("Quick switch tabs: Ctrl/Cmd+Shift+K");
+                            ui.label("Search history: Ctrl/Cmd+Shift+F");
+                            ui.label("Close active tab: Ctrl/Cmd+W");
+                            ui.label("Focus split pane: Ctrl/Cmd+Alt+Left/Right");
+                            ui.small(
+                                "Application shortcuts are disabled while a confirmation dialog is open. Tab/Shift+Tab traverses ordinary egui controls.",
+                            );
+                            ui.small(
+                                "IME pre-edit and screen-reader integration depend on egui/winit and the native platform; committed Unicode text is forwarded unchanged.",
+                            );
+                        });
                     ui.separator();
                     ui.label("Saved sessions");
                     ui.horizontal(|ui| {
@@ -2006,31 +2112,10 @@ impl App {
                         }
                         if ui
                             .add_enabled(self.tabs.len() < 16, egui::Button::new("Connect"))
+                            .on_hover_text("Keyboard: Ctrl/Cmd+Enter")
                             .clicked()
                         {
-                            let result = self.validated_draft().and_then(|session| {
-                                let terminal = terminal::connect(
-                                    self.next_id,
-                                    ctx.clone(),
-                                    self.tx.clone(),
-                                    &session,
-                                    self.config.as_deref(),
-                                )?;
-                                self.tabs.push(Tab {
-                                    id: self.next_id,
-                                    name: session.name.clone(),
-                                    kind: TabKind::Ssh,
-                                    session,
-                                    terminal,
-                                    exited: false,
-                                });
-                                self.active = Some(self.next_id);
-                                self.terminal_focus = Some(self.next_id);
-                                self.next_id += 1;
-                                Ok(())
-                            });
-                            self.error =
-                                result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+                            self.connect_draft(ctx);
                         }
                         if ui
                             .add_enabled(self.tabs.len() < 16, egui::Button::new("SFTP"))

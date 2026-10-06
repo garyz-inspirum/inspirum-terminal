@@ -637,6 +637,7 @@ fn read_sessions(file: fs::File) -> Result<Vec<Session>> {
 
 pub mod appearance;
 pub mod history;
+pub mod keyboard;
 pub mod proxy;
 pub mod scp;
 pub mod scp_panel;
