@@ -22,6 +22,7 @@ PROVENANCE_FILES = {"inspirum_patches.md", "upstream.md"}
 DEFAULT_SUPPLEMENTS = Path(__file__).resolve().parents[1] / "third-party-licenses" / "manifest.json"
 CANONICAL_STANDARD_SOURCES = {
     "CC0-1.0": "https://creativecommons.org/publicdomain/zero/1.0/legalcode.txt",
+    "MIT": "https://spdx.org/licenses/MIT.txt",
 }
 
 
@@ -201,6 +202,19 @@ def package_vcs_revision(package_dir: Path) -> str | None:
         fail(f"invalid registry provenance file {vcs_path}: {error}")
 
 
+def package_registry_checksum(package_dir: Path) -> str | None:
+    checksum_path = package_dir / ".cargo-checksum.json"
+    if not checksum_path.is_file():
+        return None
+    try:
+        checksum = json.loads(checksum_path.read_text(encoding="utf-8")).get("package")
+    except (OSError, TypeError, json.JSONDecodeError) as error:
+        fail(f"invalid registry checksum file {checksum_path}: {error}")
+    if checksum is not None and not re.fullmatch(r"[0-9a-f]{64}", checksum):
+        fail(f"invalid registry package checksum in {checksum_path}: {checksum!r}")
+    return checksum
+
+
 def publish_directory(staging: Path, output: Path) -> None:
     """Publish without ever replacing an existing output directory."""
     try:
@@ -316,13 +330,22 @@ def main(argv: list[str] | None = None) -> int:
                         fail(f"supplemental repository mismatch for {name} {version}")
                     if supplement.get("declared_license") and supplement["declared_license"] != license_expression:
                         fail(f"supplemental declared-license mismatch for {name} {version}")
-                    actual_revision = package_vcs_revision(package_dir)
-                    expected_revision = supplement.get("revision")
-                    if actual_revision != expected_revision:
-                        fail(
-                            f"supplemental revision mismatch for {name} {version}: "
-                            f"expected {expected_revision}, registry package has {actual_revision}"
-                        )
+                    expected_checksum = supplement.get("registry_checksum")
+                    if expected_checksum:
+                        actual_checksum = package_registry_checksum(package_dir)
+                        if actual_checksum != expected_checksum:
+                            fail(
+                                f"supplemental registry checksum mismatch for {name} {version}: "
+                                f"expected {expected_checksum}, registry package has {actual_checksum}"
+                            )
+                    else:
+                        actual_revision = package_vcs_revision(package_dir)
+                        expected_revision = supplement.get("revision")
+                        if actual_revision != expected_revision:
+                            fail(
+                                f"supplemental revision mismatch for {name} {version}: "
+                                f"expected {expected_revision}, registry package has {actual_revision}"
+                            )
                     for file_id in supplement["files"]:
                         source_entry = supplemental_files[file_id]
                         source = args.supplements.absolute().parent / source_entry["path"]
