@@ -28,14 +28,16 @@ Downloads are written to a temporary file in the destination directory. The exis
 
 Uploads record the local source length and, after a successful SFTP transfer, query the remote length. A size mismatch is reported as an integrity failure. This is transfer-completeness verification by byte length, not a cryptographic hash.
 
-## Queue, progress, cancellation and retry
+## Queue, progress, cancellation, retry and resume
 
 Transfers are queued and executed one at a time. Each row reports lifecycle state and byte totals. Downloads report bytes currently present in the staging file; uploads report their known total and transition through queued/running/completed state.
 
-Running transfers can be cancelled. Cancellation terminates and waits for the OpenSSH child and removes any download staging file. Failed or cancelled jobs can be retried from the queue.
+Running transfers can be cancelled. Cancellation terminates and waits for the OpenSSH child. A cancelled download preserves its private staging file and exposes **Resume**; OpenSSH `reget` continues from the preserved byte length and the normal final size check still runs before the destination is committed. A cancelled or failed upload can resume with OpenSSH `reput` when the remote partial is no larger than the local source. Resume is deliberately offered only from the same queue job: it is size-based continuation, not proof that an arbitrary pre-existing file has the same prefix.
 
-Closing the Files view drops its queue; any running transfer is terminated by the transfer object's cleanup path.
+**Retry** means restart from byte zero. For downloads it discards the queue-owned partial before starting again. Failed or cancelled jobs therefore provide an explicit choice between restart and continuation rather than silently overwriting or guessing.
+
+Closing the Files view drops its queue; any running transfer is terminated by the transfer object's cleanup path. A download partial is retained only after an explicit cancellation or a child-process transfer failure where resume remains possible; completed transfers remove the staging path.
 
 ## Verification
 
-Portable tests cover SFTP path/list parsing and browser navigation helpers. The isolated Linux sshd fixture covers graphical binary upload/download, remote browse/mkdir/rename/delete, a negative delete, local no-clobber behavior, failed integrity verification preserving an existing file, confirmed overwrite, and transfer cancellation cleanup.
+Portable tests cover SFTP path/list parsing and browser navigation helpers. The isolated Linux sshd fixture covers graphical binary upload/download, remote browse/mkdir/rename/delete, a negative delete, local no-clobber behavior, failed integrity verification preserving an existing file, confirmed overwrite, cancellation with a preserved private partial, and upload/download continuation through `reput`/`reget`.
