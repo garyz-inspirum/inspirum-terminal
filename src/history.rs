@@ -26,7 +26,10 @@ pub struct HistoryMark {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HistoryRow {
     Line(HistoryLine),
-    Folded { after_line_id: u64, hidden_lines: usize },
+    Folded {
+        after_line_id: u64,
+        hidden_lines: usize,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -218,10 +221,7 @@ impl HistoryState {
             let line = self.lines[index].clone();
             rows.push(HistoryRow::Line(line.clone()));
 
-            let collapsed = self
-                .marks
-                .get(&line.id)
-                .is_some_and(|mark| mark.collapsed);
+            let collapsed = self.marks.get(&line.id).is_some_and(|mark| mark.collapsed);
             if collapsed {
                 let next_mark = mark_ids.iter().copied().find(|id| *id > line.id);
                 let mut end = index + 1;
@@ -365,13 +365,18 @@ mod tests {
                 ..
             }
         ));
-        assert!(rows.iter().any(|row| matches!(row, HistoryRow::Line(line) if line.id == second)));
+        assert!(
+            rows.iter()
+                .any(|row| matches!(row, HistoryRow::Line(line) if line.id == second))
+        );
     }
 
     #[test]
     fn large_scrollback_search_is_bounded_and_deterministic() {
         let mut state = HistoryState::default();
-        let mut lines: Vec<String> = (0..50_000).map(|n| format!("line-{n:05} ordinary")).collect();
+        let mut lines: Vec<String> = (0..50_000)
+            .map(|n| format!("line-{n:05} ordinary"))
+            .collect();
         lines[49_999] = "line-49999 NEEDLE".into();
         state.update_snapshot(lines);
         state.set_query("needle");
