@@ -126,7 +126,7 @@ fn retained_history_snapshot_includes_scrollback_and_survives_viewport_navigatio
             shell: "/bin/sh".into(),
             args: vec![
                 "-c".into(),
-                "i=1; while [ $i -le 80 ]; do printf 'HIST-%03d\\n' "$i"; i=$((i+1)); done; sleep 1".into(),
+                r#"i=1; while [ $i -le 80 ]; do printf 'HIST-%03d\n' "$i"; i=$((i+1)); done; sleep 1"#.into(),
             ],
             working_directory: None,
         },
