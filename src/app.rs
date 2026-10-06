@@ -1105,6 +1105,21 @@ impl App {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.heading("Inspirum Terminal");
                     ui.label("SSH-first • system OpenSSH");
+                    egui::CollapsingHeader::new("Keyboard & accessibility")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.label("Connect: Ctrl/Cmd+Enter");
+                            ui.label("Quick switch tabs: Ctrl/Cmd+Shift+K");
+                            ui.label("Search history: Ctrl/Cmd+Shift+F");
+                            ui.label("Close active tab: Ctrl/Cmd+W");
+                            ui.label("Focus split pane: Ctrl/Cmd+Alt+Left/Right");
+                            ui.small(
+                                "Application shortcuts are disabled while a confirmation dialog is open. Tab/Shift+Tab traverses ordinary egui controls.",
+                            );
+                            ui.small(
+                                "IME pre-edit and screen-reader integration depend on egui/winit and the native platform; committed Unicode text is forwarded unchanged.",
+                            );
+                        });
                     ui.separator();
                     ui.label("Saved sessions");
                     ui.horizontal(|ui| {
