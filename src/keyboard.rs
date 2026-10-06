@@ -93,6 +93,14 @@ pub fn action_for(
     }
 }
 
+/// Convert committed text (including IME/dead-key composed Unicode) to PTY bytes.
+///
+/// Pre-edit/composition UI remains owned by egui/the native platform. Inspirum only sends
+/// the final committed text event, so partially composed CJK/dead-key text is never written.
+pub fn committed_text_bytes(text: &str) -> Option<Vec<u8>> {
+    (!text.is_empty()).then(|| text.as_bytes().to_vec())
+}
+
 /// Move pane focus without mutating pane order.
 pub fn adjacent_pane(
     panes: &[u64],
@@ -210,6 +218,18 @@ mod tests {
         for (key, modifiers) in candidates {
             assert_eq!(action_for(key, modifiers, true), None);
         }
+    }
+
+    #[test]
+    fn committed_unicode_text_preserves_cjk_dead_key_and_emoji_bytes() {
+        for text in ["東京", "é", "e\u{301}", "🚀"] {
+            assert_eq!(
+                committed_text_bytes(text),
+                Some(text.as_bytes().to_vec()),
+                "{text:?}"
+            );
+        }
+        assert_eq!(committed_text_bytes(""), None);
     }
 
     #[test]
