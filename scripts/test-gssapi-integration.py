@@ -68,6 +68,7 @@ def main() -> int:
     kinit = tool("kinit")
     kdestroy = tool("kdestroy")
     klist = tool("klist")
+    kvno = tool("kvno")
     ssh_keygen = tool("ssh-keygen")
     ssh = tool("ssh")
 
@@ -169,7 +170,24 @@ def main() -> int:
             wait_tcp(kdc, kdc_port, "Kerberos KDC")
             run([kinit, principal], env, input_text=fixture_password + "\n")
             run([klist, "-s"], env)
-            print("PASS disposable Kerberos client ticket acquired", flush=True)
+            service_principal = f"host/localhost@{REALM}"
+            service = subprocess.run(
+                [kvno, service_principal],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if service.returncode != 0:
+                raise RuntimeError(
+                    "Kerberos service-ticket acquisition failed: "
+                    + service.stderr.replace(fixture_password, "[redacted]")
+                )
+            print(
+                "PASS disposable Kerberos client and host service tickets acquired: "
+                + service.stdout.strip(),
+                flush=True,
+            )
 
             for name in ("host", "wrong-host"):
                 run(
@@ -223,7 +241,7 @@ PermitTTY yes
 PrintMotd no
 PrintLastLog no
 ForceCommand /bin/sh {remote}
-LogLevel VERBOSE
+LogLevel DEBUG3
 """,
                 encoding="utf-8",
             )
@@ -266,7 +284,7 @@ LogLevel VERBOSE
             wait_tcp(server, ssh_port, "GSSAPI sshd")
 
             baseline = subprocess.run(
-                [ssh, "-F", str(config), "gssapi-fixture"],
+                [ssh, "-vvv", "-T", "-F", str(config), "gssapi-fixture"],
                 env=env,
                 input="exit\n",
                 text=True,
