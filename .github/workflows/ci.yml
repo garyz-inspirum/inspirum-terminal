@@ -62,7 +62,7 @@ jobs:
           cargo test --locked --target ${{ matrix.target }} --no-run
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          $targets = @('lib', 'app', 'controlmaster', 'diagnostics_cli', 'profile_import_safety', 'proxy_cli', 'proxy_transport', 'scp', 'sessions', 'sftp_policy', 'ssh_integration', 'terminal', 'tunnel_manager')
+          $targets = @('lib', 'app', 'controlmaster', 'diagnostics_cli', 'profile_import_safety', 'proxy_cli', 'proxy_transport', 'scp', 'sessions', 'sftp_policy', 'ssh_integration', 'terminal', 'terminal_compat', 'tunnel_manager')
           foreach ($target in $targets) {
             Write-Host "::group::cargo test target: $target"
             if ($target -eq 'lib') {
