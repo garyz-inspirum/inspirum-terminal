@@ -1916,12 +1916,26 @@ impl App {
                 });
             });
 
+        let mut close_single = None;
+        let mut move_active = 0isize;
+        let mut bulk_scope = None;
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-            let mut close = None;
             ui.horizontal_wrapped(|ui| {
                 for tab in &self.tabs {
-                    let label =
-                        format!("{}{}", tab.name, if tab.exited { " (exited)" } else { "" });
+                    let mut selected = self.selected_tabs.contains(&tab.id);
+                    if ui.checkbox(&mut selected, "").changed() {
+                        if selected {
+                            self.selected_tabs.insert(tab.id);
+                        } else {
+                            self.selected_tabs.remove(&tab.id);
+                        }
+                    }
+                    let label = format!(
+                        "{}{}{}",
+                        tab.marker.prefix(),
+                        tab.name,
+                        if tab.exited { " (exited)" } else { "" }
+                    );
                     if ui
                         .selectable_label(self.active == Some(tab.id), label)
                         .clicked()
@@ -1944,22 +1958,85 @@ impl App {
                         .on_hover_text(close_help)
                         .clicked()
                     {
-                        close = Some(tab.id);
+                        close_single = Some(tab.id);
                     }
                 }
             });
-            if let Some(id) = close {
-                self.tabs.retain(|tab| tab.id != id);
-                self.workspace_panes.retain(|pane| *pane != id);
-                self.sync_input.remove_pane(id);
-                if self.active == Some(id) {
-                    self.active = self.tabs.last().map(|tab| tab.id);
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Quick switcher").on_hover_text("Keyboard: Ctrl/Cmd+P").clicked() {
+                    self.tab_switcher_open = true;
+                    self.tab_switcher_query.clear();
+                    self.tab_switcher_index = 0;
+                    self.terminal_focus = None;
                 }
-                if self.terminal_focus == Some(id) {
-                    self.terminal_focus = self.active;
+                if ui
+                    .add_enabled(self.active.is_some(), egui::Button::new("Move left"))
+                    .clicked()
+                {
+                    move_active = -1;
                 }
+                if ui
+                    .add_enabled(self.active.is_some(), egui::Button::new("Move right"))
+                    .clicked()
+                {
+                    move_active = 1;
+                }
+                if ui
+                    .add_enabled(
+                        !self.selected_tabs.is_empty(),
+                        egui::Button::new(format!("Close selected ({})", self.selected_tabs.len())),
+                    )
+                    .clicked()
+                {
+                    bulk_scope = Some(CloseScope::Selected);
+                }
+                if let Some(active) = self.active {
+                    if ui.button("Close right").clicked() {
+                        bulk_scope = Some(CloseScope::RightOf(active));
+                    }
+                    if ui.button("Close others").clicked() {
+                        bulk_scope = Some(CloseScope::Others(active));
+                    }
+                }
+            });
+            if let Some(active) = self.active
+                && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == active)
+            {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Active tab label:");
+                    for marker in TabMarker::ALL {
+                        ui.selectable_value(&mut tab.marker, marker, marker.label());
+                    }
+                });
+            }
+            if !self.tab_action_notice.is_empty() {
+                ui.small(&self.tab_action_notice);
             }
         });
+
+        if let Some(id) = close_single {
+            let removed = self.close_tabs(&[id]);
+            self.tab_action_notice = format!("Closed {removed} tab(s); synchronized input is disarmed.");
+        }
+        if move_active != 0
+            && let Some(id) = self.active
+            && tab_management::move_item_by_id(&mut self.tabs, id, move_active, |tab| tab.id)
+        {
+            self.tab_action_notice = if move_active < 0 {
+                "Moved active tab left.".into()
+            } else {
+                "Moved active tab right.".into()
+            };
+        }
+        if let Some(scope) = bulk_scope {
+            let order: Vec<u64> = self.tabs.iter().map(|tab| tab.id).collect();
+            let plan = tab_management::close_plan(&order, &self.selected_tabs, scope);
+            if plan.is_empty() {
+                self.tab_action_notice = "No tabs matched that close action.".into();
+            } else {
+                self.bulk_close_confirm = Some(plan);
+            }
+        }
 
         let mut reconnect = None;
         let mut close_browser = false;
