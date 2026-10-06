@@ -40,9 +40,10 @@ rather than sending form-navigation keystrokes to the PTY.
 ## IME and composed characters
 
 Inspirum does not implement a private IME. It relies on egui/winit and the native window
-system for composition/pre-edit UI. The terminal consumes only final committed text
-events. Final UTF-8 text is forwarded unchanged, including CJK text, precomposed accented
-characters, combining-character sequences and emoji.
+system for composition/pre-edit UI. The terminal consumes ordinary text events plus final `ImeEvent::Commit` text only.
+`ImeEvent::Preedit` is deliberately ignored by the PTY path. Final UTF-8 text is forwarded
+unchanged, including CJK text, precomposed accented characters, combining-character
+sequences and emoji.
 
 This design means partially composed text is not intentionally written to the PTY.
 Native candidate-window placement and pre-edit rendering remain platform/window-system
@@ -59,9 +60,11 @@ Platform limitations:
   or Fcitx). Inspirum does not claim identical candidate-window behavior across those
   combinations.
 
-CI exercises committed UTF-8 conversion on all supported native targets. OS IME candidate
-windows are not meaningfully automatable in the current GitHub-hosted native CI runners;
-that limitation is explicit rather than reported as fully automated coverage.
+CI exercises committed UTF-8 conversion on all supported native targets. Linux/macOS
+headless terminal integration also injects IME pre-edit followed by commit and verifies
+that pre-edit is never written while the committed CJK text is delivered exactly once.
+OS IME candidate windows are not meaningfully automatable in the current GitHub-hosted
+native CI runners; that limitation is explicit rather than reported as fully automated coverage.
 
 ## Shortcut-conflict and paste-safety audit
 
