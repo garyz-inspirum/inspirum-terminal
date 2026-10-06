@@ -648,6 +648,13 @@ impl App {
             }
         }
 
+        if ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::P)) {
+            self.tab_switcher_open = true;
+            self.tab_switcher_query.clear();
+            self.tab_switcher_index = 0;
+            self.terminal_focus = None;
+        }
+
         // Remote output may set titles/clipboard requests. Do NOT forward those to host APIs.
         for _ in 0..256 {
             let Ok((id, event)) = self.rx.try_recv() else {
@@ -2035,6 +2042,128 @@ impl App {
                 self.tab_action_notice = "No tabs matched that close action.".into();
             } else {
                 self.bulk_close_confirm = Some(plan);
+            }
+        }
+
+        let switch_hits = tab_management::search_tab_ids(
+            self.tabs.iter().map(|tab| (tab.id, tab.name.as_str())),
+            &self.tab_switcher_query,
+        );
+        if self.tab_switcher_index >= switch_hits.len() {
+            self.tab_switcher_index = switch_hits.len().saturating_sub(1);
+        }
+        let mut switch_to = None;
+        let mut close_switcher = false;
+        if self.tab_switcher_open {
+            egui::Window::new("Quick tab switcher")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.tab_switcher_query)
+                            .hint_text("Type to filter open tabs"),
+                    );
+                    response.request_focus();
+                    ui.small("Keyboard: Up/Down choose · Enter switch · Escape close");
+                    egui::ScrollArea::vertical()
+                        .max_height(220.0)
+                        .show(ui, |ui| {
+                            for (index, id) in switch_hits.iter().enumerate() {
+                                if let Some(tab) = self.tabs.iter().find(|tab| tab.id == *id) {
+                                    let label = format!("{}{}", tab.marker.prefix(), tab.name);
+                                    if ui
+                                        .selectable_label(self.tab_switcher_index == index, label)
+                                        .clicked()
+                                    {
+                                        self.tab_switcher_index = index;
+                                        switch_to = Some(*id);
+                                    }
+                                }
+                            }
+                        });
+                });
+            if ctx.input(|input| input.key_pressed(egui::Key::ArrowDown))
+                && !switch_hits.is_empty()
+            {
+                self.tab_switcher_index = (self.tab_switcher_index + 1) % switch_hits.len();
+            }
+            if ctx.input(|input| input.key_pressed(egui::Key::ArrowUp))
+                && !switch_hits.is_empty()
+            {
+                self.tab_switcher_index =
+                    (self.tab_switcher_index + switch_hits.len() - 1) % switch_hits.len();
+            }
+            if ctx.input(|input| input.key_pressed(egui::Key::Enter))
+                && let Some(id) = switch_hits.get(self.tab_switcher_index)
+            {
+                switch_to = Some(*id);
+            }
+            close_switcher |= ctx.input(|input| input.key_pressed(egui::Key::Escape));
+        }
+        if let Some(id) = switch_to {
+            self.active = Some(id);
+            self.terminal_focus = Some(id);
+            self.tab_switcher_open = false;
+        } else if close_switcher {
+            self.tab_switcher_open = false;
+            self.terminal_focus = self.active;
+        }
+
+        let mut confirm_bulk_close = false;
+        let mut cancel_bulk_close = false;
+        if let Some(ids) = self.bulk_close_confirm.clone() {
+            let affected: Vec<String> = ids
+                .iter()
+                .filter_map(|id| {
+                    self.tabs.iter().find(|tab| tab.id == *id).map(|tab| {
+                        format!(
+                            "{}{}{}",
+                            tab.marker.prefix(),
+                            tab.name,
+                            if tab.exited { " (exited)" } else { " (live)" }
+                        )
+                    })
+                })
+                .collect();
+            let live_count = ids
+                .iter()
+                .filter(|id| {
+                    self.tabs
+                        .iter()
+                        .find(|tab| tab.id == **id)
+                        .is_some_and(|tab| !tab.exited)
+                })
+                .count();
+            egui::Window::new("Confirm bulk tab close")
+                .collapsible(false)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    ui.strong(format!(
+                        "Close {} tab(s), disconnecting {live_count} live session(s)?",
+                        affected.len()
+                    ));
+                    for name in &affected {
+                        ui.label(name);
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Close tabs").clicked() {
+                            confirm_bulk_close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel_bulk_close = true;
+                        }
+                    });
+                    ui.small("Synchronized input will be disarmed before any tab is closed.");
+                });
+            confirm_bulk_close |= ctx.input(|input| input.key_pressed(egui::Key::Enter));
+            cancel_bulk_close |= ctx.input(|input| input.key_pressed(egui::Key::Escape));
+            if confirm_bulk_close {
+                let removed = self.close_tabs(&ids);
+                self.bulk_close_confirm = None;
+                self.tab_action_notice =
+                    format!("Closed {removed} tab(s); synchronized input is disarmed.");
+            } else if cancel_bulk_close {
+                self.bulk_close_confirm = None;
             }
         }
 
