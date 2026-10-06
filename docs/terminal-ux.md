@@ -72,3 +72,36 @@ Search is bounded to 500 displayed matches per active tab. Tests cover ASCII,
 Unicode/CJK, combining-character and emoji queries, deterministic mark/truncation
 behavior, bounded folding, navigation wrapping, and a 50,000-line retained-history
 regression.
+
+
+## Terminal appearance and pointer interaction preferences
+
+Issue #58 adds a separate global appearance file next to the profile store. Existing users
+who have no appearance file continue to receive the previous 14-point monospace font and
+classic dark terminal palette.
+
+Global settings currently control:
+
+- terminal font family choice (monospace or proportional) and font size from 8–48 points;
+- ANSI palette preset (Classic dark, Light, or Solarized dark);
+- optional foreground/background `#RRGGBB` overrides;
+- block, underline, or beam cursor style;
+- select-to-copy after completing a mouse selection;
+- optional middle-click or right-click clipboard paste;
+- hide-pointer-while-typing behavior.
+
+Saved SSH profiles inherit these local global preferences. Profile-specific appearance
+overrides are intentionally not serialized into profile import/export data, so importing a
+profile library cannot silently change a workstation's presentation or pointer shortcuts.
+
+Mouse-triggered paste does not write clipboard text directly to the PTY. It passes through
+the exact same guarded paste classifier as other paste input: multiline content is confirmed
+or blocked according to the selected policy, and NUL-containing clipboard data is always
+blocked.
+
+Custom foreground/background values are validated before persistence. Low-contrast valid
+pairs display a warning, and invalid live values are not applied to terminal rendering.
+
+Whole native-window opacity is explicitly unsupported by the current cross-platform eframe
+window path. Inspirum reports this in the settings UI rather than pretending that terminal
+widget alpha is equivalent to operating-system window opacity.
