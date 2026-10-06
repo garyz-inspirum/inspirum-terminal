@@ -72,3 +72,40 @@ Search is bounded to 500 displayed matches per active tab. Tests cover ASCII,
 Unicode/CJK, combining-character and emoji queries, deterministic mark/truncation
 behavior, bounded folding, navigation wrapping, and a 50,000-line retained-history
 regression.
+
+
+## Terminal appearance and interaction preferences
+
+Issue #58 adds a separate bounded appearance settings file next to the profile store.
+Missing settings preserve the previous terminal defaults: 14 pt monospace text, the
+existing dark ANSI palette, block cursor, normal selection behavior, and no mouse paste
+shortcuts.
+
+Global preferences provide the default for every terminal. An active profile can opt
+into its own override; profiles without an override continue to inherit the global
+settings. Profile overrides cover font family/size, palette, foreground/background,
+cursor style, select-to-copy, mouse paste shortcuts and pointer hiding. Window opacity
+is intentionally global only.
+
+Built-in palettes are **Default dark**, **Light**, and **High contrast**. Optional custom
+foreground/background colors must be `#RRGGBB`. The UI warns when the resulting
+foreground/background contrast falls below 3:1. Invalid values are rejected on save or
+load rather than silently substituted.
+
+Cursor styles are block, underline and beam. **Select to copy** remains disabled by
+default. Middle-click and right-click paste are explicit opt-ins. A mouse paste shortcut
+only asks the native window for clipboard paste; the resulting paste event still passes
+through the same **confirm multiline / confirm all / block multiline** policy used by
+keyboard paste, so mouse shortcuts cannot bypass guarded paste.
+
+**Hide pointer while typing** hides the native cursor after terminal text/key input and
+shows it again on pointer movement.
+
+The opacity preference is persisted and validated, but the current portable eframe
+window stack used by this application does not expose runtime native-window opacity.
+The settings UI states this explicitly and does not pretend to apply unsupported
+opacity.
+
+Appearance settings are JSON schema version 1, limited to 64 KiB, validated before use,
+and replaced atomically. Missing fields migrate to defaults; unknown fields and unknown
+schema versions are rejected.
