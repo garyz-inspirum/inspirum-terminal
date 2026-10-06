@@ -221,7 +221,10 @@ impl TerminalBackend {
             escape_args: true,
             ..tty::Options::default()
         };
-        let config = term::Config::default();
+        let config = term::Config {
+            scrolling_history: 10_000,
+            ..term::Config::default()
+        };
         let terminal_size = TerminalSize::default();
         let pty = tty::new(&pty_config, terminal_size.into(), id)?;
         let (event_sender, event_receiver) = mpsc::channel();
