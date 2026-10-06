@@ -102,11 +102,7 @@ pub fn committed_text_bytes(text: &str) -> Option<Vec<u8>> {
 }
 
 /// Move pane focus without mutating pane order.
-pub fn adjacent_pane(
-    panes: &[u64],
-    current: Option<u64>,
-    direction: isize,
-) -> Option<u64> {
+pub fn adjacent_pane(panes: &[u64], current: Option<u64>, direction: isize) -> Option<u64> {
     if panes.is_empty() {
         return None;
     }
