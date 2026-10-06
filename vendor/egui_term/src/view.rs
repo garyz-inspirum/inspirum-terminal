@@ -179,7 +179,8 @@ impl<'a> TerminalView<'a> {
                 egui::Event::Text(_)
                 | egui::Event::Key { .. }
                 | egui::Event::Copy
-                | egui::Event::Paste(_) => {
+                | egui::Event::Paste(_)
+                | egui::Event::Ime(egui::ImeEvent::Commit(_)) => {
                     if self.interaction.hide_pointer_while_typing
                         && matches!(event, egui::Event::Text(_) | egui::Event::Key { .. })
                     {
@@ -377,6 +378,14 @@ fn process_keyboard_event(
 ) -> InputAction {
     match event {
         egui::Event::Text(text) => process_text_event(&text, modifiers, backend, bindings_layout),
+        egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
+            if text.is_empty() {
+                InputAction::Ignore
+            } else {
+                InputAction::BackendCall(BackendCommand::Write(text.as_bytes().to_vec()))
+            }
+        }
+        egui::Event::Ime(_) => InputAction::Ignore,
         egui::Event::Paste(text) => InputAction::BackendCall(
             #[cfg(not(any(target_os = "ios", target_os = "macos")))]
             if modifiers.contains(Modifiers::COMMAND | Modifiers::SHIFT) {
