@@ -97,10 +97,10 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 
 - [x] Interactive SFTP terminal tabs backed by the system OpenSSH `sftp` client, reusing host trust, SSH config, identity, ProxyJump and connection-policy inputs. A disposable Linux upload/download fixture is present; green verification is tracked separately.
 - [x] All six explicit authentication policies apply to SFTP; inherited policies remain inherited. IPv6/scoped IPv6 destinations are bracketed for the SFTP grammar. Portable regressions and Linux success/disabled-key/changed-trust fixtures passed in PR #32; broader platform acceptance remains open. See [SFTP](sftp.md).
-- [x] Integrated graphical SFTP browser, transfer queue, progress state, cancel/retry, and overwrite/conflict UX. Resume remains a broader transfer-workflow roadmap item.
+- [x] Integrated graphical SFTP browser, transfer queue, progress state, cancel/retry/resume, and overwrite/conflict UX. Download resume uses queue-owned staging plus OpenSSH `reget`; new-path upload resume uses `reput`. Confirmed-overwrite upload resume is intentionally refused because a pre-existing remote prefix cannot be safely attributed to the local source.
 - [x] Explicit SCP upload/download through system OpenSSH with shared trust/auth/proxy policy, staged no-partial success semantics, overwrite safeguards, portable argv tests and Linux binary SHA-256 acceptance (#18).
 - [ ] Local file browser and drag/drop policy.
-- [ ] Transfer queue, progress, resume, conflict handling, and integrity checks.
+- [x] Transfer queue, progress, resume, conflict handling, and integrity checks for SFTP; SCP remains explicit non-resumable behavior and directs resumable use cases to SFTP.
 - [ ] Remote editor workflow with safe temporary-file handling.
 
 ## Additional protocols — only after SSH quality gates
