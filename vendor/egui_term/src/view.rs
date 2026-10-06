@@ -676,7 +676,6 @@ fn process_mouse_move(
     actions
 }
 
-
 #[cfg(test)]
 mod appearance_interaction_tests {
     use super::*;
@@ -701,11 +700,14 @@ mod appearance_interaction_tests {
     #[test]
     fn defaults_preserve_existing_terminal_interaction_behavior() {
         assert_eq!(CursorStyle::default(), CursorStyle::Block);
-        assert_eq!(InteractionSettings::default(), InteractionSettings {
-            select_to_copy: false,
-            middle_click_paste: false,
-            right_click_paste: false,
-            hide_pointer_while_typing: false,
-        });
+        assert_eq!(
+            InteractionSettings::default(),
+            InteractionSettings {
+                select_to_copy: false,
+                middle_click_paste: false,
+                right_click_paste: false,
+                hide_pointer_while_typing: false,
+            }
+        );
     }
 }
