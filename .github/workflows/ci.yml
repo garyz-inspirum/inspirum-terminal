@@ -62,7 +62,7 @@ jobs:
           cargo test --locked --target ${{ matrix.target }} --no-run
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          $targets = @('lib', 'app', 'controlmaster', 'diagnostics_cli', 'profile_import_safety', 'proxy_cli', 'proxy_transport', 'scp', 'sessions', 'sftp_policy', 'ssh_integration', 'terminal', 'terminal_compat', 'tunnel_manager')
+          $targets = @('lib', 'app', 'controlmaster', 'diagnostics_cli', 'native_ssh_smoke', 'profile_import_safety', 'proxy_cli', 'proxy_transport', 'scp', 'sessions', 'sftp_policy', 'ssh_integration', 'terminal', 'terminal_compat', 'tunnel_manager')
           foreach ($target in $targets) {
             Write-Host "::group::cargo test target: $target"
             if ($target -eq 'lib') {
@@ -87,6 +87,30 @@ jobs:
       - name: Test workflow helper scripts
         if: runner.os == 'Linux'
         run: python3 -B -m unittest discover -s scripts/tests -p 'test_*.py'
+      - name: Install native OpenSSH server (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sshd = Join-Path $env:WINDIR 'System32\OpenSSH\sshd.exe'
+          if (-not (Test-Path $sshd)) {
+            Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null
+          }
+          if (-not (Test-Path $sshd)) {
+            throw "OpenSSH Server installation did not provide $sshd"
+          }
+          & $sshd -V
+      - name: Native authenticated SSH acceptance (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          INSPIRUM_TEST_TMPDIR: ${{ runner.temp }}
+        run: python scripts/test-native-ssh-smoke.py
+      - name: Native authenticated SSH acceptance (macOS)
+        if: runner.os == 'macOS'
+        env:
+          INSPIRUM_TEST_TMPDIR: ${{ runner.temp }}
+        run: python3 scripts/test-native-ssh-smoke.py
       - name: Install isolated SSH test prerequisites
         if: runner.os == 'Linux'
         run: |
