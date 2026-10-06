@@ -372,12 +372,7 @@ fn duplicate_names_in_different_folders_have_deterministic_identity() {
 
     let mut moved = prod.clone();
     moved.folder = "archive".into();
-    let next = save_session_edit(
-        &saved,
-        Some(&session_profile_key(&prod)),
-        moved.clone(),
-    )
-    .unwrap();
+    let next = save_session_edit(&saved, Some(&session_profile_key(&prod)), moved.clone()).unwrap();
     assert_eq!(next[0], moved);
     assert_eq!(next[1], lab);
 }
@@ -478,6 +473,9 @@ fn profile_export_round_trips_the_validated_nonsecret_model() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("export.json");
     let mut exported = session();
+    exported.folder = "Production/Core".into();
+    exported.tags = vec!["router".into(), "critical".into()];
+    exported.favorite = true;
     exported.ssh.identity_file = "/keys/machine-specific".into();
     exported.ssh.proxy_jump = "bastion".into();
 
