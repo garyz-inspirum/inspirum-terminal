@@ -575,13 +575,30 @@ fn ime_preedit_is_not_written_and_commit_is_sent_once() {
         },
     );
 
-    let text = wait_for_grid(&mut backend, "CAPTURE=<测试>");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (text, normalized) = loop {
+        let text: String = backend
+            .sync()
+            .grid
+            .display_iter()
+            .map(|cell| cell.c)
+            .collect();
+        let normalized: String = text.chars().filter(|character| *character != ' ').collect();
+        if normalized.contains("CAPTURE=<测试>") {
+            break (text, normalized);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "missing committed IME capture in {text:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
     assert!(
         !text.contains("ce shi"),
         "IME preedit leaked to PTY: {text:?}"
     );
     assert_eq!(
-        text.matches("CAPTURE=<测试>").count(),
+        normalized.matches("CAPTURE=<测试>").count(),
         1,
         "IME commit must be delivered exactly once: {text:?}"
     );
