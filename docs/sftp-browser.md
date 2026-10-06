@@ -32,10 +32,12 @@ Uploads record the local source length and, after a successful SFTP transfer, qu
 
 Transfers are queued and executed one at a time. Each row reports lifecycle state and byte totals. Downloads report bytes currently present in the staging file; uploads report their known total and transition through queued/running/completed state.
 
-Running transfers can be cancelled. Cancellation terminates and waits for the OpenSSH child and removes any download staging file. Failed or cancelled jobs can be retried from the queue.
+Running transfers can be cancelled. Cancellation terminates and waits for the OpenSSH child. A cancelled or failed download keeps its queue-owned staging file only while that queue row remains available, so **Resume** can continue with OpenSSH `reget`; choosing **Retry from start** drops the staging file first. Failed or cancelled uploads to a path that did not exist before the job can resume with OpenSSH `reput`. Resume is deliberately not offered after a confirmed overwrite upload because a pre-existing remote prefix cannot be proven to belong to the local source.
 
-Closing the Files view drops its queue; any running transfer is terminated by the transfer object's cleanup path.
+Closing the Files view drops its queue; any running transfer is terminated and any retained local download staging file is removed by the transfer object's cleanup path. Resume is therefore an explicit in-queue recovery operation, not a promise to retain partial files across application restarts.
+
+SCP remains a separate explicit upload/download workflow. OpenSSH `scp` does not expose a safe resumable offset contract through this integration, so users who need resumable transfers should use the SFTP queue.
 
 ## Verification
 
-Portable tests cover SFTP path/list parsing and browser navigation helpers. The isolated Linux sshd fixture covers graphical binary upload/download, remote browse/mkdir/rename/delete, a negative delete, local no-clobber behavior, failed integrity verification preserving an existing file, confirmed overwrite, and transfer cancellation cleanup.
+Portable tests cover SFTP path/list parsing and browser navigation helpers. The isolated sshd fixture covers graphical binary upload/download, remote browse/mkdir/rename/delete, a negative delete, local no-clobber behavior, failed integrity verification preserving an existing file, confirmed overwrite, cancellation cleanup, and resumed download/upload byte integrity.
