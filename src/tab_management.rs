@@ -172,9 +172,18 @@ mod tests {
 
         let drops = Rc::new(Cell::new(0));
         let mut items = vec![
-            Owned { id: 1, drops: drops.clone() },
-            Owned { id: 2, drops: drops.clone() },
-            Owned { id: 3, drops: drops.clone() },
+            Owned {
+                id: 1,
+                drops: drops.clone(),
+            },
+            Owned {
+                id: 2,
+                drops: drops.clone(),
+            },
+            Owned {
+                id: 3,
+                drops: drops.clone(),
+            },
         ];
         remove_items_by_id(&mut items, &BTreeSet::from([1, 3]), |item| item.id);
         assert_eq!(drops.get(), 2);
