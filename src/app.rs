@@ -856,7 +856,10 @@ impl App {
             self.next_id += 1;
             Ok(())
         });
-        self.error = result.err().map(|error| format!("{error:#}")).unwrap_or_default();
+        self.error = result
+            .err()
+            .map(|error| format!("{error:#}"))
+            .unwrap_or_default();
     }
 
     fn shortcut_action(&self, ctx: &egui::Context) -> Option<ShortcutAction> {
@@ -1089,9 +1092,11 @@ impl App {
                     } else {
                         1
                     };
-                    if let Some(id) =
-                        keyboard::adjacent_pane(&self.workspace_panes, self.terminal_focus, direction)
-                    {
+                    if let Some(id) = keyboard::adjacent_pane(
+                        &self.workspace_panes,
+                        self.terminal_focus,
+                        direction,
+                    ) {
                         self.active = Some(id);
                         self.terminal_focus = Some(id);
                     }
