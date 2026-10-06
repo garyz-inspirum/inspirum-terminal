@@ -201,10 +201,15 @@ fn terminal_interaction(appearance: &TerminalAppearance) -> InteractionSettings 
     }
 }
 
-fn appearance_controls(ui: &mut egui::Ui, appearance: &mut TerminalAppearance) {
+fn appearance_controls(
+    ui: &mut egui::Ui,
+    appearance: &mut TerminalAppearance,
+    id_source: &str,
+    show_opacity: bool,
+) {
     ui.horizontal_wrapped(|ui| {
         ui.label("Font");
-        egui::ComboBox::from_id_salt("terminal_font_family")
+        egui::ComboBox::from_id_salt(format!("{id_source}_terminal_font_family"))
             .selected_text(match appearance.font_family {
                 TerminalFontFamily::Monospace => "Monospace",
                 TerminalFontFamily::Proportional => "Proportional",
@@ -224,7 +229,7 @@ fn appearance_controls(ui: &mut egui::Ui, appearance: &mut TerminalAppearance) {
         ui.add(egui::Slider::new(&mut appearance.font_size, 8.0..=36.0).text("size"));
 
         ui.label("Theme");
-        egui::ComboBox::from_id_salt("terminal_palette")
+        egui::ComboBox::from_id_salt(format!("{id_source}_terminal_palette"))
             .selected_text(match appearance.palette {
                 TerminalPalette::DefaultDark => "Default dark",
                 TerminalPalette::Light => "Light",
@@ -245,7 +250,7 @@ fn appearance_controls(ui: &mut egui::Ui, appearance: &mut TerminalAppearance) {
             });
 
         ui.label("Cursor");
-        egui::ComboBox::from_id_salt("terminal_cursor_style")
+        egui::ComboBox::from_id_salt(format!("{id_source}_terminal_cursor_style"))
             .selected_text(match appearance.cursor_style {
                 TerminalCursorStyle::Block => "Block",
                 TerminalCursorStyle::Underline => "Underline",
@@ -298,10 +303,14 @@ fn appearance_controls(ui: &mut egui::Ui, appearance: &mut TerminalAppearance) {
         );
     });
 
-    ui.add(egui::Slider::new(&mut appearance.opacity, 0.35..=1.0).text("window opacity"));
-    ui.small(
-        "Window opacity is saved, but the current native eframe window stack does not expose portable runtime opacity; it is not applied on this build.",
-    );
+    if show_opacity {
+        ui.add(egui::Slider::new(&mut appearance.opacity, 0.35..=1.0).text("window opacity"));
+        ui.small(
+            "Window opacity is saved, but the current native eframe window stack does not expose portable runtime opacity; it is not applied on this build.",
+        );
+    } else {
+        ui.small("Window opacity is a global-only preference.");
+    }
     if let Some(warning) = appearance.contrast_warning() {
         ui.colored_label(egui::Color32::YELLOW, warning);
     }
@@ -2497,6 +2506,96 @@ impl App {
                 if !self.paste_notice.is_empty() {
                     ui.small(&self.paste_notice);
                 }
+
+                let active_profile_name = self.active.and_then(|id| {
+                    self.tabs
+                        .iter()
+                        .find(|tab| tab.id == id)
+                        .map(|tab| tab.session.name.clone())
+                });
+                egui::CollapsingHeader::new("Appearance & interaction")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.strong("Global defaults");
+                        appearance_controls(
+                            ui,
+                            &mut self.appearance_settings.global,
+                            "global",
+                            true,
+                        );
+
+                        if let Some(profile_name) = active_profile_name.as_deref() {
+                            ui.separator();
+                            let effective_before =
+                                self.appearance_settings.effective_for(profile_name);
+                            let mut override_enabled =
+                                self.appearance_settings.profiles.contains_key(profile_name);
+                            if ui
+                                .checkbox(
+                                    &mut override_enabled,
+                                    format!("Override global settings for profile {profile_name:?}"),
+                                )
+                                .changed()
+                            {
+                                if override_enabled {
+                                    self.appearance_settings.profiles.insert(
+                                        profile_name.to_owned(),
+                                        full_profile_override(&effective_before),
+                                    );
+                                } else {
+                                    self.appearance_settings.profiles.remove(profile_name);
+                                }
+                            }
+
+                            if override_enabled {
+                                let mut effective =
+                                    self.appearance_settings.effective_for(profile_name);
+                                appearance_controls(
+                                    ui,
+                                    &mut effective,
+                                    "active_profile",
+                                    false,
+                                );
+                                self.appearance_settings.profiles.insert(
+                                    profile_name.to_owned(),
+                                    full_profile_override(&effective),
+                                );
+                            }
+                        } else {
+                            ui.small(
+                                "Open a terminal tab to configure an optional profile-level override.",
+                            );
+                        }
+
+                        ui.horizontal(|ui| {
+                            if ui.button("Save appearance settings").clicked() {
+                                self.appearance_notice =
+                                    match appearance::save_settings(
+                                        &self.appearance_path,
+                                        &self.appearance_settings,
+                                    ) {
+                                        Ok(()) => {
+                                            "Appearance settings saved atomically.".into()
+                                        }
+                                        Err(error) => {
+                                            format!("Cannot save appearance settings: {error:#}")
+                                        }
+                                    };
+                            }
+                            if ui.button("Reset global defaults").clicked() {
+                                self.appearance_settings.global = TerminalAppearance::default();
+                                self.appearance_notice =
+                                    "Global appearance reset in memory; press Save to persist."
+                                        .into();
+                            }
+                        });
+                        ui.small(
+                            "Profile overrides apply only to that profile. Unset profiles inherit global preferences. Mouse-triggered paste requests still enter the same guarded paste policy shown above.",
+                        );
+                        if !self.appearance_notice.is_empty() {
+                            ui.small(&self.appearance_notice);
+                        }
+                    });
 
                 if self.search_open {
                     let active_id = self.active;
