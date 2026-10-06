@@ -36,6 +36,14 @@ pub struct TerminalViewState {
     current_mouse_position_on_grid: TerminalGridPoint,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorStyle {
+    #[default]
+    Block,
+    Underline,
+    Beam,
+}
+
 pub struct TerminalView<'a> {
     widget_id: Id,
     has_focus: bool,
@@ -43,6 +51,8 @@ pub struct TerminalView<'a> {
     backend: &'a mut TerminalBackend,
     font: TerminalFont,
     theme: TerminalTheme,
+    cursor_style: CursorStyle,
+    hide_pointer_while_typing: bool,
     bindings_layout: BindingsLayout,
 }
 
@@ -79,6 +89,8 @@ impl<'a> TerminalView<'a> {
             backend,
             font: TerminalFont::default(),
             theme: TerminalTheme::default(),
+            cursor_style: CursorStyle::Block,
+            hide_pointer_while_typing: false,
             bindings_layout: BindingsLayout::new(),
         }
     }
@@ -98,6 +110,18 @@ impl<'a> TerminalView<'a> {
     #[inline]
     pub fn set_focus(mut self, has_focus: bool) -> Self {
         self.has_focus = has_focus;
+        self
+    }
+
+    #[inline]
+    pub fn set_cursor_style(mut self, style: CursorStyle) -> Self {
+        self.cursor_style = style;
+        self
+    }
+
+    #[inline]
+    pub fn set_hide_pointer_while_typing(mut self, enabled: bool) -> Self {
+        self.hide_pointer_while_typing = enabled;
         self
     }
 
@@ -140,6 +164,16 @@ impl<'a> TerminalView<'a> {
         let pointer_is_over_terminal = layout.contains_pointer();
         let modifiers = layout.ctx.input(|i| i.modifiers);
         let events = layout.ctx.input(|i| i.events.clone());
+        if self.hide_pointer_while_typing
+            && events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Text(_) | egui::Event::Key { pressed: true, .. }
+                )
+            })
+        {
+            layout.ctx.set_cursor_icon(egui::CursorIcon::None);
+        }
         for event in events {
             let mut input_actions = vec![];
 
@@ -278,8 +312,20 @@ impl<'a> TerminalView<'a> {
             // Handle cursor rendering
             if content.grid.cursor.point == indexed.point {
                 let cursor_color = self.theme.get_color(content.cursor.fg);
+                let cursor_rect = match self.cursor_style {
+                    CursorStyle::Block => {
+                        Rect::from_min_size(Pos2::new(x, y), Vec2::new(cell_width, cell_height))
+                    }
+                    CursorStyle::Underline => Rect::from_min_size(
+                        Pos2::new(x, y + (cell_height - 2.0).max(0.0)),
+                        Vec2::new(cell_width, 2.0),
+                    ),
+                    CursorStyle::Beam => {
+                        Rect::from_min_size(Pos2::new(x, y), Vec2::new(2.0, cell_height))
+                    }
+                };
                 shapes.push(Shape::Rect(RectShape::filled(
-                    Rect::from_min_size(Pos2::new(x, y), Vec2::new(cell_width, cell_height)),
+                    cursor_rect,
                     CornerRadius::default(),
                     cursor_color,
                 )));
