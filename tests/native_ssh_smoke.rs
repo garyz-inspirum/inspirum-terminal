@@ -38,6 +38,7 @@ fn wait_text(backend: &mut TerminalBackend, needle: &str) {
     }
 }
 
+// Windows OpenSSH PTYs expect carriage return for Enter; Unix PTYs use newline.
 fn write_line(backend: &mut TerminalBackend, text: &str) {
     let ending = if cfg!(windows) { "\r" } else { "\n" };
     backend.process_command(BackendCommand::Write(
