@@ -126,7 +126,11 @@ fn render_terminal_tab(
 
     if show_pane_header {
         ui.horizontal(|ui| {
-            ui.strong(&tab.name);
+            if terminal_focus == Some(tab.id) {
+                ui.strong(format!("FOCUSED · {}{}", tab.marker.prefix(), tab.name));
+            } else {
+                ui.label(format!("{}{}", tab.marker.prefix(), tab.name));
+            }
             if ui.small_button("Close pane").clicked() {
                 close = true;
             }
@@ -1744,6 +1748,7 @@ impl App {
                                     session,
                                     terminal,
                                     exited: false,
+                                    marker: TabMarker::default(),
                                 });
                                 self.active = Some(self.next_id);
                                 self.terminal_focus = Some(self.next_id);
@@ -1773,6 +1778,7 @@ impl App {
                                     session,
                                     terminal,
                                     exited: false,
+                                    marker: TabMarker::default(),
                                 });
                                 self.active = Some(self.next_id);
                                 self.terminal_focus = Some(self.next_id);
