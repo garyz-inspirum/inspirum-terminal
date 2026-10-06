@@ -204,8 +204,10 @@ def main() -> int:
                     env,
                 )
             host_fields = (root / "host.pub").read_text(encoding="utf-8").split()
+            host_key = f"{host_fields[0]} {host_fields[1]}"
             (root / "known_hosts").write_text(
-                f"[127.0.0.1]:{ssh_port} {host_fields[0]} {host_fields[1]}\n",
+                f"[127.0.0.1]:{ssh_port} {host_key}\n"
+                f"[{canonical_host}]:{ssh_port} {host_key}\n",
                 encoding="utf-8",
             )
 
