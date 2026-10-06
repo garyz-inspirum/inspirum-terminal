@@ -490,6 +490,12 @@ fn process_mouse_wheel(
     }
 }
 
+fn requests_paste(interaction: InteractionSettings, button: PointerButton, pressed: bool) -> bool {
+    pressed
+        && ((button == PointerButton::Middle && interaction.middle_click_paste)
+            || (button == PointerButton::Secondary && interaction.right_click_paste))
+}
+
 fn process_button_click(
     state: &mut TerminalViewState,
     layout: &Response,
@@ -512,13 +518,13 @@ fn process_button_click(
             modifiers,
             pressed,
         ),
-        PointerButton::Middle if pressed && interaction.middle_click_paste => {
+        PointerButton::Middle if requests_paste(interaction, button, pressed) => {
             layout
                 .ctx
                 .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
             InputAction::Ignore
         }
-        PointerButton::Secondary if pressed && interaction.right_click_paste => {
+        PointerButton::Secondary if requests_paste(interaction, button, pressed) => {
             layout
                 .ctx
                 .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
@@ -668,4 +674,38 @@ fn process_mouse_move(
     }
 
     actions
+}
+
+
+#[cfg(test)]
+mod appearance_interaction_tests {
+    use super::*;
+
+    #[test]
+    fn mouse_paste_is_opt_in_and_only_on_button_press() {
+        let disabled = InteractionSettings::default();
+        assert!(!requests_paste(disabled, PointerButton::Middle, true));
+        assert!(!requests_paste(disabled, PointerButton::Secondary, true));
+
+        let enabled = InteractionSettings {
+            middle_click_paste: true,
+            right_click_paste: true,
+            ..InteractionSettings::default()
+        };
+        assert!(requests_paste(enabled, PointerButton::Middle, true));
+        assert!(requests_paste(enabled, PointerButton::Secondary, true));
+        assert!(!requests_paste(enabled, PointerButton::Middle, false));
+        assert!(!requests_paste(enabled, PointerButton::Primary, true));
+    }
+
+    #[test]
+    fn defaults_preserve_existing_terminal_interaction_behavior() {
+        assert_eq!(CursorStyle::default(), CursorStyle::Block);
+        assert_eq!(InteractionSettings::default(), InteractionSettings {
+            select_to_copy: false,
+            middle_click_paste: false,
+            right_click_paste: false,
+            hide_pointer_while_typing: false,
+        });
+    }
 }
