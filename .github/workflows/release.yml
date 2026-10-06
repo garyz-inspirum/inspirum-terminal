@@ -67,13 +67,16 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            archive: tar
+            python: python3
+            binary: inspirum-terminal
           - os: windows-2022
             target: x86_64-pc-windows-msvc
-            archive: zip
+            python: python
+            binary: inspirum-terminal.exe
           - os: macos-15
             target: aarch64-apple-darwin
-            archive: tar
+            python: python3
+            binary: inspirum-terminal
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out release tag
@@ -106,6 +109,25 @@ jobs:
       - name: Test workflow helper scripts
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: python3 -B -m unittest discover -s scripts/tests -p 'test_*.py'
+      - name: Install native SSH fixture dependency (Linux)
+        if: runner.os == 'Linux'
+        run: python3 -m pip install --disable-pip-version-check "asyncssh==2.24.0"
+      - name: Install native SSH fixture dependency (macOS)
+        if: runner.os == 'macOS'
+        run: python3 -m pip install --disable-pip-version-check --break-system-packages "asyncssh==2.24.0"
+      - name: Install native SSH fixture dependency (Windows)
+        if: runner.os == 'Windows'
+        run: python -m pip install --disable-pip-version-check "asyncssh==2.24.0"
+      - name: Native authenticated SSH smoke (Unix)
+        if: runner.os != 'Windows'
+        env:
+          INSPIRUM_TEST_TMPDIR: ${{ runner.temp }}
+        run: python3 scripts/test-native-ssh-smoke.py
+      - name: Native authenticated SSH smoke (Windows)
+        if: runner.os == 'Windows'
+        env:
+          INSPIRUM_TEST_TMPDIR: ${{ runner.temp }}
+        run: python scripts/test-native-ssh-smoke.py
       - name: Install isolated SSH test prerequisites
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
@@ -118,43 +140,42 @@ jobs:
         shell: bash
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Collect target dependency notices
-        shell: bash
+      - name: Collect target dependency notices (Unix)
+        if: runner.os != 'Windows'
         env:
           TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          python3 scripts/collect-third-party-notices.py \
-            --target "$TARGET" \
-            --output "dist/notices/$TARGET/THIRD_PARTY_NOTICES"
-      - name: Package Unix archive
-        if: matrix.archive == 'tar'
-        shell: bash
+        run: python3 scripts/collect-third-party-notices.py --target "$TARGET" --output "dist/notices/$TARGET/THIRD_PARTY_NOTICES"
+      - name: Collect target dependency notices (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python scripts/collect-third-party-notices.py --target "$env:TARGET" --output "dist/notices/$env:TARGET/THIRD_PARTY_NOTICES"
+      - name: Package unsigned archive (Unix)
+        if: runner.os != 'Windows'
         env:
           TAG: ${{ needs.validate.outputs.tag }}
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          name="inspirum-terminal-${TAG}-${TARGET}"
-          mkdir -p "dist/$name"
-          cp "target/$TARGET/release/inspirum-terminal" LICENSE README.md "dist/$name/"
-          cp -R "dist/notices/$TARGET/THIRD_PARTY_NOTICES" "dist/$name/"
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
-          rm -rf "dist/$name"
-      - name: Package Windows archive
-        if: matrix.archive == 'zip'
+          commit="$(git rev-parse HEAD)"
+          python3 scripts/package-release.py \
+            --target "$TARGET" \
+            --tag "$TAG" \
+            --commit "$commit" \
+            --binary "target/${{ matrix.target }}/release/${{ matrix.binary }}" \
+            --notices "dist/notices/$TARGET/THIRD_PARTY_NOTICES" \
+            --output-dir dist
+      - name: Package unsigned archive (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           TAG: ${{ needs.validate.outputs.tag }}
           TARGET: ${{ matrix.target }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $name = "inspirum-terminal-$env:TAG-$env:TARGET"
-          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
-          Copy-Item "target/$env:TARGET/release/inspirum-terminal.exe", LICENSE, README.md "dist/$name/"
-          Copy-Item -Recurse "dist/notices/$env:TARGET/THIRD_PARTY_NOTICES" "dist/$name/"
-          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
-          Remove-Item -Recurse -Force "dist/$name"
+          $commit = (git rev-parse HEAD).Trim()
+          python scripts/package-release.py --target "$env:TARGET" --tag "$env:TAG" --commit "$commit" --binary "target/${{ matrix.target }}/release/${{ matrix.binary }}" --notices "dist/notices/$env:TARGET/THIRD_PARTY_NOTICES" --output-dir dist
       - name: Upload packaged binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -163,8 +184,56 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  publish:
+  verify:
     needs: [validate, build]
+    name: verify-${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            python: python3
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            python: python
+          - os: macos-15
+            target: aarch64-apple-darwin
+            python: python3
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out release verifier
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.tag }}
+      - name: Download packaged release
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-${{ matrix.target }}
+          path: downloaded
+      - name: Verify downloaded package (Unix)
+        if: runner.os != 'Windows'
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          python3 scripts/verify-release-package.py --archive-dir downloaded --target "$TARGET" --tag "$TAG" --commit "$commit" --work-parent "${{ runner.temp }}"
+      - name: Verify downloaded package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $commit = (git rev-parse HEAD).Trim()
+          python scripts/verify-release-package.py --archive-dir downloaded --target "$env:TARGET" --tag "$env:TAG" --commit "$commit" --work-parent "${{ runner.temp }}"
+
+  publish:
+    needs: [validate, build, verify]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -195,9 +264,9 @@ jobs:
           make_latest: false
           fail_on_unmatched_files: true
           body: |
-            Early unsigned prerelease. These binaries are not code-signed or notarized.
+            Unsigned prerelease. These binaries are not developer-code-signed or notarized.
 
-            Linux unit/headless PTY coverage exists. Check the release notes and README for current native-platform validation status. Verify archive hashes against SHA256SUMS.
+            Before publication, every archive is downloaded onto its native runner, extracted into a clean temporary directory, independently inspected as ELF x86_64, PE32+ AMD64, or thin Mach-O ARM64, and executed with --version. RELEASE_METADATA.json records the exact version, target, commit and unsigned/notarized state. Verify archive hashes against SHA256SUMS.
           files: |
             dist/*.tar.gz
             dist/*.zip
