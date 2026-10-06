@@ -5,6 +5,7 @@
 //! the obsolete third-party `dispatch 0.2.0` package from the release graph
 //! while preserving the required libdispatch behavior.
 
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 use std::ffi::c_void;
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -39,7 +40,7 @@ mod imp {
     impl Queue {
         /// Return the process main dispatch queue.
         pub fn main() -> Self {
-            let raw = std::ptr::addr_of!(_dispatch_main_q).cast_mut();
+            let raw = unsafe { std::ptr::addr_of!(_dispatch_main_q).cast_mut() };
             unsafe {
                 dispatch_retain(raw);
             }
