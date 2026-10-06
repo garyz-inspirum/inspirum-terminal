@@ -18,7 +18,12 @@ fn fixture() -> PathBuf {
 }
 
 fn grid(backend: &mut TerminalBackend) -> String {
-    backend.sync().grid.display_iter().map(|cell| cell.c).collect()
+    backend
+        .sync()
+        .grid
+        .display_iter()
+        .map(|cell| cell.c)
+        .collect()
 }
 
 fn wait_text(backend: &mut TerminalBackend, needle: &str) {
