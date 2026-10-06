@@ -5,6 +5,9 @@ use crate::{
         self, AppearanceOverride, AppearanceSettings, TerminalAppearance, TerminalCursorStyle,
         TerminalFontFamily, TerminalPalette,
     },
+    command_palette::{
+        self, PaletteItem, SendTarget, Snippet, SnippetLibrary,
+    },
     delete_session, duplicate_session_draft, export_sessions,
     history::{HistoryRow, HistoryState},
     import_sessions,
@@ -470,6 +473,18 @@ pub struct App {
     appearance_path: PathBuf,
     appearance_settings: AppearanceSettings,
     appearance_notice: String,
+    snippets_path: PathBuf,
+    snippets: SnippetLibrary,
+    snippet_notice: String,
+    snippet_transfer_path: String,
+    snippet_name: String,
+    snippet_body: String,
+    command_palette_open: bool,
+    command_palette_query: String,
+    command_palette_index: usize,
+    command_sender_text: String,
+    command_sender_target: SendTarget,
+    pending_command_send: Option<(Vec<u64>, String)>,
     draft: Session,
     profile_tags: String,
     port: String,
@@ -552,6 +567,14 @@ impl App {
                     format!("Appearance settings ignored: {error:#}"),
                 ),
             };
+        let snippets_path = command_palette::snippets_path(&path);
+        let (snippets, snippets_error) = match command_palette::load_library(&snippets_path) {
+            Ok(library) => (library, String::new()),
+            Err(error) => (
+                SnippetLibrary::default(),
+                format!("Snippet library ignored: {error:#}"),
+            ),
+        };
         let (profiles, mut error, writable) = match load_sessions(&path) {
             Ok(profiles) => (profiles, String::new(), true),
             Err(error) => (
@@ -561,7 +584,7 @@ impl App {
             ),
         };
         let (tx, rx) = mpsc::channel();
-        for settings_error in [&startup_error, &appearance_error] {
+        for settings_error in [&startup_error, &appearance_error, &snippets_error] {
             if !settings_error.is_empty() {
                 if !error.is_empty() {
                     error.push('\n');
@@ -593,6 +616,18 @@ impl App {
             appearance_path,
             appearance_settings,
             appearance_notice: String::new(),
+            snippets_path,
+            snippets,
+            snippet_notice: String::new(),
+            snippet_transfer_path: String::new(),
+            snippet_name: String::new(),
+            snippet_body: String::new(),
+            command_palette_open: false,
+            command_palette_query: String::new(),
+            command_palette_index: 0,
+            command_sender_text: String::new(),
+            command_sender_target: SendTarget::CurrentPane,
+            pending_command_send: None,
             draft: Session::default(),
             profile_tags: String::new(),
             port: String::new(),
@@ -824,6 +859,7 @@ impl App {
 
     fn confirmation_open(&self) -> bool {
         self.pending_paste.is_some()
+            || self.pending_command_send.is_some()
             || self.delete_confirm.is_some()
             || self.replace_import_confirm.is_some()
             || self.host_key_remove_confirm.is_some()
@@ -873,6 +909,7 @@ impl App {
             [
                 (egui::Key::Enter, ShortcutKey::Enter),
                 (egui::Key::K, ShortcutKey::K),
+                (egui::Key::P, ShortcutKey::P),
                 (egui::Key::F, ShortcutKey::F),
                 (egui::Key::W, ShortcutKey::W),
                 (egui::Key::ArrowLeft, ShortcutKey::ArrowLeft),
@@ -886,6 +923,50 @@ impl App {
                     .flatten()
             })
         })
+    }
+
+    fn selected_command_targets(&self) -> Vec<u64> {
+        let selected: Vec<u64> = self
+            .workspace_panes
+            .iter()
+            .copied()
+            .filter(|id| self.sync_input.is_target(*id))
+            .filter(|id| self.tabs.iter().any(|tab| tab.id == *id && !tab.exited))
+            .collect();
+        command_palette::target_ids(self.command_sender_target, self.active, &selected)
+    }
+
+    fn stage_command_send(&mut self) {
+        let text = self.command_sender_text.clone();
+        if text.is_empty() {
+            self.snippet_notice = "Command sender text is empty.".into();
+            return;
+        }
+        let targets = self.selected_command_targets();
+        if targets.is_empty() {
+            self.snippet_notice = "No eligible terminal target is selected.".into();
+            return;
+        }
+        match terminal_ux::classify_paste(self.paste_policy, &text) {
+            PasteDecision::Send => {
+                for id in targets {
+                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id && !tab.exited) {
+                        tab.terminal
+                            .process_command(BackendCommand::Write(text.as_bytes().to_vec()));
+                    }
+                }
+                self.snippet_notice = "Command text sent to the explicit target set.".into();
+            }
+            PasteDecision::Confirm => {
+                self.pending_command_send = Some((targets, text));
+                self.terminal_focus = None;
+                self.snippet_notice =
+                    "Multiline command text is waiting for explicit confirmation.".into();
+            }
+            PasteDecision::Block => {
+                self.snippet_notice = "Command text blocked by the current paste policy.".into();
+            }
+        }
     }
 
     fn close_tab_ids(&mut self, ids: &[u64]) {
@@ -1070,6 +1151,12 @@ impl App {
                     if self.terminal_focus.is_none() {
                         self.connect_draft(ctx);
                     }
+                }
+                ShortcutAction::CommandPalette => {
+                    self.command_palette_open = true;
+                    self.command_palette_query.clear();
+                    self.command_palette_index = 0;
+                    self.terminal_focus = None;
                 }
                 ShortcutAction::QuickSwitch => {
                     self.tab_switcher_open = true;
