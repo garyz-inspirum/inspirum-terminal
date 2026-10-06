@@ -201,6 +201,127 @@ fn terminal_interaction(appearance: &TerminalAppearance) -> InteractionSettings 
     }
 }
 
+fn appearance_controls(ui: &mut egui::Ui, appearance: &mut TerminalAppearance) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Font");
+        egui::ComboBox::from_id_salt("terminal_font_family")
+            .selected_text(match appearance.font_family {
+                TerminalFontFamily::Monospace => "Monospace",
+                TerminalFontFamily::Proportional => "Proportional",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut appearance.font_family,
+                    TerminalFontFamily::Monospace,
+                    "Monospace",
+                );
+                ui.selectable_value(
+                    &mut appearance.font_family,
+                    TerminalFontFamily::Proportional,
+                    "Proportional",
+                );
+            });
+        ui.add(egui::Slider::new(&mut appearance.font_size, 8.0..=36.0).text("size"));
+
+        ui.label("Theme");
+        egui::ComboBox::from_id_salt("terminal_palette")
+            .selected_text(match appearance.palette {
+                TerminalPalette::DefaultDark => "Default dark",
+                TerminalPalette::Light => "Light",
+                TerminalPalette::HighContrast => "High contrast",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut appearance.palette,
+                    TerminalPalette::DefaultDark,
+                    "Default dark",
+                );
+                ui.selectable_value(&mut appearance.palette, TerminalPalette::Light, "Light");
+                ui.selectable_value(
+                    &mut appearance.palette,
+                    TerminalPalette::HighContrast,
+                    "High contrast",
+                );
+            });
+
+        ui.label("Cursor");
+        egui::ComboBox::from_id_salt("terminal_cursor_style")
+            .selected_text(match appearance.cursor_style {
+                TerminalCursorStyle::Block => "Block",
+                TerminalCursorStyle::Underline => "Underline",
+                TerminalCursorStyle::Beam => "Beam",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut appearance.cursor_style,
+                    TerminalCursorStyle::Block,
+                    "Block",
+                );
+                ui.selectable_value(
+                    &mut appearance.cursor_style,
+                    TerminalCursorStyle::Underline,
+                    "Underline",
+                );
+                ui.selectable_value(
+                    &mut appearance.cursor_style,
+                    TerminalCursorStyle::Beam,
+                    "Beam",
+                );
+            });
+    });
+
+    ui.horizontal_wrapped(|ui| {
+        let mut custom_foreground = appearance.foreground.is_some();
+        if ui.checkbox(&mut custom_foreground, "Custom foreground").changed() {
+            appearance.foreground = custom_foreground.then(|| appearance.palette_defaults().0.into());
+        }
+        if let Some(value) = appearance.foreground.as_mut() {
+            ui.add(egui::TextEdit::singleline(value).desired_width(90.0));
+        }
+
+        let mut custom_background = appearance.background.is_some();
+        if ui.checkbox(&mut custom_background, "Custom background").changed() {
+            appearance.background = custom_background.then(|| appearance.palette_defaults().1.into());
+        }
+        if let Some(value) = appearance.background.as_mut() {
+            ui.add(egui::TextEdit::singleline(value).desired_width(90.0));
+        }
+    });
+
+    ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut appearance.select_to_copy, "Select to copy");
+        ui.checkbox(&mut appearance.middle_click_paste, "Middle-click paste");
+        ui.checkbox(&mut appearance.right_click_paste, "Right-click paste");
+        ui.checkbox(
+            &mut appearance.hide_pointer_while_typing,
+            "Hide pointer while typing",
+        );
+    });
+
+    ui.add(egui::Slider::new(&mut appearance.opacity, 0.35..=1.0).text("window opacity"));
+    ui.small(
+        "Window opacity is saved, but the current native eframe window stack does not expose portable runtime opacity; it is not applied on this build.",
+    );
+    if let Some(warning) = appearance.contrast_warning() {
+        ui.colored_label(egui::Color32::YELLOW, warning);
+    }
+}
+
+fn full_profile_override(appearance: &TerminalAppearance) -> AppearanceOverride {
+    AppearanceOverride {
+        font_family: Some(appearance.font_family),
+        font_size: Some(appearance.font_size),
+        palette: Some(appearance.palette),
+        foreground: appearance.foreground.clone(),
+        background: appearance.background.clone(),
+        cursor_style: Some(appearance.cursor_style),
+        select_to_copy: Some(appearance.select_to_copy),
+        middle_click_paste: Some(appearance.middle_click_paste),
+        right_click_paste: Some(appearance.right_click_paste),
+        hide_pointer_while_typing: Some(appearance.hide_pointer_while_typing),
+    }
+}
+
 fn render_terminal_tab(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
@@ -2725,7 +2846,9 @@ impl App {
                         (&mut right[0], &mut left[second_index])
                     };
                     let active = self.active;
+                    let appearance_settings = self.appearance_settings.clone();
                     let mut render = |ui: &mut egui::Ui, tab: &mut Tab| {
+                        let appearance = appearance_settings.effective_for(&tab.session.name);
                         let (next_reconnect, focused, close) = render_terminal_tab(
                             ui,
                             ctx,
@@ -2733,6 +2856,7 @@ impl App {
                             terminal_focus,
                             copy_selected && active == Some(tab.id),
                             true,
+                            &appearance,
                         );
                         if reconnect.is_none() {
                             reconnect = next_reconnect;
@@ -2766,6 +2890,7 @@ impl App {
                     }
                 }
             } else if let Some(tab) = self.tabs.iter_mut().find(|tab| Some(tab.id) == self.active) {
+                let appearance = self.appearance_settings.effective_for(&tab.session.name);
                 let (next_reconnect, focused, close) = render_terminal_tab(
                     ui,
                     ctx,
@@ -2773,6 +2898,7 @@ impl App {
                     terminal_focus,
                     copy_selected,
                     false,
+                    &appearance,
                 );
                 reconnect = next_reconnect;
                 if focused {
