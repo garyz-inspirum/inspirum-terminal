@@ -1024,7 +1024,38 @@ fn graphical_sftp_operations_are_verified_conflict_safe_and_cancellable() {
                 .file_name()
                 .to_string_lossy()
                 .starts_with(".inspirum-download-")),
-        "cancelled download left a staging file"
+        "cancelled download left a staging file when resume was not requested"
+    );
+
+    let resume_destination = local.join("resumed binary.bin");
+    let resume_partial = tempfile::Builder::new()
+        .prefix(".inspirum-download-")
+        .tempfile_in(&local)
+        .unwrap()
+        .into_temp_path();
+    fs::write(&resume_partial, &payload[..8192]).unwrap();
+    let mut resumed_download = sftp::resume_download(
+        &session,
+        Some(&config),
+        remote,
+        &resume_destination,
+        false,
+        Some(payload.len() as u64),
+        resume_partial,
+    )
+    .expect("resume managed SFTP download");
+    wait_managed_transfer(&mut resumed_download).expect("verify resumed SFTP download");
+    assert_eq!(fs::read(&resume_destination).unwrap(), payload);
+
+    let resume_remote = "browser resumed upload.bin";
+    fs::write(p.join("sftp-root").join(resume_remote), &payload[..8192]).unwrap();
+    let mut resumed_upload =
+        sftp::resume_upload(&session, Some(&config), &source, resume_remote)
+            .expect("resume managed SFTP upload");
+    wait_managed_transfer(&mut resumed_upload).expect("verify resumed SFTP upload");
+    assert_eq!(
+        sha256(&source),
+        sha256(&p.join("sftp-root").join(resume_remote))
     );
 
     sftp::mkdir_remote(&session, Some(&config), "browser-dir").unwrap();
@@ -1037,12 +1068,13 @@ fn graphical_sftp_operations_are_verified_conflict_safe_and_cancellable() {
     );
     sftp::delete_remote(&session, Some(&config), "browser-renamed", true).unwrap();
     sftp::delete_remote(&session, Some(&config), remote, false).unwrap();
+    sftp::delete_remote(&session, Some(&config), resume_remote, false).unwrap();
     assert!(
         sftp::delete_remote(&session, Some(&config), "missing-entry", false).is_err(),
         "negative remote delete unexpectedly succeeded"
     );
     println!(
-        "PASS graphical SFTP browse/mutate, binary transfer, conflict safety, verification and cancellation"
+        "PASS graphical SFTP browse/mutate, binary transfer, conflict safety, verification, cancellation and resume"
     );
 }
 
