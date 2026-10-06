@@ -99,7 +99,7 @@ fn native_auth_io_resize_trust_reconnect_and_cleanup() {
 
     let (mut backend, receiver) = open(&fixture, 801, "config");
     wait_text(&mut backend, "FIXTURE_AUTHENTICATED");
-    write(&mut backend, "echo:native-roundtrip-801\n");
+    write_line(&mut backend, "echo:native-roundtrip-801");
     wait_text(&mut backend, "REMOTE_ECHO:native-roundtrip-801");
 
     backend.process_command(BackendCommand::Resize(
@@ -108,7 +108,7 @@ fn native_auth_io_resize_trust_reconnect_and_cleanup() {
     ));
     let deadline = Instant::now() + Duration::from_secs(12);
     loop {
-        write(&mut backend, "size\n");
+        write_line(&mut backend, "size");
         thread::sleep(Duration::from_millis(100));
         let text = grid(&mut backend);
         if text.contains("REMOTE_SIZE:31 97") {
@@ -118,7 +118,7 @@ fn native_auth_io_resize_trust_reconnect_and_cleanup() {
     }
     assert_eq!(backend.sync().grid.display_iter().count(), 31 * 97);
 
-    write(&mut backend, "exit\n");
+    write_line(&mut backend, "exit");
     wait_exit(&receiver, 801);
     wait_cleanup(&cleanup);
     println!("PASS native authenticated terminal I/O, remote PTY resize and clean exit");
@@ -140,7 +140,7 @@ fn native_auth_io_resize_trust_reconnect_and_cleanup() {
         let _ = fs::remove_file(&cleanup);
         let (mut reconnected, _receiver) = open(&fixture, id, "config");
         wait_text(&mut reconnected, "FIXTURE_AUTHENTICATED");
-        write(&mut reconnected, &format!("echo:reconnect-{id}\n"));
+        write_line(&mut reconnected, &format!("echo:reconnect-{id}"));
         wait_text(&mut reconnected, &format!("REMOTE_ECHO:reconnect-{id}"));
         drop(reconnected);
         wait_cleanup(&cleanup);
