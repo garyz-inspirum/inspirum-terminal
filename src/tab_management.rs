@@ -62,7 +62,9 @@ pub fn moved_order(order: &[u64], id: u64, delta: isize) -> Vec<u64> {
     let target = if delta < 0 {
         index.saturating_sub(delta.unsigned_abs())
     } else {
-        index.saturating_add(delta as usize).min(next.len().saturating_sub(1))
+        index
+            .saturating_add(delta as usize)
+            .min(next.len().saturating_sub(1))
     };
     if index != target {
         let id = next.remove(index);
@@ -71,11 +73,7 @@ pub fn moved_order(order: &[u64], id: u64, delta: isize) -> Vec<u64> {
     next
 }
 
-pub fn bulk_close_ids(
-    order: &[u64],
-    selected: &BTreeSet<u64>,
-    mode: BulkCloseMode,
-) -> Vec<u64> {
+pub fn bulk_close_ids(order: &[u64], selected: &BTreeSet<u64>, mode: BulkCloseMode) -> Vec<u64> {
     match mode {
         BulkCloseMode::Selected => order
             .iter()
@@ -88,11 +86,7 @@ pub fn bulk_close_ids(
             };
             order[index + 1..].to_vec()
         }
-        BulkCloseMode::Others(anchor) => order
-            .iter()
-            .copied()
-            .filter(|id| *id != anchor)
-            .collect(),
+        BulkCloseMode::Others(anchor) => order.iter().copied().filter(|id| *id != anchor).collect(),
     }
 }
 
@@ -160,6 +154,9 @@ mod tests {
         assert_eq!(next_active_after_close(&order, Some(2), &[2]), Some(3));
         assert_eq!(next_active_after_close(&order, Some(4), &[4]), Some(3));
         assert_eq!(next_active_after_close(&order, Some(3), &[1, 2]), Some(3));
-        assert_eq!(next_active_after_close(&order, Some(1), &[1, 2, 3, 4]), None);
+        assert_eq!(
+            next_active_after_close(&order, Some(1), &[1, 2, 3, 4]),
+            None
+        );
     }
 }
