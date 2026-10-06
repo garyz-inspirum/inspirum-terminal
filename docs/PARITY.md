@@ -13,6 +13,7 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] macOS Apple Silicon CI passed native build/tests/clippy and the OpenSSH child-exit smoke test.
 - [x] PR #30 profile-import safety regressions passed all three native targets in CI run `37289535816` at `f5662def628728735eaef7caa3d66b388e90dc06`.
 - [x] PR #32 SFTP policy and IPv6 argument regressions passed all three native targets in CI run `37290183042` at `03d07bf50f0c9d3e6eef4edb0b13cbc15cd5e7db`; Linux additionally passed three SFTP policy/trust fixture tests. This is not IPv6 network or Windows/macOS authenticated-server acceptance.
+- [x] PR #45 terminal compatibility suite passed Linux x64, Windows x64 and macOS Apple Silicon in CI run `37418599457` at `efb07e397bb2ea50ca6613c1ae5fce50771ba87a`. Linux/macOS execute the Unix PTY runtime cases; Windows compiles and runs the bounded target with Unix-only cases excluded. This is not full xterm/VT/Unicode parity.
 - [x] License closure for Linux and Windows passed existing evidence.
 - [x] CI and release workflows pin Rust 1.95.0. Their gates are unchanged by this documentation.
 - [ ] Isolated authenticated SSH-server acceptance on Windows and macOS.
@@ -84,10 +85,10 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Selection/copy plus guarded paste policy: multiline CR/LF payloads cannot reach the PTY without explicit confirmation (or are blocked), with keyboard confirmation/cancel controls (#21).
 - [ ] Search, marks, timestamps, folding, and outlining. Current-viewport case-insensitive terminal search is implemented for #21; retained-scrollback navigation/highlighting, marks, timestamps, folding and outlining remain open.
 - [ ] Configurable fonts, colors, themes, opacity, and cursor.
-- [ ] Mouse protocol and alternate-screen compatibility matrix.
-- [ ] Unicode, emoji, wide-character, combining-character, and bidi test matrix.
-- [ ] VT/xterm compatibility suite and published results.
-- [ ] Performance and memory benchmarks with reproducible workloads.
+- [x] Bounded alternate-screen (`?1049`) and SGR mouse-mode (`?1000`/`?1006`) compatibility regressions execute on Unix CI as part of #23; this is not a complete mouse-protocol matrix.
+- [x] Bounded Unicode regression covers CJK wide cells, combining-mark input and emoji without replacement-character corruption on the real Unix PTY/grid path (#23). Bidi, IME and font-shaping audits remain open.
+- [x] Bounded VT/xterm compatibility suite covers alternate screen, SGR mouse mode, cursor-back overwrite and erase-line behavior, with commands/results scope documented in `terminal-compatibility.md` (#23).
+- [x] Reproducible 5,000-line high-volume scrollback regression plus opt-in 20,000-line release benchmark and `/usr/bin/time` memory wrapper are documented for #23; no universal latency or memory guarantee is claimed.
 - [x] Opt-in per-tab screen-snapshot session logging is off by default, creates a new file without overwrite, never records local keystrokes, and documents that remote output can contain sensitive material (#21).
 - [ ] Command palette, command sender, and quick bar.
 - [ ] Local/remote editing modes, completion, and snippets.

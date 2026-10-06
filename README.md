@@ -104,6 +104,13 @@ python3 -B -m unittest discover -s scripts/tests -p 'test_*.py'
 scripts/test-ssh-integration.sh
 ```
 
+Terminal compatibility coverage for Unicode/wide/combining/emoji text, alternate-screen and SGR mouse modes, representative VT behavior, and high-volume scrollback is documented in [terminal compatibility](docs/terminal-compatibility.md). Run it with:
+
+```text
+cargo test --locked --test terminal_compat
+bash scripts/terminal-compat-benchmark.sh
+```
+
 The SSH script requires `sshd`, `ssh-keygen`, and Python 3. Core fixtures use unprivileged loopback listeners and temporary keys outside the checkout. Password and PAM-backed MFA acceptance additionally use passwordless `sudo` when available to create disposable OS users and root-owned loopback sshd processes; those accounts and processes are removed in cleanup. It is Linux-only and is not Windows or macOS execution.
 
 ## Security and data model
