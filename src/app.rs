@@ -171,6 +171,13 @@ fn terminal_cursor(style: CursorStyle) -> EguiCursorStyle {
     }
 }
 
+struct RenderTerminalResult {
+    reconnect: Option<(u64, TabKind, Session)>,
+    focused: bool,
+    close: bool,
+    mouse_paste: Option<egui::PointerButton>,
+}
+
 fn render_terminal_tab(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
@@ -179,12 +186,7 @@ fn render_terminal_tab(
     copy_selected: bool,
     show_pane_header: bool,
     appearance: &AppearanceSettings,
-) -> (
-    Option<(u64, TabKind, Session)>,
-    bool,
-    bool,
-    Option<egui::PointerButton>,
-) {
+) -> RenderTerminalResult {
     let mut reconnect = None;
     let mut focus = false;
     let mut close = false;
@@ -253,7 +255,12 @@ fn render_terminal_tab(
             ctx.copy_text(selected);
         }
     }
-    (reconnect, focus, close, mouse_paste)
+    RenderTerminalResult {
+        reconnect,
+        focused: focus,
+        close,
+        mouse_paste,
+    }
 }
 
 fn parse_optional_u16(value: &str, label: &str) -> anyhow::Result<Option<u16>> {
@@ -2931,7 +2938,7 @@ impl App {
                     };
                     let active = self.active;
                     let mut render = |ui: &mut egui::Ui, tab: &mut Tab| {
-                        let (next_reconnect, focused, close, mouse_paste) = render_terminal_tab(
+                        let rendered = render_terminal_tab(
                             ui,
                             ctx,
                             tab,
@@ -2941,15 +2948,15 @@ impl App {
                             &self.appearance,
                         );
                         if reconnect.is_none() {
-                            reconnect = next_reconnect;
+                            reconnect = rendered.reconnect;
                         }
-                        if focused {
+                        if rendered.focused {
                             focus_pane = Some(tab.id);
                         }
-                        if close {
+                        if rendered.close {
                             close_pane = Some(tab.id);
                         }
-                        if let Some(button) = mouse_paste {
+                        if let Some(button) = rendered.mouse_paste {
                             mouse_paste_request = Some((tab.id, button));
                         }
                     };
@@ -2975,7 +2982,7 @@ impl App {
                     }
                 }
             } else if let Some(tab) = self.tabs.iter_mut().find(|tab| Some(tab.id) == self.active) {
-                let (next_reconnect, focused, close, mouse_paste) = render_terminal_tab(
+                let rendered = render_terminal_tab(
                     ui,
                     ctx,
                     tab,
@@ -2984,14 +2991,14 @@ impl App {
                     false,
                     &self.appearance,
                 );
-                reconnect = next_reconnect;
-                if focused {
+                reconnect = rendered.reconnect;
+                if rendered.focused {
                     focus_pane = Some(tab.id);
                 }
-                if close {
+                if rendered.close {
                     close_pane = Some(tab.id);
                 }
-                if let Some(button) = mouse_paste {
+                if let Some(button) = rendered.mouse_paste {
                     mouse_paste_request = Some((tab.id, button));
                 }
             } else {
