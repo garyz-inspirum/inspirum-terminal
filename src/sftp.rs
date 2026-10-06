@@ -310,19 +310,18 @@ fn start_download_command(
     overwrite: bool,
     expected_size: Option<u64>,
     staging: TempPath,
-    resume: bool,
 ) -> Result<Transfer> {
     if local.exists() && !overwrite {
         anyhow::bail!("local destination already exists; explicit overwrite is required");
     }
+    let partial = fs::metadata(&staging)?.len();
     if let Some(expected) = expected_size {
-        let partial = fs::metadata(&staging)?.len();
         ensure!(
             partial <= expected,
             "download partial is larger than the expected remote file"
         );
     }
-    let operation = if resume { "reget" } else { "get" };
+    let operation = if partial > 0 { "reget" } else { "get" };
     let command = format!(
         "{operation} {} {}",
         quote_batch_arg(remote)?,
@@ -369,7 +368,6 @@ pub fn start_download(
         overwrite,
         expected_size,
         staging,
-        false,
     )
 }
 
@@ -400,7 +398,6 @@ pub fn resume_download(
         overwrite,
         expected_size,
         staging,
-        true,
     )
 }
 
