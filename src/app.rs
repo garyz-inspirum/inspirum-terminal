@@ -3068,9 +3068,11 @@ impl App {
             if let Some(panel) = self.scp_panel.as_mut() {
                 ui.horizontal(|ui| {
                     ui.strong(format!("SCP · {}", panel.session_name()));
-                    if ui.button("Close SCP").clicked() {
-                        close_scp = true;
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("×").on_hover_text("Close SCP pane").clicked() {
+                            close_scp = true;
+                        }
+                    });
                 });
                 ui.separator();
                 panel.ui(ctx, ui);
@@ -3079,44 +3081,51 @@ impl App {
             if let Some(browser) = self.sftp_browser.as_mut() {
                 ui.horizontal(|ui| {
                     ui.strong(format!("Files · {}", browser.session_name()));
-                    if ui.button("Close file browser").clicked() {
-                        close_browser = true;
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("×").on_hover_text("Close file browser").clicked() {
+                            close_browser = true;
+                        }
+                    });
                 });
                 ui.separator();
                 browser.ui(ctx, ui);
                 return;
             }
             if self.sftp_browser.is_none() && self.scp_panel.is_none() && self.active.is_some() {
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Copy selection").clicked() {
+                ui.horizontal(|ui| {
+                    if ui.small_button("Copy").clicked() {
                         copy_selected = true;
                     }
                     if ui
-                        .button(if self.search_open { "Close search" } else { "Search" })
-                        .on_hover_text("Keyboard: Ctrl/Cmd+Shift+F")
+                        .small_button(if self.search_open { "× Find" } else { "Find" })
+                        .on_hover_text("Search retained history · Ctrl/Cmd+Shift+F")
                         .clicked()
                     {
                         self.search_open = !self.search_open;
                         self.terminal_focus = if self.search_open { None } else { self.active };
                     }
-
-                    ui.label("Paste:");
-                    ui.selectable_value(
-                        &mut self.paste_policy,
-                        PastePolicy::ConfirmMultiline,
-                        "confirm multiline",
-                    );
-                    ui.selectable_value(
-                        &mut self.paste_policy,
-                        PastePolicy::ConfirmAll,
-                        "confirm all",
-                    );
-                    ui.selectable_value(
-                        &mut self.paste_policy,
-                        PastePolicy::BlockMultiline,
-                        "block multiline",
-                    );
+                    ui.menu_button("Paste policy", |ui| {
+                        ui.selectable_value(
+                            &mut self.paste_policy,
+                            PastePolicy::ConfirmMultiline,
+                            "Confirm multiline",
+                        );
+                        ui.selectable_value(
+                            &mut self.paste_policy,
+                            PastePolicy::ConfirmAll,
+                            "Confirm all",
+                        );
+                        ui.selectable_value(
+                            &mut self.paste_policy,
+                            PastePolicy::BlockMultiline,
+                            "Block multiline",
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.sync_input.armed() {
+                            ui.small("SYNC");
+                        }
+                    });
                 });
 
                 if !self.paste_notice.is_empty() {
@@ -3129,6 +3138,7 @@ impl App {
                         .find(|tab| tab.id == id)
                         .map(|tab| tab.session.name.clone())
                 });
+                if self.session_settings_open {
                 egui::CollapsingHeader::new("Appearance & interaction")
                     .default_open(false)
                     .show(ui, |ui| {
@@ -3212,6 +3222,7 @@ impl App {
                             ui.small(&self.appearance_notice);
                         }
                     });
+                }
 
                 if self.search_open {
                     let active_id = self.active;
