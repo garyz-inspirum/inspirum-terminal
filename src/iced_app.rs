@@ -2803,20 +2803,13 @@ impl App {
                         action(label, Message::FilesOpenLocal(entry.path.clone())).width(Fill),
                     );
                 } else {
-                    local_list = local_list.push(
-                        container(
-                            row![
-                                text(display_leaf(&entry.name))
-                                    .font(Font::MONOSPACE)
-                                    .size(12),
-                                space::horizontal(),
-                                text(size).size(11).color(MUTED),
-                            ]
-                            .align_y(iced::Center),
-                        )
-                        .padding([6, 10])
-                        .width(Fill),
-                    );
+                    let selected = self.files.selected_local.as_ref() == Some(&entry.path);
+                    let mut file = action(label, Message::FilesSelectLocal(entry.path.clone()))
+                        .width(Fill);
+                    if selected {
+                        file = file.style(selected_button);
+                    }
+                    local_list = local_list.push(file);
                 }
             }
         }
@@ -2846,20 +2839,20 @@ impl App {
                         .width(Fill),
                     );
                 } else {
-                    remote_list = remote_list.push(
-                        container(
-                            row![
-                                text(display_leaf(&entry.name))
-                                    .font(Font::MONOSPACE)
-                                    .size(12),
-                                space::horizontal(),
-                                text(size).size(11).color(MUTED),
-                            ]
-                            .align_y(iced::Center),
-                        )
-                        .padding([6, 10])
-                        .width(Fill),
-                    );
+                    let selected = self
+                        .files
+                        .selected_remote
+                        .as_ref()
+                        .is_some_and(|selected| selected.name == entry.name);
+                    let mut file = action(
+                        format!("{:<42} {:>10}", display_leaf(&entry.name), size),
+                        Message::FilesSelectRemote(entry.clone()),
+                    )
+                    .width(Fill);
+                    if selected {
+                        file = file.style(selected_button);
+                    }
+                    remote_list = remote_list.push(file);
                 }
             }
         }
@@ -2912,6 +2905,79 @@ impl App {
             "Ready"
         };
 
+        let active_session = self.files.session_key.as_deref();
+        let mut transfer_list = column![].spacing(5);
+        let mut visible_transfers = 0usize;
+        for job in self.files.transfers.iter().rev().filter(|job| {
+            active_session == Some(job.pending.session_key.as_str())
+        }).take(6) {
+            visible_transfers += 1;
+            let state = match job.state {
+                TransferJobState::Queued => "Queued",
+                TransferJobState::Running => "Running",
+                TransferJobState::Completed => "Completed",
+                TransferJobState::Cancelled => "Cancelled",
+                TransferJobState::Failed => "Failed",
+            };
+            let progress = match job.total {
+                Some(total) if total > 0 => format!(
+                    "{} / {} ({:.0}%)",
+                    format_file_size(Some(job.transferred)),
+                    format_file_size(Some(total)),
+                    (job.transferred as f64 / total as f64 * 100.0).clamp(0.0, 100.0)
+                ),
+                _ if job.transferred > 0 => format_file_size(Some(job.transferred)),
+                _ => String::new(),
+            };
+
+            let mut controls = row![].spacing(6).align_y(iced::Center);
+            match job.state {
+                TransferJobState::Queued | TransferJobState::Running => {
+                    controls = controls.push(action("Cancel", Message::CancelTransfer(job.id)));
+                }
+                TransferJobState::Failed | TransferJobState::Cancelled => {
+                    if job.resume_available {
+                        controls = controls.push(action("Resume", Message::ResumeTransfer(job.id)));
+                    }
+                    controls = controls.push(action("Retry", Message::RetryTransfer(job.id)));
+                }
+                TransferJobState::Completed => {}
+            }
+
+            transfer_list = transfer_list.push(
+                container(
+                    row![
+                        column![
+                            text(job.label()).size(12),
+                            text(if job.error.is_empty() {
+                                format!("{state} {progress}").trim().to_owned()
+                            } else {
+                                format!("{state}: {}", job.error)
+                            })
+                            .size(11)
+                            .color(if job.state == TransferJobState::Failed {
+                                DANGER
+                            } else {
+                                MUTED
+                            }),
+                        ]
+                        .spacing(2),
+                        space::horizontal(),
+                        controls,
+                    ]
+                    .align_y(iced::Center),
+                )
+                .padding([6, 8])
+                .width(Fill)
+                .style(card),
+            );
+        }
+        if visible_transfers == 0 {
+            transfer_list = transfer_list.push(
+                text("No transfers for this session.").size(11).color(MUTED)
+            );
+        }
+
         container(
             column![
                 row![
@@ -2924,9 +2990,25 @@ impl App {
                 .spacing(12)
                 .align_y(iced::Center),
                 row![local_panel, remote_panel].spacing(8).height(Fill),
-                text("Navigation is live through the existing validated SFTP path. Transfer and destructive actions remain disabled here until their existing overwrite/delete confirmations are migrated.")
-                    .size(11)
-                    .color(MUTED),
+                row![
+                    action("Upload ->", Message::FilesRequestUpload),
+                    action("<- Download", Message::FilesRequestDownload),
+                    space::horizontal(),
+                    text("Transfers use the existing validated SFTP, overwrite confirmation, cancel and resume paths.")
+                        .size(11)
+                        .color(MUTED),
+                ]
+                .spacing(8)
+                .align_y(iced::Center),
+                container(
+                    column![
+                        text("TRANSFER QUEUE").size(11).color(MUTED),
+                        transfer_list,
+                    ]
+                    .spacing(6)
+                )
+                .padding(8)
+                .style(surface),
             ]
             .spacing(8)
             .height(Fill),
