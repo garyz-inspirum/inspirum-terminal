@@ -1646,8 +1646,7 @@ impl App {
                                 )?);
                                 Ok(())
                             });
-                            self.error =
-                                result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+                            self.error = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
                         }
                         if ui.button("SFTP").on_hover_text("Open interactive SFTP terminal").clicked() {
                             let result = self.validated_draft().and_then(|session| {
@@ -2741,8 +2740,7 @@ impl App {
                             .checkbox(&mut self.search_open, "Terminal history search")
                             .changed()
                         {
-                            self.terminal_focus =
-                                if self.search_open { None } else { self.active };
+                            self.terminal_focus = if self.search_open { None } else { self.active };
                         }
                         if ui.button("Command palette").clicked() {
                             self.command_palette_open = true;
@@ -3047,7 +3045,11 @@ impl App {
                 ui.horizontal(|ui| {
                     if let Some(active) = self.active {
                         if let Some(tab) = self.tabs.iter().find(|tab| tab.id == active) {
-                            ui.small(if tab.exited { "● disconnected" } else { "● connected" });
+                            ui.small(if tab.exited {
+                                "● disconnected"
+                            } else {
+                                "● connected"
+                            });
                             ui.separator();
                             ui.small(&tab.name);
                         }
