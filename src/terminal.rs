@@ -597,6 +597,27 @@ pub fn connect_with_waker(
     .context("create native PTY and start OpenSSH")
 }
 
+/// Connect using the production OpenSSH launch policy and a toolkit-neutral event sink.
+pub fn connect_with_event_sink(
+    id: u64,
+    session: &Session,
+    config: Option<&Path>,
+    event_sink: Arc<dyn Fn(u64, egui_term::PtyEvent) + Send + Sync>,
+) -> Result<egui_term::TerminalBackend> {
+    let args = launch_args(session, config)?;
+    check_openssh(Path::new("ssh"))?;
+    egui_term::TerminalBackend::new_with_event_sink(
+        id,
+        egui_term::BackendSettings {
+            shell: "ssh".into(),
+            args,
+            working_directory: None,
+        },
+        event_sink,
+    )
+    .context("create native PTY and start OpenSSH")
+}
+
 pub fn connect_sftp(
     id: u64,
     context: eframe::egui::Context,
