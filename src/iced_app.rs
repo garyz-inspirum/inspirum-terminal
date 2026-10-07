@@ -144,6 +144,158 @@ fn transfer_bridge() -> impl Stream<Item = Message> {
     })
 }
 
+fn send_transfer_event(sender: &TransferBridgeSender, event: TransferEvent) {
+    let _ = sender.unbounded_send(event);
+}
+
+fn run_transfer_worker(
+    id: u64,
+    pending: PendingTransfer,
+    overwrite: bool,
+    resume_path: Option<PathBuf>,
+    resume_requested: bool,
+    cancel: Arc<AtomicBool>,
+    config: Option<PathBuf>,
+    sender: TransferBridgeSender,
+) {
+    let start = match (pending.direction, resume_requested) {
+        (TransferDirection::Download, true) => {
+            let Some(partial) = resume_path.as_deref() else {
+                send_transfer_event(
+                    &sender,
+                    TransferEvent::Failed {
+                        id,
+                        error: "resumable download partial is missing".into(),
+                        partial: None,
+                        resume_available: false,
+                    },
+                );
+                return;
+            };
+            sftp::start_download_resume(
+                &pending.session,
+                config.as_deref(),
+                &pending.remote,
+                &pending.local,
+                partial,
+                overwrite,
+                pending.expected_size,
+            )
+        }
+        (TransferDirection::Download, false) => sftp::start_download(
+            &pending.session,
+            config.as_deref(),
+            &pending.remote,
+            &pending.local,
+            overwrite,
+            pending.expected_size,
+        ),
+        (TransferDirection::Upload, true) => sftp::start_upload_resume(
+            &pending.session,
+            config.as_deref(),
+            &pending.local,
+            &pending.remote,
+        ),
+        (TransferDirection::Upload, false) => sftp::start_upload(
+            &pending.session,
+            config.as_deref(),
+            &pending.local,
+            &pending.remote,
+        ),
+    };
+
+    let mut transfer = match start {
+        Ok(transfer) => transfer,
+        Err(error) => {
+            send_transfer_event(
+                &sender,
+                TransferEvent::Failed {
+                    id,
+                    error: format!("{error:#}"),
+                    partial: resume_path,
+                    resume_available: false,
+                },
+            );
+            return;
+        }
+    };
+
+    send_transfer_event(
+        &sender,
+        TransferEvent::Started {
+            id,
+            total: transfer.expected_bytes(),
+        },
+    );
+
+    let mut last_progress = u64::MAX;
+    loop {
+        if cancel.load(Ordering::Acquire) {
+            match transfer.cancel() {
+                Ok(partial) => send_transfer_event(
+                    &sender,
+                    TransferEvent::Cancelled {
+                        id,
+                        resume_available: pending.direction == TransferDirection::Upload
+                            || partial.is_some(),
+                        partial,
+                    },
+                ),
+                Err(error) => send_transfer_event(
+                    &sender,
+                    TransferEvent::Failed {
+                        id,
+                        error: format!("cancel transfer: {error:#}"),
+                        partial: None,
+                        resume_available: pending.direction == TransferDirection::Upload,
+                    },
+                ),
+            }
+            return;
+        }
+
+        let transferred = transfer.transferred_bytes();
+        if transferred != last_progress {
+            last_progress = transferred;
+            send_transfer_event(
+                &sender,
+                TransferEvent::Progress { id, transferred },
+            );
+        }
+
+        match transfer.poll() {
+            Ok(Some(())) => {
+                send_transfer_event(&sender, TransferEvent::Completed { id });
+                return;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(200)),
+            Err(error) => {
+                let mut message = format!("{error:#}");
+                let partial = match transfer.preserve_partial() {
+                    Ok(partial) => partial,
+                    Err(preserve_error) => {
+                        message.push_str(&format!(
+                            "; preserving resumable partial also failed: {preserve_error:#}"
+                        ));
+                        None
+                    }
+                };
+                send_transfer_event(
+                    &sender,
+                    TransferEvent::Failed {
+                        id,
+                        error: message,
+                        resume_available: pending.direction == TransferDirection::Upload
+                            || partial.is_some(),
+                        partial,
+                    },
+                );
+                return;
+            }
+        }
+    }
+}
+
 struct TerminalPane {
     id: u64,
     profile: Session,
@@ -1034,7 +1186,9 @@ struct App {
     load_error: Option<String>,
     paste_policy: PastePolicy,
     pty_bridge: Option<PtyBridgeSender>,
+    transfer_bridge: Option<TransferBridgeSender>,
     next_terminal_id: u64,
+    next_transfer_id: u64,
 }
 
 impl App {
@@ -1067,7 +1221,9 @@ impl App {
             load_error,
             paste_policy: PastePolicy::ConfirmMultiline,
             pty_bridge: None,
+            transfer_bridge: None,
             next_terminal_id: 1,
+            next_transfer_id: 1,
         }
     }
 
