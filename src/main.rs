@@ -171,8 +171,9 @@ fn main() -> Result<()> {
     if ui_mode == UiMode::Iced {
         #[cfg(feature = "iced-ui")]
         {
-            inspirum_terminal::iced_app::run(path.clone(), config.clone())
-                .map_err(|error| anyhow::anyhow!("native Iced window initialization failed: {error}"))?;
+            inspirum_terminal::iced_app::run(path.clone(), config.clone()).map_err(|error| {
+                anyhow::anyhow!("native Iced window initialization failed: {error}")
+            })?;
             return Ok(());
         }
         #[cfg(not(feature = "iced-ui"))]
