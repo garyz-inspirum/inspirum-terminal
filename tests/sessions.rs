@@ -1,8 +1,7 @@
 use inspirum_terminal::{
     Session, SessionImportMode, SshOptions, algorithm_policy_warnings, delete_session,
-    duplicate_session_draft,
-    export_sessions, import_sessions, load_sessions, save_session_edit, save_sessions,
-    session_matches_query, session_profile_key,
+    duplicate_session_draft, export_sessions, import_sessions, load_sessions, save_session_edit,
+    save_sessions, session_matches_query, session_profile_key,
 };
 
 fn session() -> Session {
@@ -583,7 +582,6 @@ fn replace_import_returns_only_validated_import_without_mutating_source_file() {
     assert_eq!(std::fs::read(import_path).unwrap(), import_before);
 }
 
-
 #[test]
 fn algorithm_policy_maps_to_openssh_options_and_inherit_is_empty() {
     let mut s = session();
@@ -603,7 +601,10 @@ fn algorithm_policy_maps_to_openssh_options_and_inherit_is_empty() {
         "KexAlgorithms=curve25519-sha256",
         "HostKeyAlgorithms=ssh-ed25519,rsa-sha2-512",
     ] {
-        assert!(args.iter().any(|arg| arg == expected), "missing {expected}: {args:?}");
+        assert!(
+            args.iter().any(|arg| arg == expected),
+            "missing {expected}: {args:?}"
+        );
     }
 }
 
