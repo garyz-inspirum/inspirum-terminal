@@ -145,6 +145,8 @@ enum Message {
     Open(usize),
     EditProfile(usize),
     SelectTab(usize),
+    SelectNextTab,
+    SelectPreviousTab,
     New,
     Commands,
     About,
@@ -626,6 +628,16 @@ impl App {
                     self.active = index;
                 }
             }
+            Message::SelectNextTab => {
+                if !self.tabs.is_empty() {
+                    self.active = (self.active + 1) % self.tabs.len();
+                }
+            }
+            Message::SelectPreviousTab => {
+                if !self.tabs.is_empty() {
+                    self.active = (self.active + self.tabs.len() - 1) % self.tabs.len();
+                }
+            }
             Message::New => {
                 self.editing_profile = None;
                 self.form = ConnectionForm::default();
@@ -874,6 +886,19 @@ impl App {
                 }
 
                 match key.as_ref() {
+                    keyboard::Key::Named(Named::Tab)
+                        if modifiers.command() && modifiers.shift() =>
+                    {
+                        return self.update(Message::SelectPreviousTab);
+                    }
+                    keyboard::Key::Named(Named::Tab) if modifiers.command() => {
+                        return self.update(Message::SelectNextTab);
+                    }
+                    keyboard::Key::Character("w") if modifiers.command() => {
+                        if !self.tabs.is_empty() {
+                            return self.update(Message::AskClose(self.active));
+                        }
+                    }
                     keyboard::Key::Character("n") if modifiers.command() => {
                         return self.update(Message::New);
                     }
@@ -1450,6 +1475,16 @@ impl App {
                 action(
                     "New connection                      Ctrl / Cmd + N",
                     Message::New
+                )
+                .width(Fill),
+                action(
+                    "Next tab                            Ctrl / Cmd + Tab",
+                    Message::SelectNextTab
+                )
+                .width(Fill),
+                action(
+                    "Previous tab                        Ctrl / Cmd + Shift + Tab",
+                    Message::SelectPreviousTab
                 )
                 .width(Fill),
                 action(
