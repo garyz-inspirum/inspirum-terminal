@@ -1,7 +1,9 @@
 //! Opt-in Linux loopback verification: scripts/test-ssh-integration.sh.
 use egui_term::{BackendCommand, PtyEvent, TerminalBackend};
 use inspirum_terminal::{
-    ControlMasterMode, ProxyKind, Session, SshOptions, scp, sftp,
+    ControlMasterMode, ProxyKind, Session, SshOptions,
+    remote_edit::{RemoteEdit, SaveOutcome},
+    scp, sftp,
     terminal::{
         connect, connect_sftp, control_master_operation, launch_args,
         launch_args_with_proxy_helper, start_tunnels,
@@ -1070,6 +1072,75 @@ fn graphical_sftp_operations_are_verified_conflict_safe_and_cancellable() {
     );
     println!(
         "PASS graphical SFTP browse/mutate, binary transfer, conflict safety, verification, cancellation and upload/download resume"
+    );
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn safe_remote_editor_round_trip_conflict_and_binary_policy() {
+    let p = fixture();
+    let session = fixture_sftp_session();
+    let config = p.join("config");
+    let root = p.join("sftp-root");
+    let remote = "remote-edit.txt";
+    let remote_path = root.join(remote);
+    fs::write(&remote_path, b"one\ntwo\n").unwrap();
+
+    let mut edit = RemoteEdit::open(&session, Some(&config), remote, Some(8))
+        .expect("open remote text editor");
+    assert_eq!(edit.text(), "one\ntwo\n");
+    edit.text_mut().push_str("three\n");
+    assert_eq!(
+        edit.save(&session, Some(&config), false).unwrap(),
+        SaveOutcome::Saved
+    );
+    assert_eq!(fs::read_to_string(&remote_path).unwrap(), "one\ntwo\nthree\n");
+
+    let mut conflicted = RemoteEdit::open(
+        &session,
+        Some(&config),
+        remote,
+        Some(fs::metadata(&remote_path).unwrap().len()),
+    )
+    .unwrap();
+    conflicted.text_mut().push_str("editor-change\n");
+    fs::write(&remote_path, b"changed-by-someone-else\n").unwrap();
+    assert_eq!(
+        conflicted.save(&session, Some(&config), false).unwrap(),
+        SaveOutcome::Conflict
+    );
+    assert_eq!(
+        fs::read_to_string(&remote_path).unwrap(),
+        "changed-by-someone-else\n"
+    );
+    assert_eq!(
+        conflicted.save(&session, Some(&config), true).unwrap(),
+        SaveOutcome::Saved
+    );
+    assert!(
+        fs::read_to_string(&remote_path)
+            .unwrap()
+            .contains("editor-change")
+    );
+
+    let binary = "remote-edit.bin";
+    let binary_path = root.join(binary);
+    fs::write(&binary_path, [0_u8, 1, 2, 0xff, 0x7f]).unwrap();
+    assert!(
+        RemoteEdit::open(
+            &session,
+            Some(&config),
+            binary,
+            Some(fs::metadata(&binary_path).unwrap().len()),
+        )
+        .is_err(),
+        "binary remote file unexpectedly opened for text editing"
+    );
+
+    sftp::delete_remote(&session, Some(&config), remote, false).unwrap();
+    sftp::delete_remote(&session, Some(&config), binary, false).unwrap();
+    println!(
+        "PASS safe remote editor text round-trip, conflict guard, confirmed overwrite and binary rejection"
     );
 }
 
