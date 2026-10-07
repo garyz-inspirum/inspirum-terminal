@@ -41,3 +41,16 @@ Closing the Files view drops its queue; any running transfer is terminated by th
 ## Verification
 
 Portable tests cover SFTP path/list parsing and browser navigation helpers. The isolated Linux sshd fixture covers graphical binary upload/download, remote browse/mkdir/rename/delete, a negative delete, local no-clobber behavior, failed integrity verification preserving an existing file, confirmed overwrite, cancellation with a preserved private partial, and upload/download continuation through `reput`/`reget`.
+
+
+## Local file manager and drag/drop transfers
+
+Issue #61 completes the local side of the graphical SFTP workflow.
+
+The **Local** pane supports native-path navigation, refresh, folder creation, rename, and explicit-confirmation delete. Deletes are deliberately conservative: files and empty directories only; recursive directory deletion is not performed. The path field uses the platform's native `PathBuf` semantics, so Windows drive-letter and UNC paths are preserved rather than rewritten as POSIX paths.
+
+Remote downloads resolve the listed remote filename as exactly one local path component. Dot traversal, path separators, control characters, and absolute-path escapes are rejected before any local destination is created. Existing local destinations still require the existing explicit overwrite confirmation.
+
+Local files can be dropped into the active SFTP browser for upload, but drops are ignored until **Accept dropped files for session '<name>'** is explicitly enabled. The armed session name is shown beside the control so a dropped file cannot silently target an unintended SSH session. Dropped files enter the same transfer queue as button-driven uploads and therefore use the same progress, cancel, retry, resume, integrity, and conflict behavior.
+
+The current egui/native-window integration accepts operating-system file drops into Inspirum Terminal. Native drag-out of a remote entry to the desktop is not exposed by the toolkit path used here, so remote-to-local transfer remains an explicit **Download** action into the visible Local pane. Internal transfer safety is unchanged: overwrite is never automatic and resumable downloads remain staged until final verification and atomic commit.
