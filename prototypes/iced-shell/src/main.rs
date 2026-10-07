@@ -2,7 +2,7 @@
 //! This executable neither reads production profiles nor starts SSH/PTY processes.
 mod model;
 use iced::widget::{button, center, column, container, mouse_area, opaque, operation, pane_grid, row, scrollable, space, stack, text, text_input};
-use iced::{event, keyboard, Border, Color, Element, Fill, Font, Subscription, Task, Theme};
+use iced::{event, keyboard, Border, Color, Element, Fill, Font, Task, Theme};
 use model::{ConnectionForm, Profile};
 
 const BG: Color = Color::from_rgb8(14, 18, 25);
@@ -19,15 +19,16 @@ fn main() -> iced::Result {
         .title("Inspirum - Iced design preview")
         .theme(|_: &App| Theme::custom("Inspirum".into(), iced::theme::Palette {
             background: BG, text: FG, primary: BLUE, success: GREEN,
+            warning: Color::from_rgb8(240, 190, 100),
             danger: Color::from_rgb8(255, 138, 151),
         }))
-        .default_text_size(14)
+        .settings(iced::Settings { default_text_size: iced::Pixels(14.0), ..Default::default() })
         .window(iced::window::Settings {
             size: iced::Size::new(1280.0, 800.0),
             min_size: Some(iced::Size::new(960.0, 640.0)),
             ..Default::default()
         })
-        .scale_factor(|app: &App| app.scale)
+        .scale_factor(|app: &App| app.scale as f32)
         .subscription(|_: &App| event::listen().map(Message::Event))
         .run()
 }
