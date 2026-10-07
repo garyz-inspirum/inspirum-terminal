@@ -190,8 +190,7 @@ impl TerminalBackend {
         pty_event_proxy_sender: Sender<(u64, PtyEvent)>,
         settings: BackendSettings,
     ) -> Result<Self> {
-        let wake: Arc<dyn Fn() + Send + Sync> =
-            Arc::new(move || app_context.request_repaint());
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || app_context.request_repaint());
         Self::new_with_waker(id, pty_event_proxy_sender, settings, wake)
     }
 
@@ -225,8 +224,7 @@ impl TerminalBackend {
     where
         F: FnOnce(thread::Builder, Box<dyn FnOnce() + Send + 'static>) -> Result<JoinHandle<()>>,
     {
-        let wake: Arc<dyn Fn() + Send + Sync> =
-            Arc::new(move || app_context.request_repaint());
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || app_context.request_repaint());
         Self::new_with_waker_and_subscription_spawner(
             id,
             pty_event_proxy_sender,
