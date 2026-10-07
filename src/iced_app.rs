@@ -257,10 +257,7 @@ fn run_transfer_worker(
         let transferred = transfer.transferred_bytes();
         if transferred != last_progress {
             last_progress = transferred;
-            send_transfer_event(
-                &sender,
-                TransferEvent::Progress { id, transferred },
-            );
+            send_transfer_event(&sender, TransferEvent::Progress { id, transferred });
         }
 
         match transfer.poll() {
@@ -1602,8 +1599,8 @@ impl App {
 
         Task::perform(
             async move {
-                let metadata =
-                    std::fs::metadata(&local).map_err(|error| format!("read upload source: {error}"))?;
+                let metadata = std::fs::metadata(&local)
+                    .map_err(|error| format!("read upload source: {error}"))?;
                 if !metadata.is_file() {
                     return Err("upload source must be a regular file".into());
                 }
@@ -1714,15 +1711,7 @@ impl App {
             return;
         };
 
-        let (
-            id,
-            pending,
-            overwrite,
-            resume_path,
-            resume_requested,
-            cancel,
-            config,
-        ) = {
+        let (id, pending, overwrite, resume_path, resume_requested, cancel, config) = {
             let job = &mut self.files.transfers[index];
             job.state = TransferJobState::Running;
             job.error.clear();
@@ -1814,12 +1803,15 @@ impl App {
             | TransferEvent::Progress { id, .. }
             | TransferEvent::Completed { id }
             | TransferEvent::Failed { id, .. }
-            | TransferEvent::Cancelled { id, .. } => (*id, matches!(
-                event,
-                TransferEvent::Completed { .. }
-                    | TransferEvent::Failed { .. }
-                    | TransferEvent::Cancelled { .. }
-            )),
+            | TransferEvent::Cancelled { id, .. } => (
+                *id,
+                matches!(
+                    event,
+                    TransferEvent::Completed { .. }
+                        | TransferEvent::Failed { .. }
+                        | TransferEvent::Cancelled { .. }
+                ),
+            ),
         };
         let Some(job) = self.files.transfers.iter_mut().find(|job| job.id == id) else {
             return false;
@@ -2804,8 +2796,8 @@ impl App {
                     );
                 } else {
                     let selected = self.files.selected_local.as_ref() == Some(&entry.path);
-                    let mut file = action(label, Message::FilesSelectLocal(entry.path.clone()))
-                        .width(Fill);
+                    let mut file =
+                        action(label, Message::FilesSelectLocal(entry.path.clone())).width(Fill);
                     if selected {
                         file = file.style(selected_button);
                     }
@@ -2908,9 +2900,14 @@ impl App {
         let active_session = self.files.session_key.as_deref();
         let mut transfer_list = column![].spacing(5);
         let mut visible_transfers = 0usize;
-        for job in self.files.transfers.iter().rev().filter(|job| {
-            active_session == Some(job.pending.session_key.as_str())
-        }).take(6) {
+        for job in self
+            .files
+            .transfers
+            .iter()
+            .rev()
+            .filter(|job| active_session == Some(job.pending.session_key.as_str()))
+            .take(6)
+        {
             visible_transfers += 1;
             let state = match job.state {
                 TransferJobState::Queued => "Queued",
@@ -2955,11 +2952,13 @@ impl App {
                                 format!("{state}: {}", job.error)
                             })
                             .size(11)
-                            .color(if job.state == TransferJobState::Failed {
-                                DANGER
-                            } else {
-                                MUTED
-                            }),
+                            .color(
+                                if job.state == TransferJobState::Failed {
+                                    DANGER
+                                } else {
+                                    MUTED
+                                }
+                            ),
                         ]
                         .spacing(2),
                         space::horizontal(),
@@ -2973,9 +2972,8 @@ impl App {
             );
         }
         if visible_transfers == 0 {
-            transfer_list = transfer_list.push(
-                text("No transfers for this session.").size(11).color(MUTED)
-            );
+            transfer_list =
+                transfer_list.push(text("No transfers for this session.").size(11).color(MUTED));
         }
 
         container(
