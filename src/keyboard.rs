@@ -8,6 +8,7 @@
 pub enum ShortcutKey {
     Enter,
     K,
+    P,
     F,
     W,
     ArrowLeft,
@@ -25,6 +26,7 @@ pub struct ShortcutModifiers {
 pub enum ShortcutAction {
     Connect,
     QuickSwitch,
+    CommandPalette,
     Search,
     CloseActive,
     FocusPreviousPane,
@@ -57,6 +59,14 @@ pub fn action_for(
                 alt: false,
             },
         ) => Some(ShortcutAction::QuickSwitch),
+        (
+            ShortcutKey::P,
+            ShortcutModifiers {
+                command: true,
+                shift: true,
+                alt: false,
+            },
+        ) => Some(ShortcutAction::CommandPalette),
         (
             ShortcutKey::F,
             ShortcutModifiers {
@@ -153,6 +163,18 @@ mod tests {
         );
         assert_eq!(
             action_for(
+                ShortcutKey::P,
+                ShortcutModifiers {
+                    command: true,
+                    shift: true,
+                    alt: false,
+                },
+                false,
+            ),
+            Some(ShortcutAction::CommandPalette)
+        );
+        assert_eq!(
+            action_for(
                 ShortcutKey::F,
                 ShortcutModifiers {
                     command: true,
@@ -187,6 +209,14 @@ mod tests {
             (ShortcutKey::Enter, command()),
             (
                 ShortcutKey::K,
+                ShortcutModifiers {
+                    command: true,
+                    shift: true,
+                    alt: false,
+                },
+            ),
+            (
+                ShortcutKey::P,
                 ShortcutModifiers {
                     command: true,
                     shift: true,
