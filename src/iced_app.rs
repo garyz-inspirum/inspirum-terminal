@@ -5,7 +5,7 @@
 //! host-key, argv, paste, process-lifecycle, or transfer safeguards.
 use crate::{
     Session, load_sessions, save_session_edit, save_sessions, session_matches_query,
-    session_profile_key, terminal,
+    session_profile_key, sftp, terminal,
     terminal_ux::{self, PasteDecision, PastePolicy},
 };
 use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
@@ -133,6 +133,80 @@ impl Workspace {
     }
 }
 
+#[derive(Clone, Debug)]
+struct LocalFileEntry {
+    path: PathBuf,
+    name: String,
+    is_dir: bool,
+    size: Option<u64>,
+}
+
+struct FilesState {
+    session_key: Option<String>,
+    local_dir: PathBuf,
+    remote_dir: String,
+    local_entries: Vec<LocalFileEntry>,
+    remote_entries: Vec<sftp::RemoteEntry>,
+    local_loading: bool,
+    remote_loading: bool,
+    local_error: Option<String>,
+    remote_error: Option<String>,
+    local_generation: u64,
+    remote_generation: u64,
+}
+
+impl FilesState {
+    fn new() -> Self {
+        Self {
+            session_key: None,
+            local_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            remote_dir: ".".into(),
+            local_entries: Vec::new(),
+            remote_entries: Vec::new(),
+            local_loading: false,
+            remote_loading: false,
+            local_error: None,
+            remote_error: None,
+            local_generation: 0,
+            remote_generation: 0,
+        }
+    }
+}
+
+fn remote_parent(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed == "." || trimmed == "/" {
+        return if trimmed == "/" { "/".into() } else { ".".into() };
+    }
+    match trimmed.rsplit_once('/') {
+        Some(("", _)) => "/".into(),
+        Some((parent, _)) if !parent.is_empty() => parent.into(),
+        _ => ".".into(),
+    }
+}
+
+fn display_leaf(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_control() { '�' } else { ch })
+        .collect()
+}
+
+fn format_file_size(size: Option<u64>) -> String {
+    let Some(size) = size else {
+        return String::new();
+    };
+    if size >= 1_073_741_824 {
+        format!("{:.1} GiB", size as f64 / 1_073_741_824.0)
+    } else if size >= 1_048_576 {
+        format!("{:.1} MiB", size as f64 / 1_048_576.0)
+    } else if size >= 1024 {
+        format!("{:.1} KiB", size as f64 / 1024.0)
+    } else {
+        format!("{size} B")
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Dock {
     Terminal,
@@ -163,6 +237,13 @@ enum Message {
     AskClose(usize),
     ConfirmClose(usize),
     ToggleFiles,
+    FilesRefresh,
+    FilesLocalUp,
+    FilesRemoteUp,
+    FilesOpenLocal(PathBuf),
+    FilesOpenRemote(String),
+    FilesLocalLoaded(u64, Result<Vec<LocalFileEntry>, String>),
+    FilesRemoteLoaded(u64, Result<Vec<sftp::RemoteEntry>, String>),
     ToggleSidebar,
     RequestPaste,
     ClipboardRead(u64, Option<String>),
@@ -809,6 +890,7 @@ struct App {
     dock: pane_grid::State<Dock>,
     terminal_dock: pane_grid::Pane,
     files_dock: Option<pane_grid::Pane>,
+    files: FilesState,
     sidebar_collapsed: bool,
     form: ConnectionForm,
     editing_profile: Option<String>,
@@ -841,6 +923,7 @@ impl App {
             dock,
             terminal_dock,
             files_dock: None,
+            files: FilesState::new(),
             sidebar_collapsed: false,
             form: ConnectionForm::default(),
             editing_profile: None,
@@ -1118,6 +1201,88 @@ impl App {
                 self.dock.resize(split, 0.62);
             }
         }
+    }
+
+    fn prepare_files_session(&mut self) {
+        let Some(profile) = self.tabs.get(self.active).map(|tab| &tab.profile) else {
+            self.files.session_key = None;
+            return;
+        };
+        let key = session_profile_key(profile);
+        if self.files.session_key.as_deref() != Some(key.as_str()) {
+            self.files.session_key = Some(key);
+            self.files.remote_dir = ".".into();
+            self.files.remote_entries.clear();
+            self.files.remote_error = None;
+            self.files.remote_generation = self.files.remote_generation.wrapping_add(1);
+        }
+    }
+
+    fn reload_local_files(&mut self) -> Task<Message> {
+        self.files.local_loading = true;
+        self.files.local_error = None;
+        self.files.local_generation = self.files.local_generation.wrapping_add(1);
+        let generation = self.files.local_generation;
+        let directory = self.files.local_dir.clone();
+
+        Task::perform(
+            async move {
+                sftp::local_entries(&directory)
+                    .map(|paths| {
+                        paths
+                            .into_iter()
+                            .map(|path| {
+                                let metadata = std::fs::symlink_metadata(&path).ok();
+                                let is_dir = metadata
+                                    .as_ref()
+                                    .is_some_and(std::fs::Metadata::is_dir);
+                                let size = metadata
+                                    .as_ref()
+                                    .filter(|metadata| metadata.is_file())
+                                    .map(std::fs::Metadata::len);
+                                let name = path
+                                    .file_name()
+                                    .map(|value| value.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                                LocalFileEntry {
+                                    path,
+                                    name,
+                                    is_dir,
+                                    size,
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .map_err(|error| format!("{error:#}"))
+            },
+            move |result| Message::FilesLocalLoaded(generation, result),
+        )
+    }
+
+    fn reload_remote_files(&mut self) -> Task<Message> {
+        let Some(profile) = self.tabs.get(self.active).map(|tab| tab.profile.clone()) else {
+            return Task::none();
+        };
+        self.prepare_files_session();
+        self.files.remote_loading = true;
+        self.files.remote_error = None;
+        self.files.remote_generation = self.files.remote_generation.wrapping_add(1);
+        let generation = self.files.remote_generation;
+        let directory = self.files.remote_dir.clone();
+        let config = self.ssh_config.clone();
+
+        Task::perform(
+            async move {
+                sftp::list_remote(&profile, config.as_deref(), &directory)
+                    .map_err(|error| format!("{error:#}"))
+            },
+            move |result| Message::FilesRemoteLoaded(generation, result),
+        )
+    }
+
+    fn reload_files(&mut self) -> Task<Message> {
+        self.prepare_files_session();
+        Task::batch([self.reload_local_files(), self.reload_remote_files()])
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
