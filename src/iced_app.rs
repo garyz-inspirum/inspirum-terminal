@@ -4,8 +4,9 @@
 //! Live PTY rendering is introduced separately so the GUI migration cannot bypass
 //! host-key, argv, paste, process-lifecycle, or transfer safeguards.
 use crate::{
-    Session, load_sessions, save_session_edit, save_sessions, session_matches_query,
-    remote_edit::{self, SaveOutcome}, session_profile_key, sftp, terminal,
+    Session, load_sessions,
+    remote_edit::{self, SaveOutcome},
+    save_session_edit, save_sessions, session_matches_query, session_profile_key, sftp, terminal,
     terminal_ux::{self, PasteDecision, PastePolicy},
 };
 use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
@@ -529,7 +530,10 @@ enum Dialog {
     Connection,
     Commands,
     Close(usize),
-    PasteConfirm { id: u64, text: String },
+    PasteConfirm {
+        id: u64,
+        text: String,
+    },
     FileOverwrite(PendingTransfer),
     FileDeleteLocal(PathBuf),
     FileDeleteRemote {
@@ -2082,7 +2086,8 @@ impl App {
                     self.status = "Select a remote file to delete.".into();
                     return Task::none();
                 };
-                let Some(session) = self.tabs.get(self.active).map(|tab| tab.profile.clone()) else {
+                let Some(session) = self.tabs.get(self.active).map(|tab| tab.profile.clone())
+                else {
                     return Task::none();
                 };
                 let session_key = session_profile_key(&session);
@@ -2359,7 +2364,9 @@ impl App {
                         return Task::perform(
                             async move {
                                 sftp::rename_local(&path, &name)
-                                    .map(|target| format!("Renamed local {}", target.to_string_lossy()))
+                                    .map(|target| {
+                                        format!("Renamed local {}", target.to_string_lossy())
+                                    })
                                     .map_err(|error| format!("{error:#}"))
                             },
                             |result| Message::FilesMutationFinished {
