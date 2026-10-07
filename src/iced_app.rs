@@ -2156,35 +2156,162 @@ impl App {
         } else {
             format!("{}@{}", profile.user, profile.host)
         };
+
+        let mut local_list = column![].spacing(3);
+        if self.files.local_loading {
+            local_list = local_list.push(text("Loading local directory...").size(12).color(MUTED));
+        } else if let Some(error) = &self.files.local_error {
+            local_list = local_list.push(text(error).size(12).color(DANGER));
+        } else if self.files.local_entries.is_empty() {
+            local_list = local_list.push(text("Directory is empty.").size(12).color(MUTED));
+        } else {
+            for entry in &self.files.local_entries {
+                let kind = if entry.is_dir { "DIR " } else { "    " };
+                let size = if entry.is_dir {
+                    String::new()
+                } else {
+                    format_file_size(entry.size)
+                };
+                let label = format!(
+                    "{kind}{:<38} {:>10}",
+                    display_leaf(&entry.name),
+                    size
+                );
+                if entry.is_dir {
+                    local_list = local_list.push(
+                        action(label, Message::FilesOpenLocal(entry.path.clone()))
+                            .width(Fill),
+                    );
+                } else {
+                    local_list = local_list.push(
+                        container(
+                            row![
+                                text(display_leaf(&entry.name))
+                                    .font(Font::MONOSPACE)
+                                    .size(12),
+                                space::horizontal(),
+                                text(size).size(11).color(MUTED),
+                            ]
+                            .align_y(iced::Center),
+                        )
+                        .padding([6, 10])
+                        .width(Fill),
+                    );
+                }
+            }
+        }
+
+        let mut remote_list = column![].spacing(3);
+        if self.files.remote_loading {
+            remote_list =
+                remote_list.push(text("Loading remote directory...").size(12).color(MUTED));
+        } else if let Some(error) = &self.files.remote_error {
+            remote_list = remote_list.push(text(error).size(12).color(DANGER));
+        } else if self.files.remote_entries.is_empty() {
+            remote_list = remote_list.push(text("Directory is empty.").size(12).color(MUTED));
+        } else {
+            for entry in &self.files.remote_entries {
+                let size = if entry.is_dir {
+                    String::new()
+                } else {
+                    format_file_size(entry.size)
+                };
+                if entry.is_dir {
+                    let path = sftp::join_remote(&self.files.remote_dir, &entry.name);
+                    remote_list = remote_list.push(
+                        action(
+                            format!("DIR  {}", display_leaf(&entry.name)),
+                            Message::FilesOpenRemote(path),
+                        )
+                        .width(Fill),
+                    );
+                } else {
+                    remote_list = remote_list.push(
+                        container(
+                            row![
+                                text(display_leaf(&entry.name))
+                                    .font(Font::MONOSPACE)
+                                    .size(12),
+                                space::horizontal(),
+                                text(size).size(11).color(MUTED),
+                            ]
+                            .align_y(iced::Center),
+                        )
+                        .padding([6, 10])
+                        .width(Fill),
+                    );
+                }
+            }
+        }
+
+        let local_panel = container(
+            column![
+                row![
+                    text("LOCAL").size(11).color(MUTED),
+                    text(self.files.local_dir.to_string_lossy().into_owned())
+                        .size(12)
+                        .color(FG),
+                    space::horizontal(),
+                    action("Up", Message::FilesLocalUp),
+                ]
+                .spacing(8)
+                .align_y(iced::Center),
+                scrollable(local_list).height(Fill),
+            ]
+            .spacing(8),
+        )
+        .padding(10)
+        .width(Fill)
+        .height(Fill)
+        .style(card);
+
+        let remote_panel = container(
+            column![
+                row![
+                    text("REMOTE").size(11).color(BLUE),
+                    text(&self.files.remote_dir).size(12).color(FG),
+                    space::horizontal(),
+                    action("Up", Message::FilesRemoteUp),
+                ]
+                .spacing(8)
+                .align_y(iced::Center),
+                scrollable(remote_list).height(Fill),
+            ]
+            .spacing(8),
+        )
+        .padding(10)
+        .width(Fill)
+        .height(Fill)
+        .style(card);
+
+        let activity = if self.files.local_loading || self.files.remote_loading {
+            "Loading"
+        } else if self.files.local_error.is_some() || self.files.remote_error.is_some() {
+            "Needs attention"
+        } else {
+            "Ready"
+        };
+
         container(
             column![
                 row![
                     text("Files").size(16),
                     text(format!("Target: {target}")).size(12).color(BLUE),
+                    text(activity).size(11).color(MUTED),
                     space::horizontal(),
-                    text("SFTP bridge pending").size(12).color(MUTED)
+                    action("Refresh", Message::FilesRefresh),
                 ]
                 .spacing(12)
                 .align_y(iced::Center),
-                container(
-                    column![
-                        text("No fixture files are shown in the production shell.")
-                            .size(14),
-                        text("The existing SFTP/transfer implementation will be attached here after the live terminal bridge, preserving per-session ownership and transfer safeguards.")
-                            .size(13)
-                            .color(MUTED),
-                    ]
-                    .spacing(10)
-                )
-                .padding(16)
-                .width(Fill)
-                .height(Fill)
-                .style(card),
+                row![local_panel, remote_panel].spacing(8).height(Fill),
+                text("Navigation is live through the existing validated SFTP path. Transfer and destructive actions remain disabled here until their existing overwrite/delete confirmations are migrated.")
+                    .size(11)
+                    .color(MUTED),
             ]
-            .spacing(10)
+            .spacing(8)
             .height(Fill),
         )
-        .padding(12)
+        .padding(10)
         .height(Fill)
         .width(Fill)
         .style(card)
