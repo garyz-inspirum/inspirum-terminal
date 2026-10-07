@@ -323,9 +323,11 @@ impl SftpBrowser {
                         close = true;
                     }
                 }
-                if ui.small_button("Save").on_hover_text(
-                    "Re-check remote contents, then stage and replace explicitly",
-                ).clicked() {
+                if ui
+                    .small_button("Save")
+                    .on_hover_text("Re-check remote contents, then stage and replace explicitly")
+                    .clicked()
+                {
                     save = true;
                 }
             });
@@ -516,12 +518,18 @@ impl SftpBrowser {
         ui.horizontal(|ui| {
             ui.strong("LOCAL");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("↻").on_hover_text("Refresh local directory").clicked()
+                if ui
+                    .small_button("↻")
+                    .on_hover_text("Refresh local directory")
+                    .clicked()
                     && let Err(error) = self.refresh_local()
                 {
                     self.error = format!("{error:#}");
                 }
-                if ui.small_button("↑").on_hover_text("Parent directory").clicked()
+                if ui
+                    .small_button("↑")
+                    .on_hover_text("Parent directory")
+                    .clicked()
                     && let Some(parent) = Path::new(self.local_path.trim()).parent()
                 {
                     self.local_path = parent.to_string_lossy().into_owned();
@@ -650,12 +658,19 @@ impl SftpBrowser {
         ui.horizontal(|ui| {
             ui.strong("REMOTE");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("↻").on_hover_text("Refresh remote directory").clicked()
+                if ui
+                    .small_button("↻")
+                    .on_hover_text("Refresh remote directory")
+                    .clicked()
                     && let Err(error) = self.refresh_remote()
                 {
                     self.error = format!("{error:#}");
                 }
-                if ui.small_button("↑").on_hover_text("Parent directory").clicked() {
+                if ui
+                    .small_button("↑")
+                    .on_hover_text("Parent directory")
+                    .clicked()
+                {
                     self.remote_path = Self::remote_parent(self.remote_path.trim());
                     if let Err(error) = self.refresh_remote() {
                         self.error = format!("{error:#}");
@@ -719,7 +734,10 @@ impl SftpBrowser {
             {
                 self.error = format!("{error:#}");
             }
-            if ui.small_button("Edit").on_hover_text("Open selected remote text file").clicked()
+            if ui
+                .small_button("Edit")
+                .on_hover_text("Open selected remote text file")
+                .clicked()
                 && let Err(error) = self.open_remote_editor()
             {
                 self.error = format!("{error:#}");
@@ -751,24 +769,17 @@ impl SftpBrowser {
                     ui.text_edit_singleline(&mut self.rename_name);
                     if ui.button("Apply").clicked() {
                         let result = (|| -> anyhow::Result<()> {
-                            let selected = self
-                                .selected_remote
-                                .clone()
-                                .ok_or_else(|| anyhow::anyhow!("select a remote entry to rename"))?;
+                            let selected = self.selected_remote.clone().ok_or_else(|| {
+                                anyhow::anyhow!("select a remote entry to rename")
+                            })?;
                             anyhow::ensure!(
                                 !self.rename_name.trim().is_empty(),
                                 "new name is required"
                             );
-                            let from =
-                                sftp::join_remote(self.remote_path.trim(), &selected.name);
+                            let from = sftp::join_remote(self.remote_path.trim(), &selected.name);
                             let to =
                                 sftp::join_remote(self.remote_path.trim(), self.rename_name.trim());
-                            sftp::rename_remote(
-                                &self.session,
-                                self.config.as_deref(),
-                                &from,
-                                &to,
-                            )?;
+                            sftp::rename_remote(&self.session, self.config.as_deref(), &from, &to)?;
                             self.refresh_remote()
                         })();
                         if let Err(error) = result {
@@ -968,7 +979,6 @@ impl SftpBrowser {
                 .show(ui, |ui| self.render_queue(ui));
         }
     }
-
 }
 
 #[cfg(test)]
