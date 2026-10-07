@@ -67,6 +67,10 @@ pub struct SftpBrowser {
     selected_remote: Option<RemoteEntry>,
     mkdir_name: String,
     rename_name: String,
+    local_mkdir_name: String,
+    local_rename_name: String,
+    local_delete_confirm: bool,
+    drop_upload_enabled: bool,
     conflict: Option<Conflict>,
     delete_confirm: bool,
     jobs: Vec<TransferJob>,
@@ -88,6 +92,10 @@ impl SftpBrowser {
             selected_remote: None,
             mkdir_name: String::new(),
             rename_name: String::new(),
+            local_mkdir_name: String::new(),
+            local_rename_name: String::new(),
+            local_delete_confirm: false,
+            drop_upload_enabled: false,
             conflict: None,
             delete_confirm: false,
             jobs: Vec::new(),
@@ -162,7 +170,7 @@ impl SftpBrowser {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("select a remote file to download"))?;
         anyhow::ensure!(!remote.is_dir, "select a remote file, not a directory");
-        let local = PathBuf::from(self.local_path.trim()).join(&remote.name);
+        let local = sftp::local_destination(Path::new(self.local_path.trim()), &remote.name)?;
         let pending = Conflict {
             direction: Direction::Download,
             local: local.clone(),
@@ -177,17 +185,14 @@ impl SftpBrowser {
         Ok(())
     }
 
-    fn request_upload(&mut self) -> anyhow::Result<()> {
-        let local = self
-            .selected_local
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("select a local file to upload"))?;
-        anyhow::ensure!(local.is_file(), "select a local file, not a directory");
+    fn request_upload_path(&mut self, local: PathBuf) -> anyhow::Result<()> {
+        anyhow::ensure!(local.is_file(), "upload source must be a regular file");
         let name = local
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| anyhow::anyhow!("local filename must be valid Unicode"))?
             .to_owned();
+        sftp::validate_local_leaf(&name)?;
         let remote = sftp::join_remote(self.remote_path.trim(), &name);
         let pending = Conflict {
             direction: Direction::Upload,
@@ -201,6 +206,41 @@ impl SftpBrowser {
             self.queue_job(pending, false);
         }
         Ok(())
+    }
+
+    fn request_upload(&mut self) -> anyhow::Result<()> {
+        let local = self
+            .selected_local
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("select a local file to upload"))?;
+        self.request_upload_path(local)
+    }
+
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        if !self.drop_upload_enabled {
+            return;
+        }
+        let dropped = ctx.input(|input| input.raw.dropped_files.clone());
+        if dropped.is_empty() {
+            return;
+        }
+        let mut queued = 0usize;
+        for file in dropped {
+            let Some(path) = file.path else {
+                self.error = "Dropped item has no local filesystem path.".into();
+                continue;
+            };
+            match self.request_upload_path(path) {
+                Ok(()) => queued += 1,
+                Err(error) => self.error = format!("Cannot queue dropped file: {error:#}"),
+            }
+        }
+        if queued > 0 {
+            self.notice = format!(
+                "Queued {queued} dropped file(s) for SFTP session '{}'.",
+                self.session.name
+            );
+        }
     }
 
     fn start_job(&mut self, index: usize) {
@@ -367,7 +407,12 @@ impl SftpBrowser {
                     let response =
                         ui.selectable_label(self.selected_local.as_ref() == Some(path), label);
                     if response.clicked() {
+                        self.local_rename_name = path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_default();
                         self.selected_local = Some(path.clone());
+                        self.local_delete_confirm = false;
                     }
                     if response.double_clicked() && path.is_dir() {
                         enter = Some(path.clone());
@@ -380,6 +425,72 @@ impl SftpBrowser {
                     }
                 }
             });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("New folder");
+            ui.text_edit_singleline(&mut self.local_mkdir_name);
+            if ui.button("Create").clicked() {
+                let result = sftp::mkdir_local(
+                    Path::new(self.local_path.trim()),
+                    self.local_mkdir_name.trim(),
+                );
+                match result {
+                    Ok(_) => {
+                        self.local_mkdir_name.clear();
+                        self.error.clear();
+                        let _ = self.refresh_local();
+                    }
+                    Err(error) => self.error = format!("{error:#}"),
+                }
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Rename selected");
+            ui.text_edit_singleline(&mut self.local_rename_name);
+            if ui.button("Rename").clicked() {
+                let result = (|| -> anyhow::Result<()> {
+                    let selected = self
+                        .selected_local
+                        .clone()
+                        .ok_or_else(|| anyhow::anyhow!("select a local entry to rename"))?;
+                    sftp::rename_local(&selected, self.local_rename_name.trim())?;
+                    self.local_rename_name.clear();
+                    self.refresh_local()
+                })();
+                if let Err(error) = result {
+                    self.error = format!("{error:#}");
+                }
+            }
+            if ui.button("Delete…").clicked() {
+                self.local_delete_confirm = self.selected_local.is_some();
+            }
+        });
+
+        if self.local_delete_confirm
+            && let Some(selected) = self.selected_local.clone()
+        {
+            ui.group(|ui| {
+                ui.label(format!("Delete local {:?}?", selected.file_name().unwrap_or_default()));
+                ui.small("Only files and empty directories are deleted. This action requires explicit confirmation.");
+                ui.horizontal(|ui| {
+                    if ui.button("Confirm delete").clicked() {
+                        match sftp::delete_local(&selected) {
+                            Ok(()) => {
+                                self.local_delete_confirm = false;
+                                self.error.clear();
+                                let _ = self.refresh_local();
+                            }
+                            Err(error) => self.error = format!("{error:#}"),
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.local_delete_confirm = false;
+                    }
+                });
+            });
+        }
     }
 
     fn render_remote(&mut self, ui: &mut egui::Ui) {
@@ -635,10 +746,18 @@ impl SftpBrowser {
 
     pub fn ui(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         self.tick_transfers(ctx);
+        self.handle_dropped_files(ctx);
         ui.heading(format!("SFTP files · {}", self.session.name));
         ui.small(
             "Uses the same OpenSSH host-key, authentication, config, proxy and ControlMaster policy as this profile. Credentials are not stored.",
         );
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(
+                &mut self.drop_upload_enabled,
+                format!("Accept dropped files for session '{}'", self.session.name),
+            );
+            ui.small("Drops are ignored until this session-specific target is explicitly enabled.");
+        });
         ui.columns(2, |columns| {
             self.render_local(&mut columns[0]);
             self.render_remote(&mut columns[1]);
