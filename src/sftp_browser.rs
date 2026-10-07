@@ -342,10 +342,10 @@ impl SftpBrowser {
                     "Overwrite is not automatic. Confirm only if you intend to replace the newer remote contents.",
                 );
                 ui.horizontal(|ui| {
-                    if ui.button("Overwrite changed remote file").clicked() {
-                        if let Err(error) = self.save_remote_editor(true) {
-                            self.error = format!("{error:#}");
-                        }
+                    if ui.button("Overwrite changed remote file").clicked()
+                        && let Err(error) = self.save_remote_editor(true)
+                    {
+                        self.error = format!("{error:#}");
                     }
                     if ui.button("Keep editor open").clicked() {
                         self.remote_editor_conflict = false;
