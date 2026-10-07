@@ -30,7 +30,12 @@ fn main() -> iced::Result {
             ..Default::default()
         })
         .scale_factor(|app: &App| app.scale as f32)
-        .subscription(|_: &App| event::listen().map(Message::Event))
+        // Modal Escape and focus traversal must also see keys captured by inputs.
+        // Text entry remains handled by the input widget, never replayed here.
+        .subscription(|_: &App| event::listen_with(|event, _, _| match event {
+            iced::Event::Keyboard(_) => Some(Message::Event(event)),
+            _ => None,
+        }))
         .run()
 }
 
@@ -279,7 +284,9 @@ impl App {
                 if self.form.advanced {
                     form = form.push(container(text("Production mapping: authentication, identity file, proxy, tunnels and SSH policy belong here. These are not wired in this preview; do not enter credentials.").size(13).color(MUTED)).padding(12).style(card));
                 }
-                if let Some(error) = &self.form.error { form = form.push(text(error).color(Color::from_rgb8(255, 153, 164))); }
+                if let Some(error) = &self.form.error {
+                    form = form.push(text(error).color(Color::from_rgb8(255, 153, 164)));
+                }
                 form.push(text("DESIGN PREVIEW: creates a sample session only. No SSH connection.").size(12).color(BLUE))
                     .push(row![space::horizontal(), action("Cancel", Message::CloseDialog), action("Open preview", Message::Submit).style(primary)].spacing(10)).into()
             }
