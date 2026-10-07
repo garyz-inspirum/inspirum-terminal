@@ -17,7 +17,7 @@ const GREEN: Color = Color::from_rgb8(113, 217, 171);
 fn main() -> iced::Result {
     iced::application(App::boot, App::update, App::view)
         .title("Inspirum - Iced design preview")
-        .theme(|_: &App| Theme::custom("Inspirum".into(), iced::theme::Palette {
+        .theme(|_: &App| Theme::custom("Inspirum", iced::theme::Palette {
             background: BG, text: FG, primary: BLUE, success: GREEN,
             warning: Color::from_rgb8(240, 190, 100),
             danger: Color::from_rgb8(255, 138, 151),
