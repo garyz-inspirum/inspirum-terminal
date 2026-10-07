@@ -89,6 +89,7 @@ jobs:
           cp prototypes/iced-shell/README.md preview-artifacts/README.md
           cp docs/design/gui-redesign.md preview-artifacts/GUI-DESIGN.md
           cp prototypes/iced-shell/Cargo.lock preview-artifacts/source/ 2>/dev/null || true
+          cp Cargo.lock preview-artifacts/production-Cargo.lock 2>/dev/null || true
           cp prototypes/iced-shell/target/debug/inspirum-iced-preview* preview-artifacts/ 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         if: always()
