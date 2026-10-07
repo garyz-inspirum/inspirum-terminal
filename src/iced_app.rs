@@ -286,7 +286,10 @@ impl ConnectionForm {
             name: session.name.clone(),
             host: session.host.clone(),
             user: session.user.clone(),
-            port: session.port.map(|value| value.to_string()).unwrap_or_default(),
+            port: session
+                .port
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
             folder: session.folder.clone(),
             identity_file: session.ssh.identity_file.clone(),
             proxy_jump: session.ssh.proxy_jump.clone(),
@@ -1610,10 +1613,7 @@ mod tests {
             PasteDecision::Send
         );
         assert_eq!(
-            terminal_ux::classify_paste(
-                PastePolicy::ConfirmMultiline,
-                "echo first\necho second"
-            ),
+            terminal_ux::classify_paste(PastePolicy::ConfirmMultiline, "echo first\necho second"),
             PasteDecision::Confirm
         );
         assert_eq!(
