@@ -532,9 +532,9 @@ fn main() {
         assert!(text.contains("public-key=enabled, password=disabled"));
         assert!(text.contains("local=1, remote=0, dynamic=0"));
         assert!(text.contains("authentication=environment"));
-        assert!(text.contains(
-            "Algorithm overrides: ciphers=true, macs=true, kex=true, host-key=true"
-        ));
+        assert!(
+            text.contains("Algorithm overrides: ciphers=true, macs=true, kex=true, host-key=true")
+        );
     }
 
     #[test]
