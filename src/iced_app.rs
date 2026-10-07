@@ -2676,6 +2676,18 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        let active_transfers = self
+            .files
+            .transfers
+            .iter()
+            .filter(|job| {
+                matches!(
+                    job.state,
+                    TransferJobState::Queued | TransferJobState::Running
+                )
+            })
+            .count();
+
         let header = container(
             row![
                 container(text(">_").size(21).color(BLUE))
@@ -2700,6 +2712,13 @@ impl App {
                 text("ICED").size(12).color(BLUE),
                 text(&self.status).size(12).color(MUTED),
                 space::horizontal(),
+                if active_transfers > 0 {
+                    text(format!("{active_transfers} active transfer(s)"))
+                        .size(12)
+                        .color(BLUE)
+                } else {
+                    text("").size(12)
+                },
                 text(format!(
                     "{} saved profiles{}",
                     self.profiles.len(),
@@ -3665,7 +3684,7 @@ impl App {
             }
             Dialog::About => column![
                 text("Production Iced migration").size(24),
-                text("This is no longer the fixture-only design preview. The shell reads and writes the real validated Inspirum profile store, opens live SSH sessions through the existing OpenSSH/PTY backend, and uses the accepted WindTerm-style workspace structure.\n\nClipboard paste now reuses the existing terminal safety policy: NUL-containing payloads are blocked and multiline paste requires explicit review and confirmation. Exited or failed panes can reconnect in place from their pane header. Terminal rendering fidelity and real SFTP integration remain migration work.")
+                text("This is the production Iced migration shell. It reads and writes the validated Inspirum profile store, opens live SSH sessions through the existing OpenSSH/PTY backend, and uses the WindTerm-style workspace structure.\n\nThe terminal path includes guarded paste, reconnect, splits, selection/copy, scrollback and remote mouse support. The Files utility pane uses the existing validated SFTP backend for navigation, upload/download, overwrite confirmation, progress/cancel/retry/resume, rename, folder creation and confirmed delete.\n\nRemaining migration work is focused on deeper terminal fidelity, remote-editor parity, visual QA and native interaction regression testing.")
                     .color(MUTED),
                 action("Back to workspace", Message::CloseDialog).style(primary),
             ]
