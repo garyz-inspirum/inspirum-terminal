@@ -247,10 +247,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                 state.selecting = true;
                 Some(
                     canvas::Action::publish(Message::TerminalSelectStart(
-                        self.pane,
-                        self.id,
-                        position.x,
-                        position.y,
+                        self.pane, self.id, position.x, position.y,
                     ))
                     .and_capture(),
                 )
@@ -259,9 +256,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                 let position = position?;
                 Some(
                     canvas::Action::publish(Message::TerminalSelectUpdate(
-                        self.id,
-                        position.x,
-                        position.y,
+                        self.id, position.x, position.y,
                     ))
                     .and_capture(),
                 )
@@ -272,9 +267,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                 state.selecting = false;
                 position.map(|position| {
                     canvas::Action::publish(Message::TerminalSelectUpdate(
-                        self.id,
-                        position.x,
-                        position.y,
+                        self.id, position.x, position.y,
                     ))
                     .and_capture()
                 })
@@ -980,20 +973,13 @@ impl App {
                 }
                 if self.command_terminal(
                     id,
-                    egui_term::BackendCommand::SelectStart(
-                        egui_term::SelectionType::Simple,
-                        x,
-                        y,
-                    ),
+                    egui_term::BackendCommand::SelectStart(egui_term::SelectionType::Simple, x, y),
                 ) {
                     self.refresh_terminal_display(id);
                 }
             }
             Message::TerminalSelectUpdate(id, x, y) => {
-                if self.command_terminal(
-                    id,
-                    egui_term::BackendCommand::SelectUpdate(x, y),
-                ) {
+                if self.command_terminal(id, egui_term::BackendCommand::SelectUpdate(x, y)) {
                     self.refresh_terminal_display(id);
                 }
             }
