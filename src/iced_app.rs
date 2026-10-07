@@ -653,14 +653,14 @@ fn terminal_key_bytes(
         keyboard::Key::Named(Named::F10) => Some(b"\x1b[21~".to_vec()),
         keyboard::Key::Named(Named::F11) => Some(b"\x1b[23~".to_vec()),
         keyboard::Key::Named(Named::F12) => Some(b"\x1b[24~".to_vec()),
-        _ if modifiers.alt() && !modifiers.control() && !modifiers.macos_command() => committed_text
-            .filter(|text| !text.is_empty())
-            .map(|text| {
+        _ if modifiers.alt() && !modifiers.control() && !modifiers.macos_command() => {
+            committed_text.filter(|text| !text.is_empty()).map(|text| {
                 let mut bytes = Vec::with_capacity(text.len() + 1);
                 bytes.push(0x1b);
                 bytes.extend_from_slice(text.as_bytes());
                 bytes
-            }),
+            })
+        }
         _ if !modifiers.control() && !modifiers.command() && !modifiers.alt() => committed_text
             .filter(|text| !text.is_empty())
             .map(|text| text.as_bytes().to_vec()),
