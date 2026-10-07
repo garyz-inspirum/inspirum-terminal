@@ -176,7 +176,11 @@ impl FilesState {
 fn remote_parent(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() || trimmed == "." || trimmed == "/" {
-        return if trimmed == "/" { "/".into() } else { ".".into() };
+        return if trimmed == "/" {
+            "/".into()
+        } else {
+            ".".into()
+        };
     }
     match trimmed.rsplit_once('/') {
         Some(("", _)) => "/".into(),
@@ -1233,9 +1237,8 @@ impl App {
                             .into_iter()
                             .map(|path| {
                                 let metadata = std::fs::symlink_metadata(&path).ok();
-                                let is_dir = metadata
-                                    .as_ref()
-                                    .is_some_and(std::fs::Metadata::is_dir);
+                                let is_dir =
+                                    metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
                                 let size = metadata
                                     .as_ref()
                                     .filter(|metadata| metadata.is_file())
@@ -2170,15 +2173,10 @@ impl App {
                 } else {
                     format_file_size(entry.size)
                 };
-                let label = format!(
-                    "{kind}{:<38} {:>10}",
-                    display_leaf(&entry.name),
-                    size
-                );
+                let label = format!("{kind}{:<38} {:>10}", display_leaf(&entry.name), size);
                 if entry.is_dir {
                     local_list = local_list.push(
-                        action(label, Message::FilesOpenLocal(entry.path.clone()))
-                            .width(Fill),
+                        action(label, Message::FilesOpenLocal(entry.path.clone())).width(Fill),
                     );
                 } else {
                     local_list = local_list.push(
