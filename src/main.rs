@@ -77,7 +77,11 @@ fn main() -> Result<()> {
     let mut diagnostics = false;
     let mut diagnostics_output = None;
     let mut diagnostic_profile = None;
-    let mut ui_mode = UiMode::Legacy;
+    let mut ui_mode = if cfg!(feature = "iced-ui") {
+        UiMode::Iced
+    } else {
+        UiMode::Legacy
+    };
     let mut args = raw_args.into_iter();
     while let Some(arg) = args.next() {
         match arg.to_str() {
