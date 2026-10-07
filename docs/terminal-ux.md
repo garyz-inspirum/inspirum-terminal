@@ -142,3 +142,12 @@ other secrets should not be stored in snippets.
 
 Import and export never auto-execute snippet bodies. Completion by snippet name only stages text
 in the sender and requires a separate **Send** action.
+
+
+## WindTerm-style workspace shell
+
+Issue #78 reorganizes the default application surface around the operator workflow rather than around configuration forms. The primary layout follows WindTerm's published IDE-style arrangement: a narrow Resource Manager on the left, a compact application menu and session tab strip above the terminal workspace, optional utility panes in the central workspace, and a small status bar at the bottom.
+
+Advanced profile, authentication, forwarding, appearance, keyboard and snippet controls remain available but are hidden by default behind **Settings** or the application menus. This keeps the normal workspace terminal-centric while preserving all previously implemented capabilities and safety confirmations.
+
+The UI intentionally uses compact pane headers, restrained separators, dark neutral surfaces, clear selected/focused states and overflow menus for low-frequency tab operations. Existing keyboard shortcuts remain the fastest path for command palette, quick switching, retained-history search and tab management.
