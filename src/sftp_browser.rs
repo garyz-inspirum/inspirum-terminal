@@ -300,36 +300,44 @@ impl SftpBrowser {
         };
         let remote = editor.remote().to_owned();
         let dirty = editor.is_dirty();
+        let mut save = false;
+        let mut close = false;
+
         ui.separator();
-        ui.heading(format!("Remote editor · {remote}"));
-        ui.small(
-            "Private temporary working copy. Closing does not upload. Save re-checks the live remote file before staged replacement.",
-        );
+        ui.horizontal(|ui| {
+            ui.strong(format!("EDIT · {remote}"));
+            if dirty {
+                ui.small("● modified");
+            } else {
+                ui.small("saved");
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("×")
+                    .on_hover_text("Close editor; unsaved changes require confirmation")
+                    .clicked()
+                {
+                    if dirty {
+                        self.remote_editor_discard_confirm = true;
+                    } else {
+                        close = true;
+                    }
+                }
+                if ui
+                    .small_button("Save")
+                    .on_hover_text("Re-check remote contents, then stage and replace explicitly")
+                    .clicked()
+                {
+                    save = true;
+                }
+            });
+        });
         ui.add(
             egui::TextEdit::multiline(editor.text_mut())
                 .desired_rows(18)
-                .desired_width(f32::INFINITY),
+                .desired_width(f32::INFINITY)
+                .font(egui::TextStyle::Monospace),
         );
-        let dirty = editor.is_dirty() || dirty;
-        let mut save = false;
-        let mut close = false;
-        ui.horizontal_wrapped(|ui| {
-            if dirty {
-                ui.strong("Modified");
-            } else {
-                ui.small("Unmodified");
-            }
-            if ui.button("Save").clicked() {
-                save = true;
-            }
-            if ui.button("Close").clicked() {
-                if dirty {
-                    self.remote_editor_discard_confirm = true;
-                } else {
-                    close = true;
-                }
-            }
-        });
 
         if save && let Err(error) = self.save_remote_editor(false) {
             self.error = format!("{error:#}");
@@ -337,9 +345,9 @@ impl SftpBrowser {
 
         if self.remote_editor_conflict {
             ui.group(|ui| {
-                ui.label("The remote file changed after this editor was opened.");
+                ui.strong("Remote file changed");
                 ui.small(
-                    "Overwrite is not automatic. Confirm only if you intend to replace the newer remote contents.",
+                    "The server copy changed after this editor was opened. Overwrite is never automatic.",
                 );
                 ui.horizontal(|ui| {
                     if ui.button("Overwrite changed remote file").clicked()
@@ -347,7 +355,7 @@ impl SftpBrowser {
                     {
                         self.error = format!("{error:#}");
                     }
-                    if ui.button("Keep editor open").clicked() {
+                    if ui.button("Keep editing").clicked() {
                         self.remote_editor_conflict = false;
                     }
                 });
@@ -356,8 +364,8 @@ impl SftpBrowser {
 
         if self.remote_editor_discard_confirm {
             ui.group(|ui| {
-                ui.label("Discard unsaved remote edit?");
-                ui.small("The private temporary working copy will be deleted and nothing will be uploaded.");
+                ui.strong("Discard unsaved changes?");
+                ui.small("Nothing will be uploaded and the private working copy will be deleted.");
                 ui.horizontal(|ui| {
                     if ui.button("Discard").clicked() {
                         close = true;
@@ -507,25 +515,38 @@ impl SftpBrowser {
     }
 
     fn render_local(&mut self, ui: &mut egui::Ui) {
-        ui.strong("Local");
         ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.local_path);
-            if ui.button("Up").clicked()
-                && let Some(parent) = Path::new(self.local_path.trim()).parent()
-            {
-                self.local_path = parent.to_string_lossy().into_owned();
-                if let Err(error) = self.refresh_local() {
+            ui.strong("LOCAL");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("↻")
+                    .on_hover_text("Refresh local directory")
+                    .clicked()
+                    && let Err(error) = self.refresh_local()
+                {
                     self.error = format!("{error:#}");
                 }
-            }
-            if ui.button("Refresh").clicked()
-                && let Err(error) = self.refresh_local()
-            {
-                self.error = format!("{error:#}");
-            }
+                if ui
+                    .small_button("↑")
+                    .on_hover_text("Parent directory")
+                    .clicked()
+                    && let Some(parent) = Path::new(self.local_path.trim()).parent()
+                {
+                    self.local_path = parent.to_string_lossy().into_owned();
+                    if let Err(error) = self.refresh_local() {
+                        self.error = format!("{error:#}");
+                    }
+                }
+            });
         });
+        ui.add(
+            egui::TextEdit::singleline(&mut self.local_path)
+                .desired_width(f32::INFINITY)
+                .hint_text("Local path"),
+        );
+
         egui::ScrollArea::vertical()
-            .max_height(260.0)
+            .max_height(320.0)
             .show(ui, |ui| {
                 let mut enter = None;
                 for path in &self.local_entries {
@@ -534,9 +555,9 @@ impl SftpBrowser {
                         .map(|name| name.to_string_lossy())
                         .unwrap_or_default();
                     let label = if path.is_dir() {
-                        format!("📁 {name}")
+                        format!("▸ {name}")
                     } else {
-                        format!("📄 {name}")
+                        format!("  {name}")
                     };
                     let response =
                         ui.selectable_label(self.selected_local.as_ref() == Some(path), label);
@@ -560,56 +581,62 @@ impl SftpBrowser {
                 }
             });
 
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.label("New folder");
-            ui.text_edit_singleline(&mut self.local_mkdir_name);
-            if ui.button("Create").clicked() {
-                let result = sftp::mkdir_local(
-                    Path::new(self.local_path.trim()),
-                    self.local_mkdir_name.trim(),
-                );
-                match result {
-                    Ok(_) => {
-                        self.local_mkdir_name.clear();
-                        self.error.clear();
-                        let _ = self.refresh_local();
+        egui::CollapsingHeader::new("Local actions")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("New folder");
+                    ui.text_edit_singleline(&mut self.local_mkdir_name);
+                    if ui.button("Create").clicked() {
+                        let result = sftp::mkdir_local(
+                            Path::new(self.local_path.trim()),
+                            self.local_mkdir_name.trim(),
+                        );
+                        match result {
+                            Ok(_) => {
+                                self.local_mkdir_name.clear();
+                                self.error.clear();
+                                let _ = self.refresh_local();
+                            }
+                            Err(error) => self.error = format!("{error:#}"),
+                        }
                     }
-                    Err(error) => self.error = format!("{error:#}"),
-                }
-            }
-        });
+                });
 
-        ui.horizontal(|ui| {
-            ui.label("Rename selected");
-            ui.text_edit_singleline(&mut self.local_rename_name);
-            if ui.button("Rename").clicked() {
-                let result = (|| -> anyhow::Result<()> {
-                    let selected = self
-                        .selected_local
-                        .clone()
-                        .ok_or_else(|| anyhow::anyhow!("select a local entry to rename"))?;
-                    sftp::rename_local(&selected, self.local_rename_name.trim())?;
-                    self.local_rename_name.clear();
-                    self.refresh_local()
-                })();
-                if let Err(error) = result {
-                    self.error = format!("{error:#}");
-                }
-            }
-            if ui.button("Delete…").clicked() {
-                self.local_delete_confirm = self.selected_local.is_some();
-            }
-        });
+                ui.horizontal(|ui| {
+                    ui.label("Rename");
+                    ui.text_edit_singleline(&mut self.local_rename_name);
+                    if ui.button("Apply").clicked() {
+                        let result = (|| -> anyhow::Result<()> {
+                            let selected = self
+                                .selected_local
+                                .clone()
+                                .ok_or_else(|| anyhow::anyhow!("select a local entry to rename"))?;
+                            sftp::rename_local(&selected, self.local_rename_name.trim())?;
+                            self.local_rename_name.clear();
+                            self.refresh_local()
+                        })();
+                        if let Err(error) = result {
+                            self.error = format!("{error:#}");
+                        }
+                    }
+                    if ui.button("Delete…").clicked() {
+                        self.local_delete_confirm = self.selected_local.is_some();
+                    }
+                });
+            });
 
         if self.local_delete_confirm
             && let Some(selected) = self.selected_local.clone()
         {
             ui.group(|ui| {
-                ui.label(format!("Delete local {:?}?", selected.file_name().unwrap_or_default()));
-                ui.small("Only files and empty directories are deleted. This action requires explicit confirmation.");
+                ui.strong(format!(
+                    "Delete local {:?}?",
+                    selected.file_name().unwrap_or_default()
+                ));
+                ui.small("Only files and empty directories are deleted.");
                 ui.horizontal(|ui| {
-                    if ui.button("Confirm delete").clicked() {
+                    if ui.button("Delete").clicked() {
                         match sftp::delete_local(&selected) {
                             Ok(()) => {
                                 self.local_delete_confirm = false;
@@ -628,35 +655,49 @@ impl SftpBrowser {
     }
 
     fn render_remote(&mut self, ui: &mut egui::Ui) {
-        ui.strong("Remote");
         ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.remote_path);
-            if ui.button("Up").clicked() {
-                self.remote_path = Self::remote_parent(self.remote_path.trim());
-                if let Err(error) = self.refresh_remote() {
+            ui.strong("REMOTE");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("↻")
+                    .on_hover_text("Refresh remote directory")
+                    .clicked()
+                    && let Err(error) = self.refresh_remote()
+                {
                     self.error = format!("{error:#}");
                 }
-            }
-            if ui.button("Refresh").clicked()
-                && let Err(error) = self.refresh_remote()
-            {
-                self.error = format!("{error:#}");
-            }
+                if ui
+                    .small_button("↑")
+                    .on_hover_text("Parent directory")
+                    .clicked()
+                {
+                    self.remote_path = Self::remote_parent(self.remote_path.trim());
+                    if let Err(error) = self.refresh_remote() {
+                        self.error = format!("{error:#}");
+                    }
+                }
+            });
         });
+        ui.add(
+            egui::TextEdit::singleline(&mut self.remote_path)
+                .desired_width(f32::INFINITY)
+                .hint_text("Remote path"),
+        );
+
         egui::ScrollArea::vertical()
-            .max_height(260.0)
+            .max_height(320.0)
             .show(ui, |ui| {
                 let mut enter = None;
                 for entry in &self.remote_entries {
                     let label = if entry.is_dir {
-                        format!("📁 {}", entry.name)
+                        format!("▸ {}", entry.name)
                     } else {
                         format!(
-                            "📄 {}{}",
+                            "  {}{}",
                             entry.name,
                             entry
                                 .size
-                                .map(|size| format!("  ({size} B)"))
+                                .map(|size| format!("    {size} B"))
                                 .unwrap_or_default()
                         )
                     };
@@ -681,72 +722,83 @@ impl SftpBrowser {
     }
 
     fn render_remote_actions(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Upload →").clicked()
+        ui.horizontal(|ui| {
+            ui.strong("TRANSFER");
+            if ui.small_button("Upload →").clicked()
                 && let Err(error) = self.request_upload()
             {
                 self.error = format!("{error:#}");
             }
-            if ui.button("← Download").clicked()
+            if ui.small_button("← Download").clicked()
                 && let Err(error) = self.request_download()
             {
                 self.error = format!("{error:#}");
             }
-            if ui.button("Open/Edit").clicked()
+            if ui
+                .small_button("Edit")
+                .on_hover_text("Open selected remote text file")
+                .clicked()
                 && let Err(error) = self.open_remote_editor()
             {
                 self.error = format!("{error:#}");
             }
         });
 
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.label("New folder");
-            ui.text_edit_singleline(&mut self.mkdir_name);
-            if ui.button("Create").clicked() {
-                let path = sftp::join_remote(self.remote_path.trim(), self.mkdir_name.trim());
-                match sftp::mkdir_remote(&self.session, self.config.as_deref(), &path) {
-                    Ok(()) => {
-                        self.mkdir_name.clear();
-                        self.error.clear();
-                        let _ = self.refresh_remote();
+        egui::CollapsingHeader::new("Remote actions")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("New folder");
+                    ui.text_edit_singleline(&mut self.mkdir_name);
+                    if ui.button("Create").clicked() {
+                        let path =
+                            sftp::join_remote(self.remote_path.trim(), self.mkdir_name.trim());
+                        match sftp::mkdir_remote(&self.session, self.config.as_deref(), &path) {
+                            Ok(()) => {
+                                self.mkdir_name.clear();
+                                self.error.clear();
+                                let _ = self.refresh_remote();
+                            }
+                            Err(error) => self.error = format!("{error:#}"),
+                        }
                     }
-                    Err(error) => self.error = format!("{error:#}"),
-                }
-            }
-        });
+                });
 
-        ui.horizontal(|ui| {
-            ui.label("Rename selected");
-            ui.text_edit_singleline(&mut self.rename_name);
-            if ui.button("Rename").clicked() {
-                let result = (|| -> anyhow::Result<()> {
-                    let selected = self
-                        .selected_remote
-                        .clone()
-                        .ok_or_else(|| anyhow::anyhow!("select a remote entry to rename"))?;
-                    anyhow::ensure!(!self.rename_name.trim().is_empty(), "new name is required");
-                    let from = sftp::join_remote(self.remote_path.trim(), &selected.name);
-                    let to = sftp::join_remote(self.remote_path.trim(), self.rename_name.trim());
-                    sftp::rename_remote(&self.session, self.config.as_deref(), &from, &to)?;
-                    self.refresh_remote()
-                })();
-                if let Err(error) = result {
-                    self.error = format!("{error:#}");
-                }
-            }
-            if ui.button("Delete…").clicked() {
-                self.delete_confirm = self.selected_remote.is_some();
-            }
-        });
+                ui.horizontal(|ui| {
+                    ui.label("Rename");
+                    ui.text_edit_singleline(&mut self.rename_name);
+                    if ui.button("Apply").clicked() {
+                        let result = (|| -> anyhow::Result<()> {
+                            let selected = self.selected_remote.clone().ok_or_else(|| {
+                                anyhow::anyhow!("select a remote entry to rename")
+                            })?;
+                            anyhow::ensure!(
+                                !self.rename_name.trim().is_empty(),
+                                "new name is required"
+                            );
+                            let from = sftp::join_remote(self.remote_path.trim(), &selected.name);
+                            let to =
+                                sftp::join_remote(self.remote_path.trim(), self.rename_name.trim());
+                            sftp::rename_remote(&self.session, self.config.as_deref(), &from, &to)?;
+                            self.refresh_remote()
+                        })();
+                        if let Err(error) = result {
+                            self.error = format!("{error:#}");
+                        }
+                    }
+                    if ui.button("Delete…").clicked() {
+                        self.delete_confirm = self.selected_remote.is_some();
+                    }
+                });
+            });
 
         if self.delete_confirm
             && let Some(selected) = self.selected_remote.clone()
         {
             ui.group(|ui| {
-                ui.label(format!("Delete remote {:?}?", selected.name));
+                ui.strong(format!("Delete remote {:?}?", selected.name));
                 ui.horizontal(|ui| {
-                    if ui.button("Confirm delete").clicked() {
+                    if ui.button("Delete").clicked() {
                         let path = sftp::join_remote(self.remote_path.trim(), &selected.name);
                         match sftp::delete_remote(
                             &self.session,
@@ -886,32 +938,46 @@ impl SftpBrowser {
     pub fn ui(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         self.tick_transfers(ctx);
         self.handle_dropped_files(ctx);
-        ui.heading(format!("SFTP files · {}", self.session.name));
-        ui.small(
-            "Uses the same OpenSSH host-key, authentication, config, proxy and ControlMaster policy as this profile. Credentials are not stored.",
-        );
-        ui.horizontal_wrapped(|ui| {
-            ui.checkbox(
-                &mut self.drop_upload_enabled,
-                format!("Accept dropped files for session '{}'", self.session.name),
-            );
-            ui.small("Drops are ignored until this session-specific target is explicitly enabled.");
+
+        ui.horizontal(|ui| {
+            ui.strong(format!("SFTP · {}", self.session.name));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button("⋯", |ui| {
+                    ui.checkbox(
+                        &mut self.drop_upload_enabled,
+                        "Accept dropped files for this session",
+                    );
+                    ui.small(
+                        "Dropped files are ignored unless this session-specific target is enabled.",
+                    );
+                });
+            });
         });
+        ui.separator();
+
         ui.columns(2, |columns| {
             self.render_local(&mut columns[0]);
             self.render_remote(&mut columns[1]);
         });
+
+        ui.separator();
         self.render_remote_actions(ui);
         self.render_remote_editor(ui);
         self.render_conflict(ui);
+
         if !self.notice.is_empty() {
             ui.small(&self.notice);
         }
         if !self.error.is_empty() {
             ui.colored_label(egui::Color32::LIGHT_RED, &self.error);
         }
-        ui.separator();
-        self.render_queue(ui);
+
+        if !self.jobs.is_empty() {
+            ui.separator();
+            egui::CollapsingHeader::new(format!("Transfers ({})", self.jobs.len()))
+                .default_open(true)
+                .show(ui, |ui| self.render_queue(ui));
+        }
     }
 }
 
