@@ -275,14 +275,13 @@ impl SftpBrowser {
             .remote_editor
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("remote editor is not open"))?;
-        match editor.save(
-            &self.session,
-            self.config.as_deref(),
-            force_remote_change,
-        )? {
+        match editor.save(&self.session, self.config.as_deref(), force_remote_change)? {
             SaveOutcome::Saved => {
                 self.remote_editor_conflict = false;
-                self.notice = format!("Saved '{}' through staged SFTP replacement.", editor.remote());
+                self.notice = format!(
+                    "Saved '{}' through staged SFTP replacement.",
+                    editor.remote()
+                );
                 let _ = self.refresh_remote();
             }
             SaveOutcome::Conflict => {
@@ -332,9 +331,7 @@ impl SftpBrowser {
             }
         });
 
-        if save
-            && let Err(error) = self.save_remote_editor(false)
-        {
+        if save && let Err(error) = self.save_remote_editor(false) {
             self.error = format!("{error:#}");
         }
 
