@@ -5,13 +5,13 @@
 //! host-key, argv, paste, process-lifecycle, or transfer safeguards.
 use crate::{
     Session, load_sessions, save_session_edit, save_sessions, session_matches_query,
-    session_profile_key, sftp, terminal,
+    remote_edit::{self, SaveOutcome}, session_profile_key, sftp, terminal,
     terminal_ux::{self, PasteDecision, PastePolicy},
 };
 use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
 use iced::widget::{
     button, canvas, center, column, container, mouse_area, opaque, operation, pane_grid, row,
-    scrollable, sensor, space, stack, text, text_input,
+    scrollable, sensor, space, stack, text, text_editor, text_input,
 };
 use iced::{
     Border, Color, Element, Fill, Font, Subscription, Task, Theme, event, font, keyboard, mouse,
@@ -363,6 +363,27 @@ struct PreparedTransfer {
     conflict: bool,
 }
 
+#[derive(Clone)]
+struct RemoteEditHandle(Arc<Mutex<remote_edit::RemoteEdit>>);
+
+impl std::fmt::Debug for RemoteEditHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_tuple("RemoteEditHandle").finish()
+    }
+}
+
+struct RemoteEditorState {
+    session: Session,
+    session_key: String,
+    remote: String,
+    handle: RemoteEditHandle,
+    content: text_editor::Content,
+    saving: bool,
+    conflict: bool,
+    discard_confirm: bool,
+    error: Option<String>,
+}
+
 #[derive(Debug)]
 struct TransferJob {
     id: u64,
@@ -551,6 +572,20 @@ enum Message {
     FilesRequestMkdirRemote,
     FilesRequestRenameLocal,
     FilesRequestRenameRemote,
+    FilesRequestEditRemote,
+    RemoteEditorOpened {
+        session: Session,
+        session_key: String,
+        remote: String,
+        result: Result<RemoteEditHandle, String>,
+    },
+    RemoteEditorAction(text_editor::Action),
+    RemoteEditorSave(bool),
+    RemoteEditorSaved(Result<SaveOutcome, String>),
+    RemoteEditorClose,
+    RemoteEditorDiscard,
+    RemoteEditorKeepEditing,
+    RemoteEditorKeepConflict,
     FilesNameChanged(String),
     ConfirmFileNameAction,
     FilesMutationFinished {
@@ -1220,6 +1255,7 @@ struct App {
     terminal_dock: pane_grid::Pane,
     files_dock: Option<pane_grid::Pane>,
     files: FilesState,
+    remote_editor: Option<RemoteEditorState>,
     sidebar_collapsed: bool,
     form: ConnectionForm,
     editing_profile: Option<String>,
@@ -1255,6 +1291,7 @@ impl App {
             terminal_dock,
             files_dock: None,
             files: FilesState::new(),
+            remote_editor: None,
             sidebar_collapsed: false,
             form: ConnectionForm::default(),
             editing_profile: None,
@@ -2103,6 +2140,174 @@ impl App {
                     from: sftp::join_remote(&self.files.remote_dir, &entry.name),
                 }));
                 return operation::focus("file-name");
+            }
+            Message::FilesRequestEditRemote => {
+                let Some(entry) = self.files.selected_remote.clone() else {
+                    self.status = "Select a remote text file to edit.".into();
+                    return Task::none();
+                };
+                if entry.is_dir {
+                    self.status = "Select a remote file, not a directory.".into();
+                    return Task::none();
+                }
+                let Some(session) = self.tabs.get(self.active).map(|tab| tab.profile.clone()) else {
+                    return Task::none();
+                };
+                let session_key = session_profile_key(&session);
+                let remote = sftp::join_remote(&self.files.remote_dir, &entry.name);
+                let expected_size = entry.size;
+                let config = self.ssh_config.clone();
+                let open_session = session.clone();
+                let open_remote = remote.clone();
+                self.status = format!("Opening remote editor for {remote}...");
+                return Task::perform(
+                    async move {
+                        remote_edit::RemoteEdit::open(
+                            &open_session,
+                            config.as_deref(),
+                            &open_remote,
+                            expected_size,
+                        )
+                        .map(|editor| RemoteEditHandle(Arc::new(Mutex::new(editor))))
+                        .map_err(|error| format!("{error:#}"))
+                    },
+                    move |result| Message::RemoteEditorOpened {
+                        session,
+                        session_key,
+                        remote,
+                        result,
+                    },
+                );
+            }
+            Message::RemoteEditorOpened {
+                session,
+                session_key,
+                remote,
+                result,
+            } => match result {
+                Ok(handle) => {
+                    let text = handle
+                        .0
+                        .lock()
+                        .map(|editor| editor.text().to_owned())
+                        .unwrap_or_default();
+                    self.remote_editor = Some(RemoteEditorState {
+                        session,
+                        session_key,
+                        remote: remote.clone(),
+                        handle,
+                        content: text_editor::Content::with_text(&text),
+                        saving: false,
+                        conflict: false,
+                        discard_confirm: false,
+                        error: None,
+                    });
+                    self.status = format!("Opened {remote} in the private remote editor.");
+                }
+                Err(error) => {
+                    self.status = format!("Remote editor could not open file: {error}");
+                }
+            },
+            Message::RemoteEditorAction(action) => {
+                if let Some(editor) = self.remote_editor.as_mut() {
+                    editor.content.perform(action);
+                    let text = editor.content.text();
+                    if let Ok(mut remote) = editor.handle.0.lock() {
+                        *remote.text_mut() = text;
+                    }
+                    editor.conflict = false;
+                    editor.error = None;
+                }
+            }
+            Message::RemoteEditorSave(force) => {
+                let Some(editor) = self.remote_editor.as_mut() else {
+                    return Task::none();
+                };
+                if editor.saving {
+                    return Task::none();
+                }
+                editor.saving = true;
+                editor.error = None;
+                let handle = editor.handle.clone();
+                let session = editor.session.clone();
+                let config = self.ssh_config.clone();
+                self.status = format!("Saving {}...", editor.remote);
+                return Task::perform(
+                    async move {
+                        let mut remote = handle
+                            .0
+                            .lock()
+                            .map_err(|_| "remote editor state lock is poisoned".to_string())?;
+                        remote
+                            .save(&session, config.as_deref(), force)
+                            .map_err(|error| format!("{error:#}"))
+                    },
+                    Message::RemoteEditorSaved,
+                );
+            }
+            Message::RemoteEditorSaved(result) => {
+                let Some(editor) = self.remote_editor.as_mut() else {
+                    return Task::none();
+                };
+                editor.saving = false;
+                match result {
+                    Ok(SaveOutcome::Saved) => {
+                        editor.conflict = false;
+                        editor.error = None;
+                        self.status =
+                            format!("Saved {} through staged SFTP replacement.", editor.remote);
+                        if self.files_dock.is_some()
+                            && self.files.session_key.as_deref()
+                                == Some(editor.session_key.as_str())
+                        {
+                            return self.reload_remote_files();
+                        }
+                    }
+                    Ok(SaveOutcome::Conflict) => {
+                        editor.conflict = true;
+                        self.status =
+                            "Remote file changed; explicit overwrite confirmation is required."
+                                .into();
+                    }
+                    Err(error) => {
+                        editor.error = Some(error.clone());
+                        self.status = format!("Remote editor save failed: {error}");
+                    }
+                }
+            }
+            Message::RemoteEditorClose => {
+                let dirty = self
+                    .remote_editor
+                    .as_ref()
+                    .and_then(|editor| editor.handle.0.lock().ok())
+                    .is_some_and(|editor| editor.is_dirty());
+                if dirty {
+                    if let Some(editor) = self.remote_editor.as_mut() {
+                        editor.discard_confirm = true;
+                    }
+                } else {
+                    self.remote_editor = None;
+                    self.status = "Remote editor closed.".into();
+                }
+            }
+            Message::RemoteEditorDiscard => {
+                let remote = self
+                    .remote_editor
+                    .as_ref()
+                    .map(|editor| editor.remote.clone())
+                    .unwrap_or_default();
+                self.remote_editor = None;
+                self.status = format!("Closed editor for {remote} without uploading changes.");
+            }
+            Message::RemoteEditorKeepEditing => {
+                if let Some(editor) = self.remote_editor.as_mut() {
+                    editor.discard_confirm = false;
+                }
+            }
+            Message::RemoteEditorKeepConflict => {
+                if let Some(editor) = self.remote_editor.as_mut() {
+                    editor.conflict = false;
+                }
             }
             Message::FilesNameChanged(value) => self.files.name_input = value,
             Message::ConfirmFileNameAction => {
@@ -3322,6 +3527,7 @@ impl App {
                 row![
                     action("Rename local", Message::FilesRequestRenameLocal),
                     action("Rename remote", Message::FilesRequestRenameRemote),
+                    action("Edit remote", Message::FilesRequestEditRemote),
                     action("Delete local", Message::FilesRequestDeleteLocal),
                     action("Delete remote", Message::FilesRequestDeleteRemote),
                     space::horizontal(),
@@ -3331,6 +3537,93 @@ impl App {
                 ]
                 .spacing(8)
                 .align_y(iced::Center),
+                if let Some(editor) = &self.remote_editor {
+                    let dirty = editor
+                        .handle
+                        .0
+                        .lock()
+                        .ok()
+                        .is_some_and(|remote| remote.is_dirty());
+                    container(
+                        column![
+                            row![
+                                text(format!("EDIT · {}", editor.remote)).size(12).color(BLUE),
+                                if dirty {
+                                    text("MODIFIED").size(10).color(DANGER)
+                                } else {
+                                    text("SAVED").size(10).color(GREEN)
+                                },
+                                space::horizontal(),
+                                action(
+                                    if editor.saving { "Saving..." } else { "Save" },
+                                    Message::RemoteEditorSave(false)
+                                ),
+                                action("Close", Message::RemoteEditorClose),
+                            ]
+                            .spacing(8)
+                            .align_y(iced::Center),
+                            text_editor(&editor.content)
+                                .on_action(Message::RemoteEditorAction)
+                                .font(Font::MONOSPACE)
+                                .height(220),
+                            if editor.conflict {
+                                container(
+                                    row![
+                                        text("Remote file changed since open.")
+                                            .size(12)
+                                            .color(DANGER),
+                                        space::horizontal(),
+                                        action(
+                                            "Overwrite changed remote",
+                                            Message::RemoteEditorSave(true)
+                                        )
+                                        .style(button::danger),
+                                        action("Keep editing", Message::RemoteEditorKeepConflict),
+                                    ]
+                                    .spacing(8)
+                                    .align_y(iced::Center)
+                                )
+                                .padding(8)
+                                .style(card)
+                            } else {
+                                container(text("")).padding(0)
+                            },
+                            if editor.discard_confirm {
+                                container(
+                                    row![
+                                        text("Discard unsaved editor changes?")
+                                            .size(12)
+                                            .color(DANGER),
+                                        space::horizontal(),
+                                        action("Discard", Message::RemoteEditorDiscard)
+                                            .style(button::danger),
+                                        action("Keep editing", Message::RemoteEditorKeepEditing),
+                                    ]
+                                    .spacing(8)
+                                    .align_y(iced::Center)
+                                )
+                                .padding(8)
+                                .style(card)
+                            } else if let Some(error) = &editor.error {
+                                container(text(error).size(11).color(DANGER))
+                                    .padding(8)
+                                    .style(card)
+                            } else {
+                                container(
+                                    text("Saving re-checks the remote contents and uses staged replacement; closing never uploads automatically.")
+                                        .size(11)
+                                        .color(MUTED)
+                                )
+                                .padding(4)
+                            },
+                        ]
+                        .spacing(6)
+                    )
+                    .padding(8)
+                    .style(active_card)
+                } else {
+                    container(text(""))
+                },
                 container(
                     column![
                         text("TRANSFER QUEUE").size(11).color(MUTED),
