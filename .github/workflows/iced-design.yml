@@ -43,9 +43,9 @@ jobs:
       - name: Production Iced shell tests
         run: cargo test --features iced-ui
       - name: Build production Iced shell
-        run: cargo build --features iced-ui
+        run: cargo build --release --features iced-ui
       - name: Build native preview
-        run: cargo build --manifest-path prototypes/iced-shell/Cargo.toml
+        run: cargo build --release --manifest-path prototypes/iced-shell/Cargo.toml
       - name: Capture native Linux design states
         if: runner.os == 'Linux'
         shell: bash
@@ -56,7 +56,7 @@ jobs:
           export XDG_RUNTIME_DIR="$RUNNER_TEMP/iced-runtime"
           mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
           sleep 2
-          binary=prototypes/iced-shell/target/debug/inspirum-iced-preview
+          binary=prototypes/iced-shell/target/release/inspirum-iced-preview
           for state in empty terminal split files dialog; do
             "$binary" --preview="$state" >"preview-artifacts/$state.log" 2>&1 &
             pid=$!
@@ -90,10 +90,12 @@ jobs:
           cp docs/design/gui-redesign.md preview-artifacts/GUI-DESIGN.md
           cp prototypes/iced-shell/Cargo.lock preview-artifacts/source/ 2>/dev/null || true
           cp Cargo.lock preview-artifacts/production-Cargo.lock 2>/dev/null || true
-          cp prototypes/iced-shell/target/debug/inspirum-iced-preview* preview-artifacts/ 2>/dev/null || true
+          mkdir -p preview-artifacts/production
+          cp prototypes/iced-shell/target/release/inspirum-iced-preview* preview-artifacts/ 2>/dev/null || true
+          cp target/release/inspirum-terminal* preview-artifacts/production/ 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: iced-design-preview-${{ runner.os }}
+          name: iced-gui-${{ runner.os }}
           path: preview-artifacts
           if-no-files-found: error
