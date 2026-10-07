@@ -148,7 +148,9 @@ fn socks_auth_proxy(accept: bool) -> (u16, thread::JoinHandle<()>) {
         stream.read_exact(&mut password).unwrap();
         assert_eq!(user, b"user");
         assert_eq!(password, b"s3cret");
-        stream.write_all(&[0x01, if accept { 0x00 } else { 0x01 }]).unwrap();
+        stream
+            .write_all(&[0x01, if accept { 0x00 } else { 0x01 }])
+            .unwrap();
         if !accept {
             return;
         }
