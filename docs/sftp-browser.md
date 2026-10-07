@@ -67,3 +67,10 @@ Closing the editor never uploads anything. **Save** is the only normal upload pa
 Successful saves upload the private working copy to a uniquely named remote staging file and then rename that staging file over the target. If the final rename fails, the client makes a best-effort cleanup of the staging file and reports the error. This staged replacement avoids directly streaming an edited file over the live target. Exact preservation of ownership, timestamps, ACLs and permission metadata depends on the SFTP server/filesystem rename semantics and is not currently guaranteed; operators who require metadata preservation should verify server behavior before using the editor for sensitive system files.
 
 The editor never executes the edited file and never launches it as a local process.
+
+
+## WindTerm-style Files pane
+
+The graphical SFTP surface follows the same compact workspace language as the main terminal shell. Local and Remote are presented as side-by-side explorer panes with compact path bars and small parent/refresh controls. Low-frequency create/rename/delete forms are hidden under **Local actions** and **Remote actions** rather than occupying the primary workspace.
+
+Upload, Download and Edit are grouped in a small transfer toolbar between the explorers and the optional editor. The remote editor uses a compact file header with modified/saved state plus explicit Save and Close controls. The transfer queue is only shown when jobs exist and is collapsible, keeping the normal file-browsing surface focused on the two file lists.
