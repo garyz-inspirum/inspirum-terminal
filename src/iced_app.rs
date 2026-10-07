@@ -673,6 +673,23 @@ enum Message {
     Event(iced::Event),
 }
 
+fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
+    command_palette::palette_items(query, library)
+        .into_iter()
+        .filter(|item| {
+            matches!(
+                item,
+                PaletteItem::Snippet { .. }
+                    | PaletteItem::LocalAction { id: "connect", .. }
+                    | PaletteItem::LocalAction {
+                        id: "close-active",
+                        ..
+                    }
+            )
+        })
+        .collect()
+}
+
 fn sanitize_terminal_title(title: &str) -> Option<String> {
     let value: String = title
         .chars()
@@ -3913,43 +3930,106 @@ impl App {
                 )
                 .into()
             }
-            Dialog::Commands => column![
-                text("Commands").size(24),
-                text("Workspace actions. Nothing is sent to a remote host yet.").color(MUTED),
-                action(
-                    "New connection                      Ctrl / Cmd + N",
-                    Message::New
-                )
-                .width(Fill),
-                action(
-                    "Next tab                            Ctrl / Cmd + Tab",
-                    Message::SelectNextTab
-                )
-                .width(Fill),
-                action(
-                    "Previous tab                        Ctrl / Cmd + Shift + Tab",
-                    Message::SelectPreviousTab
-                )
-                .width(Fill),
-                action(
-                    "Split active pane right",
-                    Message::Split(pane_grid::Axis::Vertical)
-                )
-                .width(Fill),
-                action(
-                    if self.sidebar_collapsed {
-                        "Show session library"
-                    } else {
-                        "Hide session library"
-                    },
-                    Message::ToggleSidebar
-                )
-                .width(Fill),
-                action("Toggle files", Message::ToggleFiles).width(Fill),
-                action("Close", Message::CloseDialog),
-            ]
-            .spacing(14)
-            .into(),
+            Dialog::Commands => {
+                let items = iced_palette_items(&self.command_query, &self.snippets);
+                let mut palette = column![
+                    text("Command palette").size(24),
+                    text("Application actions are [APP]. Snippets are [REMOTE TEXT] and only stage text; they never execute automatically.")
+                        .size(12)
+                        .color(MUTED),
+                    text_input("Search actions or snippets", &self.command_query)
+                        .id("command-query")
+                        .on_input(Message::CommandQuery)
+                        .padding(11),
+                ]
+                .spacing(8);
+
+                if items.is_empty() {
+                    palette = palette.push(text("No matching commands.").size(12).color(MUTED));
+                } else {
+                    for (index, item) in items.iter().enumerate().take(12) {
+                        let label = match item {
+                            PaletteItem::LocalAction { label, .. } => format!("[APP] {label}"),
+                            PaletteItem::Snippet { name, .. } => {
+                                format!("[REMOTE TEXT] {name}")
+                            }
+                        };
+                        palette =
+                            palette.push(action(label, Message::CommandStage(index)).width(Fill));
+                    }
+                }
+
+                let mut snippets = column![
+                    text("REUSABLE SNIPPETS").size(11).color(MUTED),
+                    text_input("Snippet name", &self.snippet_name)
+                        .on_input(Message::SnippetName)
+                        .padding(9),
+                    text_input("Snippet body (non-secret remote text)", &self.snippet_body)
+                        .on_input(Message::SnippetBody)
+                        .padding(9),
+                    action("Save snippet", Message::SaveSnippet),
+                ]
+                .spacing(6);
+                for (index, snippet) in self.snippets.snippets.iter().enumerate().take(8) {
+                    snippets = snippets.push(
+                        row![
+                            action(
+                                format!("Stage · {}", snippet.name),
+                                Message::CommandStage(
+                                    iced_palette_items(&snippet.name, &self.snippets)
+                                        .iter()
+                                        .position(|item| matches!(
+                                            item,
+                                            PaletteItem::Snippet { index: item_index, .. }
+                                                if *item_index == index
+                                        ))
+                                        .unwrap_or(usize::MAX)
+                                )
+                            ),
+                            space::horizontal(),
+                            action("Delete", Message::DeleteSnippet(index)),
+                        ]
+                        .spacing(6)
+                        .align_y(iced::Center),
+                    );
+                }
+
+                column![
+                    palette,
+                    container(
+                        column![
+                            text("COMMAND SENDER · FOCUSED PANE").size(11).color(BLUE),
+                            text_input("Remote-shell text to stage", &self.command_sender)
+                                .on_input(Message::CommandSender)
+                                .on_submit(Message::CommandSend)
+                                .padding(10),
+                            row![
+                                action("Send explicitly", Message::CommandSend).style(primary),
+                                text("Multiline payloads still require the terminal paste confirmation.")
+                                    .size(11)
+                                    .color(MUTED),
+                            ]
+                            .spacing(10)
+                            .align_y(iced::Center),
+                        ]
+                        .spacing(8)
+                    )
+                    .padding(10)
+                    .style(card),
+                    container(snippets).padding(10).style(card),
+                    row![
+                        action("New connection", Message::New),
+                        action("Next tab", Message::SelectNextTab),
+                        action("Split right", Message::Split(pane_grid::Axis::Vertical)),
+                        action("Files", Message::ToggleFiles),
+                        space::horizontal(),
+                        action("Close", Message::CloseDialog),
+                    ]
+                    .spacing(7),
+                ]
+                .spacing(12)
+                .into()
+            }
             Dialog::Close(index) => column![
                 text("Close this session?").size(24),
                 text("This disconnects the live SSH/PTY session and closes its Iced workspace tab.")
