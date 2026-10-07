@@ -371,21 +371,18 @@ fn render_terminal_tab(
                     if tab.exited {
                         ui.small("disconnected");
                     }
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            if ui
-                                .small_button("×")
-                                .on_hover_text("Close this pane")
-                                .clicked()
-                            {
-                                close = true;
-                            }
-                            if focused {
-                                ui.small("ACTIVE");
-                            }
-                        },
-                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button("×")
+                            .on_hover_text("Close this pane")
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                        if focused {
+                            ui.small("ACTIVE");
+                        }
+                    });
                 });
             });
     }
