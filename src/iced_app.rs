@@ -592,6 +592,7 @@ fn terminal_key_bytes(
     key: &keyboard::Key,
     modifiers: keyboard::Modifiers,
     committed_text: Option<&str>,
+    terminal_mode: egui_term::TerminalMode,
 ) -> Option<Vec<u8>> {
     use keyboard::key::Named;
 
@@ -600,30 +601,65 @@ fn terminal_key_bytes(
             let mut chars = value.chars();
             if let (Some(ch), None) = (chars.next(), chars.next()) {
                 let ch = ch.to_ascii_lowercase();
-                if ch.is_ascii_lowercase() {
-                    return Some(vec![(ch as u8 - b'a') + 1]);
-                }
-                if ch == ' ' {
-                    return Some(vec![0]);
+                let control = match ch {
+                    'a'..='z' => Some((ch as u8 - b'a') + 1),
+                    ' ' | '@' => Some(0),
+                    '[' => Some(0x1b),
+                    '\\' => Some(0x1c),
+                    ']' => Some(0x1d),
+                    '^' => Some(0x1e),
+                    '_' => Some(0x1f),
+                    '?' => Some(0x7f),
+                    _ => None,
+                };
+                if let Some(control) = control {
+                    return Some(vec![control]);
                 }
             }
         }
     }
 
+    let app_cursor = terminal_mode.contains(egui_term::TerminalMode::APP_CURSOR);
+    let cursor = |normal: &'static [u8], application: &'static [u8]| {
+        Some(if app_cursor { application } else { normal }.to_vec())
+    };
+
     match key.as_ref() {
         keyboard::Key::Named(Named::Enter) => Some(vec![b'\r']),
+        keyboard::Key::Named(Named::Tab) if modifiers.shift() => Some(b"\x1b[Z".to_vec()),
         keyboard::Key::Named(Named::Tab) => Some(vec![b'\t']),
         keyboard::Key::Named(Named::Escape) => Some(vec![0x1b]),
         keyboard::Key::Named(Named::Backspace) => Some(vec![0x7f]),
+        keyboard::Key::Named(Named::Insert) => Some(b"\x1b[2~".to_vec()),
         keyboard::Key::Named(Named::Delete) => Some(b"\x1b[3~".to_vec()),
-        keyboard::Key::Named(Named::ArrowUp) => Some(b"\x1b[A".to_vec()),
-        keyboard::Key::Named(Named::ArrowDown) => Some(b"\x1b[B".to_vec()),
-        keyboard::Key::Named(Named::ArrowRight) => Some(b"\x1b[C".to_vec()),
-        keyboard::Key::Named(Named::ArrowLeft) => Some(b"\x1b[D".to_vec()),
-        keyboard::Key::Named(Named::Home) => Some(b"\x1b[H".to_vec()),
-        keyboard::Key::Named(Named::End) => Some(b"\x1b[F".to_vec()),
+        keyboard::Key::Named(Named::ArrowUp) => cursor(b"\x1b[A", b"\x1bOA"),
+        keyboard::Key::Named(Named::ArrowDown) => cursor(b"\x1b[B", b"\x1bOB"),
+        keyboard::Key::Named(Named::ArrowRight) => cursor(b"\x1b[C", b"\x1bOC"),
+        keyboard::Key::Named(Named::ArrowLeft) => cursor(b"\x1b[D", b"\x1bOD"),
+        keyboard::Key::Named(Named::Home) => cursor(b"\x1b[H", b"\x1bOH"),
+        keyboard::Key::Named(Named::End) => cursor(b"\x1b[F", b"\x1bOF"),
         keyboard::Key::Named(Named::PageUp) => Some(b"\x1b[5~".to_vec()),
         keyboard::Key::Named(Named::PageDown) => Some(b"\x1b[6~".to_vec()),
+        keyboard::Key::Named(Named::F1) => Some(b"\x1bOP".to_vec()),
+        keyboard::Key::Named(Named::F2) => Some(b"\x1bOQ".to_vec()),
+        keyboard::Key::Named(Named::F3) => Some(b"\x1bOR".to_vec()),
+        keyboard::Key::Named(Named::F4) => Some(b"\x1bOS".to_vec()),
+        keyboard::Key::Named(Named::F5) => Some(b"\x1b[15~".to_vec()),
+        keyboard::Key::Named(Named::F6) => Some(b"\x1b[17~".to_vec()),
+        keyboard::Key::Named(Named::F7) => Some(b"\x1b[18~".to_vec()),
+        keyboard::Key::Named(Named::F8) => Some(b"\x1b[19~".to_vec()),
+        keyboard::Key::Named(Named::F9) => Some(b"\x1b[20~".to_vec()),
+        keyboard::Key::Named(Named::F10) => Some(b"\x1b[21~".to_vec()),
+        keyboard::Key::Named(Named::F11) => Some(b"\x1b[23~".to_vec()),
+        keyboard::Key::Named(Named::F12) => Some(b"\x1b[24~".to_vec()),
+        _ if modifiers.alt() && !modifiers.control() && !modifiers.macos_command() => committed_text
+            .filter(|text| !text.is_empty())
+            .map(|text| {
+                let mut bytes = Vec::with_capacity(text.len() + 1);
+                bytes.push(0x1b);
+                bytes.extend_from_slice(text.as_bytes());
+                bytes
+            }),
         _ if !modifiers.control() && !modifiers.command() && !modifiers.alt() => committed_text
             .filter(|text| !text.is_empty())
             .map(|text| text.as_bytes().to_vec()),
@@ -894,6 +930,15 @@ impl App {
         let tab = self.tabs.get(self.active)?;
         let pane = tab.panes.get(tab.focus)?;
         (!pane.exited && pane.terminal.is_some()).then_some(pane.id)
+    }
+
+    fn focused_terminal_mode(&self) -> egui_term::TerminalMode {
+        self.tabs
+            .get(self.active)
+            .and_then(|tab| tab.panes.get(tab.focus))
+            .and_then(|pane| pane.terminal.as_ref())
+            .map(|terminal| terminal.last_content().terminal_mode)
+            .unwrap_or_else(egui_term::TerminalMode::empty)
     }
 
     fn send_to_terminal(&mut self, id: u64, bytes: Vec<u8>) -> bool {
@@ -1416,9 +1461,13 @@ impl App {
                     _ => {}
                 }
 
-                if let Some(bytes) =
-                    terminal_key_bytes(&key, modifiers, text.as_ref().map(|value| value.as_str()))
-                {
+                let terminal_mode = self.focused_terminal_mode();
+                if let Some(bytes) = terminal_key_bytes(
+                    &key,
+                    modifiers,
+                    text.as_ref().map(|value| value.as_str()),
+                    terminal_mode,
+                ) {
                     self.send_to_focused_terminal(bytes);
                 }
             }
@@ -2278,6 +2327,53 @@ mod tests {
         assert_eq!(
             terminal_ux::classify_paste(PastePolicy::ConfirmMultiline, "bad\0payload"),
             PasteDecision::Block
+        );
+    }
+
+    #[test]
+    fn terminal_keys_honor_application_cursor_mode_and_meta_input() {
+        use keyboard::key::Named;
+
+        let none = keyboard::Modifiers::default();
+        assert_eq!(
+            terminal_key_bytes(
+                &keyboard::Key::Named(Named::ArrowUp),
+                none,
+                None,
+                egui_term::TerminalMode::empty(),
+            ),
+            Some(b"\x1b[A".to_vec())
+        );
+        assert_eq!(
+            terminal_key_bytes(
+                &keyboard::Key::Named(Named::ArrowUp),
+                none,
+                None,
+                egui_term::TerminalMode::APP_CURSOR,
+            ),
+            Some(b"\x1bOA".to_vec())
+        );
+
+        let shift = keyboard::Modifiers::SHIFT;
+        assert_eq!(
+            terminal_key_bytes(
+                &keyboard::Key::Named(Named::Tab),
+                shift,
+                None,
+                egui_term::TerminalMode::empty(),
+            ),
+            Some(b"\x1b[Z".to_vec())
+        );
+
+        let alt = keyboard::Modifiers::ALT;
+        assert_eq!(
+            terminal_key_bytes(
+                &keyboard::Key::Character("x".into()),
+                alt,
+                Some("x"),
+                egui_term::TerminalMode::empty(),
+            ),
+            Some(b"\x1bx".to_vec())
         );
     }
 
