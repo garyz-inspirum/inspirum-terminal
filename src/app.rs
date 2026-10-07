@@ -2709,11 +2709,11 @@ impl App {
         egui::TopBottomPanel::top("app_menu")
             .exact_height(24.0)
             .show(ctx, |ui| {
-                egui::MenuBar::new().ui(ui, |ui| {
+                egui::menu::bar(ui, |ui| {
                     ui.menu_button("Session", |ui| {
                         if ui.button("Connect").clicked() {
                             self.connect_draft(ctx);
-                            ui.close();
+                            ui.close_menu();
                         }
                         if ui.button("Files").clicked() {
                             self.terminal_focus = None;
@@ -2723,14 +2723,14 @@ impl App {
                                 Ok(())
                             });
                             self.error = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
-                            ui.close();
+                            ui.close_menu();
                         }
                         if ui.button("Quick switch").clicked() {
                             self.tab_switcher_open = true;
                             self.tab_switcher_query.clear();
                             self.tab_switcher_index = 0;
                             self.terminal_focus = None;
-                            ui.close();
+                            ui.close_menu();
                         }
                     });
                     ui.menu_button("View", |ui| {
@@ -2746,7 +2746,7 @@ impl App {
                             self.command_palette_query.clear();
                             self.command_palette_index = 0;
                             self.terminal_focus = None;
-                            ui.close();
+                            ui.close_menu();
                         }
                     });
                     ui.menu_button("Window", |ui| {
@@ -2755,13 +2755,13 @@ impl App {
                             self.tab_switcher_query.clear();
                             self.tab_switcher_index = 0;
                             self.terminal_focus = None;
-                            ui.close();
+                            ui.close_menu();
                         }
                         if ui.button("Close active tab").clicked() {
                             if let Some(id) = self.active {
                                 self.close_tab_ids(&[id]);
                             }
-                            ui.close();
+                            ui.close_menu();
                         }
                     });
                     ui.menu_button("Help", |ui| {
@@ -2790,14 +2790,14 @@ impl App {
                         .clicked()
                     {
                         move_active = Some(-1);
-                        ui.close();
+                        ui.close_menu();
                     }
                     if ui
                         .add_enabled(self.active.is_some(), egui::Button::new("Move tab right"))
                         .clicked()
                     {
                         move_active = Some(1);
-                        ui.close();
+                        ui.close_menu();
                     }
                     if ui
                         .add_enabled(
@@ -2807,16 +2807,16 @@ impl App {
                         .clicked()
                     {
                         bulk_mode = Some(BulkCloseMode::Selected);
-                        ui.close();
+                        ui.close_menu();
                     }
                     if let Some(active) = self.active {
                         if ui.button("Close tabs to the right").clicked() {
                             bulk_mode = Some(BulkCloseMode::RightOf(active));
-                            ui.close();
+                            ui.close_menu();
                         }
                         if ui.button("Close other tabs").clicked() {
                             bulk_mode = Some(BulkCloseMode::Others(active));
-                            ui.close();
+                            ui.close_menu();
                         }
                         ui.separator();
                         let mut visual = self.tab_labels.get(&active).copied().unwrap_or_default();
