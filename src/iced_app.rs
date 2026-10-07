@@ -162,6 +162,70 @@ enum Message {
     Event(iced::Event),
 }
 
+fn terminal_screen_text(terminal: &mut egui_term::TerminalBackend) -> String {
+    let content = terminal.sync();
+    let mut result = String::new();
+    let mut current_line = None;
+
+    for indexed in content.grid.display_iter() {
+        if current_line != Some(indexed.point.line) {
+            if current_line.is_some() {
+                while result.ends_with(' ') {
+                    result.pop();
+                }
+                result.push('\n');
+            }
+            current_line = Some(indexed.point.line);
+        }
+        result.push(indexed.c);
+    }
+
+    result.trim_end_matches(&[' ', '\n'][..]).to_owned()
+}
+
+fn terminal_key_bytes(
+    key: &keyboard::Key,
+    modifiers: keyboard::Modifiers,
+    committed_text: Option<&str>,
+) -> Option<Vec<u8>> {
+    use keyboard::key::Named;
+
+    if modifiers.control() {
+        if let keyboard::Key::Character(value) = key.as_ref() {
+            let mut chars = value.chars();
+            if let (Some(ch), None) = (chars.next(), chars.next()) {
+                let ch = ch.to_ascii_lowercase();
+                if ch.is_ascii_lowercase() {
+                    return Some(vec![(ch as u8 - b'a') + 1]);
+                }
+                if ch == ' ' {
+                    return Some(vec![0]);
+                }
+            }
+        }
+    }
+
+    match key.as_ref() {
+        keyboard::Key::Named(Named::Enter) => Some(vec![b'\r']),
+        keyboard::Key::Named(Named::Tab) => Some(vec![b'\t']),
+        keyboard::Key::Named(Named::Escape) => Some(vec![0x1b]),
+        keyboard::Key::Named(Named::Backspace) => Some(vec![0x7f]),
+        keyboard::Key::Named(Named::Delete) => Some(b"\x1b[3~".to_vec()),
+        keyboard::Key::Named(Named::ArrowUp) => Some(b"\x1b[A".to_vec()),
+        keyboard::Key::Named(Named::ArrowDown) => Some(b"\x1b[B".to_vec()),
+        keyboard::Key::Named(Named::ArrowRight) => Some(b"\x1b[C".to_vec()),
+        keyboard::Key::Named(Named::ArrowLeft) => Some(b"\x1b[D".to_vec()),
+        keyboard::Key::Named(Named::Home) => Some(b"\x1b[H".to_vec()),
+        keyboard::Key::Named(Named::End) => Some(b"\x1b[F".to_vec()),
+        keyboard::Key::Named(Named::PageUp) => Some(b"\x1b[5~".to_vec()),
+        keyboard::Key::Named(Named::PageDown) => Some(b"\x1b[6~".to_vec()),
+        _ if !modifiers.control() && !modifiers.command() && !modifiers.alt() => committed_text
+            .filter(|text| !text.is_empty())
+            .map(|text| text.as_bytes().to_vec()),
+        _ => None,
+    }
+}
+
 struct ConnectionForm {
     name: String,
     host: String,
@@ -430,8 +494,11 @@ impl App {
             }
             Message::Split(axis) => {
                 self.dialog = None;
-                if let Some(tab) = self.tabs.get_mut(self.active) {
-                    tab.split(axis);
+                if let Some(profile) = self.tabs.get(self.active).map(|tab| tab.profile.clone()) {
+                    let terminal = self.new_terminal_pane(profile);
+                    if let Some(tab) = self.tabs.get_mut(self.active) {
+                        tab.split(axis, terminal);
+                    }
                 }
             }
             Message::Focus(pane) => {
@@ -492,34 +559,57 @@ impl App {
                 }
             }
             Message::Scale(delta) => self.scale = (self.scale + delta).clamp(0.85, 1.50),
+            Message::PtyBridgeReady(sender) => {
+                self.pty_bridge = Some(sender);
+                self.status = "Terminal event bridge ready.".into();
+            }
+            Message::PtyEvent(id, event) => {
+                let exited = matches!(event, egui_term::PtyEvent::Exit);
+                self.refresh_terminal(id, exited);
+                if exited {
+                    self.status = format!("Terminal {id} exited.");
+                }
+            }
             Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
                 key,
                 modifiers,
+                text,
                 ..
             })) => {
                 use keyboard::key::Named;
+
+                if self.dialog.is_some() {
+                    return match key.as_ref() {
+                        keyboard::Key::Named(Named::Escape) => {
+                            self.update(Message::CloseDialog)
+                        }
+                        keyboard::Key::Named(Named::Tab) => {
+                            if modifiers.shift() {
+                                operation::focus_previous()
+                            } else {
+                                operation::focus_next()
+                            }
+                        }
+                        _ => Task::none(),
+                    };
+                }
+
                 match key.as_ref() {
-                    keyboard::Key::Named(Named::Escape) => {
-                        return self.update(Message::CloseDialog);
-                    }
-                    keyboard::Key::Named(Named::Tab) => {
-                        return if modifiers.shift() {
-                            operation::focus_previous()
-                        } else {
-                            operation::focus_next()
-                        };
-                    }
-                    keyboard::Key::Character("n")
-                        if modifiers.command() && self.dialog.is_none() =>
-                    {
+                    keyboard::Key::Character("n") if modifiers.command() => {
                         return self.update(Message::New);
                     }
                     keyboard::Key::Character("p")
-                        if modifiers.command() && modifiers.shift() && self.dialog.is_none() =>
+                        if modifiers.command() && modifiers.shift() =>
                     {
                         return self.update(Message::Commands);
                     }
                     _ => {}
+                }
+
+                if let Some(bytes) =
+                    terminal_key_bytes(&key, modifiers, text.as_ref().map(|value| value.as_str()))
+                {
+                    self.send_to_focused_terminal(bytes);
                 }
             }
             Message::Event(_) => {}
