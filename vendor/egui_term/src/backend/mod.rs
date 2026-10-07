@@ -473,9 +473,8 @@ impl TerminalBackend {
                 background: [cell_bg_r, cell_bg_g, cell_bg_b],
                 cursor_color: [cursor_r, cursor_g, cursor_b],
                 bold: flags.intersects(term::cell::Flags::BOLD | term::cell::Flags::DIM_BOLD),
-                italic: flags.intersects(
-                    term::cell::Flags::ITALIC | term::cell::Flags::BOLD_ITALIC,
-                ),
+                italic: flags
+                    .intersects(term::cell::Flags::ITALIC | term::cell::Flags::BOLD_ITALIC),
                 underline: flags.intersects(term::cell::Flags::ALL_UNDERLINES),
                 strikeout: flags.contains(term::cell::Flags::STRIKEOUT),
                 wide: flags.contains(term::cell::Flags::WIDE_CHAR),
