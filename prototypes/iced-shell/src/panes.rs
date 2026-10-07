@@ -1,6 +1,7 @@
 //! Terminal-shaped fixture and utility pane rendering; no backend operations.
-use super::*;
-use iced::Font;
+use super::{App, Message, BLUE, FG, MUTED, action, active_card, card, quiet, selected_button, surface};
+use iced::widget::{button, column, container, pane_grid, row, scrollable, space, text};
+use iced::{Element, Fill, Font};
 
 impl App {
     pub(super) fn terminals(&self) -> Element<'_, Message> {
