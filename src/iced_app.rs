@@ -94,6 +94,7 @@ struct TerminalPane {
     profile: Session,
     terminal: Option<egui_term::TerminalBackend>,
     transcript: String,
+    terminal_title: Option<String>,
     error: Option<String>,
     exited: bool,
 }
@@ -179,6 +180,16 @@ enum Message {
     PtyEvent(u64, egui_term::PtyEvent),
     TerminalResized(u64, iced::Size),
     Event(iced::Event),
+}
+
+fn sanitize_terminal_title(title: &str) -> Option<String> {
+    let value: String = title
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(120)
+        .collect();
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 fn terminal_screen_text(terminal: &mut egui_term::TerminalBackend) -> String {
@@ -440,6 +451,7 @@ impl App {
             profile: profile.clone(),
             terminal: None,
             transcript: String::new(),
+            terminal_title: None,
             error: None,
             exited: false,
         };
@@ -526,6 +538,17 @@ impl App {
                     pane.exited = true;
                 }
                 return;
+            }
+        }
+    }
+
+    fn update_terminal_title(&mut self, id: u64, title: Option<String>) {
+        for tab in &mut self.tabs {
+            for (_, pane) in tab.panes.iter_mut() {
+                if pane.id == id {
+                    pane.terminal_title = title;
+                    return;
+                }
             }
         }
     }
@@ -798,7 +821,25 @@ impl App {
                 self.status = "Terminal event bridge ready.".into();
             }
             Message::PtyEvent(id, event) => {
-                let exited = matches!(event, egui_term::PtyEvent::Exit);
+                let exited = matches!(
+                    &event,
+                    egui_term::PtyEvent::Exit | egui_term::PtyEvent::ChildExit(_)
+                );
+                match &event {
+                    egui_term::PtyEvent::Title(title) => {
+                        self.update_terminal_title(id, sanitize_terminal_title(title));
+                    }
+                    egui_term::PtyEvent::ResetTitle => {
+                        self.update_terminal_title(id, None);
+                    }
+                    egui_term::PtyEvent::Bell => {
+                        self.status = format!("Terminal {id} rang the bell.");
+                    }
+                    // Remote OSC clipboard requests stay isolated from the host clipboard.
+                    egui_term::PtyEvent::ClipboardStore(_, _)
+                    | egui_term::PtyEvent::ClipboardLoad(_, _) => {}
+                    _ => {}
+                }
                 self.refresh_terminal(id, exited);
                 if exited {
                     self.status = format!("Terminal {id} exited.");
@@ -1073,10 +1114,16 @@ impl App {
 
         let mut tabs = row![].spacing(4);
         for (index, tab) in self.tabs.iter().enumerate() {
+            let tab_label = tab
+                .panes
+                .get(tab.focus)
+                .and_then(|pane| pane.terminal_title.as_deref())
+                .unwrap_or(&tab.profile.name)
+                .to_owned();
             tabs = tabs.push(
                 container(
                     row![
-                        action(tab.profile.name.clone(), Message::SelectTab(index)).style(
+                        action(tab_label, Message::SelectTab(index)).style(
                             if index == self.active {
                                 selected_button
                             } else {
@@ -1158,7 +1205,13 @@ impl App {
                     text(if focused { "FOCUSED" } else { "SSH" })
                         .size(11)
                         .color(if focused { BLUE } else { MUTED }),
-                    text(pane.profile.name.clone()).size(13),
+                    text(
+                        pane.terminal_title
+                            .as_deref()
+                            .unwrap_or(&pane.profile.name)
+                            .to_owned()
+                    )
+                    .size(13),
                     text(state.0).size(10).color(state.1),
                     space::horizontal(),
                     if pane.exited || pane.error.is_some() {
@@ -1600,6 +1653,17 @@ fn primary(theme: &Theme, status: button::Status) -> button::Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_title_is_bounded_and_control_free() {
+        assert_eq!(
+            sanitize_terminal_title("  vim - server\u{7}  "),
+            Some("vim - server".into())
+        );
+        let long = "x".repeat(500);
+        assert_eq!(sanitize_terminal_title(&long).unwrap().chars().count(), 120);
+        assert_eq!(sanitize_terminal_title("\n\r\t"), None);
+    }
 
     #[test]
     fn connection_form_uses_production_session_validation() {
