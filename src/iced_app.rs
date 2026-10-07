@@ -191,6 +191,23 @@ enum Message {
     TerminalResized(u64, iced::Size),
     TerminalSelectStart(pane_grid::Pane, u64, f32, f32),
     TerminalSelectUpdate(u64, f32, f32),
+    TerminalMouse(
+        pane_grid::Pane,
+        u64,
+        egui_term::MouseButton,
+        egui_term::MouseModifiers,
+        f32,
+        f32,
+        bool,
+    ),
+    TerminalMouseWheel(
+        pane_grid::Pane,
+        u64,
+        egui_term::MouseModifiers,
+        f32,
+        f32,
+        i32,
+    ),
     TerminalScroll(u64, i32),
     CopySelection(u64),
     Event(iced::Event),
@@ -208,6 +225,10 @@ fn sanitize_terminal_title(title: &str) -> Option<String> {
 
 struct TerminalCanvasState {
     selecting: bool,
+    remote_button: Option<egui_term::MouseButton>,
+    modifiers: keyboard::Modifiers,
+    last_position: Option<iced::Point>,
+    last_report_cell: Option<(i32, i32)>,
     generation: Cell<u64>,
     cache: canvas::Cache,
 }
@@ -216,6 +237,10 @@ impl Default for TerminalCanvasState {
     fn default() -> Self {
         Self {
             selecting: false,
+            remote_button: None,
+            modifiers: keyboard::Modifiers::default(),
+            last_position: None,
+            last_report_cell: None,
             generation: Cell::new(u64::MAX),
             cache: canvas::Cache::new(),
         }
@@ -226,7 +251,49 @@ struct TerminalCanvas<'a> {
     pane: pane_grid::Pane,
     id: u64,
     generation: u64,
+    terminal_mode: egui_term::TerminalMode,
     snapshot: &'a egui_term::DisplaySnapshot,
+}
+
+impl TerminalCanvas<'_> {
+    fn remote_mouse_enabled(&self, modifiers: keyboard::Modifiers) -> bool {
+        self.terminal_mode
+            .intersects(egui_term::TerminalMode::MOUSE_MODE)
+            && !modifiers.shift()
+    }
+
+    fn mouse_modifiers(modifiers: keyboard::Modifiers) -> egui_term::MouseModifiers {
+        egui_term::MouseModifiers {
+            shift: modifiers.shift(),
+            alt: modifiers.alt(),
+            command: modifiers.command(),
+        }
+    }
+
+    fn mouse_button(button: mouse::Button) -> Option<egui_term::MouseButton> {
+        match button {
+            mouse::Button::Left => Some(egui_term::MouseButton::LeftButton),
+            mouse::Button::Middle => Some(egui_term::MouseButton::MiddleButton),
+            mouse::Button::Right => Some(egui_term::MouseButton::RightButton),
+            _ => None,
+        }
+    }
+
+    fn movement_button(button: egui_term::MouseButton) -> egui_term::MouseButton {
+        match button {
+            egui_term::MouseButton::LeftButton => egui_term::MouseButton::LeftMove,
+            egui_term::MouseButton::MiddleButton => egui_term::MouseButton::MiddleMove,
+            egui_term::MouseButton::RightButton => egui_term::MouseButton::RightMove,
+            _ => egui_term::MouseButton::NoneMove,
+        }
+    }
+
+    fn report_cell(position: iced::Point) -> (i32, i32) {
+        (
+            (position.x / TERMINAL_CELL_WIDTH).floor() as i32,
+            (position.y / TERMINAL_CELL_HEIGHT).floor() as i32,
+        )
+    }
 }
 
 impl canvas::Program<Message> for TerminalCanvas<'_> {
@@ -240,37 +307,143 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
         let position = cursor.position_in(bounds);
+        if let Some(position) = position {
+            state.last_position = Some(position);
+        }
 
         match event {
-            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let position = position?;
-                state.selecting = true;
-                Some(
-                    canvas::Action::publish(Message::TerminalSelectStart(
-                        self.pane, self.id, position.x, position.y,
-                    ))
-                    .and_capture(),
-                )
+            iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                state.modifiers = *modifiers;
+                None
             }
-            iced::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.selecting => {
+            iced::Event::Mouse(mouse::Event::ButtonPressed(button)) => {
                 let position = position?;
-                Some(
-                    canvas::Action::publish(Message::TerminalSelectUpdate(
-                        self.id, position.x, position.y,
-                    ))
-                    .and_capture(),
-                )
+                let terminal_button = Self::mouse_button(*button)?;
+                if self.remote_mouse_enabled(state.modifiers) {
+                    state.selecting = false;
+                    state.remote_button = Some(terminal_button);
+                    state.last_report_cell = Some(Self::report_cell(position));
+                    Some(
+                        canvas::Action::publish(Message::TerminalMouse(
+                            self.pane,
+                            self.id,
+                            terminal_button,
+                            Self::mouse_modifiers(state.modifiers),
+                            position.x,
+                            position.y,
+                            true,
+                        ))
+                        .and_capture(),
+                    )
+                } else if *button == mouse::Button::Left {
+                    state.selecting = true;
+                    state.remote_button = None;
+                    Some(
+                        canvas::Action::publish(Message::TerminalSelectStart(
+                            self.pane,
+                            self.id,
+                            position.x,
+                            position.y,
+                        ))
+                        .and_capture(),
+                    )
+                } else {
+                    None
+                }
             }
-            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
-                if state.selecting =>
-            {
-                state.selecting = false;
-                position.map(|position| {
-                    canvas::Action::publish(Message::TerminalSelectUpdate(
-                        self.id, position.x, position.y,
-                    ))
-                    .and_capture()
-                })
+            iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                let position = position?;
+                if let Some(button) = state.remote_button {
+                    if self.remote_mouse_enabled(state.modifiers)
+                        && self.terminal_mode.intersects(
+                            egui_term::TerminalMode::MOUSE_DRAG
+                                | egui_term::TerminalMode::MOUSE_MOTION,
+                        )
+                    {
+                        let cell = Self::report_cell(position);
+                        if state.last_report_cell == Some(cell) {
+                            return None;
+                        }
+                        state.last_report_cell = Some(cell);
+                        return Some(
+                            canvas::Action::publish(Message::TerminalMouse(
+                                self.pane,
+                                self.id,
+                                Self::movement_button(button),
+                                Self::mouse_modifiers(state.modifiers),
+                                position.x,
+                                position.y,
+                                true,
+                            ))
+                            .and_capture(),
+                        );
+                    }
+                    None
+                } else if state.selecting {
+                    Some(
+                        canvas::Action::publish(Message::TerminalSelectUpdate(
+                            self.id,
+                            position.x,
+                            position.y,
+                        ))
+                        .and_capture(),
+                    )
+                } else if self.remote_mouse_enabled(state.modifiers)
+                    && self
+                        .terminal_mode
+                        .contains(egui_term::TerminalMode::MOUSE_MOTION)
+                {
+                    let cell = Self::report_cell(position);
+                    if state.last_report_cell == Some(cell) {
+                        return None;
+                    }
+                    state.last_report_cell = Some(cell);
+                    Some(
+                        canvas::Action::publish(Message::TerminalMouse(
+                            self.pane,
+                            self.id,
+                            egui_term::MouseButton::NoneMove,
+                            Self::mouse_modifiers(state.modifiers),
+                            position.x,
+                            position.y,
+                            true,
+                        ))
+                        .and_capture(),
+                    )
+                } else {
+                    None
+                }
+            }
+            iced::Event::Mouse(mouse::Event::ButtonReleased(button)) => {
+                let terminal_button = Self::mouse_button(*button)?;
+                if state.remote_button == Some(terminal_button) {
+                    state.remote_button = None;
+                    let position = position.or(state.last_position)?;
+                    Some(
+                        canvas::Action::publish(Message::TerminalMouse(
+                            self.pane,
+                            self.id,
+                            terminal_button,
+                            Self::mouse_modifiers(state.modifiers),
+                            position.x,
+                            position.y,
+                            false,
+                        ))
+                        .and_capture(),
+                    )
+                } else if state.selecting && *button == mouse::Button::Left {
+                    state.selecting = false;
+                    position.or(state.last_position).map(|position| {
+                        canvas::Action::publish(Message::TerminalSelectUpdate(
+                            self.id,
+                            position.x,
+                            position.y,
+                        ))
+                        .and_capture()
+                    })
+                } else {
+                    None
+                }
             }
             iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 let lines = match delta {
@@ -278,9 +451,28 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                     mouse::ScrollDelta::Pixels { y, .. } => *y / TERMINAL_CELL_HEIGHT,
                 };
                 let lines = lines.round() as i32;
-                (lines != 0).then(|| {
-                    canvas::Action::publish(Message::TerminalScroll(self.id, lines)).and_capture()
-                })
+                if lines == 0 {
+                    return None;
+                }
+                if self.remote_mouse_enabled(state.modifiers) {
+                    let position = position.or(state.last_position)?;
+                    Some(
+                        canvas::Action::publish(Message::TerminalMouseWheel(
+                            self.pane,
+                            self.id,
+                            Self::mouse_modifiers(state.modifiers),
+                            position.x,
+                            position.y,
+                            lines,
+                        ))
+                        .and_capture(),
+                    )
+                } else {
+                    Some(
+                        canvas::Action::publish(Message::TerminalScroll(self.id, lines))
+                            .and_capture(),
+                    )
+                }
             }
             _ => None,
         }
@@ -295,6 +487,8 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
         if cursor.position_in(bounds).is_some() {
             if state.selecting {
                 mouse::Interaction::Grabbing
+            } else if self.remote_mouse_enabled(state.modifiers) {
+                mouse::Interaction::Pointer
             } else {
                 mouse::Interaction::Text
             }
@@ -983,6 +1177,35 @@ impl App {
                     self.refresh_terminal_display(id);
                 }
             }
+            Message::TerminalMouse(pane_id, id, button, modifiers, x, y, pressed) => {
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.focus = pane_id;
+                }
+                self.command_terminal(
+                    id,
+                    egui_term::BackendCommand::MouseReportAt(
+                        button, modifiers, x, y, pressed,
+                    ),
+                );
+            }
+            Message::TerminalMouseWheel(pane_id, id, modifiers, x, y, lines) => {
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.focus = pane_id;
+                }
+                let button = if lines > 0 {
+                    egui_term::MouseButton::ScrollUp
+                } else {
+                    egui_term::MouseButton::ScrollDown
+                };
+                for _ in 0..lines.unsigned_abs().min(8) {
+                    self.command_terminal(
+                        id,
+                        egui_term::BackendCommand::MouseReportAt(
+                            button, modifiers, x, y, true,
+                        ),
+                    );
+                }
+            }
             Message::TerminalScroll(id, lines) => {
                 if self.command_terminal(id, egui_term::BackendCommand::Scroll(lines)) {
                     self.refresh_terminal_display(id);
@@ -1559,10 +1782,16 @@ impl App {
                 .width(Fill)
                 .into()
             } else if let Some(snapshot) = &pane.display {
+                let terminal_mode = pane
+                    .terminal
+                    .as_ref()
+                    .map(|terminal| terminal.last_content().terminal_mode)
+                    .unwrap_or_else(egui_term::TerminalMode::empty);
                 canvas(TerminalCanvas {
                     pane: id,
                     id: pane.id,
                     generation: pane.display_generation,
+                    terminal_mode,
                     snapshot,
                 })
                 .width(Fill)
