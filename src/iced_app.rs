@@ -17,8 +17,12 @@ use iced::{
     Border, Color, Element, Fill, Font, Subscription, Task, Theme, event, font, keyboard, mouse,
 };
 use std::{
+    cell::Cell,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 const BG: Color = Color::from_rgb8(14, 18, 25);
@@ -95,11 +99,12 @@ struct TerminalPane {
     id: u64,
     profile: Session,
     terminal: Option<egui_term::TerminalBackend>,
-    transcript: String,
     display: Option<egui_term::DisplaySnapshot>,
+    display_generation: u64,
     terminal_title: Option<String>,
     error: Option<String>,
     exited: bool,
+    refresh_pending: Arc<AtomicBool>,
 }
 
 struct Workspace {
@@ -201,14 +206,26 @@ fn sanitize_terminal_title(title: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
-#[derive(Default)]
 struct TerminalCanvasState {
     selecting: bool,
+    generation: Cell<u64>,
+    cache: canvas::Cache,
+}
+
+impl Default for TerminalCanvasState {
+    fn default() -> Self {
+        Self {
+            selecting: false,
+            generation: Cell::new(u64::MAX),
+            cache: canvas::Cache::new(),
+        }
+    }
 }
 
 struct TerminalCanvas<'a> {
     pane: pane_grid::Pane,
     id: u64,
+    generation: u64,
     snapshot: &'a egui_term::DisplaySnapshot,
 }
 
@@ -295,7 +312,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
 
     fn draw(
         &self,
-        _state: &Self::State,
+        state: &Self::State,
         renderer: &iced::Renderer,
         _theme: &Theme,
         bounds: iced::Rectangle,
@@ -305,105 +322,90 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
             Color::from_rgb8(value[0], value[1], value[2])
         }
 
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        frame.fill(
-            &canvas::Path::rectangle(iced::Point::ORIGIN, bounds.size()),
-            rgb(self.snapshot.background),
-        );
+        if state.generation.get() != self.generation {
+            state.cache.clear();
+            state.generation.set(self.generation);
+        }
 
-        for cell in &self.snapshot.cells {
-            let x = cell.column as f32 * TERMINAL_CELL_WIDTH;
-            let y = cell.row as f32 * TERMINAL_CELL_HEIGHT;
-            if x >= bounds.width || y >= bounds.height {
-                continue;
-            }
+        let geometry = state.cache.draw(renderer, bounds.size(), |frame| {
+            frame.fill(
+                &canvas::Path::rectangle(iced::Point::ORIGIN, bounds.size()),
+                rgb(self.snapshot.background),
+            );
 
-            let cell_width = if cell.wide {
-                TERMINAL_CELL_WIDTH * 2.0
-            } else {
-                TERMINAL_CELL_WIDTH
-            };
-            let background = if cell.cursor {
-                cell.cursor_color
-            } else {
-                cell.background
-            };
-            if background != self.snapshot.background || cell.cursor {
-                frame.fill(
-                    &canvas::Path::rectangle(
-                        iced::Point::new(x, y),
-                        iced::Size::new(cell_width + 0.5, TERMINAL_CELL_HEIGHT + 0.5),
-                    ),
-                    rgb(background),
-                );
-            }
-
-            if !matches!(cell.character, ' ' | '\t' | '\0') {
-                let mut terminal_font = Font::MONOSPACE;
-                if cell.bold {
-                    terminal_font.weight = font::Weight::Bold;
+            for cell in &self.snapshot.cells {
+                let x = cell.column as f32 * TERMINAL_CELL_WIDTH;
+                let y = cell.row as f32 * TERMINAL_CELL_HEIGHT;
+                if x >= bounds.width || y >= bounds.height {
+                    continue;
                 }
-                if cell.italic {
-                    terminal_font.style = font::Style::Italic;
-                }
-                let foreground = if cell.cursor {
-                    cell.background
+
+                let cell_width = if cell.wide {
+                    TERMINAL_CELL_WIDTH * 2.0
                 } else {
-                    cell.foreground
+                    TERMINAL_CELL_WIDTH
                 };
-                frame.fill_text(canvas::Text {
-                    content: cell.character.to_string(),
-                    position: iced::Point::new(x, y - 1.0),
-                    color: rgb(foreground),
-                    size: iced::Pixels(15.0),
-                    font: terminal_font,
-                    ..canvas::Text::default()
-                });
-            }
-
-            if cell.underline {
-                frame.fill(
-                    &canvas::Path::rectangle(
-                        iced::Point::new(x, y + TERMINAL_CELL_HEIGHT - 2.0),
-                        iced::Size::new(cell_width, 1.0),
-                    ),
-                    rgb(cell.foreground),
-                );
-            }
-            if cell.strikeout {
-                frame.fill(
-                    &canvas::Path::rectangle(
-                        iced::Point::new(x, y + TERMINAL_CELL_HEIGHT * 0.55),
-                        iced::Size::new(cell_width, 1.0),
-                    ),
-                    rgb(cell.foreground),
-                );
-            }
-        }
-
-        vec![frame.into_geometry()]
-    }
-}
-
-fn terminal_screen_text(terminal: &mut egui_term::TerminalBackend) -> String {
-    let content = terminal.sync();
-    let mut result = String::new();
-    let mut current_line = None;
-
-    for indexed in content.grid.display_iter() {
-        if current_line != Some(indexed.point.line) {
-            if current_line.is_some() {
-                while result.ends_with(' ') {
-                    result.pop();
+                let background = if cell.cursor {
+                    cell.cursor_color
+                } else {
+                    cell.background
+                };
+                if background != self.snapshot.background || cell.cursor {
+                    frame.fill(
+                        &canvas::Path::rectangle(
+                            iced::Point::new(x, y),
+                            iced::Size::new(cell_width + 0.5, TERMINAL_CELL_HEIGHT + 0.5),
+                        ),
+                        rgb(background),
+                    );
                 }
-                result.push('\n');
-            }
-            current_line = Some(indexed.point.line);
-        }
-        result.push(indexed.c);
-    }
 
-    result.trim_end_matches(&[' ', '\n'][..]).to_owned()
+                if !matches!(cell.character, ' ' | '\t' | '\0') {
+                    let mut terminal_font = Font::MONOSPACE;
+                    if cell.bold {
+                        terminal_font.weight = font::Weight::Bold;
+                    }
+                    if cell.italic {
+                        terminal_font.style = font::Style::Italic;
+                    }
+                    let foreground = if cell.cursor {
+                        cell.background
+                    } else {
+                        cell.foreground
+                    };
+                    frame.fill_text(canvas::Text {
+                        content: cell.character.to_string(),
+                        position: iced::Point::new(x, y - 1.0),
+                        color: rgb(foreground),
+                        size: iced::Pixels(15.0),
+                        font: terminal_font,
+                        ..canvas::Text::default()
+                    });
+                }
+
+                if cell.underline {
+                    frame.fill(
+                        &canvas::Path::rectangle(
+                            iced::Point::new(x, y + TERMINAL_CELL_HEIGHT - 2.0),
+                            iced::Size::new(cell_width, 1.0),
+                        ),
+                        rgb(cell.foreground),
+                    );
+                }
+                if cell.strikeout {
+                    frame.fill(
+                        &canvas::Path::rectangle(
+                            iced::Point::new(x, y + TERMINAL_CELL_HEIGHT * 0.55),
+                            iced::Size::new(cell_width, 1.0),
+                        ),
+                        rgb(cell.foreground),
+                    );
+                }
+            }
+        });
+
+        vec![geometry]
+    }
 }
 
 fn terminal_key_bytes(
@@ -639,15 +641,17 @@ impl App {
         let id = self.next_terminal_id;
         self.next_terminal_id = self.next_terminal_id.saturating_add(1);
 
+        let refresh_pending = Arc::new(AtomicBool::new(false));
         let mut pane = TerminalPane {
             id,
             profile: profile.clone(),
             terminal: None,
-            transcript: String::new(),
             display: None,
+            display_generation: 0,
             terminal_title: None,
             error: None,
             exited: false,
+            refresh_pending: refresh_pending.clone(),
         };
 
         let Some(bridge) = self.pty_bridge.clone() else {
@@ -659,10 +663,19 @@ impl App {
         };
 
         let bridge = Arc::new(Mutex::new(bridge));
+        let event_refresh_pending = refresh_pending.clone();
         let event_sink: Arc<dyn Fn(u64, egui_term::PtyEvent) + Send + Sync> =
             Arc::new(move |id, event| {
-                if let Ok(sender) = bridge.lock() {
-                    let _ = sender.unbounded_send((id, event));
+                let is_wakeup = matches!(&event, egui_term::PtyEvent::Wakeup);
+                if is_wakeup && event_refresh_pending.swap(true, Ordering::AcqRel) {
+                    return;
+                }
+
+                let sent = bridge
+                    .lock()
+                    .is_ok_and(|sender| sender.unbounded_send((id, event)).is_ok());
+                if is_wakeup && !sent {
+                    event_refresh_pending.store(false, Ordering::Release);
                 }
             });
 
@@ -739,6 +752,17 @@ impl App {
         None
     }
 
+    fn mark_terminal_refresh_delivered(&mut self, id: u64) {
+        for tab in &mut self.tabs {
+            for (_, pane) in tab.panes.iter_mut() {
+                if pane.id == id {
+                    pane.refresh_pending.store(false, Ordering::Release);
+                    return;
+                }
+            }
+        }
+    }
+
     fn refresh_terminal_display(&mut self, id: u64) {
         for tab in &mut self.tabs {
             for (_, pane) in tab.panes.iter_mut() {
@@ -748,6 +772,7 @@ impl App {
                 if let Some(terminal) = pane.terminal.as_mut() {
                     pane.display =
                         Some(terminal.display_snapshot(&egui_term::TerminalTheme::default()));
+                    pane.display_generation = pane.display_generation.wrapping_add(1);
                 }
                 return;
             }
@@ -761,9 +786,9 @@ impl App {
                     continue;
                 }
                 if let Some(terminal) = pane.terminal.as_mut() {
-                    pane.transcript = terminal_screen_text(terminal);
                     pane.display =
                         Some(terminal.display_snapshot(&egui_term::TerminalTheme::default()));
+                    pane.display_generation = pane.display_generation.wrapping_add(1);
                 }
                 if exited {
                     pane.exited = true;
@@ -1097,6 +1122,9 @@ impl App {
                 self.status = "Terminal event bridge ready.".into();
             }
             Message::PtyEvent(id, event) => {
+                if matches!(&event, egui_term::PtyEvent::Wakeup) {
+                    self.mark_terminal_refresh_delivered(id);
+                }
                 let exited = matches!(
                     &event,
                     egui_term::PtyEvent::Exit | egui_term::PtyEvent::ChildExit(_)
@@ -1548,20 +1576,17 @@ impl App {
                 canvas(TerminalCanvas {
                     pane: id,
                     id: pane.id,
+                    generation: pane.display_generation,
                     snapshot,
                 })
                 .width(Fill)
                 .height(Fill)
                 .into()
             } else {
-                let transcript = if pane.transcript.is_empty() {
-                    if pane.exited {
-                        "Session exited without terminal output."
-                    } else {
-                        "Connecting with system OpenSSH..."
-                    }
+                let transcript = if pane.exited {
+                    "Session exited without terminal output."
                 } else {
-                    pane.transcript.as_str()
+                    "Connecting with system OpenSSH..."
                 };
                 text(transcript)
                     .font(Font::MONOSPACE)
