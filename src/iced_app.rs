@@ -158,7 +158,10 @@ impl Default for ConnectionForm {
 impl ConnectionForm {
     fn session(&self) -> anyhow::Result<Session> {
         let host = self.host.trim();
-        anyhow::ensure!(!host.is_empty(), "Enter a host name, SSH config alias, or IP address.");
+        anyhow::ensure!(
+            !host.is_empty(),
+            "Enter a host name, SSH config alias, or IP address."
+        );
 
         let port = if self.port.trim().is_empty() {
             None
@@ -218,7 +221,10 @@ impl App {
         let (dock, terminal_dock) = pane_grid::State::new(Dock::Terminal);
         let (profiles, load_error) = match load_sessions(&profiles_path) {
             Ok(profiles) => (profiles, None),
-            Err(error) => (Vec::new(), Some(format!("Could not load profiles: {error:#}"))),
+            Err(error) => (
+                Vec::new(),
+                Some(format!("Could not load profiles: {error:#}")),
+            ),
         };
         Self {
             profiles_path,
@@ -261,11 +267,10 @@ impl App {
         if let Some(pane) = self.files_dock.take() {
             self.dock.close(pane);
         } else if !self.tabs.is_empty() {
-            if let Some((pane, split)) = self.dock.split(
-                pane_grid::Axis::Horizontal,
-                self.terminal_dock,
-                Dock::Files,
-            ) {
+            if let Some((pane, split)) =
+                self.dock
+                    .split(pane_grid::Axis::Horizontal, self.terminal_dock, Dock::Files)
+            {
                 self.files_dock = Some(pane);
                 self.dock.resize(split, 0.62);
             }
@@ -327,8 +332,7 @@ impl App {
             }
             Message::Resize(event) => {
                 if let Some(tab) = self.tabs.get_mut(self.active) {
-                    tab.panes
-                        .resize(event.split, event.ratio.clamp(0.18, 0.82));
+                    tab.panes.resize(event.split, event.ratio.clamp(0.18, 0.82));
                 }
             }
             Message::Drag(pane_grid::DragEvent::Dropped { pane, target }) => {
@@ -347,8 +351,7 @@ impl App {
                 }
             }
             Message::DockResize(event) => {
-                self.dock
-                    .resize(event.split, event.ratio.clamp(0.30, 0.75));
+                self.dock.resize(event.split, event.ratio.clamp(0.30, 0.75));
             }
             Message::Name(value) => self.form.name = value,
             Message::Host(value) => self.form.host = value,
@@ -373,7 +376,8 @@ impl App {
                             self.open(index);
                         }
                         self.form = ConnectionForm::default();
-                        self.status = "Profile saved using the existing validated profile store.".into();
+                        self.status =
+                            "Profile saved using the existing validated profile store.".into();
                     }
                     Err(error) => self.form.error = Some(format!("{error:#}")),
                 }
@@ -402,9 +406,7 @@ impl App {
                         return self.update(Message::New);
                     }
                     keyboard::Key::Character("p")
-                        if modifiers.command()
-                            && modifiers.shift()
-                            && self.dialog.is_none() =>
+                        if modifiers.command() && modifiers.shift() && self.dialog.is_none() =>
                     {
                         return self.update(Message::Commands);
                     }
@@ -480,12 +482,10 @@ impl App {
             stack![
                 body,
                 opaque(
-                    mouse_area(
-                        center(opaque(content)).style(|_| container::Style {
-                            background: Some(Color::from_rgba(0.02, 0.03, 0.05, 0.82).into()),
-                            ..Default::default()
-                        })
-                    )
+                    mouse_area(center(opaque(content)).style(|_| container::Style {
+                        background: Some(Color::from_rgba(0.02, 0.03, 0.05, 0.82).into()),
+                        ..Default::default()
+                    }))
                     .on_press(Message::CloseDialog)
                 )
             ]
@@ -527,16 +527,14 @@ impl App {
                 profile.folder.as_str()
             };
             if current_group != group {
-                list = list.push(
-                    container(text(group.to_owned()).size(12).color(MUTED)).padding([8, 2]),
-                );
+                list = list
+                    .push(container(text(group.to_owned()).size(12).color(MUTED)).padding([8, 2]));
                 current_group = group.to_owned();
             }
 
-            let selected = self
-                .tabs
-                .get(self.active)
-                .is_some_and(|tab| session_profile_key(&tab.profile) == session_profile_key(profile));
+            let selected = self.tabs.get(self.active).is_some_and(|tab| {
+                session_profile_key(&tab.profile) == session_profile_key(profile)
+            });
             let destination = if profile.user.is_empty() {
                 profile.host.clone()
             } else {
@@ -561,11 +559,7 @@ impl App {
             .padding(10)
             .width(Fill)
             .on_press(Message::Open(index))
-            .style(if selected {
-                selected_button
-            } else {
-                quiet
-            });
+            .style(if selected { selected_button } else { quiet });
             list = list.push(item);
             count += 1;
         }
@@ -640,14 +634,8 @@ impl App {
         let toolbar = row![
             text("PROFILE READY").size(12).color(GREEN),
             space::horizontal(),
-            action(
-                "Split right",
-                Message::Split(pane_grid::Axis::Vertical)
-            ),
-            action(
-                "Split down",
-                Message::Split(pane_grid::Axis::Horizontal)
-            ),
+            action("Split right", Message::Split(pane_grid::Axis::Vertical)),
+            action("Split down", Message::Split(pane_grid::Axis::Horizontal)),
             action(
                 if self.files_dock.is_some() {
                     "Hide files"
