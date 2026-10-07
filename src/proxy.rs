@@ -1,5 +1,5 @@
 //! Built-in no-auth HTTP CONNECT and SOCKS5 proxy transport for OpenSSH ProxyCommand.
-use crate::ProxyKind;
+use crate::{ProxyAuth, ProxyKind};
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     io::{self, Read, Write},
@@ -10,6 +10,66 @@ use std::{
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_HTTP_HEADER: usize = 16 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProxyCredentials {
+    username: String,
+    password: String,
+}
+
+impl ProxyCredentials {
+    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Result<Self> {
+        let username = username.into();
+        let password = password.into();
+        ensure!(!username.is_empty(), "proxy username is required");
+        ensure!(
+            username.len() <= 255 && password.len() <= 255,
+            "proxy username/password must each be at most 255 UTF-8 bytes"
+        );
+        ensure!(
+            !username.chars().any(char::is_control) && !password.chars().any(char::is_control),
+            "proxy username/password may not contain control characters"
+        );
+        Ok(Self { username, password })
+    }
+}
+
+pub fn credentials_from_environment(auth: ProxyAuth) -> Result<Option<ProxyCredentials>> {
+    match auth {
+        ProxyAuth::None => Ok(None),
+        ProxyAuth::Environment => {
+            let username = std::env::var("INSPIRUM_PROXY_USERNAME")
+                .context("INSPIRUM_PROXY_USERNAME is required for environment proxy authentication")?;
+            let password = std::env::var("INSPIRUM_PROXY_PASSWORD")
+                .context("INSPIRUM_PROXY_PASSWORD is required for environment proxy authentication")?;
+            ProxyCredentials::new(username, password).map(Some)
+        }
+    }
+}
+
+fn base64_basic(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let a = chunk[0];
+        let b = *chunk.get(1).unwrap_or(&0);
+        let c = *chunk.get(2).unwrap_or(&0);
+        output.push(TABLE[(a >> 2) as usize] as char);
+        output.push(TABLE[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            output.push(TABLE[(((b & 0x0f) << 2) | (c >> 6)) as usize] as char);
+        } else {
+            output.push('=');
+        }
+        if chunk.len() > 2 {
+            output.push(TABLE[(c & 0x3f) as usize] as char);
+        } else {
+            output.push('=');
+        }
+    }
+    output
+}
 
 fn connect_tcp(host: &str, port: u16) -> Result<TcpStream> {
     let addresses: Vec<_> = (host, port)
@@ -56,11 +116,20 @@ fn http_connect(
     target_host: &str,
     target_port: u16,
     deadline: Instant,
+    credentials: Option<&ProxyCredentials>,
 ) -> Result<TcpStream> {
     let destination = authority(target_host, target_port);
+    let authorization = credentials
+        .map(|credentials| {
+            let token = base64_basic(
+                format!("{}:{}", credentials.username, credentials.password).as_bytes(),
+            );
+            format!("Proxy-Authorization: Basic {token}\r\n")
+        })
+        .unwrap_or_default();
     write!(
         stream,
-        "CONNECT {destination} HTTP/1.1\r\nHost: {destination}\r\nProxy-Connection: Keep-Alive\r\n\r\n"
+        "CONNECT {destination} HTTP/1.1\r\nHost: {destination}\r\nProxy-Connection: Keep-Alive\r\n{authorization}\r\n"
     )
     .context("write HTTP CONNECT request")?;
     stream.flush().context("flush HTTP CONNECT request")?;
@@ -100,16 +169,45 @@ fn socks5_connect(
     target_host: &str,
     target_port: u16,
     deadline: Instant,
+    credentials: Option<&ProxyCredentials>,
 ) -> Result<TcpStream> {
+    let requested_method = if credentials.is_some() { 0x02 } else { 0x00 };
     stream
-        .write_all(&[0x05, 0x01, 0x00])
+        .write_all(&[0x05, 0x01, requested_method])
         .context("write SOCKS5 greeting")?;
     let mut greeting = [0_u8; 2];
     read_exact_before(&mut stream, &mut greeting, deadline, "read SOCKS5 greeting")?;
     ensure!(
-        greeting == [0x05, 0x00],
-        "SOCKS5 proxy does not allow unauthenticated tunnelling"
+        greeting == [0x05, requested_method],
+        if credentials.is_some() {
+            "SOCKS5 proxy did not accept username/password authentication"
+        } else {
+            "SOCKS5 proxy does not allow unauthenticated tunnelling"
+        }
     );
+    if let Some(credentials) = credentials {
+        let username = credentials.username.as_bytes();
+        let password = credentials.password.as_bytes();
+        let mut auth = Vec::with_capacity(username.len() + password.len() + 3);
+        auth.extend([0x01, username.len() as u8]);
+        auth.extend_from_slice(username);
+        auth.push(password.len() as u8);
+        auth.extend_from_slice(password);
+        stream
+            .write_all(&auth)
+            .context("write SOCKS5 username/password authentication")?;
+        let mut response = [0_u8; 2];
+        read_exact_before(
+            &mut stream,
+            &mut response,
+            deadline,
+            "read SOCKS5 username/password response",
+        )?;
+        ensure!(
+            response == [0x01, 0x00],
+            "SOCKS5 proxy rejected username/password authentication"
+        );
+    }
 
     let mut request = vec![0x05, 0x01, 0x00];
     match target_host.parse::<IpAddr>() {
@@ -181,14 +279,36 @@ pub fn connect_tunnel(
     target_host: &str,
     target_port: u16,
 ) -> Result<TcpStream> {
+    connect_tunnel_with_credentials(
+        kind,
+        proxy_host,
+        proxy_port,
+        target_host,
+        target_port,
+        None,
+    )
+}
+
+pub fn connect_tunnel_with_credentials(
+    kind: ProxyKind,
+    proxy_host: &str,
+    proxy_port: u16,
+    target_host: &str,
+    target_port: u16,
+    credentials: Option<&ProxyCredentials>,
+) -> Result<TcpStream> {
     ensure!(proxy_port > 0 && target_port > 0, "ports must be non-zero");
     let stream = connect_tcp(proxy_host, proxy_port)?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
     let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     let stream = match kind {
-        ProxyKind::HttpConnect => http_connect(stream, target_host, target_port, deadline)?,
-        ProxyKind::Socks5 => socks5_connect(stream, target_host, target_port, deadline)?,
+        ProxyKind::HttpConnect => {
+            http_connect(stream, target_host, target_port, deadline, credentials)?
+        }
+        ProxyKind::Socks5 => {
+            socks5_connect(stream, target_host, target_port, deadline, credentials)?
+        }
         ProxyKind::None => bail!("proxy helper requires HTTP CONNECT or SOCKS5 mode"),
     };
     stream.set_read_timeout(None)?;
@@ -199,12 +319,21 @@ pub fn connect_tunnel(
 /// Relay standard input/output over the established proxy tunnel for OpenSSH ProxyCommand.
 pub fn run_stdio(
     kind: ProxyKind,
+    auth: ProxyAuth,
     proxy_host: &str,
     proxy_port: u16,
     target_host: &str,
     target_port: u16,
 ) -> Result<()> {
-    let stream = connect_tunnel(kind, proxy_host, proxy_port, target_host, target_port)?;
+    let credentials = credentials_from_environment(auth)?;
+    let stream = connect_tunnel_with_credentials(
+        kind,
+        proxy_host,
+        proxy_port,
+        target_host,
+        target_port,
+        credentials.as_ref(),
+    )?;
     let mut upstream = stream.try_clone().context("clone proxy tunnel")?;
     let mut downstream = stream;
 
