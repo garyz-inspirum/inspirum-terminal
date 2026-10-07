@@ -204,11 +204,32 @@ impl TerminalBackend {
         settings: BackendSettings,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self> {
-        Self::new_with_waker_and_subscription_spawner(
+        let event_sink: Arc<dyn Fn(u64, PtyEvent) + Send + Sync> = Arc::new(move |id, event| {
+            let _ = pty_event_proxy_sender.send((id, event));
+        });
+        Self::new_with_event_sink_and_subscription_spawner(
             id,
-            pty_event_proxy_sender,
             settings,
+            event_sink,
             wake,
+            |builder, subscription| builder.spawn(subscription),
+        )
+    }
+
+    /// Construct the PTY/parser backend with a toolkit-neutral event sink.
+    ///
+    /// This is used by non-egui frontends to receive PTY lifecycle/output events
+    /// without adding a polling loop or changing terminal/process ownership.
+    pub fn new_with_event_sink(
+        id: u64,
+        settings: BackendSettings,
+        event_sink: Arc<dyn Fn(u64, PtyEvent) + Send + Sync>,
+    ) -> Result<Self> {
+        Self::new_with_event_sink_and_subscription_spawner(
+            id,
+            settings,
+            event_sink,
+            Arc::new(|| {}),
             |builder, subscription| builder.spawn(subscription),
         )
     }
@@ -225,19 +246,22 @@ impl TerminalBackend {
         F: FnOnce(thread::Builder, Box<dyn FnOnce() + Send + 'static>) -> Result<JoinHandle<()>>,
     {
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || app_context.request_repaint());
-        Self::new_with_waker_and_subscription_spawner(
+        let event_sink: Arc<dyn Fn(u64, PtyEvent) + Send + Sync> = Arc::new(move |id, event| {
+            let _ = pty_event_proxy_sender.send((id, event));
+        });
+        Self::new_with_event_sink_and_subscription_spawner(
             id,
-            pty_event_proxy_sender,
             settings,
+            event_sink,
             wake,
             spawn_subscription,
         )
     }
 
-    fn new_with_waker_and_subscription_spawner<F>(
+    fn new_with_event_sink_and_subscription_spawner<F>(
         id: u64,
-        pty_event_proxy_sender: Sender<(u64, PtyEvent)>,
         settings: BackendSettings,
+        event_sink: Arc<dyn Fn(u64, PtyEvent) + Send + Sync>,
         wake: Arc<dyn Fn() + Send + Sync>,
         spawn_subscription: F,
     ) -> Result<Self>
@@ -283,9 +307,7 @@ impl TerminalBackend {
             while !thread_shutdown.load(Ordering::Acquire) {
                 match event_receiver.recv_timeout(Duration::from_millis(50)) {
                     Ok(event) => {
-                        if pty_event_proxy_sender.send((id, event.clone())).is_err() {
-                            break;
-                        }
+                        event_sink(id, event.clone());
                         wake();
                         if let Event::Exit = event {
                             break;
