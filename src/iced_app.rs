@@ -101,6 +101,7 @@ struct TerminalPane {
     terminal: Option<egui_term::TerminalBackend>,
     display: Option<egui_term::DisplaySnapshot>,
     display_generation: u64,
+    display_dirty: bool,
     terminal_title: Option<String>,
     error: Option<String>,
     exited: bool,
@@ -864,6 +865,7 @@ impl App {
             terminal: None,
             display: None,
             display_generation: 0,
+            display_dirty: true,
             terminal_title: None,
             error: None,
             exited: false,
@@ -978,10 +980,12 @@ impl App {
     }
 
     fn mark_terminal_refresh_delivered(&mut self, id: u64) {
-        for tab in &mut self.tabs {
+        for (tab_index, tab) in self.tabs.iter_mut().enumerate() {
             for (_, pane) in tab.panes.iter_mut() {
                 if pane.id == id {
-                    pane.refresh_pending.store(false, Ordering::Release);
+                    if tab_index == self.active {
+                        pane.refresh_pending.store(false, Ordering::Release);
+                    }
                     return;
                 }
             }
@@ -998,6 +1002,7 @@ impl App {
                     pane.display =
                         Some(terminal.display_snapshot(&egui_term::TerminalTheme::default()));
                     pane.display_generation = pane.display_generation.wrapping_add(1);
+                    pane.display_dirty = false;
                 }
                 return;
             }
@@ -1005,21 +1010,50 @@ impl App {
     }
 
     fn refresh_terminal(&mut self, id: u64, exited: bool) {
-        for tab in &mut self.tabs {
+        for (tab_index, tab) in self.tabs.iter_mut().enumerate() {
             for (_, pane) in tab.panes.iter_mut() {
                 if pane.id != id {
                     continue;
                 }
-                if let Some(terminal) = pane.terminal.as_mut() {
-                    pane.display =
-                        Some(terminal.display_snapshot(&egui_term::TerminalTheme::default()));
-                    pane.display_generation = pane.display_generation.wrapping_add(1);
+                if tab_index == self.active {
+                    if let Some(terminal) = pane.terminal.as_mut() {
+                        pane.display =
+                            Some(terminal.display_snapshot(&egui_term::TerminalTheme::default()));
+                        pane.display_generation = pane.display_generation.wrapping_add(1);
+                        pane.display_dirty = false;
+                    }
+                } else {
+                    pane.display_dirty = true;
                 }
                 if exited {
                     pane.exited = true;
                 }
                 return;
             }
+        }
+    }
+
+    fn refresh_workspace_displays(&mut self, index: usize) {
+        let Some(tab) = self.tabs.get_mut(index) else {
+            return;
+        };
+        for (_, pane) in tab.panes.iter_mut() {
+            if pane.display_dirty {
+                if let Some(terminal) = pane.terminal.as_mut() {
+                    pane.display =
+                        Some(terminal.display_snapshot(&egui_term::TerminalTheme::default()));
+                    pane.display_generation = pane.display_generation.wrapping_add(1);
+                }
+                pane.display_dirty = false;
+            }
+            pane.refresh_pending.store(false, Ordering::Release);
+        }
+    }
+
+    fn activate_tab(&mut self, index: usize) {
+        if index < self.tabs.len() {
+            self.active = index;
+            self.refresh_workspace_displays(index);
         }
     }
 
@@ -1061,11 +1095,11 @@ impl App {
                 .iter()
                 .position(|tab| session_profile_key(&tab.profile) == key)
             {
-                self.active = existing;
+                self.activate_tab(existing);
             } else {
                 let terminal = self.new_terminal_pane(profile.clone());
                 self.tabs.push(Workspace::new(profile, terminal));
-                self.active = self.tabs.len() - 1;
+                self.activate_tab(self.tabs.len() - 1);
             }
             self.status = "SSH session opened through the production OpenSSH/PTY backend.".into();
         }
@@ -1102,19 +1136,15 @@ impl App {
                     return operation::focus("connection-name");
                 }
             }
-            Message::SelectTab(index) => {
-                if index < self.tabs.len() {
-                    self.active = index;
-                }
-            }
+            Message::SelectTab(index) => self.activate_tab(index),
             Message::SelectNextTab => {
                 if !self.tabs.is_empty() {
-                    self.active = (self.active + 1) % self.tabs.len();
+                    self.activate_tab((self.active + 1) % self.tabs.len());
                 }
             }
             Message::SelectPreviousTab => {
                 if !self.tabs.is_empty() {
-                    self.active = (self.active + self.tabs.len() - 1) % self.tabs.len();
+                    self.activate_tab((self.active + self.tabs.len() - 1) % self.tabs.len());
                 }
             }
             Message::New => {
@@ -1138,6 +1168,9 @@ impl App {
                         self.active -= 1;
                     }
                     self.active = self.active.min(self.tabs.len().saturating_sub(1));
+                    if !self.tabs.is_empty() {
+                        self.refresh_workspace_displays(self.active);
+                    }
                 }
                 if self.tabs.is_empty() && self.files_dock.is_some() {
                     self.toggle_files();
@@ -1365,7 +1398,8 @@ impl App {
                 self.status = "Terminal event bridge ready.".into();
             }
             Message::PtyEvent(id, event) => {
-                if matches!(&event, egui_term::PtyEvent::Wakeup) {
+                let wakeup = matches!(&event, egui_term::PtyEvent::Wakeup);
+                if wakeup {
                     self.mark_terminal_refresh_delivered(id);
                 }
                 let exited = matches!(
@@ -1387,7 +1421,9 @@ impl App {
                     | egui_term::PtyEvent::ClipboardLoad(_, _) => {}
                     _ => {}
                 }
-                self.refresh_terminal(id, exited);
+                if wakeup || exited {
+                    self.refresh_terminal(id, exited);
+                }
                 if exited {
                     self.status = format!("Terminal {id} exited.");
                 }
