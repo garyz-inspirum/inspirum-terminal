@@ -9,7 +9,7 @@ use crate::{
 };
 use iced::widget::{
     button, center, column, container, mouse_area, opaque, operation, pane_grid, row, scrollable,
-    space, stack, text, text_input,
+    sensor, space, stack, text, text_input,
 };
 use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
 use iced::{Border, Color, Element, Fill, Font, Subscription, Task, Theme, event, keyboard};
@@ -24,6 +24,8 @@ const MUTED: Color = Color::from_rgb8(163, 177, 196);
 const BLUE: Color = Color::from_rgb8(123, 176, 255);
 const GREEN: Color = Color::from_rgb8(113, 217, 171);
 const DANGER: Color = Color::from_rgb8(255, 138, 151);
+const TERMINAL_CELL_WIDTH: f32 = 8.4;
+const TERMINAL_CELL_HEIGHT: f32 = 18.0;
 
 pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result {
     iced::application(
@@ -159,6 +161,7 @@ enum Message {
     Scale(f64),
     PtyBridgeReady(PtyBridgeSender),
     PtyEvent(u64, egui_term::PtyEvent),
+    TerminalResized(u64, iced::Size),
     Event(iced::Event),
 }
 
@@ -417,6 +420,25 @@ impl App {
         }
     }
 
+    fn resize_terminal(&mut self, id: u64, size: iced::Size) {
+        let width = (size.width - 28.0).max(1.0);
+        let height = (size.height - 28.0).max(1.0);
+        for tab in &mut self.tabs {
+            for (_, pane) in tab.panes.iter_mut() {
+                if pane.id != id {
+                    continue;
+                }
+                if let Some(terminal) = pane.terminal.as_mut() {
+                    terminal.process_command(egui_term::BackendCommand::Resize(
+                        egui_term::Size::new(width, height),
+                        egui_term::Size::new(TERMINAL_CELL_WIDTH, TERMINAL_CELL_HEIGHT),
+                    ));
+                }
+                return;
+            }
+        }
+    }
+
     fn open(&mut self, index: usize) {
         if let Some(profile) = self.profiles.get(index).cloned() {
             let key = session_profile_key(&profile);
@@ -570,6 +592,7 @@ impl App {
                     self.status = format!("Terminal {id} exited.");
                 }
             }
+            Message::TerminalResized(id, size) => self.resize_terminal(id, size),
             Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
                 key,
                 modifiers,
@@ -934,10 +957,14 @@ impl App {
             };
 
             pane_grid::Content::new(
-                container(terminal_body)
-                    .padding(14)
-                    .width(Fill)
-                    .height(Fill),
+                sensor(
+                    container(terminal_body)
+                        .padding(14)
+                        .width(Fill)
+                        .height(Fill),
+                )
+                .key(pane.id)
+                .on_resize(move |size| Message::TerminalResized(pane.id, size)),
             )
             .title_bar(title)
             .style(if focused { active_card } else { card })
