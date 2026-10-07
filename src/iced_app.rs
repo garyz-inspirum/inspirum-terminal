@@ -340,10 +340,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                     state.remote_button = None;
                     Some(
                         canvas::Action::publish(Message::TerminalSelectStart(
-                            self.pane,
-                            self.id,
-                            position.x,
-                            position.y,
+                            self.pane, self.id, position.x, position.y,
                         ))
                         .and_capture(),
                     )
@@ -382,9 +379,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                 } else if state.selecting {
                     Some(
                         canvas::Action::publish(Message::TerminalSelectUpdate(
-                            self.id,
-                            position.x,
-                            position.y,
+                            self.id, position.x, position.y,
                         ))
                         .and_capture(),
                     )
@@ -435,9 +430,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                     state.selecting = false;
                     position.or(state.last_position).map(|position| {
                         canvas::Action::publish(Message::TerminalSelectUpdate(
-                            self.id,
-                            position.x,
-                            position.y,
+                            self.id, position.x, position.y,
                         ))
                         .and_capture()
                     })
@@ -1183,9 +1176,7 @@ impl App {
                 }
                 self.command_terminal(
                     id,
-                    egui_term::BackendCommand::MouseReportAt(
-                        button, modifiers, x, y, pressed,
-                    ),
+                    egui_term::BackendCommand::MouseReportAt(button, modifiers, x, y, pressed),
                 );
             }
             Message::TerminalMouseWheel(pane_id, id, modifiers, x, y, lines) => {
@@ -1200,9 +1191,7 @@ impl App {
                 for _ in 0..lines.unsigned_abs().min(8) {
                     self.command_terminal(
                         id,
-                        egui_term::BackendCommand::MouseReportAt(
-                            button, modifiers, x, y, true,
-                        ),
+                        egui_term::BackendCommand::MouseReportAt(button, modifiers, x, y, true),
                     );
                 }
             }
