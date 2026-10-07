@@ -153,6 +153,7 @@ enum Message {
     RequestPaste,
     ClipboardRead(u64, Option<String>),
     ConfirmPaste,
+    Reconnect(pane_grid::Pane),
     Split(pane_grid::Axis),
     Focus(pane_grid::Pane),
     Resize(pane_grid::ResizeEvent),
@@ -596,6 +597,29 @@ impl App {
                     }
                 }
             }
+            Message::Reconnect(pane_id) => {
+                let profile = self
+                    .tabs
+                    .get(self.active)
+                    .and_then(|tab| tab.panes.get(pane_id))
+                    .map(|pane| pane.profile.clone());
+
+                if let Some(profile) = profile {
+                    let replacement = self.new_terminal_pane(profile);
+                    let connected = replacement.terminal.is_some() && replacement.error.is_none();
+                    if let Some(tab) = self.tabs.get_mut(self.active)
+                        && let Some(pane) = tab.panes.get_mut(pane_id)
+                    {
+                        *pane = replacement;
+                        tab.focus = pane_id;
+                        self.status = if connected {
+                            "Reconnected through the production OpenSSH/PTY backend.".into()
+                        } else {
+                            "Reconnect attempt failed; review the pane error.".into()
+                        };
+                    }
+                }
+            }
             Message::Split(axis) => {
                 self.dialog = None;
                 if let Some(profile) = self.tabs.get(self.active).map(|tab| tab.profile.clone()) {
@@ -1004,6 +1028,11 @@ impl App {
                     text(pane.profile.name.clone()).size(13),
                     text(state.0).size(10).color(state.1),
                     space::horizontal(),
+                    if pane.exited || pane.error.is_some() {
+                        action("Reconnect", Message::Reconnect(id))
+                    } else {
+                        action("Paste", Message::RequestPaste)
+                    },
                     action("x", Message::ClosePane(id)),
                 ]
                 .spacing(10)
@@ -1199,7 +1228,7 @@ impl App {
             .into(),
             Dialog::Close(index) => column![
                 text("Close this session?").size(24),
-                text("This disconnects the live SSH/PTTY session and closes its Iced workspace tab.")
+                text("This disconnects the live SSH/PTY session and closes its Iced workspace tab.")
                     .color(MUTED),
                 row![
                     space::horizontal(),
@@ -1254,7 +1283,7 @@ impl App {
             }
             Dialog::About => column![
                 text("Production Iced migration").size(24),
-                text("This is no longer the fixture-only design preview. The shell reads and writes the real validated Inspirum profile store, opens live SSH sessions through the existing OpenSSH/PTTY backend, and uses the accepted WindTerm-style workspace structure.\n\nClipboard paste now reuses the existing terminal safety policy: NUL-containing payloads are blocked and multiline paste requires explicit review and confirmation. Terminal rendering fidelity, reconnect polish and real SFTP integration remain migration work.")
+                text("This is no longer the fixture-only design preview. The shell reads and writes the real validated Inspirum profile store, opens live SSH sessions through the existing OpenSSH/PTTY backend, and uses the accepted WindTerm-style workspace structure.\n\nClipboard paste now reuses the existing terminal safety policy: NUL-containing payloads are blocked and multiline paste requires explicit review and confirmation. Exited or failed panes can reconnect in place from their pane header. Terminal rendering fidelity and real SFTP integration remain migration work.")
                     .color(MUTED),
                 action("Back to workspace", Message::CloseDialog).style(primary),
             ]
