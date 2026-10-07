@@ -337,10 +337,12 @@ fn valid_single_argument(value: &str, max_len: usize) -> bool {
 fn valid_algorithm_policy(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 4096
-        && !value.bytes().any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || b"@._+^,-*!?".contains(&byte)
-        })
+        && !value
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"@._+^,-*!?".contains(&byte))
 }
 
 pub fn algorithm_policy_warnings(options: &SshOptions) -> Vec<&'static str> {
