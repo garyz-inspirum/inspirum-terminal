@@ -2722,8 +2722,7 @@ impl App {
                                     Some(SftpBrowser::new(session, self.config.clone())?);
                                 Ok(())
                             });
-                            self.error =
-                                result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+                            self.error = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
                             ui.close();
                         }
                         if ui.button("Quick switch").clicked() {
