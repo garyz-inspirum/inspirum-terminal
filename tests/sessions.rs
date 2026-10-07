@@ -1,5 +1,6 @@
 use inspirum_terminal::{
-    Session, SessionImportMode, SshOptions, delete_session, duplicate_session_draft,
+    Session, SessionImportMode, SshOptions, algorithm_policy_warnings, delete_session,
+    duplicate_session_draft,
     export_sessions, import_sessions, load_sessions, save_session_edit, save_sessions,
     session_matches_query, session_profile_key,
 };
@@ -580,4 +581,45 @@ fn replace_import_returns_only_validated_import_without_mutating_source_file() {
     .unwrap();
     assert_eq!(next, vec![replacement]);
     assert_eq!(std::fs::read(import_path).unwrap(), import_before);
+}
+
+
+#[test]
+fn algorithm_policy_maps_to_openssh_options_and_inherit_is_empty() {
+    let mut s = session();
+    assert!(s.ssh.ciphers.is_empty());
+    assert!(s.ssh.macs.is_empty());
+    assert!(s.ssh.kex_algorithms.is_empty());
+    assert!(s.ssh.host_key_algorithms.is_empty());
+
+    s.ssh.ciphers = "chacha20-poly1305@openssh.com,aes256-gcm@openssh.com".into();
+    s.ssh.macs = "hmac-sha2-256-etm@openssh.com".into();
+    s.ssh.kex_algorithms = "curve25519-sha256".into();
+    s.ssh.host_key_algorithms = "ssh-ed25519,rsa-sha2-512".into();
+    let args = s.ssh_args().unwrap();
+    for expected in [
+        "Ciphers=chacha20-poly1305@openssh.com,aes256-gcm@openssh.com",
+        "MACs=hmac-sha2-256-etm@openssh.com",
+        "KexAlgorithms=curve25519-sha256",
+        "HostKeyAlgorithms=ssh-ed25519,rsa-sha2-512",
+    ] {
+        assert!(args.iter().any(|arg| arg == expected), "missing {expected}: {args:?}");
+    }
+}
+
+#[test]
+fn algorithm_policy_rejects_whitespace_and_warns_for_legacy_requests() {
+    let mut s = session();
+    for invalid in [
+        "aes256-ctr aes128-ctr",
+        "aes256-ctr\nProxyCommand=bad",
+        "aes256-ctr=bad",
+    ] {
+        s.ssh.ciphers = invalid.into();
+        assert!(s.ssh_args().is_err(), "{invalid:?}");
+    }
+    s.ssh.ciphers = "aes256-ctr".into();
+    s.ssh.host_key_algorithms = "+ssh-rsa".into();
+    assert!(s.ssh_args().is_ok());
+    assert!(!algorithm_policy_warnings(&s.ssh).is_empty());
 }
