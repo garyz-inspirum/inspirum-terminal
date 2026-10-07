@@ -23,6 +23,8 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    thread,
+    time::Duration,
 };
 
 const BG: Color = Color::from_rgb8(14, 18, 25);
@@ -74,6 +76,7 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                 _ => None,
             }),
             Subscription::run(pty_bridge),
+            Subscription::run(transfer_bridge),
         ])
     })
     .run()
@@ -89,6 +92,52 @@ fn pty_bridge() -> impl Stream<Item = Message> {
         }
         while let Some((id, event)) = receiver.next().await {
             if output.send(Message::PtyEvent(id, event)).await.is_err() {
+                break;
+            }
+        }
+    })
+}
+
+#[derive(Clone, Debug)]
+enum TransferEvent {
+    Started {
+        id: u64,
+        total: Option<u64>,
+    },
+    Progress {
+        id: u64,
+        transferred: u64,
+    },
+    Completed {
+        id: u64,
+    },
+    Failed {
+        id: u64,
+        error: String,
+        partial: Option<PathBuf>,
+        resume_available: bool,
+    },
+    Cancelled {
+        id: u64,
+        partial: Option<PathBuf>,
+        resume_available: bool,
+    },
+}
+
+type TransferBridgeSender = mpsc::UnboundedSender<TransferEvent>;
+
+fn transfer_bridge() -> impl Stream<Item = Message> {
+    iced::stream::channel(100, async |mut output| {
+        let (sender, mut receiver) = mpsc::unbounded();
+        if output
+            .send(Message::TransferBridgeReady(sender))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        while let Some(event) = receiver.next().await {
+            if output.send(Message::TransferEvent(event)).await.is_err() {
                 break;
             }
         }
@@ -133,6 +182,69 @@ impl Workspace {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransferDirection {
+    Upload,
+    Download,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransferJobState {
+    Queued,
+    Running,
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Clone, Debug)]
+struct PendingTransfer {
+    session: Session,
+    session_key: String,
+    direction: TransferDirection,
+    local: PathBuf,
+    remote: String,
+    expected_size: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedTransfer {
+    pending: PendingTransfer,
+    conflict: bool,
+}
+
+#[derive(Debug)]
+struct TransferJob {
+    id: u64,
+    pending: PendingTransfer,
+    overwrite: bool,
+    total: Option<u64>,
+    transferred: u64,
+    state: TransferJobState,
+    error: String,
+    resume_path: Option<PathBuf>,
+    resume_available: bool,
+    resume_requested: bool,
+    cancel: Arc<AtomicBool>,
+}
+
+impl TransferJob {
+    fn label(&self) -> String {
+        match self.pending.direction {
+            TransferDirection::Upload => {
+                let name = self
+                    .pending
+                    .local
+                    .file_name()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| self.pending.local.to_string_lossy().into_owned());
+                format!("Upload {name}")
+            }
+            TransferDirection::Download => format!("Download {}", self.pending.remote),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct LocalFileEntry {
     path: PathBuf,
@@ -153,6 +265,9 @@ struct FilesState {
     remote_error: Option<String>,
     local_generation: u64,
     remote_generation: u64,
+    selected_local: Option<PathBuf>,
+    selected_remote: Option<sftp::RemoteEntry>,
+    transfers: Vec<TransferJob>,
 }
 
 impl FilesState {
@@ -169,6 +284,9 @@ impl FilesState {
             remote_error: None,
             local_generation: 0,
             remote_generation: 0,
+            selected_local: None,
+            selected_remote: None,
+            transfers: Vec::new(),
         }
     }
 }
@@ -223,6 +341,7 @@ enum Dialog {
     Commands,
     Close(usize),
     PasteConfirm { id: u64, text: String },
+    FileOverwrite(PendingTransfer),
     About,
 }
 
@@ -246,6 +365,15 @@ enum Message {
     FilesRemoteUp,
     FilesOpenLocal(PathBuf),
     FilesOpenRemote(String),
+    FilesSelectLocal(PathBuf),
+    FilesSelectRemote(sftp::RemoteEntry),
+    FilesRequestUpload,
+    FilesRequestDownload,
+    FilesTransferPrepared(Result<PreparedTransfer, String>),
+    ConfirmFileOverwrite,
+    CancelTransfer(u64),
+    RetryTransfer(u64),
+    ResumeTransfer(u64),
     FilesLocalLoaded(u64, Result<Vec<LocalFileEntry>, String>),
     FilesRemoteLoaded(u64, Result<Vec<sftp::RemoteEntry>, String>),
     ToggleSidebar,
@@ -274,6 +402,8 @@ enum Message {
     Scale(f64),
     PtyBridgeReady(PtyBridgeSender),
     PtyEvent(u64, egui_term::PtyEvent),
+    TransferBridgeReady(TransferBridgeSender),
+    TransferEvent(TransferEvent),
     TerminalResized(u64, iced::Size),
     TerminalSelectStart(pane_grid::Pane, u64, f32, f32),
     TerminalSelectUpdate(u64, f32, f32),
