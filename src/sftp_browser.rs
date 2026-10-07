@@ -1,5 +1,6 @@
 use crate::{
     Session,
+    remote_edit::{RemoteEdit, SaveOutcome},
     sftp::{self, RemoteEntry, Transfer},
 };
 use eframe::egui;
@@ -73,6 +74,9 @@ pub struct SftpBrowser {
     drop_upload_enabled: bool,
     conflict: Option<Conflict>,
     delete_confirm: bool,
+    remote_editor: Option<RemoteEdit>,
+    remote_editor_conflict: bool,
+    remote_editor_discard_confirm: bool,
     jobs: Vec<TransferJob>,
     notice: String,
     error: String,
@@ -98,6 +102,9 @@ impl SftpBrowser {
             drop_upload_enabled: false,
             conflict: None,
             delete_confirm: false,
+            remote_editor: None,
+            remote_editor_conflict: false,
+            remote_editor_discard_confirm: false,
             jobs: Vec::new(),
             notice: String::new(),
             error: String::new(),
@@ -240,6 +247,136 @@ impl SftpBrowser {
                 "Queued {queued} dropped file(s) for SFTP session '{}'.",
                 self.session.name
             );
+        }
+    }
+
+    fn open_remote_editor(&mut self) -> anyhow::Result<()> {
+        let selected = self
+            .selected_remote
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("select a remote file to edit"))?;
+        anyhow::ensure!(!selected.is_dir, "select a remote file, not a directory");
+        let remote = sftp::join_remote(self.remote_path.trim(), &selected.name);
+        let editor = RemoteEdit::open(
+            &self.session,
+            self.config.as_deref(),
+            &remote,
+            selected.size,
+        )?;
+        self.remote_editor = Some(editor);
+        self.remote_editor_conflict = false;
+        self.remote_editor_discard_confirm = false;
+        self.notice = format!("Opened '{remote}' in the private internal editor.");
+        Ok(())
+    }
+
+    fn save_remote_editor(&mut self, force_remote_change: bool) -> anyhow::Result<()> {
+        let editor = self
+            .remote_editor
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("remote editor is not open"))?;
+        match editor.save(
+            &self.session,
+            self.config.as_deref(),
+            force_remote_change,
+        )? {
+            SaveOutcome::Saved => {
+                self.remote_editor_conflict = false;
+                self.notice = format!("Saved '{}' through staged SFTP replacement.", editor.remote());
+                let _ = self.refresh_remote();
+            }
+            SaveOutcome::Conflict => {
+                self.remote_editor_conflict = true;
+                self.notice =
+                    "Remote file changed since it was opened; explicit overwrite confirmation is required."
+                        .into();
+            }
+        }
+        Ok(())
+    }
+
+    fn render_remote_editor(&mut self, ui: &mut egui::Ui) {
+        let Some(editor) = self.remote_editor.as_mut() else {
+            return;
+        };
+        let remote = editor.remote().to_owned();
+        let dirty = editor.is_dirty();
+        ui.separator();
+        ui.heading(format!("Remote editor · {remote}"));
+        ui.small(
+            "Private temporary working copy. Closing does not upload. Save re-checks the live remote file before staged replacement.",
+        );
+        ui.add(
+            egui::TextEdit::multiline(editor.text_mut())
+                .desired_rows(18)
+                .desired_width(f32::INFINITY),
+        );
+        let dirty = editor.is_dirty() || dirty;
+        let mut save = false;
+        let mut close = false;
+        ui.horizontal_wrapped(|ui| {
+            if dirty {
+                ui.strong("Modified");
+            } else {
+                ui.small("Unmodified");
+            }
+            if ui.button("Save").clicked() {
+                save = true;
+            }
+            if ui.button("Close").clicked() {
+                if dirty {
+                    self.remote_editor_discard_confirm = true;
+                } else {
+                    close = true;
+                }
+            }
+        });
+
+        if save
+            && let Err(error) = self.save_remote_editor(false)
+        {
+            self.error = format!("{error:#}");
+        }
+
+        if self.remote_editor_conflict {
+            ui.group(|ui| {
+                ui.label("The remote file changed after this editor was opened.");
+                ui.small(
+                    "Overwrite is not automatic. Confirm only if you intend to replace the newer remote contents.",
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Overwrite changed remote file").clicked() {
+                        if let Err(error) = self.save_remote_editor(true) {
+                            self.error = format!("{error:#}");
+                        }
+                    }
+                    if ui.button("Keep editor open").clicked() {
+                        self.remote_editor_conflict = false;
+                    }
+                });
+            });
+        }
+
+        if self.remote_editor_discard_confirm {
+            ui.group(|ui| {
+                ui.label("Discard unsaved remote edit?");
+                ui.small("The private temporary working copy will be deleted and nothing will be uploaded.");
+                ui.horizontal(|ui| {
+                    if ui.button("Discard").clicked() {
+                        close = true;
+                    }
+                    if ui.button("Keep editing").clicked() {
+                        self.remote_editor_discard_confirm = false;
+                    }
+                });
+            });
+        }
+
+        if close {
+            self.remote_editor = None;
+            self.remote_editor_conflict = false;
+            self.remote_editor_discard_confirm = false;
+            self.notice = format!("Closed editor for '{remote}' without automatic upload.");
         }
     }
 
@@ -558,6 +695,11 @@ impl SftpBrowser {
             {
                 self.error = format!("{error:#}");
             }
+            if ui.button("Open/Edit").clicked()
+                && let Err(error) = self.open_remote_editor()
+            {
+                self.error = format!("{error:#}");
+            }
         });
 
         ui.separator();
@@ -763,6 +905,7 @@ impl SftpBrowser {
             self.render_remote(&mut columns[1]);
         });
         self.render_remote_actions(ui);
+        self.render_remote_editor(ui);
         self.render_conflict(ui);
         if !self.notice.is_empty() {
             ui.small(&self.notice);
