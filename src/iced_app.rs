@@ -795,7 +795,7 @@ impl App {
                     space::vertical().height(12),
                     action("+  New connection", Message::New).style(primary),
                     space::vertical().height(12),
-                    text("The shell is now backed by the real profile store. Live terminal migration follows.")
+                    text("The Iced shell now uses the production OpenSSH PTY backend. Open a profile to connect.")
                         .size(13)
                         .color(MUTED),
                 ]
@@ -831,7 +831,7 @@ impl App {
         tabs = tabs.push(action("+", Message::New));
 
         let toolbar = row![
-            text("PROFILE READY").size(12).color(GREEN),
+            text("LIVE SSH").size(12).color(GREEN),
             space::horizontal(),
             action("Split right", Message::Split(pane_grid::Axis::Vertical)),
             action("Split down", Message::Split(pane_grid::Axis::Horizontal)),
@@ -875,14 +875,24 @@ impl App {
 
     fn terminals(&self) -> Element<'_, Message> {
         let tab = &self.tabs[self.active];
-        pane_grid(&tab.panes, |id, profile, _| {
+        pane_grid(&tab.panes, |id, pane, _| {
             let focused = tab.focus == id;
+            let state = if pane.exited {
+                ("EXITED", MUTED)
+            } else if pane.error.is_some() {
+                ("ERROR", DANGER)
+            } else if pane.terminal.is_some() {
+                ("CONNECTED", GREEN)
+            } else {
+                ("CONNECTING", BLUE)
+            };
             let title = pane_grid::TitleBar::new(
                 row![
                     text(if focused { "FOCUSED" } else { "SSH" })
                         .size(11)
                         .color(if focused { BLUE } else { MUTED }),
-                    text(profile.name.clone()).size(13),
+                    text(pane.profile.name.clone()).size(13),
+                    text(state.0).size(10).color(state.1),
                     space::horizontal(),
                     action("x", Message::ClosePane(id)),
                 ]
@@ -892,34 +902,40 @@ impl App {
             .padding([4, 10])
             .style(surface);
 
-            let destination = if profile.user.is_empty() {
-                profile.host.clone()
+            let terminal_body: Element<'_, Message> = if let Some(error) = &pane.error {
+                column![
+                    text("Unable to start SSH session").size(16).color(DANGER),
+                    text(error).size(13).color(MUTED),
+                    space::vertical().height(8),
+                    text("The saved profile was not altered.").size(12).color(MUTED),
+                ]
+                .spacing(10)
+                .width(Fill)
+                .into()
             } else {
-                format!("{}@{}", profile.user, profile.host)
+                let transcript = if pane.transcript.is_empty() {
+                    if pane.exited {
+                        "Session exited without terminal output."
+                    } else {
+                        "Connecting with system OpenSSH..."
+                    }
+                } else {
+                    pane.transcript.as_str()
+                };
+                scrollable(
+                    text(transcript)
+                        .font(Font::MONOSPACE)
+                        .size(15)
+                        .color(FG),
+                )
+                .width(Fill)
+                .height(Fill)
+                .into()
             };
-            let port = profile
-                .port
-                .map(|port| port.to_string())
-                .unwrap_or_else(|| "SSH config/default".into());
-            let body = column![
-                text("SESSION PROFILE").size(11).color(BLUE),
-                text(destination).size(22),
-                text(format!("Port: {port}")).size(13).color(MUTED),
-                space::vertical().height(8),
-                text("The Iced production shell is active. This pane deliberately does not start an SSH process until the frontend-neutral PTY bridge is connected, so the migration cannot bypass the existing terminal safety path.")
-                    .size(13)
-                    .color(MUTED),
-                space::vertical().height(8),
-                text("Next: attach the existing OpenSSH launch policy to a reusable PTY/parser backend, then render and drive it here.")
-                    .size(13)
-                    .color(MUTED),
-            ]
-            .spacing(12)
-            .width(Fill);
 
             pane_grid::Content::new(
-                container(scrollable(body).width(Fill).height(Fill))
-                    .padding(18)
+                container(terminal_body)
+                    .padding(14)
                     .width(Fill)
                     .height(Fill),
             )
