@@ -453,11 +453,35 @@ fn ssh_policy_control(ui: &mut egui::Ui, label: &str, value: &mut Option<bool>) 
     changed
 }
 
+fn apply_windterm_style(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = egui::vec2(6.0, 4.0);
+    style.spacing.button_padding = egui::vec2(7.0, 3.0);
+    style.spacing.menu_margin = egui::Margin::same(6);
+    style.visuals = egui::Visuals::dark();
+    style.visuals.panel_fill = egui::Color32::from_rgb(30, 31, 34);
+    style.visuals.window_fill = egui::Color32::from_rgb(30, 31, 34);
+    style.visuals.extreme_bg_color = egui::Color32::from_rgb(20, 21, 23);
+    style.visuals.faint_bg_color = egui::Color32::from_rgb(37, 39, 43);
+    style.visuals.code_bg_color = egui::Color32::from_rgb(24, 25, 28);
+    style.visuals.selection.bg_fill = egui::Color32::from_rgb(53, 78, 107);
+    style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(38, 40, 44);
+    style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(48, 51, 56);
+    style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(56, 60, 66);
+    style.visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(30, 31, 34);
+    style.visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_rgb(202, 205, 211);
+    style.visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_rgb(202, 205, 211);
+    style.visuals.widgets.hovered.fg_stroke.color = egui::Color32::WHITE;
+    style.visuals.window_stroke.color = egui::Color32::from_rgb(55, 58, 63);
+    ctx.set_style(style);
+}
+
 pub struct App {
     path: PathBuf,
     config: Option<PathBuf>,
     profiles: Vec<Session>,
     profile_query: String,
+    session_settings_open: bool,
     selected_profile: Option<String>,
     delete_confirm: Option<String>,
     profile_transfer_path: String,
@@ -601,6 +625,7 @@ impl App {
             config,
             profiles,
             profile_query: String::new(),
+            session_settings_open: false,
             selected_profile: None,
             delete_confirm: None,
             profile_transfer_path: String::new(),
@@ -1004,6 +1029,7 @@ impl App {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context) {
+        apply_windterm_style(ctx);
         if self.startup_pending {
             self.startup_pending = false;
             match self.startup_settings.behavior.clone() {
@@ -1277,11 +1303,25 @@ impl App {
 
         egui::SidePanel::left("connections")
             .resizable(true)
-            .default_width(330.0)
+            .default_width(235.0)
+            .min_width(185.0)
+            .max_width(360.0)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.heading("Inspirum Terminal");
-                    ui.label("SSH-first • system OpenSSH");
+                    ui.horizontal(|ui| {
+                        ui.strong("RESOURCE MANAGER");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("+").on_hover_text("New session profile").clicked() {
+                                self.terminal_focus = None;
+                                self.selected_profile = None;
+                                self.delete_confirm = None;
+                                self.load_draft(Session::default());
+                                self.session_settings_open = true;
+                            }
+                        });
+                    });
+                    ui.small("Sessions");
+                    if self.session_settings_open {
                     egui::CollapsingHeader::new("Keyboard & accessibility")
                         .default_open(false)
                         .show(ui, |ui| {
@@ -1452,6 +1492,7 @@ impl App {
                                 ui.small(&self.snippet_notice);
                             }
                         });
+                    }
                     ui.separator();
                     ui.label("Saved sessions");
                     ui.horizontal(|ui| {
@@ -1587,6 +1628,64 @@ impl App {
                         });
                     }
 
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .add_enabled(self.tabs.len() < 16, egui::Button::new("Connect"))
+                            .on_hover_text("Connect selected/draft profile · Ctrl/Cmd+Enter")
+                            .clicked()
+                        {
+                            self.connect_draft(ctx);
+                        }
+                        if ui.button("Files").on_hover_text("Open graphical SFTP browser").clicked() {
+                            self.terminal_focus = None;
+                            let result = self.validated_draft().and_then(|session| {
+                                self.sftp_browser = Some(SftpBrowser::new(
+                                    session,
+                                    self.config.clone(),
+                                )?);
+                                Ok(())
+                            });
+                            self.error = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+                        }
+                        if ui.button("SFTP").on_hover_text("Open interactive SFTP terminal").clicked() {
+                            let result = self.validated_draft().and_then(|session| {
+                                let terminal = terminal::connect_sftp(
+                                    self.next_id,
+                                    ctx.clone(),
+                                    self.tx.clone(),
+                                    &session,
+                                    self.config.as_deref(),
+                                )?;
+                                self.tabs.push(Tab {
+                                    id: self.next_id,
+                                    name: format!("{} · SFTP", session.name),
+                                    kind: TabKind::Sftp,
+                                    session,
+                                    terminal,
+                                    exited: false,
+                                });
+                                self.active = Some(self.next_id);
+                                self.terminal_focus = Some(self.next_id);
+                                self.next_id += 1;
+                                Ok(())
+                            });
+                            self.error =
+                                result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+                        }
+                        if ui
+                            .selectable_label(self.session_settings_open, "Settings")
+                            .on_hover_text("Show connection/profile settings")
+                            .clicked()
+                        {
+                            self.session_settings_open = !self.session_settings_open;
+                        }
+                    });
+                    if let Some(profile) = self.selected_profile.as_deref() {
+                        ui.small(format!("Selected: {profile}"));
+                    }
+
+                    if self.session_settings_open {
                     egui::CollapsingHeader::new("Startup behavior")
                         .default_open(false)
                         .show(ui, |ui| {
@@ -2582,6 +2681,8 @@ impl App {
                             }
                         });
 
+                    }
+
                     if !self.error.is_empty() {
                         ui.colored_label(egui::Color32::LIGHT_RED, &self.error);
                     }
@@ -2605,11 +2706,77 @@ impl App {
         let mut move_active = None;
         let mut bulk_mode = None;
 
+        egui::TopBottomPanel::top("app_menu")
+            .exact_height(24.0)
+            .show(ctx, |ui| {
+                egui::menu::bar(ui, |ui| {
+                    ui.menu_button("Session", |ui| {
+                        if ui.button("Connect").clicked() {
+                            self.connect_draft(ctx);
+                            ui.close_menu();
+                        }
+                        if ui.button("Files").clicked() {
+                            self.terminal_focus = None;
+                            let result = self.validated_draft().and_then(|session| {
+                                self.sftp_browser =
+                                    Some(SftpBrowser::new(session, self.config.clone())?);
+                                Ok(())
+                            });
+                            self.error = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+                            ui.close_menu();
+                        }
+                        if ui.button("Quick switch").clicked() {
+                            self.tab_switcher_open = true;
+                            self.tab_switcher_query.clear();
+                            self.tab_switcher_index = 0;
+                            self.terminal_focus = None;
+                            ui.close_menu();
+                        }
+                    });
+                    ui.menu_button("View", |ui| {
+                        ui.checkbox(&mut self.session_settings_open, "Session settings");
+                        if ui
+                            .checkbox(&mut self.search_open, "Terminal history search")
+                            .changed()
+                        {
+                            self.terminal_focus = if self.search_open { None } else { self.active };
+                        }
+                        if ui.button("Command palette").clicked() {
+                            self.command_palette_open = true;
+                            self.command_palette_query.clear();
+                            self.command_palette_index = 0;
+                            self.terminal_focus = None;
+                            ui.close_menu();
+                        }
+                    });
+                    ui.menu_button("Window", |ui| {
+                        if ui.button("Quick switch tabs").clicked() {
+                            self.tab_switcher_open = true;
+                            self.tab_switcher_query.clear();
+                            self.tab_switcher_index = 0;
+                            self.terminal_focus = None;
+                            ui.close_menu();
+                        }
+                        if ui.button("Close active tab").clicked() {
+                            if let Some(id) = self.active {
+                                self.close_tab_ids(&[id]);
+                            }
+                            ui.close_menu();
+                        }
+                    });
+                    ui.menu_button("Help", |ui| {
+                        ui.label("Inspirum Terminal");
+                        ui.small("WindTerm-style workspace shell");
+                    });
+                });
+            });
+
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
+            ui.horizontal(|ui| {
+                ui.small("SESSIONS");
                 if ui
-                    .button("Quick switch…")
-                    .on_hover_text("Ctrl/Cmd+Shift+K")
+                    .small_button("⌕")
+                    .on_hover_text("Quick switch · Ctrl/Cmd+Shift+K")
                     .clicked()
                 {
                     self.tab_switcher_open = true;
@@ -2617,48 +2784,56 @@ impl App {
                     self.tab_switcher_index = 0;
                     self.terminal_focus = None;
                 }
-                if ui
-                    .add_enabled(self.active.is_some(), egui::Button::new("← Move"))
-                    .clicked()
-                {
-                    move_active = Some(-1);
-                }
-                if ui
-                    .add_enabled(self.active.is_some(), egui::Button::new("Move →"))
-                    .clicked()
-                {
-                    move_active = Some(1);
-                }
-                if ui
-                    .add_enabled(
-                        !self.tab_selected.is_empty(),
-                        egui::Button::new("Close selected"),
-                    )
-                    .clicked()
-                {
-                    bulk_mode = Some(BulkCloseMode::Selected);
-                }
-                if let Some(active) = self.active {
-                    if ui.button("Close right").clicked() {
-                        bulk_mode = Some(BulkCloseMode::RightOf(active));
+                ui.menu_button("⋯", |ui| {
+                    if ui
+                        .add_enabled(self.active.is_some(), egui::Button::new("Move tab left"))
+                        .clicked()
+                    {
+                        move_active = Some(-1);
+                        ui.close_menu();
                     }
-                    if ui.button("Close others").clicked() {
-                        bulk_mode = Some(BulkCloseMode::Others(active));
+                    if ui
+                        .add_enabled(self.active.is_some(), egui::Button::new("Move tab right"))
+                        .clicked()
+                    {
+                        move_active = Some(1);
+                        ui.close_menu();
                     }
-                    let mut visual = self.tab_labels.get(&active).copied().unwrap_or_default();
-                    egui::ComboBox::from_id_salt("active_tab_visual_label")
-                        .selected_text(format!("Label: {}", visual.name()))
-                        .show_ui(ui, |ui| {
-                            for choice in TabVisualLabel::ALL {
-                                ui.selectable_value(&mut visual, choice, choice.name());
-                            }
-                        });
-                    if visual == TabVisualLabel::None {
-                        self.tab_labels.remove(&active);
-                    } else {
-                        self.tab_labels.insert(active, visual);
+                    if ui
+                        .add_enabled(
+                            !self.tab_selected.is_empty(),
+                            egui::Button::new("Close selected tabs"),
+                        )
+                        .clicked()
+                    {
+                        bulk_mode = Some(BulkCloseMode::Selected);
+                        ui.close_menu();
                     }
-                }
+                    if let Some(active) = self.active {
+                        if ui.button("Close tabs to the right").clicked() {
+                            bulk_mode = Some(BulkCloseMode::RightOf(active));
+                            ui.close_menu();
+                        }
+                        if ui.button("Close other tabs").clicked() {
+                            bulk_mode = Some(BulkCloseMode::Others(active));
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        let mut visual = self.tab_labels.get(&active).copied().unwrap_or_default();
+                        egui::ComboBox::from_id_salt("active_tab_visual_label")
+                            .selected_text(format!("Tab marker: {}", visual.name()))
+                            .show_ui(ui, |ui| {
+                                for choice in TabVisualLabel::ALL {
+                                    ui.selectable_value(&mut visual, choice, choice.name());
+                                }
+                            });
+                        if visual == TabVisualLabel::None {
+                            self.tab_labels.remove(&active);
+                        } else {
+                            self.tab_labels.insert(active, visual);
+                        }
+                    }
+                });
             });
             ui.horizontal_wrapped(|ui| {
                 for (id, name, exited) in &tab_snapshot {
@@ -2863,13 +3038,42 @@ impl App {
             }
         }
 
+        egui::TopBottomPanel::bottom("status_bar")
+            .exact_height(23.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if let Some(active) = self.active {
+                        if let Some(tab) = self.tabs.iter().find(|tab| tab.id == active) {
+                            ui.small(if tab.exited {
+                                "● disconnected"
+                            } else {
+                                "● connected"
+                            });
+                            ui.separator();
+                            ui.small(&tab.name);
+                        }
+                    } else {
+                        ui.small("Ready");
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.small("Inspirum Terminal");
+                        if self.sync_input.armed() {
+                            ui.separator();
+                            ui.small("SYNC INPUT");
+                        }
+                    });
+                });
+            });
+
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(panel) = self.scp_panel.as_mut() {
                 ui.horizontal(|ui| {
                     ui.strong(format!("SCP · {}", panel.session_name()));
-                    if ui.button("Close SCP").clicked() {
-                        close_scp = true;
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("×").on_hover_text("Close SCP pane").clicked() {
+                            close_scp = true;
+                        }
+                    });
                 });
                 ui.separator();
                 panel.ui(ctx, ui);
@@ -2878,44 +3082,51 @@ impl App {
             if let Some(browser) = self.sftp_browser.as_mut() {
                 ui.horizontal(|ui| {
                     ui.strong(format!("Files · {}", browser.session_name()));
-                    if ui.button("Close file browser").clicked() {
-                        close_browser = true;
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("×").on_hover_text("Close file browser").clicked() {
+                            close_browser = true;
+                        }
+                    });
                 });
                 ui.separator();
                 browser.ui(ctx, ui);
                 return;
             }
             if self.sftp_browser.is_none() && self.scp_panel.is_none() && self.active.is_some() {
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Copy selection").clicked() {
+                ui.horizontal(|ui| {
+                    if ui.small_button("Copy").clicked() {
                         copy_selected = true;
                     }
                     if ui
-                        .button(if self.search_open { "Close search" } else { "Search" })
-                        .on_hover_text("Keyboard: Ctrl/Cmd+Shift+F")
+                        .small_button(if self.search_open { "× Find" } else { "Find" })
+                        .on_hover_text("Search retained history · Ctrl/Cmd+Shift+F")
                         .clicked()
                     {
                         self.search_open = !self.search_open;
                         self.terminal_focus = if self.search_open { None } else { self.active };
                     }
-
-                    ui.label("Paste:");
-                    ui.selectable_value(
-                        &mut self.paste_policy,
-                        PastePolicy::ConfirmMultiline,
-                        "confirm multiline",
-                    );
-                    ui.selectable_value(
-                        &mut self.paste_policy,
-                        PastePolicy::ConfirmAll,
-                        "confirm all",
-                    );
-                    ui.selectable_value(
-                        &mut self.paste_policy,
-                        PastePolicy::BlockMultiline,
-                        "block multiline",
-                    );
+                    ui.menu_button("Paste policy", |ui| {
+                        ui.selectable_value(
+                            &mut self.paste_policy,
+                            PastePolicy::ConfirmMultiline,
+                            "Confirm multiline",
+                        );
+                        ui.selectable_value(
+                            &mut self.paste_policy,
+                            PastePolicy::ConfirmAll,
+                            "Confirm all",
+                        );
+                        ui.selectable_value(
+                            &mut self.paste_policy,
+                            PastePolicy::BlockMultiline,
+                            "Block multiline",
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.sync_input.armed() {
+                            ui.small("SYNC");
+                        }
+                    });
                 });
 
                 if !self.paste_notice.is_empty() {
@@ -2928,6 +3139,7 @@ impl App {
                         .find(|tab| tab.id == id)
                         .map(|tab| tab.session.name.clone())
                 });
+                if self.session_settings_open {
                 egui::CollapsingHeader::new("Appearance & interaction")
                     .default_open(false)
                     .show(ui, |ui| {
@@ -3011,6 +3223,7 @@ impl App {
                             ui.small(&self.appearance_notice);
                         }
                     });
+                }
 
                 if self.search_open {
                     let active_id = self.active;
