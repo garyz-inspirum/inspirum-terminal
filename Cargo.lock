@@ -421,6 +421,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "core-foundation"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -457,6 +467,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77745e017f5edba1a9c1d854f6f3a52dac8a12dd5af5d2f54aecf61e43d80d30"
 dependencies = [
  "libm",
+]
+
+[[package]]
+name = "core-graphics-types"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d44a101f213f6c4cdc1853d4b78aef6db6bdfa3468798cc1d9912f4735013eb"
+dependencies = [
+ "bitflags 2.13.2",
+ "core-foundation 0.10.1",
+ "libc",
 ]
 
 [[package]]
@@ -1182,6 +1203,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2bbed164dd10ed526c2e4fe3e721ca4a71c61730e5aafac6844b417b3227058"
 dependencies = [
  "bitflags 2.13.2",
+]
+
+[[package]]
+name = "gpu-allocator"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c151a2a5ef800297b4e79efa4f4bec035c5f51d5ae587287c9b952bdf734cacd"
+dependencies = [
+ "log",
+ "presser",
+ "thiserror 1.0.69",
+ "windows",
 ]
 
 [[package]]
@@ -1943,6 +1976,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "metal"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00c15a6f673ff72ddcc22394663290f870fb224c1bfce55734a75c414150e605"
+dependencies = [
+ "bitflags 2.13.2",
+ "block",
+ "core-graphics-types 0.2.0",
+ "foreign-types",
+ "log",
+ "objc",
+ "paste",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2589,6 +2637,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "presser"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
+
+[[package]]
 name = "proc-macro-crate"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2653,6 +2707,12 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "range-alloc"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca45419789ae5a7899559e9512e58ca889e41f04f1f2445e9f4b290ceccd1d08"
 
 [[package]]
 name = "rangemap"
@@ -3798,12 +3858,18 @@ dependencies = [
  "cfg_aliases",
  "document-features",
  "hashbrown 0.16.1",
+ "js-sys",
  "log",
+ "naga 27.0.3",
+ "parking_lot",
  "portable-atomic",
  "profiling",
  "raw-window-handle",
  "smallvec",
  "static_assertions",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "wgpu-core 27.0.3",
  "wgpu-hal 27.0.4",
  "wgpu-types 27.0.1",
@@ -3859,9 +3925,29 @@ dependencies = [
  "rustc-hash 1.1.0",
  "smallvec",
  "thiserror 2.0.21",
+ "wgpu-core-deps-apple",
+ "wgpu-core-deps-emscripten",
  "wgpu-core-deps-windows-linux-android",
  "wgpu-hal 27.0.4",
  "wgpu-types 27.0.1",
+]
+
+[[package]]
+name = "wgpu-core-deps-apple"
+version = "27.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0772ae958e9be0c729561d5e3fd9a19679bcdfb945b8b1a1969d9bfe8056d233"
+dependencies = [
+ "wgpu-hal 27.0.4",
+]
+
+[[package]]
+name = "wgpu-core-deps-emscripten"
+version = "27.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b06ac3444a95b0813ecfd81ddb2774b66220b264b3e2031152a4a29fda4da6b5"
+dependencies = [
+ "wgpu-hal 27.0.4",
 ]
 
 [[package]]
@@ -3920,18 +4006,47 @@ version = "27.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b21cb61c57ee198bc4aff71aeadff4cbb80b927beb912506af9c780d64313ce"
 dependencies = [
+ "android_system_properties",
+ "arrayvec",
+ "ash",
+ "bit-set",
  "bitflags 2.13.2",
+ "block",
+ "bytemuck",
  "cfg-if",
  "cfg_aliases",
+ "core-graphics-types 0.2.0",
+ "glow",
+ "glutin_wgl_sys",
+ "gpu-alloc",
+ "gpu-allocator",
+ "gpu-descriptor",
+ "hashbrown 0.16.1",
+ "js-sys",
+ "khronos-egl",
+ "libc",
  "libloading",
  "log",
+ "metal 0.32.0",
  "naga 27.0.3",
+ "ndk-sys 0.6.0+11769913",
+ "objc",
+ "once_cell",
+ "ordered-float",
+ "parking_lot",
  "portable-atomic",
  "portable-atomic-util",
+ "profiling",
+ "range-alloc",
  "raw-window-handle",
  "renderdoc-sys",
+ "smallvec",
  "thiserror 2.0.21",
+ "wasm-bindgen",
+ "web-sys",
  "wgpu-types 27.0.1",
+ "windows",
+ "windows-core",
 ]
 
 [[package]]
