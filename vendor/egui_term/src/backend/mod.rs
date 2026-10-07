@@ -1,5 +1,6 @@
 pub mod settings;
 
+use crate::theme::TerminalTheme;
 use crate::types::Size;
 use alacritty_terminal::event::{Event, EventListener, Notify, OnResize, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
@@ -414,6 +415,82 @@ impl TerminalBackend {
         &self.last_content
     }
 
+    /// Return the currently visible terminal grid with resolved colors and text attributes.
+    ///
+    /// This keeps toolkit-specific rendering outside the PTY/parser backend while preserving the
+    /// exact Alacritty cell model. The supplied theme controls ANSI/named-color resolution.
+    pub fn display_snapshot(&mut self, theme: &TerminalTheme) -> DisplaySnapshot {
+        let content = self.sync();
+        let global_bg = theme.get_color(alacritty_terminal::vte::ansi::Color::Named(
+            alacritty_terminal::vte::ansi::NamedColor::Background,
+        ));
+        let [bg_r, bg_g, bg_b, _] = global_bg.to_array();
+        let mut cells = Vec::with_capacity(
+            content.terminal_size.num_cols as usize * content.terminal_size.num_lines as usize,
+        );
+
+        for indexed in content.grid.display_iter() {
+            let flags = indexed.cell.flags;
+            if flags.contains(term::cell::Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+
+            let line = indexed.point.line.0 + content.grid.display_offset() as i32;
+            if line < 0 || line >= content.terminal_size.num_lines as i32 {
+                continue;
+            }
+
+            let selected = content
+                .selectable_range
+                .is_some_and(|range| range.contains(indexed.point));
+            let inverse = flags.contains(term::cell::Flags::INVERSE);
+            let dim = flags.intersects(term::cell::Flags::DIM | term::cell::Flags::DIM_BOLD);
+
+            let mut foreground = theme.get_color(indexed.fg);
+            let mut background = theme.get_color(indexed.bg);
+            if dim {
+                foreground = foreground.linear_multiply(0.7);
+            }
+            if inverse || selected {
+                std::mem::swap(&mut foreground, &mut background);
+            }
+
+            let cursor = content.grid.cursor.point == indexed.point;
+            let cursor_color = theme.get_color(content.cursor.fg);
+            let [fg_r, fg_g, fg_b, _] = foreground.to_array();
+            let [cell_bg_r, cell_bg_g, cell_bg_b, _] = background.to_array();
+            let [cursor_r, cursor_g, cursor_b, _] = cursor_color.to_array();
+
+            cells.push(DisplayCell {
+                character: if flags.contains(term::cell::Flags::HIDDEN) {
+                    ' '
+                } else {
+                    indexed.c
+                },
+                row: line as usize,
+                column: indexed.point.column.0,
+                foreground: [fg_r, fg_g, fg_b],
+                background: [cell_bg_r, cell_bg_g, cell_bg_b],
+                cursor_color: [cursor_r, cursor_g, cursor_b],
+                bold: flags.intersects(term::cell::Flags::BOLD | term::cell::Flags::DIM_BOLD),
+                italic: flags.intersects(
+                    term::cell::Flags::ITALIC | term::cell::Flags::BOLD_ITALIC,
+                ),
+                underline: flags.intersects(term::cell::Flags::ALL_UNDERLINES),
+                strikeout: flags.contains(term::cell::Flags::STRIKEOUT),
+                wide: flags.contains(term::cell::Flags::WIDE_CHAR),
+                cursor,
+            });
+        }
+
+        DisplaySnapshot {
+            rows: content.terminal_size.num_lines as usize,
+            columns: content.terminal_size.num_cols as usize,
+            background: [bg_r, bg_g, bg_b],
+            cells,
+        }
+    }
+
     /// Snapshot retained scrollback plus the visible screen without changing viewport state.
     ///
     /// Lines are returned oldest-to-newest and trailing blank cells are trimmed. This reads the
@@ -695,6 +772,30 @@ fn visible_regex_match_iter<'a>(
     RegexIter::new(start, end, Direction::Right, term, regex)
         .skip_while(move |rm| rm.end().line < viewport_start)
         .take_while(move |rm| rm.start().line <= viewport_end)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayCell {
+    pub character: char,
+    pub row: usize,
+    pub column: usize,
+    pub foreground: [u8; 3],
+    pub background: [u8; 3],
+    pub cursor_color: [u8; 3],
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strikeout: bool,
+    pub wide: bool,
+    pub cursor: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplaySnapshot {
+    pub rows: usize,
+    pub columns: usize,
+    pub background: [u8; 3],
+    pub cells: Vec<DisplayCell>,
 }
 
 pub struct RenderableContent {
