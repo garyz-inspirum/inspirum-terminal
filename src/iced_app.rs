@@ -184,6 +184,10 @@ enum Message {
     PtyBridgeReady(PtyBridgeSender),
     PtyEvent(u64, egui_term::PtyEvent),
     TerminalResized(u64, iced::Size),
+    TerminalSelectStart(pane_grid::Pane, u64, f32, f32),
+    TerminalSelectUpdate(u64, f32, f32),
+    TerminalScroll(u64, i32),
+    CopySelection(u64),
     Event(iced::Event),
 }
 
@@ -197,12 +201,97 @@ fn sanitize_terminal_title(title: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
+#[derive(Default)]
+struct TerminalCanvasState {
+    selecting: bool,
+}
+
 struct TerminalCanvas<'a> {
+    pane: pane_grid::Pane,
+    id: u64,
     snapshot: &'a egui_term::DisplaySnapshot,
 }
 
 impl canvas::Program<Message> for TerminalCanvas<'_> {
-    type State = ();
+    type State = TerminalCanvasState;
+
+    fn update(
+        &self,
+        state: &mut Self::State,
+        event: &iced::Event,
+        bounds: iced::Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Option<canvas::Action<Message>> {
+        let position = cursor.position_in(bounds);
+
+        match event {
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                let position = position?;
+                state.selecting = true;
+                Some(
+                    canvas::Action::publish(Message::TerminalSelectStart(
+                        self.pane,
+                        self.id,
+                        position.x,
+                        position.y,
+                    ))
+                    .and_capture(),
+                )
+            }
+            iced::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.selecting => {
+                let position = position?;
+                Some(
+                    canvas::Action::publish(Message::TerminalSelectUpdate(
+                        self.id,
+                        position.x,
+                        position.y,
+                    ))
+                    .and_capture(),
+                )
+            }
+            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+                if state.selecting =>
+            {
+                state.selecting = false;
+                position.map(|position| {
+                    canvas::Action::publish(Message::TerminalSelectUpdate(
+                        self.id,
+                        position.x,
+                        position.y,
+                    ))
+                    .and_capture()
+                })
+            }
+            iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                let lines = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => *y,
+                    mouse::ScrollDelta::Pixels { y, .. } => *y / TERMINAL_CELL_HEIGHT,
+                };
+                let lines = lines.round() as i32;
+                (lines != 0).then(|| {
+                    canvas::Action::publish(Message::TerminalScroll(self.id, lines)).and_capture()
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        state: &Self::State,
+        bounds: iced::Rectangle,
+        cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        if cursor.position_in(bounds).is_some() {
+            if state.selecting {
+                mouse::Interaction::Grabbing
+            } else {
+                mouse::Interaction::Text
+            }
+        } else {
+            mouse::Interaction::default()
+        }
+    }
 
     fn draw(
         &self,
@@ -615,19 +704,54 @@ impl App {
     }
 
     fn send_to_terminal(&mut self, id: u64, bytes: Vec<u8>) -> bool {
+        self.command_terminal(id, egui_term::BackendCommand::Write(bytes))
+    }
+
+    fn command_terminal(&mut self, id: u64, command: egui_term::BackendCommand) -> bool {
+        let mut command = Some(command);
         for tab in &mut self.tabs {
             for (_, pane) in tab.panes.iter_mut() {
                 if pane.id != id || pane.exited {
                     continue;
                 }
                 if let Some(terminal) = pane.terminal.as_mut() {
-                    terminal.process_command(egui_term::BackendCommand::Write(bytes));
+                    terminal.process_command(command.take().expect("terminal command"));
                     return true;
                 }
                 return false;
             }
         }
         false
+    }
+
+    fn selected_terminal_text(&mut self, id: u64) -> Option<String> {
+        for tab in &mut self.tabs {
+            for (_, pane) in tab.panes.iter_mut() {
+                if pane.id != id {
+                    continue;
+                }
+                let terminal = pane.terminal.as_mut()?;
+                terminal.sync();
+                let selection = terminal.selectable_content();
+                return (!selection.is_empty()).then_some(selection);
+            }
+        }
+        None
+    }
+
+    fn refresh_terminal_display(&mut self, id: u64) {
+        for tab in &mut self.tabs {
+            for (_, pane) in tab.panes.iter_mut() {
+                if pane.id != id {
+                    continue;
+                }
+                if let Some(terminal) = pane.terminal.as_mut() {
+                    pane.display =
+                        Some(terminal.display_snapshot(&egui_term::TerminalTheme::default()));
+                }
+                return;
+            }
+        }
     }
 
     fn refresh_terminal(&mut self, id: u64, exited: bool) {
@@ -825,6 +949,41 @@ impl App {
                     }
                 }
             }
+            Message::TerminalSelectStart(pane_id, id, x, y) => {
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.focus = pane_id;
+                }
+                if self.command_terminal(
+                    id,
+                    egui_term::BackendCommand::SelectStart(
+                        egui_term::SelectionType::Simple,
+                        x,
+                        y,
+                    ),
+                ) {
+                    self.refresh_terminal_display(id);
+                }
+            }
+            Message::TerminalSelectUpdate(id, x, y) => {
+                if self.command_terminal(
+                    id,
+                    egui_term::BackendCommand::SelectUpdate(x, y),
+                ) {
+                    self.refresh_terminal_display(id);
+                }
+            }
+            Message::TerminalScroll(id, lines) => {
+                if self.command_terminal(id, egui_term::BackendCommand::Scroll(lines)) {
+                    self.refresh_terminal_display(id);
+                }
+            }
+            Message::CopySelection(id) => {
+                if let Some(selection) = self.selected_terminal_text(id) {
+                    self.status = "Terminal selection copied to clipboard.".into();
+                    return iced::clipboard::write(selection);
+                }
+                self.status = "No terminal text is selected.".into();
+            }
             Message::Reconnect(pane_id) => {
                 let profile = self
                     .tabs
@@ -1010,7 +1169,22 @@ impl App {
                     keyboard::Key::Character("p") if modifiers.command() && modifiers.shift() => {
                         return self.update(Message::Commands);
                     }
-                    keyboard::Key::Character("v") if modifiers.command() => {
+                    keyboard::Key::Character("c")
+                        if (cfg!(target_os = "macos") && modifiers.macos_command())
+                            || (!cfg!(target_os = "macos")
+                                && modifiers.control()
+                                && modifiers.shift()) =>
+                    {
+                        if let Some(id) = self.focused_terminal_id() {
+                            return self.update(Message::CopySelection(id));
+                        }
+                    }
+                    keyboard::Key::Character("v")
+                        if (cfg!(target_os = "macos") && modifiers.macos_command())
+                            || (!cfg!(target_os = "macos")
+                                && modifiers.control()
+                                && modifiers.shift()) =>
+                    {
                         return self.update(Message::RequestPaste);
                     }
                     _ => {}
@@ -1344,6 +1518,7 @@ impl App {
                     .size(13),
                     text(state.0).size(10).color(state.1),
                     space::horizontal(),
+                    action("Copy", Message::CopySelection(pane.id)),
                     if pane.exited || pane.error.is_some() {
                         action("Reconnect", Message::Reconnect(id))
                     } else {
@@ -1370,7 +1545,11 @@ impl App {
                 .width(Fill)
                 .into()
             } else if let Some(snapshot) = &pane.display {
-                canvas(TerminalCanvas { snapshot })
+                canvas(TerminalCanvas {
+                    pane: id,
+                    id: pane.id,
+                    snapshot,
+                })
                     .width(Fill)
                     .height(Fill)
                     .into()
