@@ -475,7 +475,10 @@ pub fn start_upload_resume(
 
 pub fn validate_local_leaf(name: &str) -> Result<()> {
     ensure!(!name.is_empty(), "local name is required");
-    ensure!(name != "." && name != "..", "local name may not be dot traversal");
+    ensure!(
+        name != "." && name != "..",
+        "local name may not be dot traversal"
+    );
     ensure!(
         !name.chars().any(char::is_control),
         "local name contains control characters"
@@ -489,7 +492,10 @@ pub fn validate_local_leaf(name: &str) -> Result<()> {
 
 pub fn local_destination(directory: &Path, remote_name: &str) -> Result<PathBuf> {
     validate_local_leaf(remote_name)?;
-    ensure!(directory.is_dir(), "local destination directory does not exist");
+    ensure!(
+        directory.is_dir(),
+        "local destination directory does not exist"
+    );
     Ok(directory.join(remote_name))
 }
 
@@ -603,7 +609,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let destination = local_destination(temp.path(), "file.txt").unwrap();
         assert_eq!(destination.parent(), Some(temp.path()));
-        assert_eq!(destination.file_name().and_then(|name| name.to_str()), Some("file.txt"));
+        assert_eq!(
+            destination.file_name().and_then(|name| name.to_str()),
+            Some("file.txt")
+        );
     }
 
     #[cfg(windows)]
@@ -612,5 +621,4 @@ mod tests {
         let path = PathBuf::from(r"\\server\share\folder");
         assert_eq!(path.parent(), Some(Path::new(r"\\server\share")));
     }
-
 }
