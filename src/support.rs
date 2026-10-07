@@ -266,7 +266,8 @@ pub fn policy_summary(session: &Session) -> String {
          Port override configured: {}\n\
          Explicit identity path configured: {}\n\
          ProxyJump configured: {}\n\
-         Structured proxy: {} (endpoint omitted)\n\
+         Structured proxy: {} (endpoint omitted), authentication={}\n\
+         Algorithm overrides: ciphers={}, macs={}, kex={}, host-key={} (values omitted)\n\
          ControlMaster: {} (path omitted, persist configured={})\n\
          Remote command configured: {} (contents omitted)\n\
          Forward counts: local={}, remote={}, dynamic={}\n\
@@ -292,6 +293,14 @@ pub fn policy_summary(session: &Session) -> String {
             crate::ProxyKind::HttpConnect => "http-connect",
             crate::ProxyKind::Socks5 => "socks5",
         },
+        match session.ssh.proxy_auth {
+            crate::ProxyAuth::None => "none",
+            crate::ProxyAuth::Environment => "environment",
+        },
+        !session.ssh.ciphers.is_empty(),
+        !session.ssh.macs.is_empty(),
+        !session.ssh.kex_algorithms.is_empty(),
+        !session.ssh.host_key_algorithms.is_empty(),
         match session.ssh.control_master {
             crate::ControlMasterMode::Inherit => "inherit",
             crate::ControlMasterMode::Disabled => "disabled",
