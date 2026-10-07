@@ -7,6 +7,8 @@ on:
       - 'src/iced_app.rs'
       - 'src/main.rs'
       - 'src/lib.rs'
+      - 'src/terminal.rs'
+      - 'vendor/egui_term/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/iced-design.yml'
