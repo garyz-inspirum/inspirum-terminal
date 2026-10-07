@@ -1503,6 +1503,7 @@ impl App {
             self.files.session_key = Some(key);
             self.files.remote_dir = ".".into();
             self.files.remote_entries.clear();
+            self.files.selected_remote = None;
             self.files.remote_error = None;
             self.files.remote_generation = self.files.remote_generation.wrapping_add(1);
         }
@@ -1572,6 +1573,295 @@ impl App {
     fn reload_files(&mut self) -> Task<Message> {
         self.prepare_files_session();
         Task::batch([self.reload_local_files(), self.reload_remote_files()])
+    }
+
+    fn request_upload(&mut self) -> Task<Message> {
+        let Some(local) = self.files.selected_local.clone() else {
+            self.status = "Select a local file to upload.".into();
+            return Task::none();
+        };
+        let Some(profile) = self.tabs.get(self.active).map(|tab| tab.profile.clone()) else {
+            return Task::none();
+        };
+        let session_key = session_profile_key(&profile);
+        let remote_dir = self.files.remote_dir.clone();
+        let remote_entries = self.files.remote_entries.clone();
+
+        Task::perform(
+            async move {
+                let metadata =
+                    std::fs::metadata(&local).map_err(|error| format!("read upload source: {error}"))?;
+                if !metadata.is_file() {
+                    return Err("upload source must be a regular file".into());
+                }
+                let name = local
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .ok_or_else(|| "local filename must be valid Unicode".to_string())?
+                    .to_owned();
+                sftp::validate_local_leaf(&name).map_err(|error| format!("{error:#}"))?;
+                let remote = sftp::join_remote(&remote_dir, &name);
+                let conflict = remote_entries.iter().any(|entry| entry.name == name);
+                Ok(PreparedTransfer {
+                    pending: PendingTransfer {
+                        session: profile,
+                        session_key,
+                        direction: TransferDirection::Upload,
+                        local,
+                        remote,
+                        expected_size: Some(metadata.len()),
+                    },
+                    conflict,
+                })
+            },
+            Message::FilesTransferPrepared,
+        )
+    }
+
+    fn request_download(&mut self) -> Task<Message> {
+        let Some(remote_entry) = self.files.selected_remote.clone() else {
+            self.status = "Select a remote file to download.".into();
+            return Task::none();
+        };
+        if remote_entry.is_dir {
+            self.status = "Select a remote file, not a directory.".into();
+            return Task::none();
+        }
+        let Some(profile) = self.tabs.get(self.active).map(|tab| tab.profile.clone()) else {
+            return Task::none();
+        };
+        let session_key = session_profile_key(&profile);
+        let local_dir = self.files.local_dir.clone();
+        let remote = sftp::join_remote(&self.files.remote_dir, &remote_entry.name);
+
+        Task::perform(
+            async move {
+                let local = sftp::local_destination(&local_dir, &remote_entry.name)
+                    .map_err(|error| format!("{error:#}"))?;
+                let conflict = local.exists();
+                Ok(PreparedTransfer {
+                    pending: PendingTransfer {
+                        session: profile,
+                        session_key,
+                        direction: TransferDirection::Download,
+                        local,
+                        remote,
+                        expected_size: remote_entry.size,
+                    },
+                    conflict,
+                })
+            },
+            Message::FilesTransferPrepared,
+        )
+    }
+
+    fn queue_transfer(&mut self, pending: PendingTransfer, overwrite: bool) {
+        let id = self.next_transfer_id;
+        self.next_transfer_id = self.next_transfer_id.saturating_add(1);
+        let total = pending.expected_size;
+        let label = match pending.direction {
+            TransferDirection::Upload => "Upload",
+            TransferDirection::Download => "Download",
+        };
+        self.files.transfers.push(TransferJob {
+            id,
+            pending,
+            overwrite,
+            total,
+            transferred: 0,
+            state: TransferJobState::Queued,
+            error: String::new(),
+            resume_path: None,
+            resume_available: false,
+            resume_requested: false,
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        self.status = format!("{label} queued.");
+        self.try_start_next_transfer();
+    }
+
+    fn try_start_next_transfer(&mut self) {
+        if self
+            .files
+            .transfers
+            .iter()
+            .any(|job| job.state == TransferJobState::Running)
+        {
+            return;
+        }
+        let Some(sender) = self.transfer_bridge.clone() else {
+            return;
+        };
+        let Some(index) = self
+            .files
+            .transfers
+            .iter()
+            .position(|job| job.state == TransferJobState::Queued)
+        else {
+            return;
+        };
+
+        let (
+            id,
+            pending,
+            overwrite,
+            resume_path,
+            resume_requested,
+            cancel,
+            config,
+        ) = {
+            let job = &mut self.files.transfers[index];
+            job.state = TransferJobState::Running;
+            job.error.clear();
+            job.cancel.store(false, Ordering::Release);
+            (
+                job.id,
+                job.pending.clone(),
+                job.overwrite,
+                job.resume_path.clone(),
+                job.resume_requested,
+                job.cancel.clone(),
+                self.ssh_config.clone(),
+            )
+        };
+
+        let spawn = thread::Builder::new()
+            .name(format!("sftp-transfer-{id}"))
+            .spawn(move || {
+                run_transfer_worker(
+                    id,
+                    pending,
+                    overwrite,
+                    resume_path,
+                    resume_requested,
+                    cancel,
+                    config,
+                    sender,
+                );
+            });
+
+        if let Err(error) = spawn {
+            if let Some(job) = self.files.transfers.iter_mut().find(|job| job.id == id) {
+                job.state = TransferJobState::Failed;
+                job.error = format!("start transfer worker: {error}");
+            }
+            self.try_start_next_transfer();
+        }
+    }
+
+    fn cancel_transfer(&mut self, id: u64) {
+        if let Some(job) = self.files.transfers.iter_mut().find(|job| job.id == id) {
+            match job.state {
+                TransferJobState::Running => {
+                    job.cancel.store(true, Ordering::Release);
+                    self.status = format!("Cancelling {}...", job.label());
+                }
+                TransferJobState::Queued => {
+                    job.state = TransferJobState::Cancelled;
+                    self.status = format!("{} cancelled.", job.label());
+                    self.try_start_next_transfer();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn retry_transfer(&mut self, id: u64, resume: bool) {
+        let Some(job) = self.files.transfers.iter_mut().find(|job| job.id == id) else {
+            return;
+        };
+        if !matches!(
+            job.state,
+            TransferJobState::Failed | TransferJobState::Cancelled
+        ) {
+            return;
+        }
+        if resume && !job.resume_available {
+            self.status = "This transfer has no resumable partial.".into();
+            return;
+        }
+        job.resume_requested = resume;
+        if !resume {
+            job.resume_path = None;
+        }
+        job.transferred = 0;
+        job.error.clear();
+        job.state = TransferJobState::Queued;
+        self.status = if resume {
+            format!("{} queued for resume.", job.label())
+        } else {
+            format!("{} queued for retry.", job.label())
+        };
+        self.try_start_next_transfer();
+    }
+
+    fn handle_transfer_event(&mut self, event: TransferEvent) -> bool {
+        let (id, terminal) = match &event {
+            TransferEvent::Started { id, .. }
+            | TransferEvent::Progress { id, .. }
+            | TransferEvent::Completed { id }
+            | TransferEvent::Failed { id, .. }
+            | TransferEvent::Cancelled { id, .. } => (*id, matches!(
+                event,
+                TransferEvent::Completed { .. }
+                    | TransferEvent::Failed { .. }
+                    | TransferEvent::Cancelled { .. }
+            )),
+        };
+        let Some(job) = self.files.transfers.iter_mut().find(|job| job.id == id) else {
+            return false;
+        };
+        let active_session = self.files.session_key.clone();
+        let refresh_active = terminal
+            && active_session.as_deref() == Some(job.pending.session_key.as_str())
+            && self.files_dock.is_some();
+
+        match event {
+            TransferEvent::Started { total, .. } => {
+                job.total = total.or(job.total);
+                job.state = TransferJobState::Running;
+                self.status = format!("{} started.", job.label());
+            }
+            TransferEvent::Progress { transferred, .. } => {
+                job.transferred = transferred;
+            }
+            TransferEvent::Completed { .. } => {
+                job.transferred = job.total.unwrap_or(job.transferred);
+                job.state = TransferJobState::Completed;
+                job.error.clear();
+                job.resume_path = None;
+                job.resume_available = false;
+                job.resume_requested = false;
+                self.status = format!("{} completed and verified.", job.label());
+            }
+            TransferEvent::Failed {
+                error,
+                partial,
+                resume_available,
+                ..
+            } => {
+                job.state = TransferJobState::Failed;
+                job.error = error;
+                job.resume_path = partial;
+                job.resume_available = resume_available;
+                self.status = format!("{} failed.", job.label());
+            }
+            TransferEvent::Cancelled {
+                partial,
+                resume_available,
+                ..
+            } => {
+                job.state = TransferJobState::Cancelled;
+                job.resume_path = partial;
+                job.resume_available = resume_available;
+                self.status = format!("{} cancelled.", job.label());
+            }
+        }
+
+        if terminal {
+            self.try_start_next_transfer();
+        }
+        refresh_active
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
