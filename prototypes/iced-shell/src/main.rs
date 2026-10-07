@@ -1,8 +1,9 @@
 //! Native Iced interaction prototype. Every terminal/file is a labelled fixture.
 //! This executable neither reads production profiles nor starts SSH/PTY processes.
 mod model;
+mod panes;
 use iced::widget::{button, center, column, container, mouse_area, opaque, operation, pane_grid, row, scrollable, space, stack, text, text_input};
-use iced::{event, keyboard, Border, Color, Element, Fill, Font, Task, Theme};
+use iced::{event, keyboard, Border, Color, Element, Fill, Task, Theme};
 use model::{ConnectionForm, Profile};
 
 const BG: Color = Color::from_rgb8(14, 18, 25);
@@ -89,9 +90,7 @@ impl App {
     fn boot() -> Self {
         let mut app = Self::empty();
         let mode = std::env::args().find_map(|arg| arg.strip_prefix("--preview=").map(str::to_owned)).unwrap_or_default();
-        if ["terminal", "split", "files", "dialog"].contains(&mode.as_str()) {
-            app.open(0);
-        }
+        if ["terminal", "split", "files", "dialog"].contains(&mode.as_str()) { app.open(0); }
         if mode == "split" { app.tabs[0].split(pane_grid::Axis::Vertical); }
         if mode == "files" { app.toggle_files(); }
         if mode == "dialog" { app.dialog = Some(Dialog::Connection); }
@@ -121,10 +120,10 @@ impl App {
     }
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Search(value) => self.query = value,
+            Message::Search(value) => { if self.dialog.is_none() { self.query = value; } }
             Message::Open(index) => self.open(index),
             Message::SelectTab(index) => { if index < self.tabs.len() { self.active = index; self.selected_file = None; } }
-            Message::New => { self.form = ConnectionForm::default(); self.dialog = Some(Dialog::Connection); return operation::focus_next(); }
+            Message::New => { self.form = ConnectionForm::default(); self.dialog = Some(Dialog::Connection); return operation::focus("connection-host"); }
             Message::Commands => self.dialog = Some(Dialog::Commands),
             Message::About => self.dialog = Some(Dialog::About),
             Message::CloseDialog => { self.dialog = None; self.form = ConnectionForm::default(); }
@@ -188,7 +187,7 @@ impl App {
     fn view(&self) -> Element<'_, Message> {
         let header = container(row![
             container(text(">_").size(21).color(BLUE)).padding([3, 8]).style(card),
-            text("Inspirum").size(19), text("/  Terminal workspace").color(MUTED),
+            text("Inspirum").size(19),
             space::horizontal(),
             action("Commands", Message::Commands),
             action("A-", Message::Scale(-0.1)), action("A+", Message::Scale(0.1)),
@@ -211,7 +210,7 @@ impl App {
         let mut list = column![
             row![text("SESSIONS").size(12).color(MUTED), space::horizontal(), text(self.profiles.len().to_string()).size(12).color(MUTED)],
             action("+  New connection", Message::New).style(primary).width(Fill),
-            text_input("Search sessions...", &self.query).on_input(Message::Search).padding(10),
+            text_input("Search sessions...", &self.query).id("session-search").on_input_maybe(self.dialog.is_none().then_some(Message::Search)).padding(10),
             space::vertical().height(6),
         ].spacing(12);
         let mut group = String::new();
@@ -266,47 +265,6 @@ impl App {
         container(column![scrollable(tabs).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::default())), toolbar, dock].spacing(10))
             .padding(14).height(Fill).width(Fill).into()
     }
-    fn terminals(&self) -> Element<'_, Message> {
-        let tab = &self.tabs[self.active];
-        pane_grid(&tab.panes, |id, profile, _| {
-            let focused = tab.focus == id;
-            let title = pane_grid::TitleBar::new(row![
-                text(if focused { "FOCUSED" } else { "SSH" }).size(11).color(if focused { BLUE } else { MUTED }),
-                text(format!("{}@{}", profile.user, profile.name)).size(13),
-                space::horizontal(), action("x", Message::ClosePane(id)),
-            ].spacing(10).align_y(iced::Center)).padding([4, 10]).style(surface);
-            let transcript = format!("{}@{}:~$ pwd\n/home/{}\n\n{}@{}:~$ ls -lh\ntotal 24K\ndrwxr-xr-x  4 ops ops  4.0K  config/\ndrwxr-xr-x  2 ops ops  4.0K  logs/\n-rw-r--r--  1 ops ops   892  deployment.yml\n\n{}@{}:~$ ", profile.user, profile.name, profile.user, profile.user, profile.name, profile.user, profile.name);
-            let body = column![
-                text("SIMULATED TERMINAL / sample output, not a live shell").size(12).color(MUTED),
-                text(transcript).font(Font::MONOSPACE).size(15).color(FG),
-                space::vertical(),
-                text("Drag the pane header to rearrange. Drag dividers to resize.").size(12).color(MUTED),
-            ].spacing(18).height(Fill);
-            pane_grid::Content::new(container(scrollable(body)).padding(18).height(Fill))
-                .title_bar(title).style(if focused { active_card } else { card })
-        }).spacing(8).on_click(Message::Focus).on_drag(Message::Drag).on_resize(8, Message::Resize).height(Fill).into()
-    }
-    fn files(&self) -> Element<'_, Message> {
-        let tab = &self.tabs[self.active];
-        let remote = format!("REMOTE / {}", tab.profile.name);
-        let mut remote_rows = column![text(remote).size(12).color(BLUE), text("/home/ops  /  sample files").size(13).color(MUTED)].spacing(8);
-        for (index, (name, size)) in [("deployment.yml", "892 B"), ("notes.txt", "1.2 KB"), ("service.log", "12.4 KB")].iter().enumerate() {
-            remote_rows = remote_rows.push(button(row![text(*name), space::horizontal(), text(*size).size(12).color(MUTED)])
-                .padding(8).width(Fill).on_press(Message::File(index))
-                .style(if self.selected_file == Some(index) { selected_button } else { quiet }));
-        }
-        let local = column![text("LOCAL / sample computer").size(12).color(MUTED), text("~/Downloads").size(13).color(MUTED),
-            container(text("Select a remote file, then preview a transfer.\nNo real files are read or written.").color(MUTED)).padding([18, 0])].spacing(8);
-        let queue = if self.preview_transfers.is_empty() { "Transfer queue is empty".into() } else { self.preview_transfers.join("\n") };
-        let transfer = button(text("Queue preview transfer")).padding([7, 12]).style(quiet)
-            .on_press_maybe(self.selected_file.map(|_| Message::QueuePreview));
-        container(scrollable(column![
-            row![text("Files").size(16), text("SFTP design preview").size(12).color(MUTED), space::horizontal(), transfer].spacing(12).align_y(iced::Center),
-            row![container(local).width(Fill).padding(10), container(remote_rows).width(Fill).padding(10)].spacing(12),
-            text(format!("TRANSFERS ({})", self.preview_transfers.len())).size(12).color(MUTED),
-            text(queue).size(12).color(MUTED),
-        ].spacing(10))).padding(14).height(Fill).style(card).into()
-    }
     fn dialog_view(&self, dialog: &Dialog) -> Element<'_, Message> {
         let body: Element<'_, Message> = match dialog {
             Dialog::Connection => {
@@ -348,7 +306,8 @@ impl App {
     }
 }
 fn field<'a>(label: &'a str, hint: &'a str, value: &'a str, message: fn(String) -> Message) -> Element<'a, Message> {
-    column![text(label).size(13).color(MUTED), text_input(hint, value).on_input(message).on_submit(Message::Submit).padding(11)].spacing(7).into()
+    let id = match label { "Host" => "connection-host", "Username" => "connection-user", "Port" => "connection-port", _ => "connection-name" };
+    column![text(label).size(13).color(MUTED), text_input(hint, value).id(id).on_input(message).on_submit(Message::Submit).padding(11)].spacing(7).into()
 }
 fn action<'a>(label: impl Into<String>, message: Message) -> button::Button<'a, Message> {
     button(text(label.into()).size(14)).padding([8, 12]).style(quiet).on_press(message)
@@ -414,5 +373,11 @@ mod tests {
     fn scale_is_bounded() {
         let mut app = App::empty(); let _ = app.update(Message::Scale(100.0));
         assert_eq!(app.scale, 1.5); let _ = app.update(Message::Scale(-100.0)); assert_eq!(app.scale, 0.85);
+    }
+    #[test]
+    fn modal_blocks_background_search_edits() {
+        let mut app = App::empty(); let _ = app.update(Message::New);
+        let _ = app.update(Message::Search("should not leak".into()));
+        assert!(app.query.is_empty());
     }
 }
