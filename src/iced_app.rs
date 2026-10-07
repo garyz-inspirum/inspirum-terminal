@@ -142,6 +142,7 @@ enum Dialog {
 enum Message {
     Search(String),
     Open(usize),
+    EditProfile(usize),
     SelectTab(usize),
     New,
     Commands,
@@ -165,6 +166,11 @@ enum Message {
     User(String),
     Port(String),
     Folder(String),
+    IdentityFile(String),
+    ProxyJump(String),
+    ConnectTimeout(String),
+    Keepalive(String),
+    RemoteCommand(String),
     Advanced,
     Submit,
     Scale(f64),
@@ -244,6 +250,12 @@ struct ConnectionForm {
     user: String,
     port: String,
     folder: String,
+    identity_file: String,
+    proxy_jump: String,
+    connect_timeout: String,
+    keepalive: String,
+    remote_command: String,
+    base: Option<Session>,
     advanced: bool,
     error: Option<String>,
 }
@@ -256,6 +268,12 @@ impl Default for ConnectionForm {
             user: String::new(),
             port: String::new(),
             folder: String::new(),
+            identity_file: String::new(),
+            proxy_jump: String::new(),
+            connect_timeout: String::new(),
+            keepalive: String::new(),
+            remote_command: String::new(),
+            base: None,
             advanced: false,
             error: None,
         }
@@ -263,6 +281,48 @@ impl Default for ConnectionForm {
 }
 
 impl ConnectionForm {
+    fn from_session(session: &Session) -> Self {
+        Self {
+            name: session.name.clone(),
+            host: session.host.clone(),
+            user: session.user.clone(),
+            port: session.port.map(|value| value.to_string()).unwrap_or_default(),
+            folder: session.folder.clone(),
+            identity_file: session.ssh.identity_file.clone(),
+            proxy_jump: session.ssh.proxy_jump.clone(),
+            connect_timeout: session
+                .ssh
+                .connect_timeout_seconds
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            keepalive: session
+                .ssh
+                .server_alive_interval_seconds
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            remote_command: session.ssh.remote_command.clone(),
+            base: Some(session.clone()),
+            advanced: !session.ssh.identity_file.is_empty()
+                || !session.ssh.proxy_jump.is_empty()
+                || session.ssh.connect_timeout_seconds.is_some()
+                || session.ssh.server_alive_interval_seconds.is_some()
+                || !session.ssh.remote_command.is_empty(),
+            error: None,
+        }
+    }
+
+    fn optional_positive_u16(label: &str, value: &str) -> anyhow::Result<Option<u16>> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Ok(None);
+        }
+        let parsed = value
+            .parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("{label} must be a number from 1 to 65535."))?;
+        anyhow::ensure!(parsed > 0, "{label} must be a number from 1 to 65535.");
+        Ok(Some(parsed))
+    }
+
     fn session(&self) -> anyhow::Result<Session> {
         let host = self.host.trim();
         anyhow::ensure!(
@@ -282,25 +342,31 @@ impl ConnectionForm {
             Some(port)
         };
 
-        let mut session = Session {
-            name: {
-                let name = self.name.trim();
-                if name.is_empty() {
-                    host.to_owned()
-                } else {
-                    name.to_owned()
-                }
-            },
-            host: host.to_owned(),
-            user: self.user.trim().to_owned(),
-            port,
-            folder: self.folder.trim().to_owned(),
-            ..Session::default()
+        let mut session = self.base.clone().unwrap_or_default();
+        session.name = {
+            let name = self.name.trim();
+            if name.is_empty() {
+                host.to_owned()
+            } else {
+                name.to_owned()
+            }
         };
+        session.host = host.to_owned();
+        session.user = self.user.trim().to_owned();
+        session.port = port;
+        session.folder = self.folder.trim().to_owned();
+        if self.base.is_none() {
+            session.strict = false;
+        }
 
-        // Keep the initial Iced form deliberately small. Advanced policy fields are
-        // retained by the existing model and will be edited in the advanced panel.
-        session.strict = false;
+        session.ssh.identity_file = self.identity_file.trim().to_owned();
+        session.ssh.proxy_jump = self.proxy_jump.trim().to_owned();
+        session.ssh.connect_timeout_seconds =
+            Self::optional_positive_u16("Connect timeout", &self.connect_timeout)?;
+        session.ssh.server_alive_interval_seconds =
+            Self::optional_positive_u16("Server alive interval", &self.keepalive)?;
+        session.ssh.remote_command = self.remote_command.trim().to_owned();
+
         session.ssh_args()?;
         Ok(session)
     }
@@ -317,6 +383,7 @@ struct App {
     terminal_dock: pane_grid::Pane,
     files_dock: Option<pane_grid::Pane>,
     form: ConnectionForm,
+    editing_profile: Option<String>,
     dialog: Option<Dialog>,
     scale: f64,
     status: String,
@@ -347,6 +414,7 @@ impl App {
             terminal_dock,
             files_dock: None,
             form: ConnectionForm::default(),
+            editing_profile: None,
             dialog: None,
             scale: 1.0,
             status: "Ready".into(),
@@ -516,12 +584,21 @@ impl App {
                 }
             }
             Message::Open(index) => self.open(index),
+            Message::EditProfile(index) => {
+                if let Some(profile) = self.profiles.get(index).cloned() {
+                    self.editing_profile = Some(session_profile_key(&profile));
+                    self.form = ConnectionForm::from_session(&profile);
+                    self.dialog = Some(Dialog::Connection);
+                    return operation::focus("connection-name");
+                }
+            }
             Message::SelectTab(index) => {
                 if index < self.tabs.len() {
                     self.active = index;
                 }
             }
             Message::New => {
+                self.editing_profile = None;
                 self.form = ConnectionForm::default();
                 self.dialog = Some(Dialog::Connection);
                 return operation::focus("connection-host");
@@ -530,6 +607,7 @@ impl App {
             Message::About => self.dialog = Some(Dialog::About),
             Message::CloseDialog => {
                 self.dialog = None;
+                self.editing_profile = None;
                 self.form = ConnectionForm::default();
             }
             Message::AskClose(index) => self.dialog = Some(Dialog::Close(index)),
@@ -662,26 +740,44 @@ impl App {
             Message::User(value) => self.form.user = value,
             Message::Port(value) => self.form.port = value,
             Message::Folder(value) => self.form.folder = value,
+            Message::IdentityFile(value) => self.form.identity_file = value,
+            Message::ProxyJump(value) => self.form.proxy_jump = value,
+            Message::ConnectTimeout(value) => self.form.connect_timeout = value,
+            Message::Keepalive(value) => self.form.keepalive = value,
+            Message::RemoteCommand(value) => self.form.remote_command = value,
             Message::Advanced => self.form.advanced = !self.form.advanced,
             Message::Submit => {
+                let selected_profile = self.editing_profile.clone();
+                let was_editing = selected_profile.is_some();
                 match self.form.session().and_then(|session| {
-                    let profiles = save_session_edit(&self.profiles, None, session.clone())?;
+                    let profiles = save_session_edit(
+                        &self.profiles,
+                        selected_profile.as_deref(),
+                        session.clone(),
+                    )?;
                     save_sessions(&self.profiles_path, &profiles)?;
                     Ok((profiles, session))
                 }) {
                     Ok((profiles, session)) => {
                         self.profiles = profiles;
-                        let key = session_profile_key(&session);
-                        if let Some(index) = self
-                            .profiles
-                            .iter()
-                            .position(|profile| session_profile_key(profile) == key)
-                        {
-                            self.open(index);
-                        }
+                        self.dialog = None;
+                        self.editing_profile = None;
                         self.form = ConnectionForm::default();
-                        self.status =
-                            "Profile saved using the existing validated profile store.".into();
+                        if was_editing {
+                            self.status =
+                                "Profile changes saved. Existing live SSH panes keep their current connection until reconnect.".into();
+                        } else {
+                            let key = session_profile_key(&session);
+                            if let Some(index) = self
+                                .profiles
+                                .iter()
+                                .position(|profile| session_profile_key(profile) == key)
+                            {
+                                self.open(index);
+                            }
+                            self.status =
+                                "Profile saved and opened using the existing validated profile store.".into();
+                        }
                     }
                     Err(error) => self.form.error = Some(format!("{error:#}")),
                 }
@@ -892,7 +988,11 @@ impl App {
             .width(Fill)
             .on_press(Message::Open(index))
             .style(if selected { selected_button } else { quiet });
-            list = list.push(item);
+            list = list.push(
+                row![item, action("Edit", Message::EditProfile(index))]
+                    .spacing(4)
+                    .align_y(iced::Center),
+            );
             count += 1;
         }
 
@@ -1135,10 +1235,20 @@ impl App {
     fn dialog_view(&self, dialog: &Dialog) -> Element<'_, Message> {
         let body: Element<'_, Message> = match dialog {
             Dialog::Connection => {
+                let editing = self.editing_profile.is_some();
                 let mut form = column![
-                    text("New SSH connection").size(24),
-                    text("Saved through the existing validated, non-secret profile store.")
-                        .color(MUTED),
+                    text(if editing {
+                        "Edit SSH connection"
+                    } else {
+                        "New SSH connection"
+                    })
+                    .size(24),
+                    text(if editing {
+                        "Changes are saved to the existing profile. Live panes keep their current connection until reconnect."
+                    } else {
+                        "Saved through the existing validated, non-secret profile store."
+                    })
+                    .color(MUTED),
                     field(
                         "Session name",
                         "Optional; defaults to host",
@@ -1187,11 +1297,47 @@ impl App {
                 if self.form.advanced {
                     form = form.push(
                         container(
-                            text("Advanced policy is not duplicated into a second model. Identity, authentication policy, ProxyJump/proxy transport, ControlMaster, forwarding, keepalive and remote-command fields will edit the existing Session::ssh structure directly in the next UI pass.")
-                                .size(13)
-                                .color(MUTED),
+                            column![
+                                field(
+                                    "Identity file",
+                                    "~/.ssh/id_ed25519 or other key path",
+                                    &self.form.identity_file,
+                                    Message::IdentityFile
+                                ),
+                                field(
+                                    "ProxyJump",
+                                    "bastion or user@bastion:2222",
+                                    &self.form.proxy_jump,
+                                    Message::ProxyJump
+                                ),
+                                row![
+                                    field(
+                                        "Connect timeout",
+                                        "seconds / inherit",
+                                        &self.form.connect_timeout,
+                                        Message::ConnectTimeout
+                                    ),
+                                    field(
+                                        "Server alive interval",
+                                        "seconds / inherit",
+                                        &self.form.keepalive,
+                                        Message::Keepalive
+                                    )
+                                ]
+                                .spacing(14),
+                                field(
+                                    "Remote command",
+                                    "Optional command after authentication",
+                                    &self.form.remote_command,
+                                    Message::RemoteCommand
+                                ),
+                                text("These values write directly into the existing Session::ssh model and use its current validation. Advanced settings not exposed here yet are preserved when editing an existing profile.")
+                                    .size(12)
+                                    .color(MUTED),
+                            ]
+                            .spacing(14)
                         )
-                        .padding(12)
+                        .padding(14)
                         .style(card),
                     );
                 }
@@ -1202,7 +1348,11 @@ impl App {
                     row![
                         space::horizontal(),
                         action("Cancel", Message::CloseDialog),
-                        action("Save and open", Message::Submit).style(primary)
+                        action(
+                            if editing { "Save changes" } else { "Save and open" },
+                            Message::Submit
+                        )
+                        .style(primary)
                     ]
                     .spacing(10),
                 )
@@ -1283,7 +1433,7 @@ impl App {
             }
             Dialog::About => column![
                 text("Production Iced migration").size(24),
-                text("This is no longer the fixture-only design preview. The shell reads and writes the real validated Inspirum profile store, opens live SSH sessions through the existing OpenSSH/PTTY backend, and uses the accepted WindTerm-style workspace structure.\n\nClipboard paste now reuses the existing terminal safety policy: NUL-containing payloads are blocked and multiline paste requires explicit review and confirmation. Exited or failed panes can reconnect in place from their pane header. Terminal rendering fidelity and real SFTP integration remain migration work.")
+                text("This is no longer the fixture-only design preview. The shell reads and writes the real validated Inspirum profile store, opens live SSH sessions through the existing OpenSSH/PTY backend, and uses the accepted WindTerm-style workspace structure.\n\nClipboard paste now reuses the existing terminal safety policy: NUL-containing payloads are blocked and multiline paste requires explicit review and confirmation. Exited or failed panes can reconnect in place from their pane header. Terminal rendering fidelity and real SFTP integration remain migration work.")
                     .color(MUTED),
                 action("Back to workspace", Message::CloseDialog).style(primary),
             ]
@@ -1311,6 +1461,11 @@ fn field<'a>(
         "Username" => "connection-user",
         "Port" => "connection-port",
         "Folder" => "connection-folder",
+        "Identity file" => "connection-identity-file",
+        "ProxyJump" => "connection-proxy-jump",
+        "Connect timeout" => "connection-timeout",
+        "Server alive interval" => "connection-keepalive",
+        "Remote command" => "connection-remote-command",
         _ => "connection-name",
     };
     column![
@@ -1417,6 +1572,26 @@ mod tests {
         assert_eq!(session.user, "ops");
         assert_eq!(session.port, None);
         assert!(!session.strict);
+    }
+
+    #[test]
+    fn editing_form_preserves_unexposed_ssh_options() {
+        let mut session = Session {
+            name: "server".into(),
+            host: "server.example".into(),
+            ..Session::default()
+        };
+        session.ssh.password_auth = Some(false);
+        session.ssh.agent_forwarding = Some(true);
+        session.ssh.identity_file = "/tmp/key".into();
+
+        let mut form = ConnectionForm::from_session(&session);
+        form.identity_file = "/tmp/new-key".into();
+        let updated = form.session().expect("edited session");
+
+        assert_eq!(updated.ssh.identity_file, "/tmp/new-key");
+        assert_eq!(updated.ssh.password_auth, Some(false));
+        assert_eq!(updated.ssh.agent_forwarding, Some(true));
     }
 
     #[test]
