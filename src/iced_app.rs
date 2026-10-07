@@ -1957,6 +1957,7 @@ impl App {
             Message::FilesLocalUp => {
                 if let Some(parent) = self.files.local_dir.parent().map(ToOwned::to_owned) {
                     self.files.local_dir = parent;
+                    self.files.selected_local = None;
                     return self.reload_local_files();
                 }
             }
@@ -1964,11 +1965,13 @@ impl App {
                 let parent = remote_parent(&self.files.remote_dir);
                 if parent != self.files.remote_dir {
                     self.files.remote_dir = parent;
+                    self.files.selected_remote = None;
                     return self.reload_remote_files();
                 }
             }
             Message::FilesOpenLocal(path) => {
                 self.files.local_dir = path;
+                self.files.selected_local = None;
                 return self.reload_local_files();
             }
             Message::FilesOpenRemote(path) => {
