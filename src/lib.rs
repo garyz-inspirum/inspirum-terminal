@@ -640,6 +640,7 @@ pub mod command_palette;
 pub mod history;
 pub mod keyboard;
 pub mod proxy;
+pub mod remote_edit;
 pub mod scp;
 pub mod scp_panel;
 pub mod sftp;
