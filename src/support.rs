@@ -504,6 +504,11 @@ fn main() {
         session.ssh.local_forwards = vec!["127.0.0.1:2222:FORWARD_CANARY:22".into()];
         session.ssh.password_auth = Some(false);
         session.ssh.public_key_auth = Some(true);
+        session.ssh.proxy_auth = crate::ProxyAuth::Environment;
+        session.ssh.ciphers = "CIPHER_POLICY_CANARY".into();
+        session.ssh.macs = "MAC_POLICY_CANARY".into();
+        session.ssh.kex_algorithms = "KEX_POLICY_CANARY".into();
+        session.ssh.host_key_algorithms = "HOSTKEY_POLICY_CANARY".into();
         let text = policy_summary(&session);
         assert_eq!(text, policy_summary(&session));
         for canary in [
@@ -514,12 +519,22 @@ fn main() {
             "JUMP_CANARY",
             "COMMAND_SECRET_CANARY",
             "FORWARD_CANARY",
+            "CIPHER_POLICY_CANARY",
+            "MAC_POLICY_CANARY",
+            "KEX_POLICY_CANARY",
+            "HOSTKEY_POLICY_CANARY",
+            "INSPIRUM_PROXY_USERNAME",
+            "INSPIRUM_PROXY_PASSWORD",
         ] {
             assert!(!text.contains(canary));
         }
         assert!(text.contains("already trusted only"));
         assert!(text.contains("public-key=enabled, password=disabled"));
         assert!(text.contains("local=1, remote=0, dynamic=0"));
+        assert!(text.contains("authentication=environment"));
+        assert!(text.contains(
+            "Algorithm overrides: ciphers=true, macs=true, kex=true, host-key=true"
+        ));
     }
 
     #[test]
