@@ -303,6 +303,7 @@ struct TerminalPane {
     display: Option<egui_term::DisplaySnapshot>,
     display_generation: u64,
     display_dirty: bool,
+    terminal_grid_size: Option<(u16, u16)>,
     terminal_title: Option<String>,
     error: Option<String>,
     exited: bool,
@@ -1239,6 +1240,7 @@ impl App {
             display: None,
             display_generation: 0,
             display_dirty: true,
+            terminal_grid_size: None,
             terminal_title: None,
             error: None,
             exited: false,
@@ -1444,14 +1446,25 @@ impl App {
     fn resize_terminal(&mut self, id: u64, size: iced::Size) {
         let width = (size.width - 28.0).max(1.0);
         let height = (size.height - 28.0).max(1.0);
+        let columns = (width / TERMINAL_CELL_WIDTH).floor().max(1.0) as u16;
+        let lines = (height / TERMINAL_CELL_HEIGHT).floor().max(1.0) as u16;
+        let grid_size = (columns, lines);
+
         for tab in &mut self.tabs {
             for (_, pane) in tab.panes.iter_mut() {
                 if pane.id != id {
                     continue;
                 }
+                if pane.terminal_grid_size == Some(grid_size) {
+                    return;
+                }
+                pane.terminal_grid_size = Some(grid_size);
                 if let Some(terminal) = pane.terminal.as_mut() {
                     terminal.process_command(egui_term::BackendCommand::Resize(
-                        egui_term::Size::new(width, height),
+                        egui_term::Size::new(
+                            columns as f32 * TERMINAL_CELL_WIDTH,
+                            lines as f32 * TERMINAL_CELL_HEIGHT,
+                        ),
                         egui_term::Size::new(TERMINAL_CELL_WIDTH, TERMINAL_CELL_HEIGHT),
                     ));
                 }
