@@ -492,6 +492,13 @@ enum Dialog {
     Close(usize),
     PasteConfirm { id: u64, text: String },
     FileOverwrite(PendingTransfer),
+    FileDeleteLocal(PathBuf),
+    FileDeleteRemote {
+        session: Session,
+        session_key: String,
+        path: String,
+        directory: bool,
+    },
     About,
 }
 
@@ -519,8 +526,16 @@ enum Message {
     FilesSelectRemote(sftp::RemoteEntry),
     FilesRequestUpload,
     FilesRequestDownload,
+    FilesRequestDeleteLocal,
+    FilesRequestDeleteRemote,
     FilesTransferPrepared(Result<PreparedTransfer, String>),
     ConfirmFileOverwrite,
+    ConfirmFileDelete,
+    FilesDeleteFinished {
+        remote: bool,
+        session_key: Option<String>,
+        result: Result<String, String>,
+    },
     CancelTransfer(u64),
     RetryTransfer(u64),
     ResumeTransfer(u64),
@@ -1987,6 +2002,30 @@ impl App {
             }
             Message::FilesRequestUpload => return self.request_upload(),
             Message::FilesRequestDownload => return self.request_download(),
+            Message::FilesRequestDeleteLocal => {
+                let Some(path) = self.files.selected_local.clone() else {
+                    self.status = "Select a local file to delete.".into();
+                    return Task::none();
+                };
+                self.dialog = Some(Dialog::FileDeleteLocal(path));
+            }
+            Message::FilesRequestDeleteRemote => {
+                let Some(entry) = self.files.selected_remote.clone() else {
+                    self.status = "Select a remote file to delete.".into();
+                    return Task::none();
+                };
+                let Some(session) = self.tabs.get(self.active).map(|tab| tab.profile.clone()) else {
+                    return Task::none();
+                };
+                let session_key = session_profile_key(&session);
+                let path = sftp::join_remote(&self.files.remote_dir, &entry.name);
+                self.dialog = Some(Dialog::FileDeleteRemote {
+                    session,
+                    session_key,
+                    path,
+                    directory: entry.is_dir,
+                });
+            }
             Message::FilesTransferPrepared(result) => match result {
                 Ok(prepared) if prepared.conflict => {
                     self.dialog = Some(Dialog::FileOverwrite(prepared.pending));
@@ -1999,6 +2038,81 @@ impl App {
             Message::ConfirmFileOverwrite => {
                 if let Some(Dialog::FileOverwrite(pending)) = self.dialog.take() {
                     self.queue_transfer(pending, true);
+                }
+            }
+            Message::ConfirmFileDelete => {
+                let Some(dialog) = self.dialog.take() else {
+                    return Task::none();
+                };
+                match dialog {
+                    Dialog::FileDeleteLocal(path) => {
+                        let label = path.to_string_lossy().into_owned();
+                        return Task::perform(
+                            async move {
+                                sftp::delete_local(&path)
+                                    .map(|_| format!("Deleted local {label}"))
+                                    .map_err(|error| format!("{error:#}"))
+                            },
+                            |result| Message::FilesDeleteFinished {
+                                remote: false,
+                                session_key: None,
+                                result,
+                            },
+                        );
+                    }
+                    Dialog::FileDeleteRemote {
+                        session,
+                        session_key,
+                        path,
+                        directory,
+                    } => {
+                        let config = self.ssh_config.clone();
+                        let label = path.clone();
+                        return Task::perform(
+                            async move {
+                                sftp::delete_remote(&session, config.as_deref(), &path, directory)
+                                    .map(|_| format!("Deleted remote {label}"))
+                                    .map_err(|error| format!("{error:#}"))
+                            },
+                            move |result| Message::FilesDeleteFinished {
+                                remote: true,
+                                session_key: Some(session_key.clone()),
+                                result,
+                            },
+                        );
+                    }
+                    other => {
+                        self.dialog = Some(other);
+                    }
+                }
+            }
+            Message::FilesDeleteFinished {
+                remote,
+                session_key,
+                result,
+            } => {
+                match result {
+                    Ok(message) => {
+                        self.status = message;
+                        if remote {
+                            self.files.selected_remote = None;
+                        } else {
+                            self.files.selected_local = None;
+                        }
+                    }
+                    Err(error) => {
+                        self.status = format!("Delete failed: {error}");
+                    }
+                }
+                let active_session = self.files.session_key.as_deref();
+                if self.files_dock.is_some()
+                    && (!remote || session_key.as_deref() == active_session)
+                {
+                    return if remote {
+                        self.reload_remote_files()
+                    } else {
+                        self.reload_local_files()
+                    };
                 }
             }
             Message::CancelTransfer(id) => self.cancel_transfer(id),
@@ -2994,8 +3108,10 @@ impl App {
                 row![
                     action("Upload ->", Message::FilesRequestUpload),
                     action("<- Download", Message::FilesRequestDownload),
+                    action("Delete local", Message::FilesRequestDeleteLocal),
+                    action("Delete remote", Message::FilesRequestDeleteRemote),
                     space::horizontal(),
-                    text("Transfers use the existing validated SFTP, overwrite confirmation, cancel and resume paths.")
+                    text("Transfers and deletes use the existing validated SFTP paths and explicit confirmations.")
                         .size(11)
                         .color(MUTED),
                 ]
@@ -3284,6 +3400,47 @@ impl App {
                 .spacing(16)
                 .into()
             }
+            Dialog::FileDeleteLocal(path) => column![
+                text("Delete local file?").size(24),
+                text(path.to_string_lossy().into_owned())
+                    .font(Font::MONOSPACE)
+                    .size(12),
+                text("This action is permanent. Directories are removed only when empty.")
+                    .size(12)
+                    .color(MUTED),
+                row![
+                    space::horizontal(),
+                    action("Cancel", Message::CloseDialog),
+                    action("Delete", Message::ConfirmFileDelete).style(button::danger)
+                ]
+                .spacing(10),
+            ]
+            .spacing(16)
+            .into(),
+            Dialog::FileDeleteRemote { path, directory, .. } => column![
+                text(if *directory {
+                    "Delete remote directory?"
+                } else {
+                    "Delete remote file?"
+                })
+                .size(24),
+                text(path).font(Font::MONOSPACE).size(12),
+                text(if *directory {
+                    "This action is permanent. Remote directories are removed only when empty."
+                } else {
+                    "This action is permanent and uses the validated SFTP delete path."
+                })
+                .size(12)
+                .color(MUTED),
+                row![
+                    space::horizontal(),
+                    action("Cancel", Message::CloseDialog),
+                    action("Delete", Message::ConfirmFileDelete).style(button::danger)
+                ]
+                .spacing(10),
+            ]
+            .spacing(16)
+            .into(),
             Dialog::About => column![
                 text("Production Iced migration").size(24),
                 text("This is no longer the fixture-only design preview. The shell reads and writes the real validated Inspirum profile store, opens live SSH sessions through the existing OpenSSH/PTY backend, and uses the accepted WindTerm-style workspace structure.\n\nClipboard paste now reuses the existing terminal safety policy: NUL-containing payloads are blocked and multiline paste requires explicit review and confirmation. Exited or failed panes can reconnect in place from their pane header. Terminal rendering fidelity and real SFTP integration remain migration work.")
