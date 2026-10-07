@@ -5,14 +5,15 @@
 //! host-key, argv, paste, process-lifecycle, or transfer safeguards.
 use crate::{
     Session, load_sessions, save_session_edit, save_sessions, session_matches_query,
-    session_profile_key,
+    session_profile_key, terminal,
 };
 use iced::widget::{
     button, center, column, container, mouse_area, opaque, operation, pane_grid, row, scrollable,
     space, stack, text, text_input,
 };
-use iced::{Border, Color, Element, Fill, Task, Theme, event, keyboard};
-use std::path::PathBuf;
+use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
+use iced::{Border, Color, Element, Fill, Font, Subscription, Task, Theme, event, keyboard};
+use std::{path::PathBuf, sync::{Arc, Mutex}};
 
 const BG: Color = Color::from_rgb8(14, 18, 25);
 const PANEL: Color = Color::from_rgb8(22, 29, 40);
@@ -55,23 +56,51 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
     })
     .scale_factor(|app: &App| app.scale as f32)
     .subscription(|_: &App| {
-        event::listen_with(|event, _, _| match event {
-            iced::Event::Keyboard(_) => Some(Message::Event(event)),
-            _ => None,
-        })
+        Subscription::batch([
+            event::listen_with(|event, _, _| match event {
+                iced::Event::Keyboard(_) => Some(Message::Event(event)),
+                _ => None,
+            }),
+            Subscription::run(pty_bridge),
+        ])
     })
     .run()
 }
 
+type PtyBridgeSender = mpsc::UnboundedSender<(u64, egui_term::PtyEvent)>;
+
+fn pty_bridge() -> impl Stream<Item = Message> {
+    iced::stream::channel(100, async |mut output| {
+        let (sender, mut receiver) = mpsc::unbounded();
+        if output.send(Message::PtyBridgeReady(sender)).await.is_err() {
+            return;
+        }
+        while let Some((id, event)) = receiver.next().await {
+            if output.send(Message::PtyEvent(id, event)).await.is_err() {
+                break;
+            }
+        }
+    })
+}
+
+struct TerminalPane {
+    id: u64,
+    profile: Session,
+    terminal: Option<egui_term::TerminalBackend>,
+    transcript: String,
+    error: Option<String>,
+    exited: bool,
+}
+
 struct Workspace {
     profile: Session,
-    panes: pane_grid::State<Session>,
+    panes: pane_grid::State<TerminalPane>,
     focus: pane_grid::Pane,
 }
 
 impl Workspace {
-    fn new(profile: Session) -> Self {
-        let (panes, focus) = pane_grid::State::new(profile.clone());
+    fn new(profile: Session, terminal: TerminalPane) -> Self {
+        let (panes, focus) = pane_grid::State::new(terminal);
         Self {
             profile,
             panes,
@@ -79,9 +108,9 @@ impl Workspace {
         }
     }
 
-    fn split(&mut self, axis: pane_grid::Axis) {
+    fn split(&mut self, axis: pane_grid::Axis, terminal: TerminalPane) {
         if self.panes.len() < 4 {
-            if let Some((pane, _)) = self.panes.split(axis, self.focus, self.profile.clone()) {
+            if let Some((pane, _)) = self.panes.split(axis, self.focus, terminal) {
                 self.focus = pane;
             }
         }
@@ -128,6 +157,8 @@ enum Message {
     Advanced,
     Submit,
     Scale(f64),
+    PtyBridgeReady(PtyBridgeSender),
+    PtyEvent(u64, egui_term::PtyEvent),
     Event(iced::Event),
 }
 
@@ -214,6 +245,8 @@ struct App {
     scale: f64,
     status: String,
     load_error: Option<String>,
+    pty_bridge: Option<PtyBridgeSender>,
+    next_terminal_id: u64,
 }
 
 impl App {
@@ -241,6 +274,82 @@ impl App {
             scale: 1.0,
             status: "Ready".into(),
             load_error,
+            pty_bridge: None,
+            next_terminal_id: 1,
+        }
+    }
+
+    fn new_terminal_pane(&mut self, profile: Session) -> TerminalPane {
+        let id = self.next_terminal_id;
+        self.next_terminal_id = self.next_terminal_id.saturating_add(1);
+
+        let mut pane = TerminalPane {
+            id,
+            profile: profile.clone(),
+            terminal: None,
+            transcript: String::new(),
+            error: None,
+            exited: false,
+        };
+
+        let Some(bridge) = self.pty_bridge.clone() else {
+            pane.error = Some("Terminal event bridge is still initializing. Close and reopen this session.".into());
+            return pane;
+        };
+
+        let bridge = Arc::new(Mutex::new(bridge));
+        let event_sink: Arc<dyn Fn(u64, egui_term::PtyEvent) + Send + Sync> =
+            Arc::new(move |id, event| {
+                if let Ok(sender) = bridge.lock() {
+                    let _ = sender.unbounded_send((id, event));
+                }
+            });
+
+        match terminal::connect_with_event_sink(
+            id,
+            &profile,
+            self.ssh_config.as_deref(),
+            event_sink,
+        ) {
+            Ok(terminal) => {
+                pane.terminal = Some(terminal);
+            }
+            Err(error) => {
+                pane.error = Some(format!("{error:#}"));
+            }
+        }
+        pane
+    }
+
+    fn send_to_focused_terminal(&mut self, bytes: Vec<u8>) {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let Some(pane) = tab.panes.get_mut(tab.focus) else {
+            return;
+        };
+        if pane.exited {
+            return;
+        }
+        if let Some(terminal) = pane.terminal.as_mut() {
+            terminal.process_command(egui_term::BackendCommand::Write(bytes));
+        }
+    }
+
+    fn refresh_terminal(&mut self, id: u64, exited: bool) {
+        for tab in &mut self.tabs {
+            for (_, pane) in tab.panes.iter_mut() {
+                if pane.id != id {
+                    continue;
+                }
+                if let Some(terminal) = pane.terminal.as_mut() {
+                    pane.transcript = terminal_screen_text(terminal);
+                }
+                if exited {
+                    pane.exited = true;
+                }
+                return;
+            }
         }
     }
 
@@ -254,11 +363,11 @@ impl App {
             {
                 self.active = existing;
             } else {
-                self.tabs.push(Workspace::new(profile));
+                let terminal = self.new_terminal_pane(profile.clone());
+                self.tabs.push(Workspace::new(profile, terminal));
                 self.active = self.tabs.len() - 1;
             }
-            self.status =
-                "Profile opened. Live SSH/PTY bridge is the next production migration step.".into();
+            self.status = "SSH session opened through the production OpenSSH/PTY backend.".into();
         }
         self.dialog = None;
     }
