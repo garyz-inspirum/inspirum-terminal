@@ -1,5 +1,5 @@
 //! Native terminal adapter: egui_term owns the Alacritty parser and platform PTY.
-use crate::{ControlMasterMode, ProxyKind, Session};
+use crate::{ControlMasterMode, ProxyAuth, ProxyKind, Session};
 use anyhow::{Context, Result, ensure};
 use std::{
     io::Read,
@@ -112,9 +112,13 @@ pub fn proxy_command_for_target(
         ProxyKind::Socks5 => "socks5",
         ProxyKind::None => unreachable!(),
     };
+    let auth = match session.ssh.proxy_auth {
+        ProxyAuth::None => "none",
+        ProxyAuth::Environment => "environment",
+    };
     let program = quote_proxy_program(helper)?;
     Ok(Some(format!(
-        "{program} --proxy-helper --mode {mode} --proxy-host {} --proxy-port {proxy_port} --target-host {target_host} --target-port {target_port}",
+        "{program} --proxy-helper --mode {mode} --proxy-auth {auth} --proxy-host {} --proxy-port {proxy_port} --target-host {target_host} --target-port {target_port}",
         session.ssh.proxy_host
     )))
 }
