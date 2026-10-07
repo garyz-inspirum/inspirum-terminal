@@ -6,6 +6,7 @@
 use crate::{
     Session, load_sessions, save_session_edit, save_sessions, session_matches_query,
     session_profile_key, terminal,
+    terminal_ux::{self, PasteDecision, PastePolicy},
 };
 use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
 use iced::widget::{
@@ -133,6 +134,7 @@ enum Dialog {
     Connection,
     Commands,
     Close(usize),
+    PasteConfirm { id: u64, text: String },
     About,
 }
 
@@ -148,6 +150,9 @@ enum Message {
     AskClose(usize),
     ConfirmClose(usize),
     ToggleFiles,
+    RequestPaste,
+    ClipboardRead(u64, Option<String>),
+    ConfirmPaste,
     Split(pane_grid::Axis),
     Focus(pane_grid::Pane),
     Resize(pane_grid::ResizeEvent),
@@ -315,6 +320,7 @@ struct App {
     scale: f64,
     status: String,
     load_error: Option<String>,
+    paste_policy: PastePolicy,
     pty_bridge: Option<PtyBridgeSender>,
     next_terminal_id: u64,
 }
@@ -344,6 +350,7 @@ impl App {
             scale: 1.0,
             status: "Ready".into(),
             load_error,
+            paste_policy: PastePolicy::ConfirmMultiline,
             pty_bridge: None,
             next_terminal_id: 1,
         }
@@ -407,6 +414,28 @@ impl App {
         if let Some(terminal) = pane.terminal.as_mut() {
             terminal.process_command(egui_term::BackendCommand::Write(bytes));
         }
+    }
+
+    fn focused_terminal_id(&self) -> Option<u64> {
+        let tab = self.tabs.get(self.active)?;
+        let pane = tab.panes.get(tab.focus)?;
+        (!pane.exited && pane.terminal.is_some()).then_some(pane.id)
+    }
+
+    fn send_to_terminal(&mut self, id: u64, bytes: Vec<u8>) -> bool {
+        for tab in &mut self.tabs {
+            for (_, pane) in tab.panes.iter_mut() {
+                if pane.id != id || pane.exited {
+                    continue;
+                }
+                if let Some(terminal) = pane.terminal.as_mut() {
+                    terminal.process_command(egui_term::BackendCommand::Write(bytes));
+                    return true;
+                }
+                return false;
+            }
+        }
+        false
     }
 
     fn refresh_terminal(&mut self, id: u64, exited: bool) {
@@ -520,6 +549,53 @@ impl App {
                 self.dialog = None;
                 self.toggle_files();
             }
+            Message::RequestPaste => {
+                let Some(id) = self.focused_terminal_id() else {
+                    self.status = "Focus a connected terminal before pasting.".into();
+                    return Task::none();
+                };
+                return iced::clipboard::read()
+                    .map(move |contents| Message::ClipboardRead(id, contents));
+            }
+            Message::ClipboardRead(id, contents) => {
+                let Some(text) = contents else {
+                    self.status = "Clipboard does not contain text.".into();
+                    return Task::none();
+                };
+                if text.is_empty() {
+                    self.status = "Clipboard text is empty.".into();
+                    return Task::none();
+                }
+                match terminal_ux::classify_paste(self.paste_policy, &text) {
+                    PasteDecision::Send => {
+                        if self.send_to_terminal(id, text.into_bytes()) {
+                            self.status = "Clipboard text pasted to the focused terminal.".into();
+                        } else {
+                            self.status =
+                                "Paste cancelled because that terminal is no longer active.".into();
+                        }
+                    }
+                    PasteDecision::Confirm => {
+                        self.dialog = Some(Dialog::PasteConfirm { id, text });
+                        self.status =
+                            "Multiline paste is waiting for explicit confirmation.".into();
+                    }
+                    PasteDecision::Block => {
+                        self.status =
+                            "Paste blocked by policy (multiline or NUL-containing payload).".into();
+                    }
+                }
+            }
+            Message::ConfirmPaste => {
+                if let Some(Dialog::PasteConfirm { id, text }) = self.dialog.take() {
+                    if self.send_to_terminal(id, text.into_bytes()) {
+                        self.status = "Paste sent after explicit confirmation.".into();
+                    } else {
+                        self.status =
+                            "Paste cancelled because that terminal is no longer active.".into();
+                    }
+                }
+            }
             Message::Split(axis) => {
                 self.dialog = None;
                 if let Some(profile) = self.tabs.get(self.active).map(|tab| tab.profile.clone()) {
@@ -608,6 +684,11 @@ impl App {
                 use keyboard::key::Named;
 
                 if self.dialog.is_some() {
+                    if matches!(self.dialog, Some(Dialog::PasteConfirm { .. }))
+                        && matches!(key.as_ref(), keyboard::Key::Named(Named::Enter))
+                    {
+                        return self.update(Message::ConfirmPaste);
+                    }
                     return match key.as_ref() {
                         keyboard::Key::Named(Named::Escape) => self.update(Message::CloseDialog),
                         keyboard::Key::Named(Named::Tab) => {
@@ -627,6 +708,9 @@ impl App {
                     }
                     keyboard::Key::Character("p") if modifiers.command() && modifiers.shift() => {
                         return self.update(Message::Commands);
+                    }
+                    keyboard::Key::Character("v") if modifiers.command() => {
+                        return self.update(Message::RequestPaste);
                     }
                     _ => {}
                 }
@@ -858,6 +942,7 @@ impl App {
         let toolbar = row![
             text("LIVE SSH").size(12).color(GREEN),
             space::horizontal(),
+            action("Paste", Message::RequestPaste),
             action("Split right", Message::Split(pane_grid::Axis::Vertical)),
             action("Split down", Message::Split(pane_grid::Axis::Horizontal)),
             action(
@@ -1114,7 +1199,7 @@ impl App {
             .into(),
             Dialog::Close(index) => column![
                 text("Close this session?").size(24),
-                text("This closes the Iced workspace tab. No SSH process is attached to this shell yet.")
+                text("This disconnects the live SSH/PTTY session and closes its Iced workspace tab.")
                     .color(MUTED),
                 row![
                     space::horizontal(),
@@ -1125,9 +1210,51 @@ impl App {
             ]
             .spacing(20)
             .into(),
+            Dialog::PasteConfirm { id: _, text: paste } => {
+                let line_count = paste
+                    .as_bytes()
+                    .iter()
+                    .filter(|&&byte| matches!(byte, b'\r' | b'\n'))
+                    .count()
+                    + 1;
+                let truncated = paste.chars().count() > 4000;
+                let mut preview = paste.chars().take(4000).collect::<String>();
+                if truncated {
+                    preview.push_str("\n… preview truncated …");
+                }
+                column![
+                    text("Confirm terminal paste").size(24),
+                    text(format!(
+                        "Paste {} bytes across approximately {} line(s)?",
+                        paste.len(),
+                        line_count
+                    )),
+                    text("Review carefully. Multiline terminal pastes can execute several commands immediately.")
+                        .size(13)
+                        .color(MUTED),
+                    container(
+                        scrollable(text(preview).font(Font::MONOSPACE).size(13))
+                            .height(220)
+                    )
+                    .padding(12)
+                    .width(Fill)
+                    .style(card),
+                    row![
+                        space::horizontal(),
+                        action("Cancel", Message::CloseDialog),
+                        action("Paste now", Message::ConfirmPaste).style(primary)
+                    ]
+                    .spacing(10),
+                    text("Keyboard: Enter confirms; Escape cancels.")
+                        .size(12)
+                        .color(MUTED),
+                ]
+                .spacing(16)
+                .into()
+            }
             Dialog::About => column![
                 text("Production Iced migration").size(24),
-                text("This is no longer the fixture-only design preview. The shell reads and writes the real validated Inspirum profile store and uses the accepted WindTerm-style workspace structure.\n\nThe live SSH/PTY renderer is intentionally not attached in this commit because the current TerminalBackend is coupled to egui. The next migration step extracts that backend boundary while retaining OpenSSH host-key policy, paste safeguards and process lifecycle behaviour.")
+                text("This is no longer the fixture-only design preview. The shell reads and writes the real validated Inspirum profile store, opens live SSH sessions through the existing OpenSSH/PTTY backend, and uses the accepted WindTerm-style workspace structure.\n\nClipboard paste now reuses the existing terminal safety policy: NUL-containing payloads are blocked and multiline paste requires explicit review and confirmation. Terminal rendering fidelity, reconnect polish and real SFTP integration remain migration work.")
                     .color(MUTED),
                 action("Back to workspace", Message::CloseDialog).style(primary),
             ]
@@ -1270,6 +1397,25 @@ mod tests {
             ..Default::default()
         };
         assert!(form.session().is_err());
+    }
+
+    #[test]
+    fn iced_paste_keeps_existing_multiline_and_nul_policy() {
+        assert_eq!(
+            terminal_ux::classify_paste(PastePolicy::ConfirmMultiline, "echo safe"),
+            PasteDecision::Send
+        );
+        assert_eq!(
+            terminal_ux::classify_paste(
+                PastePolicy::ConfirmMultiline,
+                "echo first\necho second"
+            ),
+            PasteDecision::Confirm
+        );
+        assert_eq!(
+            terminal_ux::classify_paste(PastePolicy::ConfirmMultiline, "bad\0payload"),
+            PasteDecision::Block
+        );
     }
 
     #[test]
