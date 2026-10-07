@@ -1,0 +1,84 @@
+name: Iced design preview
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'prototypes/iced-shell/**'
+      - '.github/workflows/iced-design.yml'
+permissions:
+  contents: read
+concurrency:
+  group: iced-design-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  preview:
+    name: Native preview (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libfontconfig1-dev xvfb xdotool imagemagick fonts-dejavu-core
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'prototypes/iced-shell -> target'
+      - name: Format source for preview artifact
+        run: cargo fmt --manifest-path prototypes/iced-shell/Cargo.toml
+      - name: Unit and interaction-model tests
+        run: cargo test --manifest-path prototypes/iced-shell/Cargo.toml
+      - name: Build native preview
+        run: cargo build --manifest-path prototypes/iced-shell/Cargo.toml
+      - name: Capture native Linux design states
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p preview-artifacts/screenshots
+          Xvfb :99 -screen 0 1440x1000x24 &
+          export DISPLAY=:99
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/iced-runtime"
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          sleep 2
+          binary=prototypes/iced-shell/target/debug/inspirum-iced-preview
+          for state in empty terminal split files dialog; do
+            "$binary" --preview="$state" >"preview-artifacts/$state.log" 2>&1 &
+            pid=$!
+            window=""
+            for attempt in $(seq 1 40); do
+              window=$(xdotool search --onlyvisible --name 'Inspirum - Iced design preview' 2>/dev/null | head -1 || true)
+              test -n "$window" && break
+              kill -0 "$pid" || { cat "preview-artifacts/$state.log"; exit 1; }
+              sleep 1
+            done
+            test -n "$window" || { cat "preview-artifacts/$state.log"; exit 1; }
+            sleep 2
+            import -window "$window" "preview-artifacts/screenshots/$state.png"
+            if [ "$state" = "empty" ]; then
+              xdotool windowfocus "$window" key ctrl+n
+              sleep 1
+              import -window "$window" preview-artifacts/screenshots/keyboard-new-connection.png
+              xdotool key Escape
+            fi
+            kill "$pid"
+            wait "$pid" || true
+          done
+      - name: Prepare preview artifact
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p preview-artifacts/source
+          cp -r prototypes/iced-shell/src preview-artifacts/source/
+          cp prototypes/iced-shell/Cargo.toml preview-artifacts/source/
+          cp prototypes/iced-shell/Cargo.lock preview-artifacts/source/ 2>/dev/null || true
+          cp prototypes/iced-shell/target/debug/inspirum-iced-preview* preview-artifacts/ 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: iced-design-preview-${{ runner.os }}
+          path: preview-artifacts
+          if-no-files-found: error
