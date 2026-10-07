@@ -4,7 +4,9 @@
 //! Live PTY rendering is introduced separately so the GUI migration cannot bypass
 //! host-key, argv, paste, process-lifecycle, or transfer safeguards.
 use crate::{
-    Session, load_sessions,
+    Session,
+    command_palette::{self, PaletteItem, Snippet, SnippetLibrary},
+    load_sessions,
     remote_edit::{self, SaveOutcome},
     save_session_edit, save_sessions, session_matches_query, session_profile_key, sftp, terminal,
     terminal_ux::{self, PasteDecision, PastePolicy},
@@ -556,6 +558,14 @@ enum Message {
     SelectPreviousTab,
     New,
     Commands,
+    CommandQuery(String),
+    CommandSender(String),
+    CommandStage(usize),
+    CommandSend,
+    SnippetName(String),
+    SnippetBody(String),
+    SaveSnippet,
+    DeleteSnippet(usize),
     About,
     CloseDialog,
     AskClose(usize),
@@ -1260,6 +1270,12 @@ struct App {
     files_dock: Option<pane_grid::Pane>,
     files: FilesState,
     remote_editor: Option<RemoteEditorState>,
+    snippets_path: PathBuf,
+    snippets: SnippetLibrary,
+    command_query: String,
+    command_sender: String,
+    snippet_name: String,
+    snippet_body: String,
     sidebar_collapsed: bool,
     form: ConnectionForm,
     editing_profile: Option<String>,
@@ -1277,12 +1293,24 @@ struct App {
 impl App {
     fn boot(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> Self {
         let (dock, terminal_dock) = pane_grid::State::new(Dock::Terminal);
-        let (profiles, load_error) = match load_sessions(&profiles_path) {
+        let (profiles, mut load_error) = match load_sessions(&profiles_path) {
             Ok(profiles) => (profiles, None),
             Err(error) => (
                 Vec::new(),
                 Some(format!("Could not load profiles: {error:#}")),
             ),
+        };
+        let snippets_path = command_palette::snippets_path(&profiles_path);
+        let snippets = match command_palette::load_library(&snippets_path) {
+            Ok(library) => library,
+            Err(error) => {
+                let message = format!("Could not load snippets: {error:#}");
+                load_error = Some(match load_error {
+                    Some(existing) => format!("{existing}\n{message}"),
+                    None => message,
+                });
+                SnippetLibrary::default()
+            }
         };
         Self {
             profiles_path,
@@ -1296,6 +1324,12 @@ impl App {
             files_dock: None,
             files: FilesState::new(),
             remote_editor: None,
+            snippets_path,
+            snippets,
+            command_query: String::new(),
+            command_sender: String::new(),
+            snippet_name: String::new(),
+            snippet_body: String::new(),
             sidebar_collapsed: false,
             form: ConnectionForm::default(),
             editing_profile: None,
@@ -2004,7 +2038,106 @@ impl App {
                 self.dialog = Some(Dialog::Connection);
                 return operation::focus("connection-host");
             }
-            Message::Commands => self.dialog = Some(Dialog::Commands),
+            Message::Commands => {
+                self.command_query.clear();
+                self.dialog = Some(Dialog::Commands);
+                return operation::focus("command-query");
+            }
+            Message::CommandQuery(value) => self.command_query = value,
+            Message::CommandSender(value) => self.command_sender = value,
+            Message::CommandStage(index) => {
+                let items = iced_palette_items(&self.command_query, &self.snippets);
+                if let Some(item) = items.get(index).cloned() {
+                    match item {
+                        PaletteItem::Snippet { index, name } => {
+                            if let Some(snippet) = self.snippets.snippets.get(index) {
+                                self.command_sender = snippet.body.clone();
+                                self.status =
+                                    format!("Snippet '{name}' staged. Press Send explicitly.");
+                            }
+                        }
+                        PaletteItem::LocalAction { id, .. } => match id {
+                            "connect" => {
+                                self.dialog = None;
+                                return self.update(Message::New);
+                            }
+                            "close-active" if !self.tabs.is_empty() => {
+                                self.dialog = None;
+                                return self.update(Message::AskClose(self.active));
+                            }
+                            _ => {}
+                        },
+                    }
+                }
+            }
+            Message::CommandSend => {
+                let text = self.command_sender.clone();
+                if text.is_empty() {
+                    self.status = "Command sender text is empty.".into();
+                    return Task::none();
+                }
+                let Some(id) = self.focused_terminal_id() else {
+                    self.status = "Focus a connected terminal before sending command text.".into();
+                    return Task::none();
+                };
+                match terminal_ux::classify_paste(self.paste_policy, &text) {
+                    PasteDecision::Send => {
+                        if self.send_to_terminal(id, text.into_bytes()) {
+                            self.status = "Command text sent to the focused terminal.".into();
+                        }
+                    }
+                    PasteDecision::Confirm => {
+                        self.dialog = Some(Dialog::PasteConfirm { id, text });
+                        self.status =
+                            "Multiline command text is waiting for explicit confirmation.".into();
+                    }
+                    PasteDecision::Block => {
+                        self.status = "Command text blocked by the paste safety policy.".into();
+                    }
+                }
+            }
+            Message::SnippetName(value) => self.snippet_name = value,
+            Message::SnippetBody(value) => self.snippet_body = value,
+            Message::SaveSnippet => {
+                let candidate = Snippet {
+                    name: self.snippet_name.trim().to_owned(),
+                    body: self.snippet_body.clone(),
+                };
+                match candidate.validate() {
+                    Err(error) => self.status = format!("Invalid snippet: {error:#}"),
+                    Ok(()) if self.snippets.snippets.iter().any(|snippet| {
+                        snippet.name.eq_ignore_ascii_case(&candidate.name)
+                    }) => {
+                        self.status = "Snippet name already exists.".into();
+                    }
+                    Ok(()) => {
+                        self.snippets.snippets.push(candidate);
+                        match command_palette::save_library(&self.snippets_path, &self.snippets) {
+                            Ok(()) => {
+                                self.snippet_name.clear();
+                                self.snippet_body.clear();
+                                self.status = "Snippet saved.".into();
+                            }
+                            Err(error) => {
+                                self.snippets.snippets.pop();
+                                self.status = format!("Cannot save snippet: {error:#}");
+                            }
+                        }
+                    }
+                }
+            }
+            Message::DeleteSnippet(index) => {
+                if index < self.snippets.snippets.len() {
+                    let removed = self.snippets.snippets.remove(index);
+                    match command_palette::save_library(&self.snippets_path, &self.snippets) {
+                        Ok(()) => self.status = format!("Snippet '{}' deleted.", removed.name),
+                        Err(error) => {
+                            self.snippets.snippets.insert(index, removed);
+                            self.status = format!("Cannot delete snippet: {error:#}");
+                        }
+                    }
+                }
+            }
             Message::About => self.dialog = Some(Dialog::About),
             Message::CloseDialog => {
                 self.dialog = None;
