@@ -190,11 +190,26 @@ impl TerminalBackend {
         pty_event_proxy_sender: Sender<(u64, PtyEvent)>,
         settings: BackendSettings,
     ) -> Result<Self> {
-        Self::new_with_subscription_spawner(
+        let wake: Arc<dyn Fn() + Send + Sync> =
+            Arc::new(move || app_context.request_repaint());
+        Self::new_with_waker(id, pty_event_proxy_sender, settings, wake)
+    }
+
+    /// Construct the PTY/parser backend without coupling it to a particular GUI toolkit.
+    ///
+    /// The callback only schedules a frontend refresh. Terminal bytes, parsing, resize,
+    /// process shutdown, and PTY ownership remain in this backend.
+    pub fn new_with_waker(
+        id: u64,
+        pty_event_proxy_sender: Sender<(u64, PtyEvent)>,
+        settings: BackendSettings,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<Self> {
+        Self::new_with_waker_and_subscription_spawner(
             id,
-            app_context,
             pty_event_proxy_sender,
             settings,
+            wake,
             |builder, subscription| builder.spawn(subscription),
         )
     }
@@ -205,6 +220,27 @@ impl TerminalBackend {
         app_context: egui::Context,
         pty_event_proxy_sender: Sender<(u64, PtyEvent)>,
         settings: BackendSettings,
+        spawn_subscription: F,
+    ) -> Result<Self>
+    where
+        F: FnOnce(thread::Builder, Box<dyn FnOnce() + Send + 'static>) -> Result<JoinHandle<()>>,
+    {
+        let wake: Arc<dyn Fn() + Send + Sync> =
+            Arc::new(move || app_context.request_repaint());
+        Self::new_with_waker_and_subscription_spawner(
+            id,
+            pty_event_proxy_sender,
+            settings,
+            wake,
+            spawn_subscription,
+        )
+    }
+
+    fn new_with_waker_and_subscription_spawner<F>(
+        id: u64,
+        pty_event_proxy_sender: Sender<(u64, PtyEvent)>,
+        settings: BackendSettings,
+        wake: Arc<dyn Fn() + Send + Sync>,
         spawn_subscription: F,
     ) -> Result<Self>
     where
@@ -252,7 +288,7 @@ impl TerminalBackend {
                         if pty_event_proxy_sender.send((id, event.clone())).is_err() {
                             break;
                         }
-                        app_context.request_repaint();
+                        wake();
                         if let Event::Exit = event {
                             break;
                         }
