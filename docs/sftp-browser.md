@@ -54,3 +54,16 @@ Remote downloads resolve the listed remote filename as exactly one local path co
 Local files can be dropped into the active SFTP browser for upload, but drops are ignored until **Accept dropped files for session '<name>'** is explicitly enabled. The armed session name is shown beside the control so a dropped file cannot silently target an unintended SSH session. Dropped files enter the same transfer queue as button-driven uploads and therefore use the same progress, cancel, retry, resume, integrity, and conflict behavior.
 
 The current egui/native-window integration accepts operating-system file drops into Inspirum Terminal. Native drag-out of a remote entry to the desktop is not exposed by the toolkit path used here, so remote-to-local transfer remains an explicit **Download** action into the visible Local pane. Internal transfer safety is unchanged: overwrite is never automatic and resumable downloads remain staged until final verification and atomic commit.
+
+
+## Safe remote text editor
+
+Issue #62 adds an explicit **Open/Edit** action for a selected remote file. The editor downloads the file into a private temporary working directory and opens it in Inspirum Terminal's internal multiline editor. The working copy is deleted when the editor is discarded or the application releases the editor state.
+
+Only bounded UTF-8 text is editable. Files larger than 1 MiB, invalid UTF-8, NUL-containing data, or other binary-style control bytes are rejected rather than interpreted as text.
+
+Closing the editor never uploads anything. **Save** is the only normal upload path. Before every save, the client downloads the live remote file again and compares its bytes with the version originally opened. If the remote content changed, saving stops and requires an explicit **Overwrite changed remote file** confirmation.
+
+Successful saves upload the private working copy to a uniquely named remote staging file and then rename that staging file over the target. If the final rename fails, the client makes a best-effort cleanup of the staging file and reports the error. This staged replacement avoids directly streaming an edited file over the live target. Exact preservation of ownership, timestamps, ACLs and permission metadata depends on the SFTP server/filesystem rename semantics and is not currently guaranteed; operators who require metadata preservation should verify server behavior before using the editor for sensitive system files.
+
+The editor never executes the edited file and never launches it as a local process.
