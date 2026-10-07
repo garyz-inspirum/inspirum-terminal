@@ -151,6 +151,7 @@ enum Message {
     AskClose(usize),
     ConfirmClose(usize),
     ToggleFiles,
+    ToggleSidebar,
     RequestPaste,
     ClipboardRead(u64, Option<String>),
     ConfirmPaste,
@@ -385,6 +386,7 @@ struct App {
     dock: pane_grid::State<Dock>,
     terminal_dock: pane_grid::Pane,
     files_dock: Option<pane_grid::Pane>,
+    sidebar_collapsed: bool,
     form: ConnectionForm,
     editing_profile: Option<String>,
     dialog: Option<Dialog>,
@@ -416,6 +418,7 @@ impl App {
             dock,
             terminal_dock,
             files_dock: None,
+            sidebar_collapsed: false,
             form: ConnectionForm::default(),
             editing_profile: None,
             dialog: None,
@@ -630,6 +633,10 @@ impl App {
             Message::ToggleFiles => {
                 self.dialog = None;
                 self.toggle_files();
+            }
+            Message::ToggleSidebar => {
+                self.dialog = None;
+                self.sidebar_collapsed = !self.sidebar_collapsed;
             }
             Message::RequestPaste => {
                 let Some(id) = self.focused_terminal_id() else {
@@ -927,12 +934,35 @@ impl App {
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
+        if self.sidebar_collapsed {
+            return container(
+                column![
+                    action(">>", Message::ToggleSidebar).width(Fill),
+                    action("+", Message::New).style(primary).width(Fill),
+                    space::vertical().height(6),
+                    text("SSH").size(10).color(BLUE),
+                    space::vertical(),
+                    text(self.profiles.len().to_string()).size(11).color(MUTED),
+                ]
+                .spacing(10)
+                .align_x(iced::Center),
+            )
+            .width(58)
+            .height(Fill)
+            .padding([14, 8])
+            .style(surface)
+            .into();
+        }
+
         let mut list = column![
             row![
                 text("SESSIONS").size(12).color(MUTED),
                 space::horizontal(),
-                text(self.profiles.len().to_string()).size(12).color(MUTED)
-            ],
+                text(self.profiles.len().to_string()).size(12).color(MUTED),
+                action("<<", Message::ToggleSidebar),
+            ]
+            .spacing(6)
+            .align_y(iced::Center),
             action("+  New connection", Message::New)
                 .style(primary)
                 .width(Fill),
@@ -1372,6 +1402,15 @@ impl App {
                 action(
                     "Split active pane right",
                     Message::Split(pane_grid::Axis::Vertical)
+                )
+                .width(Fill),
+                action(
+                    if self.sidebar_collapsed {
+                        "Show session library"
+                    } else {
+                        "Hide session library"
+                    },
+                    Message::ToggleSidebar
                 )
                 .width(Fill),
                 action("Toggle files", Message::ToggleFiles).width(Fill),
