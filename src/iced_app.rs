@@ -1384,10 +1384,8 @@ impl App {
                 }
             }
             Message::FilesOpenLocal(path) => {
-                if path.is_dir() {
-                    self.files.local_dir = path;
-                    return self.reload_local_files();
-                }
+                self.files.local_dir = path;
+                return self.reload_local_files();
             }
             Message::FilesOpenRemote(path) => {
                 self.files.remote_dir = path;
