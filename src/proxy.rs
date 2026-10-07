@@ -38,18 +38,19 @@ pub fn credentials_from_environment(auth: ProxyAuth) -> Result<Option<ProxyCrede
     match auth {
         ProxyAuth::None => Ok(None),
         ProxyAuth::Environment => {
-            let username = std::env::var("INSPIRUM_PROXY_USERNAME")
-                .context("INSPIRUM_PROXY_USERNAME is required for environment proxy authentication")?;
-            let password = std::env::var("INSPIRUM_PROXY_PASSWORD")
-                .context("INSPIRUM_PROXY_PASSWORD is required for environment proxy authentication")?;
+            let username = std::env::var("INSPIRUM_PROXY_USERNAME").context(
+                "INSPIRUM_PROXY_USERNAME is required for environment proxy authentication",
+            )?;
+            let password = std::env::var("INSPIRUM_PROXY_PASSWORD").context(
+                "INSPIRUM_PROXY_PASSWORD is required for environment proxy authentication",
+            )?;
             ProxyCredentials::new(username, password).map(Some)
         }
     }
 }
 
 fn base64_basic(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let a = chunk[0];
@@ -279,14 +280,7 @@ pub fn connect_tunnel(
     target_host: &str,
     target_port: u16,
 ) -> Result<TcpStream> {
-    connect_tunnel_with_credentials(
-        kind,
-        proxy_host,
-        proxy_port,
-        target_host,
-        target_port,
-        None,
-    )
+    connect_tunnel_with_credentials(kind, proxy_host, proxy_port, target_host, target_port, None)
 }
 
 pub fn connect_tunnel_with_credentials(
