@@ -1292,7 +1292,12 @@ impl App {
                     self.query = value;
                 }
             }
-            Message::Open(index) => self.open(index),
+            Message::Open(index) => {
+                self.open(index);
+                if self.files_dock.is_some() {
+                    return self.reload_files();
+                }
+            }
             Message::EditProfile(index) => {
                 if let Some(profile) = self.profiles.get(index).cloned() {
                     self.editing_profile = Some(session_profile_key(&profile));
@@ -1301,15 +1306,26 @@ impl App {
                     return operation::focus("connection-name");
                 }
             }
-            Message::SelectTab(index) => self.activate_tab(index),
+            Message::SelectTab(index) => {
+                self.activate_tab(index);
+                if self.files_dock.is_some() {
+                    return self.reload_files();
+                }
+            }
             Message::SelectNextTab => {
                 if !self.tabs.is_empty() {
                     self.activate_tab((self.active + 1) % self.tabs.len());
+                    if self.files_dock.is_some() {
+                        return self.reload_files();
+                    }
                 }
             }
             Message::SelectPreviousTab => {
                 if !self.tabs.is_empty() {
                     self.activate_tab((self.active + self.tabs.len() - 1) % self.tabs.len());
+                    if self.files_dock.is_some() {
+                        return self.reload_files();
+                    }
                 }
             }
             Message::New => {
@@ -1341,10 +1357,71 @@ impl App {
                     self.toggle_files();
                 }
                 self.dialog = None;
+                if self.files_dock.is_some() && !self.tabs.is_empty() {
+                    return self.reload_files();
+                }
             }
             Message::ToggleFiles => {
                 self.dialog = None;
+                let opening = self.files_dock.is_none() && !self.tabs.is_empty();
                 self.toggle_files();
+                if opening && self.files_dock.is_some() {
+                    return self.reload_files();
+                }
+            }
+            Message::FilesRefresh => return self.reload_files(),
+            Message::FilesLocalUp => {
+                if let Some(parent) = self.files.local_dir.parent().map(ToOwned::to_owned) {
+                    self.files.local_dir = parent;
+                    return self.reload_local_files();
+                }
+            }
+            Message::FilesRemoteUp => {
+                let parent = remote_parent(&self.files.remote_dir);
+                if parent != self.files.remote_dir {
+                    self.files.remote_dir = parent;
+                    return self.reload_remote_files();
+                }
+            }
+            Message::FilesOpenLocal(path) => {
+                if path.is_dir() {
+                    self.files.local_dir = path;
+                    return self.reload_local_files();
+                }
+            }
+            Message::FilesOpenRemote(path) => {
+                self.files.remote_dir = path;
+                return self.reload_remote_files();
+            }
+            Message::FilesLocalLoaded(generation, result) => {
+                if generation == self.files.local_generation {
+                    self.files.local_loading = false;
+                    match result {
+                        Ok(entries) => {
+                            self.files.local_entries = entries;
+                            self.files.local_error = None;
+                        }
+                        Err(error) => {
+                            self.files.local_entries.clear();
+                            self.files.local_error = Some(error);
+                        }
+                    }
+                }
+            }
+            Message::FilesRemoteLoaded(generation, result) => {
+                if generation == self.files.remote_generation {
+                    self.files.remote_loading = false;
+                    match result {
+                        Ok(entries) => {
+                            self.files.remote_entries = entries;
+                            self.files.remote_error = None;
+                        }
+                        Err(error) => {
+                            self.files.remote_entries.clear();
+                            self.files.remote_error = Some(error);
+                        }
+                    }
+                }
             }
             Message::ToggleSidebar => {
                 self.dialog = None;
