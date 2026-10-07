@@ -372,8 +372,7 @@ impl TerminalBackend {
                 self.process_mouse_report(button, modifiers, point, pressed);
             }
             BackendCommand::MouseReportAt(button, modifiers, x, y, pressed) => {
-                let point =
-                    Self::selection_point(x, y, &self.size, term.grid().display_offset());
+                let point = Self::selection_point(x, y, &self.size, term.grid().display_offset());
                 self.process_mouse_report_flags(
                     button,
                     modifiers.shift,
