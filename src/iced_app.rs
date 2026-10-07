@@ -1550,9 +1550,9 @@ impl App {
                     id: pane.id,
                     snapshot,
                 })
-                    .width(Fill)
-                    .height(Fill)
-                    .into()
+                .width(Fill)
+                .height(Fill)
+                .into()
             } else {
                 let transcript = if pane.transcript.is_empty() {
                     if pane.exited {
