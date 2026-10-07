@@ -1094,7 +1094,10 @@ fn safe_remote_editor_round_trip_conflict_and_binary_policy() {
         edit.save(&session, Some(&config), false).unwrap(),
         SaveOutcome::Saved
     );
-    assert_eq!(fs::read_to_string(&remote_path).unwrap(), "one\ntwo\nthree\n");
+    assert_eq!(
+        fs::read_to_string(&remote_path).unwrap(),
+        "one\ntwo\nthree\n"
+    );
 
     let mut conflicted = RemoteEdit::open(
         &session,
