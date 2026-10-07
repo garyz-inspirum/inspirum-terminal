@@ -1321,6 +1321,7 @@ impl App {
                         });
                     });
                     ui.small("Sessions");
+                    if self.session_settings_open {
                     egui::CollapsingHeader::new("Keyboard & accessibility")
                         .default_open(false)
                         .show(ui, |ui| {
@@ -1491,6 +1492,7 @@ impl App {
                                 ui.small(&self.snippet_notice);
                             }
                         });
+                    }
                     ui.separator();
                     ui.label("Saved sessions");
                     ui.horizontal(|ui| {
@@ -2704,6 +2706,73 @@ impl App {
         let mut close_one = None;
         let mut move_active = None;
         let mut bulk_mode = None;
+
+        egui::TopBottomPanel::top("app_menu")
+            .exact_height(24.0)
+            .show(ctx, |ui| {
+                egui::MenuBar::new().ui(ui, |ui| {
+                    ui.menu_button("Session", |ui| {
+                        if ui.button("Connect").clicked() {
+                            self.connect_draft(ctx);
+                            ui.close();
+                        }
+                        if ui.button("Files").clicked() {
+                            self.terminal_focus = None;
+                            let result = self.validated_draft().and_then(|session| {
+                                self.sftp_browser =
+                                    Some(SftpBrowser::new(session, self.config.clone())?);
+                                Ok(())
+                            });
+                            self.error =
+                                result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+                            ui.close();
+                        }
+                        if ui.button("Quick switch").clicked() {
+                            self.tab_switcher_open = true;
+                            self.tab_switcher_query.clear();
+                            self.tab_switcher_index = 0;
+                            self.terminal_focus = None;
+                            ui.close();
+                        }
+                    });
+                    ui.menu_button("View", |ui| {
+                        ui.checkbox(&mut self.session_settings_open, "Session settings");
+                        if ui
+                            .checkbox(&mut self.search_open, "Terminal history search")
+                            .changed()
+                        {
+                            self.terminal_focus =
+                                if self.search_open { None } else { self.active };
+                        }
+                        if ui.button("Command palette").clicked() {
+                            self.command_palette_open = true;
+                            self.command_palette_query.clear();
+                            self.command_palette_index = 0;
+                            self.terminal_focus = None;
+                            ui.close();
+                        }
+                    });
+                    ui.menu_button("Window", |ui| {
+                        if ui.button("Quick switch tabs").clicked() {
+                            self.tab_switcher_open = true;
+                            self.tab_switcher_query.clear();
+                            self.tab_switcher_index = 0;
+                            self.terminal_focus = None;
+                            ui.close();
+                        }
+                        if ui.button("Close active tab").clicked() {
+                            if let Some(id) = self.active {
+                                self.close_tab_ids(&[id]);
+                            }
+                            ui.close();
+                        }
+                    });
+                    ui.menu_button("Help", |ui| {
+                        ui.label("Inspirum Terminal");
+                        ui.small("WindTerm-style workspace shell");
+                    });
+                });
+            });
 
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
