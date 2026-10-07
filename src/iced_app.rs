@@ -2122,9 +2122,13 @@ impl App {
                 };
                 match candidate.validate() {
                     Err(error) => self.status = format!("Invalid snippet: {error:#}"),
-                    Ok(()) if self.snippets.snippets.iter().any(|snippet| {
-                        snippet.name.eq_ignore_ascii_case(&candidate.name)
-                    }) => {
+                    Ok(())
+                        if self
+                            .snippets
+                            .snippets
+                            .iter()
+                            .any(|snippet| snippet.name.eq_ignore_ascii_case(&candidate.name)) =>
+                    {
                         self.status = "Snippet name already exists.".into();
                     }
                     Ok(()) => {
