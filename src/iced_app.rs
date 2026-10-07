@@ -417,6 +417,7 @@ struct FilesState {
     remote_generation: u64,
     selected_local: Option<PathBuf>,
     selected_remote: Option<sftp::RemoteEntry>,
+    name_input: String,
     transfers: Vec<TransferJob>,
 }
 
@@ -436,6 +437,7 @@ impl FilesState {
             remote_generation: 0,
             selected_local: None,
             selected_remote: None,
+            name_input: String::new(),
             transfers: Vec::new(),
         }
     }
@@ -486,6 +488,22 @@ enum Dock {
 }
 
 #[derive(Clone)]
+enum FileNameAction {
+    MkdirLocal(PathBuf),
+    MkdirRemote {
+        session: Session,
+        session_key: String,
+        directory: String,
+    },
+    RenameLocal(PathBuf),
+    RenameRemote {
+        session: Session,
+        session_key: String,
+        from: String,
+    },
+}
+
+#[derive(Clone)]
 enum Dialog {
     Connection,
     Commands,
@@ -499,6 +517,7 @@ enum Dialog {
         path: String,
         directory: bool,
     },
+    FileName(FileNameAction),
     About,
 }
 
@@ -528,6 +547,17 @@ enum Message {
     FilesRequestDownload,
     FilesRequestDeleteLocal,
     FilesRequestDeleteRemote,
+    FilesRequestMkdirLocal,
+    FilesRequestMkdirRemote,
+    FilesRequestRenameLocal,
+    FilesRequestRenameRemote,
+    FilesNameChanged(String),
+    ConfirmFileNameAction,
+    FilesMutationFinished {
+        remote: bool,
+        session_key: Option<String>,
+        result: Result<String, String>,
+    },
     FilesTransferPrepared(Result<PreparedTransfer, String>),
     ConfirmFileOverwrite,
     ConfirmFileDelete,
@@ -1939,6 +1969,7 @@ impl App {
                 self.dialog = None;
                 self.editing_profile = None;
                 self.form = ConnectionForm::default();
+                self.files.name_input.clear();
             }
             Message::AskClose(index) => self.dialog = Some(Dialog::Close(index)),
             Message::ConfirmClose(index) => {
@@ -2025,6 +2056,162 @@ impl App {
                     path,
                     directory: entry.is_dir,
                 });
+            }
+            Message::FilesRequestMkdirLocal => {
+                self.files.name_input.clear();
+                self.dialog = Some(Dialog::FileName(FileNameAction::MkdirLocal(
+                    self.files.local_dir.clone(),
+                )));
+                return operation::focus("file-name");
+            }
+            Message::FilesRequestMkdirRemote => {
+                let Some(session) = self.tabs.get(self.active).map(|tab| tab.profile.clone()) else {
+                    return Task::none();
+                };
+                self.files.name_input.clear();
+                self.dialog = Some(Dialog::FileName(FileNameAction::MkdirRemote {
+                    session_key: session_profile_key(&session),
+                    session,
+                    directory: self.files.remote_dir.clone(),
+                }));
+                return operation::focus("file-name");
+            }
+            Message::FilesRequestRenameLocal => {
+                let Some(path) = self.files.selected_local.clone() else {
+                    self.status = "Select a local file to rename.".into();
+                    return Task::none();
+                };
+                self.files.name_input = path
+                    .file_name()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.dialog = Some(Dialog::FileName(FileNameAction::RenameLocal(path)));
+                return operation::focus("file-name");
+            }
+            Message::FilesRequestRenameRemote => {
+                let Some(entry) = self.files.selected_remote.clone() else {
+                    self.status = "Select a remote file to rename.".into();
+                    return Task::none();
+                };
+                let Some(session) = self.tabs.get(self.active).map(|tab| tab.profile.clone()) else {
+                    return Task::none();
+                };
+                self.files.name_input = entry.name.clone();
+                self.dialog = Some(Dialog::FileName(FileNameAction::RenameRemote {
+                    session_key: session_profile_key(&session),
+                    session,
+                    from: sftp::join_remote(&self.files.remote_dir, &entry.name),
+                }));
+                return operation::focus("file-name");
+            }
+            Message::FilesNameChanged(value) => self.files.name_input = value,
+            Message::ConfirmFileNameAction => {
+                let name = self.files.name_input.trim().to_owned();
+                if name.is_empty() {
+                    self.status = "A file or folder name is required.".into();
+                    return Task::none();
+                }
+                let Some(Dialog::FileName(action)) = self.dialog.take() else {
+                    return Task::none();
+                };
+                self.files.name_input.clear();
+                match action {
+                    FileNameAction::MkdirLocal(directory) => {
+                        return Task::perform(
+                            async move {
+                                sftp::mkdir_local(&directory, &name)
+                                    .map(|path| format!("Created local {}", path.to_string_lossy()))
+                                    .map_err(|error| format!("{error:#}"))
+                            },
+                            |result| Message::FilesMutationFinished {
+                                remote: false,
+                                session_key: None,
+                                result,
+                            },
+                        );
+                    }
+                    FileNameAction::MkdirRemote {
+                        session,
+                        session_key,
+                        directory,
+                    } => {
+                        let config = self.ssh_config.clone();
+                        let path = sftp::join_remote(&directory, &name);
+                        return Task::perform(
+                            async move {
+                                sftp::mkdir_remote(&session, config.as_deref(), &path)
+                                    .map(|_| format!("Created remote {path}"))
+                                    .map_err(|error| format!("{error:#}"))
+                            },
+                            move |result| Message::FilesMutationFinished {
+                                remote: true,
+                                session_key: Some(session_key.clone()),
+                                result,
+                            },
+                        );
+                    }
+                    FileNameAction::RenameLocal(path) => {
+                        return Task::perform(
+                            async move {
+                                sftp::rename_local(&path, &name)
+                                    .map(|target| format!("Renamed local {}", target.to_string_lossy()))
+                                    .map_err(|error| format!("{error:#}"))
+                            },
+                            |result| Message::FilesMutationFinished {
+                                remote: false,
+                                session_key: None,
+                                result,
+                            },
+                        );
+                    }
+                    FileNameAction::RenameRemote {
+                        session,
+                        session_key,
+                        from,
+                    } => {
+                        let config = self.ssh_config.clone();
+                        let to = sftp::join_remote(&remote_parent(&from), &name);
+                        return Task::perform(
+                            async move {
+                                sftp::rename_remote(&session, config.as_deref(), &from, &to)
+                                    .map(|_| format!("Renamed remote to {to}"))
+                                    .map_err(|error| format!("{error:#}"))
+                            },
+                            move |result| Message::FilesMutationFinished {
+                                remote: true,
+                                session_key: Some(session_key.clone()),
+                                result,
+                            },
+                        );
+                    }
+                }
+            }
+            Message::FilesMutationFinished {
+                remote,
+                session_key,
+                result,
+            } => {
+                match result {
+                    Ok(message) => {
+                        self.status = message;
+                        if remote {
+                            self.files.selected_remote = None;
+                        } else {
+                            self.files.selected_local = None;
+                        }
+                    }
+                    Err(error) => self.status = format!("File operation failed: {error}"),
+                }
+                let active_session = self.files.session_key.as_deref();
+                if self.files_dock.is_some()
+                    && (!remote || session_key.as_deref() == active_session)
+                {
+                    return if remote {
+                        self.reload_remote_files()
+                    } else {
+                        self.reload_local_files()
+                    };
+                }
             }
             Message::FilesTransferPrepared(result) => match result {
                 Ok(prepared) if prepared.conflict => {
@@ -3108,10 +3295,18 @@ impl App {
                 row![
                     action("Upload ->", Message::FilesRequestUpload),
                     action("<- Download", Message::FilesRequestDownload),
+                    action("New local folder", Message::FilesRequestMkdirLocal),
+                    action("New remote folder", Message::FilesRequestMkdirRemote),
+                ]
+                .spacing(8)
+                .align_y(iced::Center),
+                row![
+                    action("Rename local", Message::FilesRequestRenameLocal),
+                    action("Rename remote", Message::FilesRequestRenameRemote),
                     action("Delete local", Message::FilesRequestDeleteLocal),
                     action("Delete remote", Message::FilesRequestDeleteRemote),
                     space::horizontal(),
-                    text("Transfers and deletes use the existing validated SFTP paths and explicit confirmations.")
+                    text("File actions reuse the validated SFTP/local-file policy; destructive actions still require confirmation.")
                         .size(11)
                         .color(MUTED),
                 ]
@@ -3441,6 +3636,33 @@ impl App {
             ]
             .spacing(16)
             .into(),
+            Dialog::FileName(action) => {
+                let (title, hint) = match action {
+                    FileNameAction::MkdirLocal(_) => ("New local folder", "Folder name"),
+                    FileNameAction::MkdirRemote { .. } => ("New remote folder", "Folder name"),
+                    FileNameAction::RenameLocal(_) => ("Rename local file", "New filename"),
+                    FileNameAction::RenameRemote { .. } => ("Rename remote file", "New filename"),
+                };
+                column![
+                    text(title).size(24),
+                    text_input(hint, &self.files.name_input)
+                        .id("file-name")
+                        .on_input(Message::FilesNameChanged)
+                        .on_submit(Message::ConfirmFileNameAction)
+                        .padding(11),
+                    text("Names are validated by the existing SFTP/local-file policy before any operation is executed.")
+                        .size(12)
+                        .color(MUTED),
+                    row![
+                        space::horizontal(),
+                        action("Cancel", Message::CloseDialog),
+                        action("Apply", Message::ConfirmFileNameAction).style(primary)
+                    ]
+                    .spacing(10),
+                ]
+                .spacing(16)
+                .into()
+            }
             Dialog::About => column![
                 text("Production Iced migration").size(24),
                 text("This is no longer the fixture-only design preview. The shell reads and writes the real validated Inspirum profile store, opens live SSH sessions through the existing OpenSSH/PTY backend, and uses the accepted WindTerm-style workspace structure.\n\nClipboard paste now reuses the existing terminal safety policy: NUL-containing payloads are blocked and multiline paste requires explicit review and confirmation. Exited or failed panes can reconnect in place from their pane header. Terminal rendering fidelity and real SFTP integration remain migration work.")
