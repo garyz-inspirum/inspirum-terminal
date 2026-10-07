@@ -49,6 +49,13 @@ pub fn serialize_windows_program(program: &str) -> Result<String> {
     Ok(format!("\"{program}\""))
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MouseModifiers {
+    pub shift: bool,
+    pub alt: bool,
+    pub command: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum BackendCommand {
     Write(Vec<u8>),
@@ -58,6 +65,7 @@ pub enum BackendCommand {
     SelectUpdate(f32, f32),
     ProcessLink(LinkAction, Point),
     MouseReport(MouseButton, Modifiers, Point, bool),
+    MouseReportAt(MouseButton, MouseModifiers, f32, f32, bool),
 }
 
 #[derive(Debug, Clone)]
@@ -363,6 +371,18 @@ impl TerminalBackend {
             BackendCommand::MouseReport(button, modifiers, point, pressed) => {
                 self.process_mouse_report(button, modifiers, point, pressed);
             }
+            BackendCommand::MouseReportAt(button, modifiers, x, y, pressed) => {
+                let point =
+                    Self::selection_point(x, y, &self.size, term.grid().display_offset());
+                self.process_mouse_report_flags(
+                    button,
+                    modifiers.shift,
+                    modifiers.alt,
+                    modifiers.command,
+                    point,
+                    pressed,
+                );
+            }
         };
     }
 
@@ -578,14 +598,33 @@ impl TerminalBackend {
         point: Point,
         pressed: bool,
     ) {
+        self.process_mouse_report_flags(
+            button,
+            modifiers.contains(Modifiers::SHIFT),
+            modifiers.contains(Modifiers::ALT),
+            modifiers.contains(Modifiers::COMMAND),
+            point,
+            pressed,
+        );
+    }
+
+    fn process_mouse_report_flags(
+        &self,
+        button: MouseButton,
+        shift: bool,
+        alt: bool,
+        command: bool,
+        point: Point,
+        pressed: bool,
+    ) {
         let mut mods = 0;
-        if modifiers.contains(Modifiers::SHIFT) {
+        if shift {
             mods += 4;
         }
-        if modifiers.contains(Modifiers::ALT) {
+        if alt {
             mods += 8;
         }
-        if modifiers.contains(Modifiers::COMMAND) {
+        if command {
             mods += 16;
         }
 
