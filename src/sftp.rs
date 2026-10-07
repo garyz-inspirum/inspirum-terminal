@@ -473,6 +473,50 @@ pub fn start_upload_resume(
     })
 }
 
+pub fn validate_local_leaf(name: &str) -> Result<()> {
+    ensure!(!name.is_empty(), "local name is required");
+    ensure!(name != "." && name != "..", "local name may not be dot traversal");
+    ensure!(
+        !name.chars().any(char::is_control),
+        "local name contains control characters"
+    );
+    ensure!(
+        !name.contains('/') && !name.contains('\\'),
+        "local name must be a single path component"
+    );
+    Ok(())
+}
+
+pub fn local_destination(directory: &Path, remote_name: &str) -> Result<PathBuf> {
+    validate_local_leaf(remote_name)?;
+    ensure!(directory.is_dir(), "local destination directory does not exist");
+    Ok(directory.join(remote_name))
+}
+
+pub fn mkdir_local(directory: &Path, name: &str) -> Result<PathBuf> {
+    validate_local_leaf(name)?;
+    let path = directory.join(name);
+    fs::create_dir(&path).context("create local directory")?;
+    Ok(path)
+}
+
+pub fn rename_local(path: &Path, new_name: &str) -> Result<PathBuf> {
+    validate_local_leaf(new_name)?;
+    let parent = path.parent().context("local path has no parent")?;
+    let target = parent.join(new_name);
+    ensure!(!target.exists(), "local rename target already exists");
+    fs::rename(path, &target).context("rename local entry")?;
+    Ok(target)
+}
+
+pub fn delete_local(path: &Path) -> Result<()> {
+    if path.is_dir() {
+        fs::remove_dir(path).context("delete empty local directory")
+    } else {
+        fs::remove_file(path).context("delete local file")
+    }
+}
+
 pub fn local_entries(path: &Path) -> Result<Vec<PathBuf>> {
     let mut entries = fs::read_dir(path)?
         .map(|entry| entry.map(|entry| entry.path()))
@@ -532,4 +576,41 @@ mod tests {
         assert!(quote_batch_arg("normal path").is_ok());
         assert!(quote_batch_arg("bad\npath").is_err());
     }
+    #[test]
+    fn local_policy_rejects_traversal_and_preserves_binary_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        assert!(local_destination(root, "../escape").is_err());
+        assert!(local_destination(root, r"..\\escape").is_err());
+        assert!(local_destination(root, "/absolute").is_err());
+
+        let bytes = [0_u8, 1, 2, 0xff, 0x80, 0x0a, 0x00, 0x7f];
+        let source = root.join("binary.bin");
+        fs::write(&source, bytes).unwrap();
+        let renamed = rename_local(&source, "renamed.bin").unwrap();
+        assert_eq!(fs::read(&renamed).unwrap(), bytes);
+        delete_local(&renamed).unwrap();
+        assert!(!renamed.exists());
+
+        let folder = mkdir_local(root, "folder").unwrap();
+        assert!(folder.is_dir());
+        delete_local(&folder).unwrap();
+        assert!(!folder.exists());
+    }
+
+    #[test]
+    fn local_destination_keeps_native_path_semantics() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = local_destination(temp.path(), "file.txt").unwrap();
+        assert_eq!(destination.parent(), Some(temp.path()));
+        assert_eq!(destination.file_name().and_then(|name| name.to_str()), Some("file.txt"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_unc_parent_navigation_is_preserved_by_pathbuf() {
+        let path = PathBuf::from(r"\\server\share\folder");
+        assert_eq!(path.parent(), Some(Path::new(r"\\server\share")));
+    }
+
 }
