@@ -7,13 +7,16 @@ use crate::{
     Session, load_sessions, save_session_edit, save_sessions, session_matches_query,
     session_profile_key, terminal,
 };
+use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
 use iced::widget::{
     button, center, column, container, mouse_area, opaque, operation, pane_grid, row, scrollable,
     sensor, space, stack, text, text_input,
 };
-use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
 use iced::{Border, Color, Element, Fill, Font, Subscription, Task, Theme, event, keyboard};
-use std::{path::PathBuf, sync::{Arc, Mutex}};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 const BG: Color = Color::from_rgb8(14, 18, 25);
 const PANEL: Color = Color::from_rgb8(22, 29, 40);
@@ -360,7 +363,10 @@ impl App {
         };
 
         let Some(bridge) = self.pty_bridge.clone() else {
-            pane.error = Some("Terminal event bridge is still initializing. Close and reopen this session.".into());
+            pane.error = Some(
+                "Terminal event bridge is still initializing. Close and reopen this session."
+                    .into(),
+            );
             return pane;
         };
 
@@ -603,9 +609,7 @@ impl App {
 
                 if self.dialog.is_some() {
                     return match key.as_ref() {
-                        keyboard::Key::Named(Named::Escape) => {
-                            self.update(Message::CloseDialog)
-                        }
+                        keyboard::Key::Named(Named::Escape) => self.update(Message::CloseDialog),
                         keyboard::Key::Named(Named::Tab) => {
                             if modifiers.shift() {
                                 operation::focus_previous()
@@ -621,9 +625,7 @@ impl App {
                     keyboard::Key::Character("n") if modifiers.command() => {
                         return self.update(Message::New);
                     }
-                    keyboard::Key::Character("p")
-                        if modifiers.command() && modifiers.shift() =>
-                    {
+                    keyboard::Key::Character("p") if modifiers.command() && modifiers.shift() => {
                         return self.update(Message::Commands);
                     }
                     _ => {}
@@ -930,7 +932,9 @@ impl App {
                     text("Unable to start SSH session").size(16).color(DANGER),
                     text(error).size(13).color(MUTED),
                     space::vertical().height(8),
-                    text("The saved profile was not altered.").size(12).color(MUTED),
+                    text("The saved profile was not altered.")
+                        .size(12)
+                        .color(MUTED),
                 ]
                 .spacing(10)
                 .width(Fill)
@@ -945,15 +949,10 @@ impl App {
                 } else {
                     pane.transcript.as_str()
                 };
-                scrollable(
-                    text(transcript)
-                        .font(Font::MONOSPACE)
-                        .size(15)
-                        .color(FG),
-                )
-                .width(Fill)
-                .height(Fill)
-                .into()
+                scrollable(text(transcript).font(Font::MONOSPACE).size(15).color(FG))
+                    .width(Fill)
+                    .height(Fill)
+                    .into()
             };
 
             pane_grid::Content::new(
