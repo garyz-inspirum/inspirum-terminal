@@ -3958,8 +3958,8 @@ impl App {
             ]
             .spacing(16)
             .into(),
-            Dialog::FileName(action) => {
-                let (title, hint) = match action {
+            Dialog::FileName(file_action) => {
+                let (title, hint) = match file_action {
                     FileNameAction::MkdirLocal(_) => ("New local folder", "Folder name"),
                     FileNameAction::MkdirRemote { .. } => ("New remote folder", "Folder name"),
                     FileNameAction::RenameLocal(_) => ("Rename local file", "New filename"),
