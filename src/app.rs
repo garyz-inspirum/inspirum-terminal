@@ -5,9 +5,7 @@ use crate::{
         self, AppearanceOverride, AppearanceSettings, TerminalAppearance, TerminalCursorStyle,
         TerminalFontFamily, TerminalPalette,
     },
-    command_palette::{
-        self, PaletteItem, SendTarget, Snippet, SnippetLibrary,
-    },
+    command_palette::{self, PaletteItem, SendTarget, Snippet, SnippetLibrary},
     delete_session, duplicate_session_draft, export_sessions,
     history::{HistoryRow, HistoryState},
     import_sessions,
@@ -950,7 +948,8 @@ impl App {
         match terminal_ux::classify_paste(self.paste_policy, &text) {
             PasteDecision::Send => {
                 for id in targets {
-                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id && !tab.exited) {
+                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id && !tab.exited)
+                    {
                         tab.terminal
                             .process_command(BackendCommand::Write(text.as_bytes().to_vec()));
                     }
@@ -1235,9 +1234,8 @@ impl App {
                         }
                     }
                 });
-            let selected = chosen.or_else(|| {
-                (activate && !items.is_empty()).then_some(self.command_palette_index)
-            });
+            let selected = chosen
+                .or_else(|| (activate && !items.is_empty()).then_some(self.command_palette_index));
             if let Some(index) = selected {
                 match items[index].clone() {
                     PaletteItem::Snippet { index, name } => {
@@ -3701,7 +3699,10 @@ impl App {
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.strong(format!("Send multiline text to {} explicit target(s)?", targets.len()));
+                    ui.strong(format!(
+                        "Send multiline text to {} explicit target(s)?",
+                        targets.len()
+                    ));
                     ui.monospace(&text);
                     ui.horizontal(|ui| {
                         if ui.button("Send confirmed text").clicked() {
@@ -3714,7 +3715,11 @@ impl App {
                 });
             if send {
                 for id in &targets {
-                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == *id && !tab.exited) {
+                    if let Some(tab) = self
+                        .tabs
+                        .iter_mut()
+                        .find(|tab| tab.id == *id && !tab.exited)
+                    {
                         tab.terminal
                             .process_command(BackendCommand::Write(text.as_bytes().to_vec()));
                     }
