@@ -34,7 +34,10 @@ impl RemoteEdit {
         expected_size: Option<u64>,
     ) -> Result<Self> {
         if let Some(size) = expected_size {
-            ensure!(size <= MAX_EDIT_BYTES, "remote file is too large for the text editor");
+            ensure!(
+                size <= MAX_EDIT_BYTES,
+                "remote file is too large for the text editor"
+            );
         }
         let temp_dir = private_temp_dir()?;
         let working_path = temp_dir.path().join("working.txt");
@@ -164,14 +167,7 @@ fn download_blocking(
     destination: &Path,
     expected_size: Option<u64>,
 ) -> Result<()> {
-    let transfer = sftp::start_download(
-        session,
-        config,
-        remote,
-        destination,
-        true,
-        expected_size,
-    )?;
+    let transfer = sftp::start_download(session, config, remote, destination, true, expected_size)?;
     wait_transfer(transfer)
 }
 
@@ -202,7 +198,10 @@ mod tests {
 
     #[test]
     fn text_policy_accepts_utf8_and_rejects_binary_controls() {
-        assert_eq!(decode_text("hello\n世界\t!\n".as_bytes()).unwrap(), "hello\n世界\t!\n");
+        assert_eq!(
+            decode_text("hello\n世界\t!\n".as_bytes()).unwrap(),
+            "hello\n世界\t!\n"
+        );
         assert!(decode_text(&[0xff, 0xfe]).is_err());
         assert!(decode_text(b"hello\0world").is_err());
         assert!(decode_text(b"hello\x1bworld").is_err());
@@ -219,8 +218,14 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::{MetadataExt, PermissionsExt};
-            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o700);
-            assert_eq!(fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
             assert!(fs::metadata(&file).unwrap().uid() == fs::metadata(&path).unwrap().uid());
         }
         drop(dir);
