@@ -1246,10 +1246,8 @@ impl App {
                         }
                     }
                     PaletteItem::LocalAction { id, .. } => match id {
-                        "connect" => {
-                            if self.terminal_focus.is_none() {
-                                self.connect_draft(ctx);
-                            }
+                        "connect" if self.terminal_focus.is_none() => {
+                            self.connect_draft(ctx);
                         }
                         "quick-switch" => {
                             self.tab_switcher_open = true;
@@ -1413,12 +1411,12 @@ impl App {
                                         self.snippet_transfer_path.trim(),
                                     )) {
                                         Ok(library) => {
-                                            self.snippets = library;
                                             match command_palette::save_library(
                                                 &self.snippets_path,
-                                                &self.snippets,
+                                                &library,
                                             ) {
                                                 Ok(()) => {
+                                                    self.snippets = library;
                                                     self.snippet_notice =
                                                         "Snippet library imported.".into();
                                                 }
