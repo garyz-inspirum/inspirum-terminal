@@ -3654,7 +3654,7 @@ impl App {
         .into()
     }
 
-    fn dialog_view(&self, dialog: &Dialog) -> Element<'_, Message> {
+    fn dialog_view<'a>(&'a self, dialog: &'a Dialog) -> Element<'a, Message> {
         let body: Element<'_, Message> = match dialog {
             Dialog::Connection => {
                 let editing = self.editing_profile.is_some();
