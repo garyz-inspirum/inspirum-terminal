@@ -2107,7 +2107,8 @@ impl App {
                 return operation::focus("file-name");
             }
             Message::FilesRequestMkdirRemote => {
-                let Some(session) = self.tabs.get(self.active).map(|tab| tab.profile.clone()) else {
+                let Some(session) = self.tabs.get(self.active).map(|tab| tab.profile.clone())
+                else {
                     return Task::none();
                 };
                 self.files.name_input.clear();
@@ -2135,7 +2136,8 @@ impl App {
                     self.status = "Select a remote file to rename.".into();
                     return Task::none();
                 };
-                let Some(session) = self.tabs.get(self.active).map(|tab| tab.profile.clone()) else {
+                let Some(session) = self.tabs.get(self.active).map(|tab| tab.profile.clone())
+                else {
                     return Task::none();
                 };
                 self.files.name_input = entry.name.clone();
@@ -2155,7 +2157,8 @@ impl App {
                     self.status = "Select a remote file, not a directory.".into();
                     return Task::none();
                 }
-                let Some(session) = self.tabs.get(self.active).map(|tab| tab.profile.clone()) else {
+                let Some(session) = self.tabs.get(self.active).map(|tab| tab.profile.clone())
+                else {
                     return Task::none();
                 };
                 let session_key = session_profile_key(&session);
