@@ -10,10 +10,12 @@ use crate::{
 };
 use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
 use iced::widget::{
-    button, center, column, container, mouse_area, opaque, operation, pane_grid, row, scrollable,
-    sensor, space, stack, text, text_input,
+    button, canvas, center, column, container, mouse_area, opaque, operation, pane_grid, row,
+    scrollable, sensor, space, stack, text, text_input,
 };
-use iced::{Border, Color, Element, Fill, Font, Subscription, Task, Theme, event, keyboard};
+use iced::{
+    Border, Color, Element, Fill, Font, Subscription, Task, Theme, event, font, keyboard, mouse,
+};
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -94,6 +96,7 @@ struct TerminalPane {
     profile: Session,
     terminal: Option<egui_term::TerminalBackend>,
     transcript: String,
+    display: Option<egui_term::DisplaySnapshot>,
     terminal_title: Option<String>,
     error: Option<String>,
     exited: bool,
@@ -192,6 +195,105 @@ fn sanitize_terminal_title(title: &str) -> Option<String> {
         .collect();
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_owned())
+}
+
+struct TerminalCanvas<'a> {
+    snapshot: &'a egui_term::DisplaySnapshot,
+}
+
+impl canvas::Program<Message> for TerminalCanvas<'_> {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &iced::Renderer,
+        _theme: &Theme,
+        bounds: iced::Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        fn rgb(value: [u8; 3]) -> Color {
+            Color::from_rgb8(value[0], value[1], value[2])
+        }
+
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        frame.fill(
+            &canvas::Path::rectangle(iced::Point::ORIGIN, bounds.size()),
+            rgb(self.snapshot.background),
+        );
+
+        for cell in &self.snapshot.cells {
+            let x = cell.column as f32 * TERMINAL_CELL_WIDTH;
+            let y = cell.row as f32 * TERMINAL_CELL_HEIGHT;
+            if x >= bounds.width || y >= bounds.height {
+                continue;
+            }
+
+            let cell_width = if cell.wide {
+                TERMINAL_CELL_WIDTH * 2.0
+            } else {
+                TERMINAL_CELL_WIDTH
+            };
+            let background = if cell.cursor {
+                cell.cursor_color
+            } else {
+                cell.background
+            };
+            if background != self.snapshot.background || cell.cursor {
+                frame.fill(
+                    &canvas::Path::rectangle(
+                        iced::Point::new(x, y),
+                        iced::Size::new(cell_width + 0.5, TERMINAL_CELL_HEIGHT + 0.5),
+                    ),
+                    rgb(background),
+                );
+            }
+
+            if !matches!(cell.character, ' ' | '\t' | '\0') {
+                let mut terminal_font = Font::MONOSPACE;
+                if cell.bold {
+                    terminal_font.weight = font::Weight::Bold;
+                }
+                if cell.italic {
+                    terminal_font.style = font::Style::Italic;
+                }
+                let foreground = if cell.cursor {
+                    cell.background
+                } else {
+                    cell.foreground
+                };
+                frame.fill_text(canvas::Text {
+                    content: cell.character.to_string(),
+                    position: iced::Point::new(x, y - 1.0),
+                    color: rgb(foreground),
+                    size: iced::Pixels(15.0),
+                    font: terminal_font,
+                    ..canvas::Text::default()
+                });
+            }
+
+            if cell.underline {
+                frame.fill(
+                    &canvas::Path::rectangle(
+                        iced::Point::new(x, y + TERMINAL_CELL_HEIGHT - 2.0),
+                        iced::Size::new(cell_width, 1.0),
+                    ),
+                    rgb(cell.foreground),
+                );
+            }
+            if cell.strikeout {
+                frame.fill(
+                    &canvas::Path::rectangle(
+                        iced::Point::new(x, y + TERMINAL_CELL_HEIGHT * 0.55),
+                        iced::Size::new(cell_width, 1.0),
+                    ),
+                    rgb(cell.foreground),
+                );
+            }
+        }
+
+        vec![frame.into_geometry()]
+    }
 }
 
 fn terminal_screen_text(terminal: &mut egui_term::TerminalBackend) -> String {
@@ -453,6 +555,7 @@ impl App {
             profile: profile.clone(),
             terminal: None,
             transcript: String::new(),
+            display: None,
             terminal_title: None,
             error: None,
             exited: false,
@@ -535,6 +638,8 @@ impl App {
                 }
                 if let Some(terminal) = pane.terminal.as_mut() {
                     pane.transcript = terminal_screen_text(terminal);
+                    pane.display =
+                        Some(terminal.display_snapshot(&egui_term::TerminalTheme::default()));
                 }
                 if exited {
                     pane.exited = true;
@@ -1264,6 +1369,11 @@ impl App {
                 .spacing(10)
                 .width(Fill)
                 .into()
+            } else if let Some(snapshot) = &pane.display {
+                canvas(TerminalCanvas { snapshot })
+                    .width(Fill)
+                    .height(Fill)
+                    .into()
             } else {
                 let transcript = if pane.transcript.is_empty() {
                     if pane.exited {
@@ -1274,7 +1384,10 @@ impl App {
                 } else {
                     pane.transcript.as_str()
                 };
-                scrollable(text(transcript).font(Font::MONOSPACE).size(15).color(FG))
+                text(transcript)
+                    .font(Font::MONOSPACE)
+                    .size(15)
+                    .color(FG)
                     .width(Fill)
                     .height(Fill)
                     .into()
