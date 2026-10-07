@@ -1981,7 +1981,42 @@ impl App {
             }
             Message::FilesOpenRemote(path) => {
                 self.files.remote_dir = path;
+                self.files.selected_remote = None;
                 return self.reload_remote_files();
+            }
+            Message::FilesSelectLocal(path) => {
+                self.files.selected_local = Some(path);
+            }
+            Message::FilesSelectRemote(entry) => {
+                self.files.selected_remote = Some(entry);
+            }
+            Message::FilesRequestUpload => return self.request_upload(),
+            Message::FilesRequestDownload => return self.request_download(),
+            Message::FilesTransferPrepared(result) => match result {
+                Ok(prepared) if prepared.conflict => {
+                    self.dialog = Some(Dialog::FileOverwrite(prepared.pending));
+                }
+                Ok(prepared) => self.queue_transfer(prepared.pending, false),
+                Err(error) => {
+                    self.status = format!("Transfer could not be prepared: {error}");
+                }
+            },
+            Message::ConfirmFileOverwrite => {
+                if let Some(Dialog::FileOverwrite(pending)) = self.dialog.take() {
+                    self.queue_transfer(pending, true);
+                }
+            }
+            Message::CancelTransfer(id) => self.cancel_transfer(id),
+            Message::RetryTransfer(id) => self.retry_transfer(id, false),
+            Message::ResumeTransfer(id) => self.retry_transfer(id, true),
+            Message::TransferBridgeReady(sender) => {
+                self.transfer_bridge = Some(sender);
+                self.try_start_next_transfer();
+            }
+            Message::TransferEvent(event) => {
+                if self.handle_transfer_event(event) {
+                    return self.reload_files();
+                }
             }
             Message::FilesLocalLoaded(generation, result) => {
                 if generation == self.files.local_generation {
@@ -3117,6 +3152,51 @@ impl App {
                     text("Keyboard: Enter confirms; Escape cancels.")
                         .size(12)
                         .color(MUTED),
+                ]
+                .spacing(16)
+                .into()
+            }
+            Dialog::FileOverwrite(pending) => {
+                let direction = match pending.direction {
+                    TransferDirection::Upload => "remote",
+                    TransferDirection::Download => "local",
+                };
+                let source = match pending.direction {
+                    TransferDirection::Upload => pending.local.to_string_lossy().into_owned(),
+                    TransferDirection::Download => pending.remote.clone(),
+                };
+                let destination = match pending.direction {
+                    TransferDirection::Upload => pending.remote.clone(),
+                    TransferDirection::Download => pending.local.to_string_lossy().into_owned(),
+                };
+                column![
+                    text("Replace existing file?").size(24),
+                    text(format!(
+                        "A file already exists at the {direction} destination."
+                    ))
+                    .color(MUTED),
+                    container(
+                        column![
+                            text("Source").size(11).color(MUTED),
+                            text(source).font(Font::MONOSPACE).size(12),
+                            text("Destination").size(11).color(MUTED),
+                            text(destination).font(Font::MONOSPACE).size(12),
+                        ]
+                        .spacing(6)
+                    )
+                    .padding(12)
+                    .width(Fill)
+                    .style(card),
+                    text("Replacing is explicit. The transfer still uses the existing validated SFTP path and verification/resume policy.")
+                        .size(12)
+                        .color(MUTED),
+                    row![
+                        space::horizontal(),
+                        action("Cancel", Message::CloseDialog),
+                        action("Replace and transfer", Message::ConfirmFileOverwrite)
+                            .style(button::danger)
+                    ]
+                    .spacing(10),
                 ]
                 .spacing(16)
                 .into()
