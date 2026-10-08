@@ -1684,6 +1684,12 @@ impl App {
         }
     }
 
+    fn contains_terminal_pane(&self, id: u64) -> bool {
+        self.tabs
+            .iter()
+            .any(|tab| tab.panes.iter().any(|(_, pane)| pane.id == id))
+    }
+
     fn queue_terminal_refresh(&mut self, id: u64, exited: bool) {
         for tab in &mut self.tabs {
             for (_, pane) in tab.panes.iter_mut() {
@@ -3249,6 +3255,12 @@ impl App {
                 };
             }
             Message::PtyEvent(id, event) => {
+                // Exit/Title/Bell/Wakeup from a closed or reconnected PTY can
+                // remain queued briefly after its pane was removed. They must
+                // never mutate a new session's UI or queue an orphan redraw.
+                if !self.contains_terminal_pane(id) {
+                    return Task::none();
+                }
                 let wakeup = matches!(&event, egui_term::PtyEvent::Wakeup);
                 let exited = matches!(
                     &event,
@@ -5278,20 +5290,46 @@ mod tests {
             std::process::id()
         ));
         let mut app = App::boot(profiles_path, None);
+        let profile = Session {
+            name: "test host".into(),
+            host: "example.com".into(),
+            ..Session::default()
+        };
+        let first = app.new_terminal_pane(profile.clone());
+        let second = app.new_terminal_pane(profile.clone());
+        let first_id = first.id;
+        let second_id = second.id;
+        app.tabs.push(Workspace::new(profile.clone(), first));
+        app.tabs.push(Workspace::new(profile, second));
         assert!(!app.terminal_frame_scheduled);
 
-        // Multiple sessions can wake in the same interval, but only one Iced
+        // Two open sessions wake in the same interval, but only one Iced
         // frame may be scheduled. No network connection is required.
-        let _ = app.update(Message::PtyEvent(1001, egui_term::PtyEvent::Wakeup));
+        let _ = app.update(Message::PtyEvent(first_id, egui_term::PtyEvent::Wakeup));
         assert!(app.terminal_frame_scheduled);
-        let _ = app.update(Message::PtyEvent(1002, egui_term::PtyEvent::Wakeup));
+        let _ = app.update(Message::PtyEvent(second_id, egui_term::PtyEvent::Wakeup));
         assert!(app.terminal_frame_scheduled);
 
         let _ = app.update(Message::TerminalFrame);
         assert!(!app.terminal_frame_scheduled);
 
-        let _ = app.update(Message::PtyEvent(1001, egui_term::PtyEvent::Wakeup));
+        let _ = app.update(Message::PtyEvent(first_id, egui_term::PtyEvent::Wakeup));
         assert!(app.terminal_frame_scheduled);
+    }
+
+    #[test]
+    fn events_from_removed_terminal_panes_do_not_mutate_workspace() {
+        let profiles_path = std::env::temp_dir().join(format!(
+            "inspirum-iced-stale-event-{}-missing.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(profiles_path, None);
+        let before = app.status.clone();
+        let _ = app.update(Message::PtyEvent(777, egui_term::PtyEvent::Bell));
+        assert_eq!(app.status, before);
+
+        let _ = app.update(Message::PtyEvent(777, egui_term::PtyEvent::Wakeup));
+        assert!(!app.terminal_frame_scheduled);
     }
 
     #[test]
