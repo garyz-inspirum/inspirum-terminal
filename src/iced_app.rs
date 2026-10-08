@@ -4,7 +4,7 @@
 //! Live PTY rendering is introduced separately so the GUI migration cannot bypass
 //! host-key, argv, paste, process-lifecycle, or transfer safeguards.
 use crate::{
-    Session,
+    ProxyAuth, ProxyKind, Session,
     command_palette::{self, PaletteItem, Snippet, SnippetLibrary},
     load_sessions,
     remote_edit::{self, SaveOutcome},
@@ -640,6 +640,10 @@ enum Message {
     Folder(String),
     IdentityFile(String),
     ProxyJump(String),
+    ProxyKind(ProxyKind),
+    ProxyHost(String),
+    ProxyPort(String),
+    ProxyAuth(ProxyAuth),
     Ciphers(String),
     Macs(String),
     KexAlgorithms(String),
@@ -1159,6 +1163,10 @@ struct ConnectionForm {
     folder: String,
     identity_file: String,
     proxy_jump: String,
+    proxy_kind: ProxyKind,
+    proxy_host: String,
+    proxy_port: String,
+    proxy_auth: ProxyAuth,
     ciphers: String,
     macs: String,
     kex_algorithms: String,
@@ -1181,6 +1189,10 @@ impl Default for ConnectionForm {
             folder: String::new(),
             identity_file: String::new(),
             proxy_jump: String::new(),
+            proxy_kind: ProxyKind::None,
+            proxy_host: String::new(),
+            proxy_port: String::new(),
+            proxy_auth: ProxyAuth::None,
             ciphers: String::new(),
             macs: String::new(),
             kex_algorithms: String::new(),
@@ -1208,6 +1220,14 @@ impl ConnectionForm {
             folder: session.folder.clone(),
             identity_file: session.ssh.identity_file.clone(),
             proxy_jump: session.ssh.proxy_jump.clone(),
+            proxy_kind: session.ssh.proxy_kind,
+            proxy_host: session.ssh.proxy_host.clone(),
+            proxy_port: session
+                .ssh
+                .proxy_port
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            proxy_auth: session.ssh.proxy_auth,
             ciphers: session.ssh.ciphers.clone(),
             macs: session.ssh.macs.clone(),
             kex_algorithms: session.ssh.kex_algorithms.clone(),
@@ -1226,6 +1246,7 @@ impl ConnectionForm {
             base: Some(session.clone()),
             advanced: !session.ssh.identity_file.is_empty()
                 || !session.ssh.proxy_jump.is_empty()
+                || session.ssh.proxy_kind != ProxyKind::None
                 || !session.ssh.ciphers.is_empty()
                 || !session.ssh.macs.is_empty()
                 || !session.ssh.kex_algorithms.is_empty()
@@ -1287,6 +1308,17 @@ impl ConnectionForm {
 
         session.ssh.identity_file = self.identity_file.trim().to_owned();
         session.ssh.proxy_jump = self.proxy_jump.trim().to_owned();
+        session.ssh.proxy_kind = self.proxy_kind;
+        if self.proxy_kind == ProxyKind::None {
+            session.ssh.proxy_host.clear();
+            session.ssh.proxy_port = None;
+            session.ssh.proxy_auth = ProxyAuth::None;
+        } else {
+            session.ssh.proxy_host = self.proxy_host.trim().to_owned();
+            session.ssh.proxy_port =
+                Self::optional_positive_u16("Proxy port", &self.proxy_port)?;
+            session.ssh.proxy_auth = self.proxy_auth;
+        }
         session.ssh.ciphers = self.ciphers.trim().to_owned();
         session.ssh.macs = self.macs.trim().to_owned();
         session.ssh.kex_algorithms = self.kex_algorithms.trim().to_owned();
@@ -2906,6 +2938,10 @@ impl App {
             Message::Folder(value) => self.form.folder = value,
             Message::IdentityFile(value) => self.form.identity_file = value,
             Message::ProxyJump(value) => self.form.proxy_jump = value,
+            Message::ProxyKind(value) => self.form.proxy_kind = value,
+            Message::ProxyHost(value) => self.form.proxy_host = value,
+            Message::ProxyPort(value) => self.form.proxy_port = value,
+            Message::ProxyAuth(value) => self.form.proxy_auth = value,
             Message::Ciphers(value) => self.form.ciphers = value,
             Message::Macs(value) => self.form.macs = value,
             Message::KexAlgorithms(value) => self.form.kex_algorithms = value,
@@ -3925,6 +3961,91 @@ impl App {
                                     &self.form.proxy_jump,
                                     Message::ProxyJump
                                 ),
+                                text("Structured proxy · mutually exclusive with ProxyJump")
+                                    .size(11)
+                                    .color(MUTED),
+                                row![
+                                    action(
+                                        "None",
+                                        Message::ProxyKind(ProxyKind::None)
+                                    )
+                                    .style(if self.form.proxy_kind == ProxyKind::None {
+                                        selected_button
+                                    } else {
+                                        quiet
+                                    }),
+                                    action(
+                                        "HTTP CONNECT",
+                                        Message::ProxyKind(ProxyKind::HttpConnect)
+                                    )
+                                    .style(if self.form.proxy_kind == ProxyKind::HttpConnect {
+                                        selected_button
+                                    } else {
+                                        quiet
+                                    }),
+                                    action(
+                                        "SOCKS5",
+                                        Message::ProxyKind(ProxyKind::Socks5)
+                                    )
+                                    .style(if self.form.proxy_kind == ProxyKind::Socks5 {
+                                        selected_button
+                                    } else {
+                                        quiet
+                                    }),
+                                ]
+                                .spacing(8),
+                                if self.form.proxy_kind == ProxyKind::None {
+                                    column![].into()
+                                } else {
+                                    column![
+                                        row![
+                                            field(
+                                                "Proxy host",
+                                                "proxy.example or IP",
+                                                &self.form.proxy_host,
+                                                Message::ProxyHost
+                                            ),
+                                            container(field(
+                                                "Proxy port",
+                                                "8080",
+                                                &self.form.proxy_port,
+                                                Message::ProxyPort
+                                            ))
+                                            .width(140)
+                                        ]
+                                        .spacing(14),
+                                        row![
+                                            text("Proxy authentication")
+                                                .size(12)
+                                                .color(MUTED),
+                                            action(
+                                                "None",
+                                                Message::ProxyAuth(ProxyAuth::None)
+                                            )
+                                            .style(if self.form.proxy_auth == ProxyAuth::None {
+                                                selected_button
+                                            } else {
+                                                quiet
+                                            }),
+                                            action(
+                                                "Environment credentials",
+                                                Message::ProxyAuth(ProxyAuth::Environment)
+                                            )
+                                            .style(if self.form.proxy_auth == ProxyAuth::Environment {
+                                                selected_button
+                                            } else {
+                                                quiet
+                                            }),
+                                        ]
+                                        .spacing(8)
+                                        .align_y(iced::Center),
+                                        text("Environment mode reads ephemeral proxy credentials at runtime; usernames/passwords are never saved in the profile.")
+                                            .size(11)
+                                            .color(MUTED),
+                                    ]
+                                    .spacing(10)
+                                    .into()
+                                },
                                 text("Algorithm policy · leave empty to inherit OpenSSH defaults")
                                     .size(11)
                                     .color(MUTED),
