@@ -4546,13 +4546,15 @@ impl App {
                 text("Import SSH profiles").size(24),
                 text("Merge a validated non-secret Inspirum profile JSON file into the current library. Existing profiles are never overwritten by import.")
                     .color(MUTED),
-                field(
-                    "Import file",
-                    "/path/to/profiles.json",
-                    &self.import_path,
-                    Message::ImportPath
-                )
-                .id("import-path"),
+                column![
+                    text("Import file").size(13).color(MUTED),
+                    text_input("/path/to/profiles.json", &self.import_path)
+                        .id("import-path")
+                        .on_input(Message::ImportPath)
+                        .on_submit(Message::ConfirmImportProfiles)
+                        .padding(11)
+                ]
+                .spacing(7),
                 text("Conflicting folder/name entries, invalid SSH policy, secret-bearing unsupported fields, oversized files, and malformed JSON are rejected before the active profile store is changed.")
                     .size(12)
                     .color(MUTED),
@@ -4597,6 +4599,12 @@ fn field<'a>(
         "Folder" => "connection-folder",
         "Identity file" => "connection-identity-file",
         "ProxyJump" => "connection-proxy-jump",
+        "Proxy host" => "connection-proxy-host",
+        "Proxy port" => "connection-proxy-port",
+        "Ciphers" => "connection-ciphers",
+        "MACs" => "connection-macs",
+        "Key exchange" => "connection-kex",
+        "Host key algorithms" => "connection-host-key-algorithms",
         "Connect timeout" => "connection-timeout",
         "Server alive interval" => "connection-keepalive",
         "Remote command" => "connection-remote-command",
