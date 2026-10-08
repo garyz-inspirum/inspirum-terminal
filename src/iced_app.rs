@@ -2405,6 +2405,16 @@ impl App {
                 result,
             } => match result {
                 Ok(handle) => {
+                    let active_session_key = self
+                        .tabs
+                        .get(self.active)
+                        .map(|tab| session_profile_key(&tab.profile));
+                    if active_session_key.as_deref() != Some(session_key.as_str()) {
+                        self.status = format!(
+                            "Finished opening {remote}, but its SSH session is no longer active; editor result was discarded."
+                        );
+                        return Task::none();
+                    }
                     let text = handle
                         .0
                         .lock()
@@ -3780,7 +3790,11 @@ impl App {
                 ]
                 .spacing(8)
                 .align_y(iced::Center),
-                if let Some(editor) = &self.remote_editor {
+                if let Some(editor) = self
+                    .remote_editor
+                    .as_ref()
+                    .filter(|editor| active_session == Some(editor.session_key.as_str()))
+                {
                     let dirty = editor
                         .handle
                         .0
