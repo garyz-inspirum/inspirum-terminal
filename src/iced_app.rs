@@ -4357,7 +4357,7 @@ impl App {
                                 ]
                                 .spacing(8),
                                 if self.form.proxy_kind == ProxyKind::None {
-                                    column![].into()
+                                    Element::<'_, Message>::from(column![])
                                 } else {
                                     column![
                                         row![
