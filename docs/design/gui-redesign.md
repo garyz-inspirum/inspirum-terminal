@@ -155,7 +155,7 @@ Benchmark with a real terminal: burst output, ANSI styling, Unicode, selection d
 7. Test 100/125/150/200 percent scale and Unicode labels. Inspect actual rendered screens, not only screenshots of a design tool.
 8. Repeat keyboard, clipboard, IME, scrollback and shutdown checks natively on Linux, Windows and macOS.
 
-The Iced workflow builds the production candidate on Linux, Windows and macOS and records Linux design-state screenshots. CI also exercises the production Iced feature build. macOS/Windows visual acceptance, named-hardware latency measurements, real-network interactive acceptance and user approval are still outstanding.
+The Iced workflow builds the production candidate on Linux, Windows and macOS and records Linux design-state screenshots. It also launches the **real production Iced executable** in a headless Linux desktop with an empty local profile store, captures the empty workspace and New Connection dialog, exercises Escape, and checks the process stays alive. These are automated startup/dialog smoke checks and screenshots for subsequent visual inspection, **not** proof of full native GUI usability. CI also exercises the production Iced feature tests. macOS/Windows visual acceptance, named-hardware latency measurements, real-network interactive acceptance and user approval are still outstanding.
 
 ## 10. Delivery boundary
 
