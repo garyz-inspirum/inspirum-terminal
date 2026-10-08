@@ -1676,6 +1676,18 @@ impl App {
     /// A delayed canvas event must never retarget a pane in another tab or
     /// a pane replaced by Reconnect. Pane handles alone are insufficient:
     /// every reconnect gets a new terminal ID.
+    fn active_session_matches(&self, session_key: &str) -> bool {
+        self.tabs
+            .get(self.active)
+            .is_some_and(|tab| session_profile_key(&tab.profile) == session_key)
+    }
+
+    fn active_editor_is_visible(&self) -> bool {
+        self.remote_editor
+            .as_ref()
+            .is_some_and(|editor| self.active_session_matches(&editor.session_key))
+    }
+
     fn active_pane_matches(&self, pane_id: pane_grid::Pane, id: u64) -> bool {
         self.tabs
             .get(self.active)
@@ -2734,6 +2746,9 @@ impl App {
                 }
             }
             Message::RemoteEditorAction(action) => {
+                if !self.active_editor_is_visible() {
+                    return Task::none();
+                }
                 if let Some(editor) = self.remote_editor.as_mut() {
                     // Saving holds the mutex through network I/O. Never wait for it
                     // in a UI input callback.
@@ -2753,6 +2768,9 @@ impl App {
                 }
             }
             Message::RemoteEditorSave(force) => {
+                if !self.active_editor_is_visible() {
+                    return Task::none();
+                }
                 let Some(editor) = self.remote_editor.as_mut() else {
                     return Task::none();
                 };
@@ -2814,6 +2832,9 @@ impl App {
                 }
             }
             Message::RemoteEditorClose => {
+                if !self.active_editor_is_visible() {
+                    return Task::none();
+                }
                 if self
                     .remote_editor
                     .as_ref()
@@ -2837,6 +2858,9 @@ impl App {
                 }
             }
             Message::RemoteEditorDiscard => {
+                if !self.active_editor_is_visible() {
+                    return Task::none();
+                }
                 if self
                     .remote_editor
                     .as_ref()
@@ -2854,11 +2878,17 @@ impl App {
                 self.status = format!("Closed editor for {remote} without uploading changes.");
             }
             Message::RemoteEditorKeepEditing => {
+                if !self.active_editor_is_visible() {
+                    return Task::none();
+                }
                 if let Some(editor) = self.remote_editor.as_mut() {
                     editor.discard_confirm = false;
                 }
             }
             Message::RemoteEditorKeepConflict => {
+                if !self.active_editor_is_visible() {
+                    return Task::none();
+                }
                 if let Some(editor) = self.remote_editor.as_mut() {
                     editor.conflict = false;
                 }
@@ -5217,6 +5247,38 @@ mod tests {
         *app.tabs[1].panes.get_mut(focus_before).unwrap() = replacement;
         assert!(!app.active_pane_matches(focus_before, next_id));
         assert!(app.active_pane_matches(focus_before, new_id));
+    }
+
+    #[test]
+    fn active_session_guard_rejects_events_after_tab_switch() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-active-editor-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let first = Session {
+            name: "first".into(),
+            host: "first.example.invalid".into(),
+            ..Session::default()
+        };
+        let second = Session {
+            name: "second".into(),
+            host: "second.example.invalid".into(),
+            ..Session::default()
+        };
+        let first_key = session_profile_key(&first);
+        let second_key = session_profile_key(&second);
+        let first_terminal = app.new_terminal_pane(first.clone());
+        let second_terminal = app.new_terminal_pane(second.clone());
+        app.tabs.push(Workspace::new(first, first_terminal));
+        app.tabs.push(Workspace::new(second, second_terminal));
+
+        app.active = 0;
+        assert!(app.active_session_matches(&first_key));
+        assert!(!app.active_session_matches(&second_key));
+        app.active = 1;
+        assert!(!app.active_session_matches(&first_key));
+        assert!(app.active_session_matches(&second_key));
     }
 
     #[test]
