@@ -3258,7 +3258,9 @@ impl App {
                 self.status = if attempted == 0 {
                     "Terminal event bridge ready.".into()
                 } else {
-                    format!("Terminal bridge ready: {started} of {attempted} pending session(s) started.")
+                    format!(
+                        "Terminal bridge ready: {started} of {attempted} pending session(s) started."
+                    )
                 };
             }
             Message::PtyEvent(id, event) => {
