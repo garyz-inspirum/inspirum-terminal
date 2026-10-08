@@ -2651,7 +2651,15 @@ impl App {
             }
             Message::FilesTransferPrepared(result) => match result {
                 Ok(prepared) if prepared.conflict => {
-                    self.dialog = Some(Dialog::FileOverwrite(prepared.pending));
+                    let active_session = self.files.session_key.as_deref();
+                    if active_session == Some(prepared.pending.session_key.as_str()) {
+                        self.dialog = Some(Dialog::FileOverwrite(prepared.pending));
+                    } else {
+                        self.status = format!(
+                            "{} needs overwrite confirmation, but its SSH session is no longer active; switch back and retry the transfer.",
+                            prepared.pending.label()
+                        );
+                    }
                 }
                 Ok(prepared) => self.queue_transfer(prepared.pending, false),
                 Err(error) => {
