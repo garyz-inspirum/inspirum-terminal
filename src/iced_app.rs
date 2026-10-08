@@ -1621,6 +1621,22 @@ impl App {
         }
     }
 
+    /// A delayed canvas event must never retarget a pane in another tab or
+    /// a pane replaced by Reconnect. Pane handles alone are insufficient:
+    /// every reconnect gets a new terminal ID.
+    fn active_pane_matches(&self, pane_id: pane_grid::Pane, id: u64) -> bool {
+        self.tabs
+            .get(self.active)
+            .and_then(|tab| tab.panes.get(pane_id))
+            .is_some_and(|pane| pane.id == id && !pane.exited)
+    }
+
+    fn active_terminal_matches(&self, id: u64) -> bool {
+        self.tabs
+            .get(self.active)
+            .is_some_and(|tab| tab.panes.iter().any(|(_, pane)| pane.id == id && !pane.exited))
+    }
+
     fn focused_terminal_id(&self) -> Option<u64> {
         let tab = self.tabs.get(self.active)?;
         let pane = tab.panes.get(tab.focus)?;
@@ -3051,6 +3067,9 @@ impl App {
                 }
             }
             Message::TerminalSelectStart(pane_id, id, x, y) => {
+                if !self.active_pane_matches(pane_id, id) {
+                    return Task::none();
+                }
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.focus = pane_id;
                 }
@@ -3062,11 +3081,17 @@ impl App {
                 }
             }
             Message::TerminalSelectUpdate(id, x, y) => {
+                if !self.active_terminal_matches(id) {
+                    return Task::none();
+                }
                 if self.command_terminal(id, egui_term::BackendCommand::SelectUpdate(x, y)) {
                     self.refresh_terminal_display(id);
                 }
             }
             Message::TerminalMouse(pane_id, id, button, modifiers, x, y, pressed) => {
+                if !self.active_pane_matches(pane_id, id) {
+                    return Task::none();
+                }
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.focus = pane_id;
                 }
@@ -3076,6 +3101,9 @@ impl App {
                 );
             }
             Message::TerminalMouseWheel(pane_id, id, modifiers, x, y, lines) => {
+                if !self.active_pane_matches(pane_id, id) {
+                    return Task::none();
+                }
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.focus = pane_id;
                 }
@@ -3092,11 +3120,17 @@ impl App {
                 }
             }
             Message::TerminalScroll(id, lines) => {
+                if !self.active_terminal_matches(id) {
+                    return Task::none();
+                }
                 if self.command_terminal(id, egui_term::BackendCommand::Scroll(lines)) {
                     self.refresh_terminal_display(id);
                 }
             }
             Message::CopySelection(id) => {
+                if !self.active_terminal_matches(id) {
+                    return Task::none();
+                }
                 if let Some(selection) = self.selected_terminal_text(id) {
                     self.status = "Terminal selection copied to clipboard.".into();
                     return iced::clipboard::write(selection);
@@ -4978,6 +5012,48 @@ fn primary(theme: &Theme, status: button::Status) -> button::Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_canvas_events_cannot_refocus_a_different_session() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-stale-canvas-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session {
+            name: "test".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let original = app.new_terminal_pane(profile.clone());
+        let original_id = original.id;
+        app.tabs.push(Workspace::new(profile.clone(), original));
+        let (old_pane, _) = app.tabs[0].panes.iter().next().unwrap();
+        let old_pane = *old_pane;
+
+        let next = app.new_terminal_pane(profile.clone());
+        let next_id = next.id;
+        app.tabs.push(Workspace::new(profile, next));
+        app.active = 1;
+        let focus_before = app.tabs[1].focus;
+
+        assert!(!app.active_terminal_matches(original_id));
+        assert!(!app.active_pane_matches(old_pane, original_id));
+        let _ = app.update(Message::TerminalSelectStart(old_pane, original_id, 3.0, 4.0));
+        assert_eq!(app.tabs[1].focus, focus_before);
+        let _ = app.update(Message::TerminalSelectUpdate(original_id, 5.0, 6.0));
+        let _ = app.update(Message::TerminalScroll(original_id, -3));
+        assert_eq!(app.tabs[1].focus, focus_before);
+        assert!(app.active_terminal_matches(next_id));
+
+        // Reconnect replaces the terminal ID even if its pane handle is reused.
+        let new_id = app.next_terminal_id;
+        let replacement = app.new_terminal_pane(app.tabs[1].profile.clone());
+        assert_eq!(replacement.id, new_id);
+        *app.tabs[1].panes.get_mut(focus_before).unwrap() = replacement;
+        assert!(!app.active_pane_matches(focus_before, next_id));
+        assert!(app.active_pane_matches(focus_before, new_id));
+    }
 
     #[test]
     fn early_ssh_open_waits_for_bridge_and_retries_once_with_existing_pane_id() {
