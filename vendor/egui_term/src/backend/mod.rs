@@ -494,10 +494,27 @@ impl TerminalBackend {
             });
         }
 
+        let rows = content.terminal_size.num_lines as usize;
+        let mut row_ranges = vec![(usize::MAX, 0); rows];
+        for (index, cell) in cells.iter().enumerate() {
+            if let Some(range) = row_ranges.get_mut(cell.row) {
+                if range.0 == usize::MAX {
+                    range.0 = index;
+                }
+                range.1 = index + 1;
+            }
+        }
+        for range in &mut row_ranges {
+            if range.0 == usize::MAX {
+                *range = (0, 0);
+            }
+        }
+
         DisplaySnapshot {
-            rows: content.terminal_size.num_lines as usize,
+            rows,
             columns: content.terminal_size.num_cols as usize,
             background: [bg_r, bg_g, bg_b],
+            row_ranges,
             cells,
         }
     }
@@ -804,7 +821,7 @@ fn visible_regex_match_iter<'a>(
         .take_while(move |rm| rm.start().line <= viewport_end)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DisplayCell {
     pub character: char,
     pub row: usize,
@@ -825,6 +842,8 @@ pub struct DisplaySnapshot {
     pub rows: usize,
     pub columns: usize,
     pub background: [u8; 3],
+    /// Contiguous cell index range for each visible row. Empty rows use (0, 0).
+    pub row_ranges: Vec<(usize, usize)>,
     pub cells: Vec<DisplayCell>,
 }
 
