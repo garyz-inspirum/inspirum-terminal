@@ -2582,7 +2582,11 @@ impl App {
                 return operation::focus("file-name");
             }
             Message::FilesRequestEditRemote => {
-                if self.remote_editor.as_ref().is_some_and(|editor| editor.saving || editor.dirty) {
+                if self
+                    .remote_editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.saving || editor.dirty)
+                {
                     self.status = "Save or explicitly discard the current remote editor before opening another file.".into();
                     return Task::none();
                 }
@@ -2639,42 +2643,50 @@ impl App {
                     return Task::none();
                 }
                 match result {
-                Ok(handle) => {
-                    let active_session_key = self
-                        .tabs
-                        .get(self.active)
-                        .map(|tab| session_profile_key(&tab.profile));
-                    if active_session_key.as_deref() != Some(session_key.as_str()) {
-                        self.status = format!(
-                            "Finished opening {remote}, but its SSH session is no longer active; editor result was discarded."
-                        );
-                        return Task::none();
+                    Ok(handle) => {
+                        let active_session_key = self
+                            .tabs
+                            .get(self.active)
+                            .map(|tab| session_profile_key(&tab.profile));
+                        if active_session_key.as_deref() != Some(session_key.as_str()) {
+                            self.status = format!(
+                                "Finished opening {remote}, but its SSH session is no longer active; editor result was discarded."
+                            );
+                            return Task::none();
+                        }
+                        if self
+                            .remote_editor
+                            .as_ref()
+                            .is_some_and(|editor| editor.saving || editor.dirty)
+                        {
+                            self.status = "Remote editor open result ignored to protect unsaved changes.".into();
+                            return Task::none();
+                        }
+                        let text = handle
+                            .0
+                            .lock()
+                            .map(|editor| editor.text().to_owned())
+                            .unwrap_or_default();
+                        let id = self.next_remote_editor_id;
+                        self.next_remote_editor_id = self.next_remote_editor_id.saturating_add(1);
+                        self.remote_editor = Some(RemoteEditorState {
+                            id,
+                            session,
+                            session_key,
+                            remote: remote.clone(),
+                            handle,
+                            content: text_editor::Content::with_text(&text),
+                            saving: false,
+                            dirty: false,
+                            conflict: false,
+                            discard_confirm: false,
+                            error: None,
+                        });
+                        self.status = format!("Opened {remote} in the private remote editor.");
                     }
-                    let text = handle
-                        .0
-                        .lock()
-                        .map(|editor| editor.text().to_owned())
-                        .unwrap_or_default();
-                    let id = self.next_remote_editor_id;
-                    self.next_remote_editor_id = self.next_remote_editor_id.saturating_add(1);
-                    self.remote_editor = Some(RemoteEditorState {
-                        id,
-                        session,
-                        session_key,
-                        remote: remote.clone(),
-                        handle,
-                        content: text_editor::Content::with_text(&text),
-                        saving: false,
-                        dirty: false,
-                        conflict: false,
-                        discard_confirm: false,
-                        error: None,
-                    });
-                    self.status = format!("Opened {remote} in the private remote editor.");
-                }
-                Err(error) => {
-                    self.status = format!("Remote editor could not open file: {error}");
-                }
+                    Err(error) => {
+                        self.status = format!("Remote editor could not open file: {error}");
+                    }
                 }
             }
             Message::RemoteEditorAction(action) => {
@@ -2758,11 +2770,19 @@ impl App {
                 }
             }
             Message::RemoteEditorClose => {
-                if self.remote_editor.as_ref().is_some_and(|editor| editor.saving) {
-                    self.status = "Remote editor is saving; close it once the save finishes.".into();
+                if self
+                    .remote_editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.saving)
+                {
+                    self.status =
+                        "Remote editor is saving; close it once the save finishes.".into();
                     return Task::none();
                 }
-                let dirty = self.remote_editor.as_ref().is_some_and(|editor| editor.dirty);
+                let dirty = self
+                    .remote_editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.dirty);
                 if dirty {
                     if let Some(editor) = self.remote_editor.as_mut() {
                         editor.discard_confirm = true;
@@ -2773,6 +2793,14 @@ impl App {
                 }
             }
             Message::RemoteEditorDiscard => {
+                if self
+                    .remote_editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.saving)
+                {
+                    self.status = "Remote editor is saving; changes cannot be discarded during an in-flight upload.".into();
+                    return Task::none();
+                }
                 let remote = self
                     .remote_editor
                     .as_ref()
