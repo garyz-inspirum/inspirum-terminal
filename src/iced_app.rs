@@ -2570,16 +2570,12 @@ impl App {
                 return self.reload_remote_files();
             }
             Message::FilesShowMoreLocal => {
-                self.files.local_visible = next_file_page(
-                    self.files.local_visible,
-                    self.files.local_entries.len(),
-                );
+                self.files.local_visible =
+                    next_file_page(self.files.local_visible, self.files.local_entries.len());
             }
             Message::FilesShowMoreRemote => {
-                self.files.remote_visible = next_file_page(
-                    self.files.remote_visible,
-                    self.files.remote_entries.len(),
-                );
+                self.files.remote_visible =
+                    next_file_page(self.files.remote_visible, self.files.remote_entries.len());
             }
             Message::FilesSelectLocal(path) => {
                 self.files.selected_local = Some(path);
@@ -4117,7 +4113,12 @@ impl App {
         } else if self.files.local_entries.is_empty() {
             local_list = local_list.push(text("Directory is empty.").size(12).color(MUTED));
         } else {
-            for entry in self.files.local_entries.iter().take(self.files.local_visible) {
+            for entry in self
+                .files
+                .local_entries
+                .iter()
+                .take(self.files.local_visible)
+            {
                 let kind = if entry.is_dir { "DIR " } else { "    " };
                 let size = if entry.is_dir {
                     String::new()
@@ -4163,7 +4164,12 @@ impl App {
         } else if self.files.remote_entries.is_empty() {
             remote_list = remote_list.push(text("Directory is empty.").size(12).color(MUTED));
         } else {
-            for entry in self.files.remote_entries.iter().take(self.files.remote_visible) {
+            for entry in self
+                .files
+                .remote_entries
+                .iter()
+                .take(self.files.remote_visible)
+            {
                 let size = if entry.is_dir {
                     String::new()
                 } else {
