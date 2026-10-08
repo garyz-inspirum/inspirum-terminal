@@ -1632,9 +1632,11 @@ impl App {
     }
 
     fn active_terminal_matches(&self, id: u64) -> bool {
-        self.tabs
-            .get(self.active)
-            .is_some_and(|tab| tab.panes.iter().any(|(_, pane)| pane.id == id && !pane.exited))
+        self.tabs.get(self.active).is_some_and(|tab| {
+            tab.panes
+                .iter()
+                .any(|(_, pane)| pane.id == id && !pane.exited)
+        })
     }
 
     fn focused_terminal_id(&self) -> Option<u64> {
@@ -5039,7 +5041,12 @@ mod tests {
 
         assert!(!app.active_terminal_matches(original_id));
         assert!(!app.active_pane_matches(old_pane, original_id));
-        let _ = app.update(Message::TerminalSelectStart(old_pane, original_id, 3.0, 4.0));
+        let _ = app.update(Message::TerminalSelectStart(
+            old_pane,
+            original_id,
+            3.0,
+            4.0,
+        ));
         assert_eq!(app.tabs[1].focus, focus_before);
         let _ = app.update(Message::TerminalSelectUpdate(original_id, 5.0, 6.0));
         let _ = app.update(Message::TerminalScroll(original_id, -3));
