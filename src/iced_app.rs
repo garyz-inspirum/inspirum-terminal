@@ -3100,7 +3100,8 @@ impl App {
 
                 if let Some(profile) = profile {
                     let replacement = self.new_terminal_pane(profile);
-                    let connected = replacement.terminal.is_some() && replacement.error.is_none();
+                    let connected = replacement.terminal.is_some();
+                    let failed = replacement.error.is_some();
                     if let Some(tab) = self.tabs.get_mut(self.active)
                         && let Some(pane) = tab.panes.get_mut(pane_id)
                     {
@@ -3108,8 +3109,10 @@ impl App {
                         tab.focus = pane_id;
                         self.status = if connected {
                             "Reconnected through the production OpenSSH/PTY backend.".into()
-                        } else {
+                        } else if failed {
                             "Reconnect attempt failed; review the pane error.".into()
+                        } else {
+                            "Reconnect queued until the terminal event bridge is ready.".into()
                         };
                     }
                 }
@@ -3239,19 +3242,23 @@ impl App {
             Message::Scale(delta) => self.scale = (self.scale + delta).clamp(0.85, 1.50),
             Message::PtyBridgeReady(sender) => {
                 self.pty_bridge = Some(sender.clone());
+                let mut attempted = 0;
                 let mut started = 0;
                 for tab in &mut self.tabs {
                     for (_, pane) in tab.panes.iter_mut() {
                         if pane.terminal.is_none() && pane.error.is_none() && !pane.exited {
                             Self::start_terminal_pane(pane, &sender, self.ssh_config.as_deref());
-                            started += 1;
+                            attempted += 1;
+                            if pane.terminal.is_some() {
+                                started += 1;
+                            }
                         }
                     }
                 }
-                self.status = if started == 0 {
+                self.status = if attempted == 0 {
                     "Terminal event bridge ready.".into()
                 } else {
-                    format!("Terminal event bridge ready; started {started} pending session(s).")
+                    format!("Terminal bridge ready: {started} of {attempted} pending session(s) started.")
                 };
             }
             Message::PtyEvent(id, event) => {
