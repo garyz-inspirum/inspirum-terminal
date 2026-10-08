@@ -4579,6 +4579,7 @@ mod tests {
             host: "server.example".into(),
             ..Session::default()
         };
+        session.strict = true;
         session.ssh.password_auth = Some(false);
         session.ssh.agent_forwarding = Some(true);
         session.ssh.identity_file = "/tmp/key".into();
@@ -4587,6 +4588,7 @@ mod tests {
         form.identity_file = "/tmp/new-key".into();
         let updated = form.session().expect("edited session");
 
+        assert!(updated.strict);
         assert_eq!(updated.ssh.identity_file, "/tmp/new-key");
         assert_eq!(updated.ssh.password_auth, Some(false));
         assert_eq!(updated.ssh.agent_forwarding, Some(true));
