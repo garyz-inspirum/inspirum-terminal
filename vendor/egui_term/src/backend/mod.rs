@@ -495,20 +495,7 @@ impl TerminalBackend {
         }
 
         let rows = content.terminal_size.num_lines as usize;
-        let mut row_ranges = vec![(usize::MAX, 0); rows];
-        for (index, cell) in cells.iter().enumerate() {
-            if let Some(range) = row_ranges.get_mut(cell.row) {
-                if range.0 == usize::MAX {
-                    range.0 = index;
-                }
-                range.1 = index + 1;
-            }
-        }
-        for range in &mut row_ranges {
-            if range.0 == usize::MAX {
-                *range = (0, 0);
-            }
-        }
+        let row_ranges = display_row_ranges(rows, &cells);
 
         DisplaySnapshot {
             rows,
@@ -837,6 +824,24 @@ pub struct DisplayCell {
     pub cursor: bool,
 }
 
+fn display_row_ranges(rows: usize, cells: &[DisplayCell]) -> Vec<(usize, usize)> {
+    let mut row_ranges = vec![(usize::MAX, 0); rows];
+    for (index, cell) in cells.iter().enumerate() {
+        if let Some(range) = row_ranges.get_mut(cell.row) {
+            if range.0 == usize::MAX {
+                range.0 = index;
+            }
+            range.1 = index + 1;
+        }
+    }
+    for range in &mut row_ranges {
+        if range.0 == usize::MAX {
+            *range = (0, 0);
+        }
+    }
+    row_ranges
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DisplaySnapshot {
     pub rows: usize,
@@ -885,5 +890,49 @@ pub struct EventProxy(mpsc::Sender<Event>);
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         let _ = self.0.send(event.clone());
+    }
+}
+
+#[cfg(test)]
+mod display_snapshot_tests {
+    use super::*;
+
+    fn cell(row: usize, column: usize, character: char) -> DisplayCell {
+        DisplayCell {
+            character,
+            row,
+            column,
+            foreground: [255, 255, 255],
+            background: [0, 0, 0],
+            cursor_color: [255, 255, 255],
+            bold: false,
+            italic: false,
+            underline: false,
+            strikeout: false,
+            wide: false,
+            cursor: false,
+        }
+    }
+
+    #[test]
+    fn row_ranges_cover_contiguous_visible_cells_and_empty_rows() {
+        let cells = vec![
+            cell(0, 0, 'a'),
+            cell(0, 1, 'b'),
+            cell(2, 0, 'c'),
+            cell(2, 1, 'd'),
+            cell(2, 2, 'e'),
+        ];
+
+        assert_eq!(
+            display_row_ranges(4, &cells),
+            vec![(0, 2), (0, 0), (2, 5), (0, 0)]
+        );
+    }
+
+    #[test]
+    fn row_ranges_ignore_cells_outside_visible_row_count() {
+        let cells = vec![cell(0, 0, 'a'), cell(4, 0, 'x')];
+        assert_eq!(display_row_ranges(2, &cells), vec![(0, 1), (0, 0)]);
     }
 }
