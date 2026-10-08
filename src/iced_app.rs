@@ -486,6 +486,18 @@ fn next_file_page(current: usize, total: usize) -> usize {
     current.saturating_add(FILES_PAGE_SIZE).min(total)
 }
 
+fn upload_conflicts_with_remote_entries(
+    local: &std::path::Path,
+    entries: &[sftp::RemoteEntry],
+) -> bool {
+    let Some(name) = local.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    // Scan once rather than cloning the entire remote listing into every
+    // asynchronous upload request (which can contain tens of thousands of files).
+    entries.iter().any(|entry| entry.name == name)
+}
+
 fn remote_parent(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() || trimmed == "." || trimmed == "/" {
@@ -2015,7 +2027,7 @@ impl App {
         };
         let session_key = session_profile_key(&profile);
         let remote_dir = self.files.remote_dir.clone();
-        let remote_entries = self.files.remote_entries.clone();
+        let conflict = upload_conflicts_with_remote_entries(&local, &self.files.remote_entries);
 
         Task::perform(
             async move {
@@ -2031,7 +2043,6 @@ impl App {
                     .to_owned();
                 sftp::validate_local_leaf(&name).map_err(|error| format!("{error:#}"))?;
                 let remote = sftp::join_remote(&remote_dir, &name);
-                let conflict = remote_entries.iter().any(|entry| entry.name == name);
                 Ok(PreparedTransfer {
                     pending: PendingTransfer {
                         session: profile,
@@ -5274,6 +5285,34 @@ fn primary(theme: &Theme, status: button::Status) -> button::Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upload_conflict_check_does_not_need_to_clone_remote_directory() {
+        let entries = vec![
+            sftp::RemoteEntry {
+                name: "existing.txt".into(),
+                is_dir: false,
+                size: Some(10),
+            },
+            sftp::RemoteEntry {
+                name: "folder".into(),
+                is_dir: true,
+                size: None,
+            },
+        ];
+        assert!(upload_conflicts_with_remote_entries(
+            std::path::Path::new("/tmp/existing.txt"),
+            &entries
+        ));
+        assert!(!upload_conflicts_with_remote_entries(
+            std::path::Path::new("/tmp/new.txt"),
+            &entries
+        ));
+        assert!(upload_conflicts_with_remote_entries(
+            std::path::Path::new("/tmp/folder"),
+            &entries
+        ));
+    }
 
     #[test]
     fn delayed_clipboard_paste_is_cancelled_after_switching_tabs() {
