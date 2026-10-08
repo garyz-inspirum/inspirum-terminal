@@ -1161,6 +1161,15 @@ fn terminal_key_bytes(
     let cursor = |normal: &'static [u8], application: &'static [u8]| {
         Some(if app_cursor { application } else { normal }.to_vec())
     };
+    let xterm_modifier = 1
+        + u8::from(modifiers.shift())
+        + 2 * u8::from(modifiers.alt())
+        + 4 * u8::from(modifiers.control());
+    let modified_cursor = |suffix: u8| {
+        (xterm_modifier > 1).then(|| {
+            format!("\x1b[1;{}{}", xterm_modifier, suffix as char).into_bytes()
+        })
+    };
 
     match key.as_ref() {
         keyboard::Key::Named(Named::Enter) => Some(vec![b'\r']),
@@ -1170,12 +1179,24 @@ fn terminal_key_bytes(
         keyboard::Key::Named(Named::Backspace) => Some(vec![0x7f]),
         keyboard::Key::Named(Named::Insert) => Some(b"\x1b[2~".to_vec()),
         keyboard::Key::Named(Named::Delete) => Some(b"\x1b[3~".to_vec()),
-        keyboard::Key::Named(Named::ArrowUp) => cursor(b"\x1b[A", b"\x1bOA"),
-        keyboard::Key::Named(Named::ArrowDown) => cursor(b"\x1b[B", b"\x1bOB"),
-        keyboard::Key::Named(Named::ArrowRight) => cursor(b"\x1b[C", b"\x1bOC"),
-        keyboard::Key::Named(Named::ArrowLeft) => cursor(b"\x1b[D", b"\x1bOD"),
-        keyboard::Key::Named(Named::Home) => cursor(b"\x1b[H", b"\x1bOH"),
-        keyboard::Key::Named(Named::End) => cursor(b"\x1b[F", b"\x1bOF"),
+        keyboard::Key::Named(Named::ArrowUp) => {
+            modified_cursor(b'A').or_else(|| cursor(b"\x1b[A", b"\x1bOA"))
+        }
+        keyboard::Key::Named(Named::ArrowDown) => {
+            modified_cursor(b'B').or_else(|| cursor(b"\x1b[B", b"\x1bOB"))
+        }
+        keyboard::Key::Named(Named::ArrowRight) => {
+            modified_cursor(b'C').or_else(|| cursor(b"\x1b[C", b"\x1bOC"))
+        }
+        keyboard::Key::Named(Named::ArrowLeft) => {
+            modified_cursor(b'D').or_else(|| cursor(b"\x1b[D", b"\x1bOD"))
+        }
+        keyboard::Key::Named(Named::Home) => {
+            modified_cursor(b'H').or_else(|| cursor(b"\x1b[H", b"\x1bOH"))
+        }
+        keyboard::Key::Named(Named::End) => {
+            modified_cursor(b'F').or_else(|| cursor(b"\x1b[F", b"\x1bOF"))
+        }
         keyboard::Key::Named(Named::PageUp) => Some(b"\x1b[5~".to_vec()),
         keyboard::Key::Named(Named::PageDown) => Some(b"\x1b[6~".to_vec()),
         keyboard::Key::Named(Named::F1) => Some(b"\x1bOP".to_vec()),
@@ -4973,6 +4994,39 @@ mod tests {
                 egui_term::TerminalMode::empty(),
             ),
             Some(b"\x1bx".to_vec())
+        );
+    }
+
+    #[test]
+    fn terminal_keys_encode_xterm_cursor_modifiers_for_full_screen_apps() {
+        use keyboard::key::Named;
+
+        assert_eq!(
+            terminal_key_bytes(
+                &keyboard::Key::Named(Named::ArrowLeft),
+                keyboard::Modifiers::CTRL,
+                None,
+                egui_term::TerminalMode::APP_CURSOR,
+            ),
+            Some(b"\x1b[1;5D".to_vec())
+        );
+        assert_eq!(
+            terminal_key_bytes(
+                &keyboard::Key::Named(Named::ArrowRight),
+                keyboard::Modifiers::ALT | keyboard::Modifiers::SHIFT,
+                None,
+                egui_term::TerminalMode::empty(),
+            ),
+            Some(b"\x1b[1;4C".to_vec())
+        );
+        assert_eq!(
+            terminal_key_bytes(
+                &keyboard::Key::Named(Named::Home),
+                keyboard::Modifiers::SHIFT,
+                None,
+                egui_term::TerminalMode::empty(),
+            ),
+            Some(b"\x1b[1;2H".to_vec())
         );
     }
 
