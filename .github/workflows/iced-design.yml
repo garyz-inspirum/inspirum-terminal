@@ -120,6 +120,21 @@ jobs:
           # Focus/caret blinking can change pixels without dismissing a modal.
           # After Escape, the screen must largely match the original workspace.
           test "$restored_diff" -lt "$((opened_diff / 3))" || { echo "Escape did not restore the empty workspace"; exit 1; }
+          # Exercise the production sidebar search field with native pointer
+          # focus and keyboard input. Compare the focused, empty textbox with
+          # the typed state, not the full window (which may contain caret blinks).
+          xdotool mousemove --window "$window" 95 125 click 1
+          sleep 1
+          import -window "$window" preview-artifacts/screenshots/production-search-focused.png
+          xdotool type --clearmodifiers --delay 5 "focusprobe"
+          sleep 1
+          kill -0 "$app_pid" || { cat preview-artifacts/production.log; exit 1; }
+          import -window "$window" preview-artifacts/screenshots/production-search-typed.png
+          convert preview-artifacts/screenshots/production-search-focused.png -crop 165x36+10+107 +repage "$RUNNER_TEMP/search-focused.png"
+          convert preview-artifacts/screenshots/production-search-typed.png -crop 165x36+10+107 +repage "$RUNNER_TEMP/search-typed.png"
+          input_diff=$(compare -metric AE "$RUNNER_TEMP/search-focused.png" "$RUNNER_TEMP/search-typed.png" null: 2>&1 || true)
+          echo "Native search text entry changed $input_diff pixels"
+          test "$input_diff" -gt 120 || { echo "Sidebar search field did not visibly respond to native typing"; exit 1; }
       - name: Prepare preview artifact
         if: always()
         shell: bash
