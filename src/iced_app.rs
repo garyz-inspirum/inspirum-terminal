@@ -2696,9 +2696,24 @@ impl App {
                     if active_session == Some(prepared.pending.session_key.as_str()) {
                         self.dialog = Some(Dialog::FileOverwrite(prepared.pending));
                     } else {
+                        let label = match prepared.pending.direction {
+                            TransferDirection::Upload => prepared
+                                .pending
+                                .local
+                                .file_name()
+                                .map(|value| format!("Upload {}", value.to_string_lossy()))
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "Upload {}",
+                                        prepared.pending.local.to_string_lossy()
+                                    )
+                                }),
+                            TransferDirection::Download => {
+                                format!("Download {}", prepared.pending.remote)
+                            }
+                        };
                         self.status = format!(
-                            "{} needs overwrite confirmation, but its SSH session is no longer active; switch back and retry the transfer.",
-                            prepared.pending.label()
+                            "{label} needs overwrite confirmation, but its SSH session is no longer active; switch back and retry the transfer."
                         );
                     }
                 }
