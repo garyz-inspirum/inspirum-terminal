@@ -4967,7 +4967,13 @@ mod tests {
         // Resize received before the bridge comes up must remain attached to the
         // same pane when the backend is started.
         app.resize_terminal(id, iced::Size::new(800.0, 500.0));
-        let size = app.tabs[0].panes.iter().next().unwrap().1.terminal_grid_size;
+        let size = app.tabs[0]
+            .panes
+            .iter()
+            .next()
+            .unwrap()
+            .1
+            .terminal_grid_size;
         assert!(size.is_some());
 
         let (sender, _receiver) = mpsc::unbounded();
