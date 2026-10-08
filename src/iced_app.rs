@@ -1510,9 +1510,12 @@ impl App {
                     continue;
                 }
                 if let Some(terminal) = pane.terminal.as_mut() {
-                    pane.display =
-                        Some(terminal.display_snapshot(&egui_term::TerminalTheme::default()));
-                    pane.display_generation = pane.display_generation.wrapping_add(1);
+                    let snapshot =
+                        terminal.display_snapshot(&egui_term::TerminalTheme::default());
+                    if pane.display.as_ref() != Some(&snapshot) {
+                        pane.display = Some(snapshot);
+                        pane.display_generation = pane.display_generation.wrapping_add(1);
+                    }
                     pane.display_dirty = false;
                 }
                 return;
@@ -1528,9 +1531,12 @@ impl App {
                 }
                 if tab_index == self.active {
                     if let Some(terminal) = pane.terminal.as_mut() {
-                        pane.display =
-                            Some(terminal.display_snapshot(&egui_term::TerminalTheme::default()));
-                        pane.display_generation = pane.display_generation.wrapping_add(1);
+                        let snapshot =
+                            terminal.display_snapshot(&egui_term::TerminalTheme::default());
+                        if pane.display.as_ref() != Some(&snapshot) {
+                            pane.display = Some(snapshot);
+                            pane.display_generation = pane.display_generation.wrapping_add(1);
+                        }
                         pane.display_dirty = false;
                     }
                 } else {
@@ -1551,9 +1557,12 @@ impl App {
         for (_, pane) in tab.panes.iter_mut() {
             if pane.display_dirty {
                 if let Some(terminal) = pane.terminal.as_mut() {
-                    pane.display =
-                        Some(terminal.display_snapshot(&egui_term::TerminalTheme::default()));
-                    pane.display_generation = pane.display_generation.wrapping_add(1);
+                    let snapshot =
+                        terminal.display_snapshot(&egui_term::TerminalTheme::default());
+                    if pane.display.as_ref() != Some(&snapshot) {
+                        pane.display = Some(snapshot);
+                        pane.display_generation = pane.display_generation.wrapping_add(1);
+                    }
                 }
                 pane.display_dirty = false;
             }
