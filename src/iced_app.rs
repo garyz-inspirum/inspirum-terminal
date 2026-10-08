@@ -648,6 +648,7 @@ enum Message {
     Scale(f64),
     PtyBridgeReady(PtyBridgeSender),
     PtyEvent(u64, egui_term::PtyEvent),
+    TerminalFrame,
     TransferBridgeReady(TransferBridgeSender),
     TransferEvent(TransferEvent),
     TerminalResized(u64, iced::Size),
@@ -1522,25 +1523,13 @@ impl App {
         }
     }
 
-    fn refresh_terminal(&mut self, id: u64, exited: bool) {
-        for (tab_index, tab) in self.tabs.iter_mut().enumerate() {
+    fn queue_terminal_refresh(&mut self, id: u64, exited: bool) {
+        for tab in &mut self.tabs {
             for (_, pane) in tab.panes.iter_mut() {
                 if pane.id != id {
                     continue;
                 }
-                if tab_index == self.active {
-                    if let Some(terminal) = pane.terminal.as_mut() {
-                        let snapshot =
-                            terminal.display_snapshot(&egui_term::TerminalTheme::default());
-                        if pane.display.as_ref() != Some(&snapshot) {
-                            pane.display = Some(snapshot);
-                            pane.display_generation = pane.display_generation.wrapping_add(1);
-                        }
-                        pane.display_dirty = false;
-                    }
-                } else {
-                    pane.display_dirty = true;
-                }
+                pane.display_dirty = true;
                 if exited {
                     pane.exited = true;
                 }
@@ -2960,16 +2949,26 @@ impl App {
                     _ => {}
                 }
                 if wakeup || exited {
-                    self.refresh_terminal(id, exited);
-                }
-                if wakeup {
-                    // Keep the producer-side coalescing gate closed until the potentially
-                    // expensive terminal snapshot is complete. This prevents sustained PTY
-                    // output from continuously refilling the UI queue while a frame renders.
-                    self.mark_terminal_refresh_delivered(id);
+                    self.queue_terminal_refresh(id, exited);
                 }
                 if exited {
                     self.status = format!("Terminal {id} exited.");
+                }
+                if wakeup || exited {
+                    // Defer the expensive terminal snapshot off the PTY event itself. Keeping
+                    // refresh_pending set during this short frame delay coalesces high-volume
+                    // output and leaves the UI event loop room to service pointer/keyboard input.
+                    return Task::perform(
+                        async {
+                            thread::sleep(Duration::from_millis(12));
+                        },
+                        |_| Message::TerminalFrame,
+                    );
+                }
+            }
+            Message::TerminalFrame => {
+                if !self.tabs.is_empty() {
+                    self.refresh_workspace_displays(self.active);
                 }
             }
             Message::TerminalResized(id, size) => self.resize_terminal(id, size),
