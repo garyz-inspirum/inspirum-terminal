@@ -3355,6 +3355,61 @@ impl App {
 
     fn workspace(&self) -> Element<'_, Message> {
         if self.tabs.is_empty() {
+            let mut saved = column![].spacing(6).width(360);
+            for (index, profile) in self
+                .profiles
+                .iter()
+                .enumerate()
+                .filter(|(_, profile)| profile.favorite)
+                .chain(
+                    self.profiles
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, profile)| !profile.favorite),
+                )
+                .take(4)
+            {
+                let destination = if profile.user.is_empty() {
+                    profile.host.clone()
+                } else {
+                    format!("{}@{}", profile.user, profile.host)
+                };
+                saved = saved.push(
+                    button(
+                        row![
+                            column![
+                                text(profile.name.clone()).size(14),
+                                text(destination).size(11).color(MUTED),
+                            ]
+                            .spacing(2),
+                            space::horizontal(),
+                            text(if profile.favorite { "PIN" } else { "SSH" })
+                                .size(10)
+                                .color(if profile.favorite { GREEN } else { BLUE }),
+                        ]
+                        .align_y(iced::Center),
+                    )
+                    .padding([9, 12])
+                    .width(Fill)
+                    .style(quiet)
+                    .on_press(Message::Open(index)),
+                );
+            }
+
+            let saved: Element<'_, Message> = if self.profiles.is_empty() {
+                text("No saved SSH sessions yet.").size(12).color(MUTED).into()
+            } else {
+                column![
+                    text("SAVED SESSIONS").size(11).color(MUTED),
+                    saved,
+                    text("Use the session sidebar for the complete library, folders and search.")
+                        .size(11)
+                        .color(MUTED),
+                ]
+                .spacing(8)
+                .into()
+            };
+
             return center(
                 column![
                     text(">_").size(56).color(BLUE),
@@ -3362,11 +3417,13 @@ impl App {
                     text("Open a saved session or create a new connection.")
                         .size(16)
                         .color(MUTED),
-                    space::vertical().height(12),
+                    space::vertical().height(8),
                     action("+  New connection", Message::New).style(primary),
-                    space::vertical().height(12),
-                    text("The Iced shell now uses the production OpenSSH PTY backend. Open a profile to connect.")
-                        .size(13)
+                    space::vertical().height(10),
+                    saved,
+                    space::vertical().height(8),
+                    text("The Iced shell uses the production OpenSSH PTY backend.")
+                        .size(12)
                         .color(MUTED),
                 ]
                 .spacing(12)
