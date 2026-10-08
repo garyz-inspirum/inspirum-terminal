@@ -1777,25 +1777,6 @@ impl App {
         None
     }
 
-    fn refresh_terminal_display(&mut self, id: u64) {
-        for tab in &mut self.tabs {
-            for (_, pane) in tab.panes.iter_mut() {
-                if pane.id != id {
-                    continue;
-                }
-                if let Some(terminal) = pane.terminal.as_mut() {
-                    let snapshot = terminal.display_snapshot(&egui_term::TerminalTheme::default());
-                    if pane.display.as_ref() != Some(&snapshot) {
-                        pane.display = Some(snapshot);
-                        pane.display_generation = pane.display_generation.wrapping_add(1);
-                    }
-                    pane.display_dirty = false;
-                }
-                return;
-            }
-        }
-    }
-
     fn contains_terminal_pane(&self, id: u64) -> bool {
         self.tabs
             .iter()
@@ -1815,6 +1796,26 @@ impl App {
                 return;
             }
         }
+    }
+
+    fn schedule_terminal_frame(&mut self) -> Task<Message> {
+        if self.terminal_frame_scheduled {
+            return Task::none();
+        }
+        // Reuse the same 12 ms redraw gate for PTY output, mouse selection
+        // and scrollback. This bounds snapshot generation during fast drags.
+        self.terminal_frame_scheduled = true;
+        Task::perform(
+            async {
+                thread::sleep(Duration::from_millis(12));
+            },
+            |_| Message::TerminalFrame,
+        )
+    }
+
+    fn defer_terminal_refresh(&mut self, id: u64) -> Task<Message> {
+        self.queue_terminal_refresh(id, false);
+        self.schedule_terminal_frame()
     }
 
     fn refresh_workspace_displays(&mut self, index: usize) {
@@ -3261,7 +3262,7 @@ impl App {
                     id,
                     egui_term::BackendCommand::SelectStart(egui_term::SelectionType::Simple, x, y),
                 ) {
-                    self.refresh_terminal_display(id);
+                    return self.defer_terminal_refresh(id);
                 }
             }
             Message::TerminalSelectUpdate(id, x, y) => {
@@ -3269,7 +3270,7 @@ impl App {
                     return Task::none();
                 }
                 if self.command_terminal(id, egui_term::BackendCommand::SelectUpdate(x, y)) {
-                    self.refresh_terminal_display(id);
+                    return self.defer_terminal_refresh(id);
                 }
             }
             Message::TerminalMouse(pane_id, id, button, modifiers, x, y, pressed) => {
@@ -3308,7 +3309,7 @@ impl App {
                     return Task::none();
                 }
                 if self.command_terminal(id, egui_term::BackendCommand::Scroll(lines)) {
-                    self.refresh_terminal_display(id);
+                    return self.defer_terminal_refresh(id);
                 }
             }
             Message::CopySelection(id) => {
@@ -3533,16 +3534,8 @@ impl App {
                 if exited {
                     self.status = format!("Terminal {id} exited.");
                 }
-                if (wakeup || exited) && !self.terminal_frame_scheduled {
-                    // One deferred frame for the entire window. Under concurrent SSH output,
-                    // per-pane wakeup gates stay closed until the batch has been rendered.
-                    self.terminal_frame_scheduled = true;
-                    return Task::perform(
-                        async {
-                            thread::sleep(Duration::from_millis(12));
-                        },
-                        |_| Message::TerminalFrame,
-                    );
+                if wakeup || exited {
+                    return self.schedule_terminal_frame();
                 }
             }
             Message::TerminalFrame => {
@@ -5807,6 +5800,40 @@ mod tests {
             terminal_key_bytes(&key, none, None, egui_term::TerminalMode::empty(),),
             None
         );
+    }
+
+    #[test]
+    fn selection_and_pty_output_share_one_deferred_display_frame() {
+        let profiles_path = std::env::temp_dir().join(format!(
+            "inspirum-iced-selection-batch-{}-missing.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(profiles_path, None);
+        let profile = Session {
+            name: "test selection".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        let id = pane.id;
+        app.tabs.push(Workspace::new(profile, pane));
+        assert!(!app.terminal_frame_scheduled);
+        assert!(!app.tabs[0].panes.iter().next().unwrap().1.display_dirty);
+
+        let _ = app.defer_terminal_refresh(id);
+        assert!(app.terminal_frame_scheduled);
+        assert!(app.tabs[0].panes.iter().next().unwrap().1.display_dirty);
+        let _ = app.defer_terminal_refresh(id);
+        assert!(app.terminal_frame_scheduled);
+
+        let _ = app.update(Message::PtyEvent(id, egui_term::PtyEvent::Wakeup));
+        assert!(app.terminal_frame_scheduled);
+
+        let _ = app.update(Message::TerminalFrame);
+        assert!(!app.terminal_frame_scheduled);
+        assert!(!app.tabs[0].panes.iter().next().unwrap().1.display_dirty);
+        let _ = app.defer_terminal_refresh(id);
+        assert!(app.terminal_frame_scheduled);
     }
 
     #[test]
