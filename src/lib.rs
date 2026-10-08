@@ -16,6 +16,14 @@ pub enum ProxyKind {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ProxyAuth {
+    #[default]
+    None,
+    Environment,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ControlMasterMode {
     #[default]
     Inherit,
@@ -34,6 +42,14 @@ pub struct SshOptions {
     pub proxy_kind: ProxyKind,
     pub proxy_host: String,
     pub proxy_port: Option<u16>,
+    /// Optional proxy authentication source. Environment mode reads ephemeral credentials
+    /// in the helper process; usernames/passwords are never stored in this profile.
+    pub proxy_auth: ProxyAuth,
+    /// OpenSSH algorithm policy strings. Empty means inherit OpenSSH/config defaults.
+    pub ciphers: String,
+    pub macs: String,
+    pub kex_algorithms: String,
+    pub host_key_algorithms: String,
     /// Structured OpenSSH connection multiplexing. Inherit leaves ~/.ssh/config untouched.
     pub control_master: ControlMasterMode,
     pub control_path: String,
@@ -91,6 +107,24 @@ impl SshOptions {
                 self.proxy_port.is_some_and(|port| port > 0),
                 "proxy port must be 1–65535 when structured proxy transport is enabled"
             );
+        } else {
+            ensure!(
+                self.proxy_auth == ProxyAuth::None,
+                "proxy authentication requires a structured proxy transport"
+            );
+        }
+        for (label, value) in [
+            ("Ciphers", self.ciphers.as_str()),
+            ("MACs", self.macs.as_str()),
+            ("KexAlgorithms", self.kex_algorithms.as_str()),
+            ("HostKeyAlgorithms", self.host_key_algorithms.as_str()),
+        ] {
+            if !value.is_empty() {
+                ensure!(
+                    valid_algorithm_policy(value),
+                    "{label} must be an OpenSSH-compatible comma-separated algorithm policy without whitespace or control characters"
+                );
+            }
         }
         if self.control_master == ControlMasterMode::Auto {
             ensure!(
@@ -134,6 +168,10 @@ impl SshOptions {
         if !self.proxy_jump.is_empty() {
             args.extend(["-J".into(), self.proxy_jump.clone()]);
         }
+        append_algorithm_option(args, "Ciphers", &self.ciphers);
+        append_algorithm_option(args, "MACs", &self.macs);
+        append_algorithm_option(args, "KexAlgorithms", &self.kex_algorithms);
+        append_algorithm_option(args, "HostKeyAlgorithms", &self.host_key_algorithms);
         append_boolean_option(args, "PubkeyAuthentication", self.public_key_auth);
         append_boolean_option(args, "PasswordAuthentication", self.password_auth);
         append_boolean_option(
@@ -277,6 +315,12 @@ impl Session {
     }
 }
 
+fn append_algorithm_option(args: &mut Vec<String>, name: &str, value: &str) {
+    if !value.is_empty() {
+        args.extend(["-o".into(), format!("{name}={value}")]);
+    }
+}
+
 fn append_boolean_option(args: &mut Vec<String>, name: &str, value: Option<bool>) {
     if let Some(enabled) = value {
         args.extend([
@@ -288,6 +332,42 @@ fn append_boolean_option(args: &mut Vec<String>, name: &str, value: Option<bool>
 
 fn valid_single_argument(value: &str, max_len: usize) -> bool {
     !value.is_empty() && value.len() <= max_len && !value.chars().any(char::is_control)
+}
+
+fn valid_algorithm_policy(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 4096
+        && !value
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"@._+^,-*!?".contains(&byte))
+}
+
+pub fn algorithm_policy_warnings(options: &SshOptions) -> Vec<&'static str> {
+    let mut warnings = Vec::new();
+    let values = [
+        options.ciphers.as_str(),
+        options.macs.as_str(),
+        options.kex_algorithms.as_str(),
+        options.host_key_algorithms.as_str(),
+    ];
+    if values.iter().any(|value| {
+        let lower = value.to_ascii_lowercase();
+        lower.contains("3des-cbc")
+            || lower.contains("arcfour")
+            || lower.contains("blowfish-cbc")
+            || lower.contains("hmac-md5")
+            || lower.contains("diffie-hellman-group1-sha1")
+            || lower.contains("ssh-dss")
+            || lower.contains("ssh-rsa")
+    }) {
+        warnings.push(
+            "Legacy SSH algorithms are explicitly requested. OpenSSH may reject them, and they should be enabled only for a known compatibility requirement.",
+        );
+    }
+    warnings
 }
 
 fn valid_proxy_endpoint(value: &str) -> bool {

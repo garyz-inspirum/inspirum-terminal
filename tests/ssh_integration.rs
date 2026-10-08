@@ -318,6 +318,34 @@ fn authenticated_grid_input_resize_and_exit() {
 }
 #[test]
 #[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn explicit_cipher_policy_matches_restricted_disposable_sshd() {
+    let p = fixture();
+    let ssh = SshOptions {
+        ciphers: "aes256-ctr".into(),
+        ..SshOptions::default()
+    };
+    let (mut backend, rx) = open_with_ssh(&p, 715, true, "config", ssh);
+    wait_text(&mut backend, "FIXTURE_AUTHENTICATED");
+    write(&mut backend, "exit\n");
+    wait_exit(&rx, 715);
+
+    let mismatched = SshOptions {
+        ciphers: "aes128-gcm@openssh.com".into(),
+        ..SshOptions::default()
+    };
+    let (mut rejected, rejected_rx) = open_with_ssh(&p, 716, true, "config", mismatched);
+    wait_exit(&rejected_rx, 716);
+    let text = grid(&mut rejected).to_lowercase();
+    assert!(
+        text.contains("no matching cipher") || text.contains("no matching cipher found"),
+        "restricted-cipher mismatch was not surfaced: {text}"
+    );
+    assert!(!text.contains("fixture_authenticated"));
+    println!("PASS explicit cipher policy connects only when it matches restricted sshd policy");
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
 fn remote_command_is_sent_after_authentication() {
     let p = fixture();
     let command = "printf canary && whoami";

@@ -90,6 +90,7 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 AuthenticationMethods publickey
+Ciphers aes256-ctr
 AllowUsers {getpass.getuser()}
 AllowTcpForwarding yes
 AllowAgentForwarding no

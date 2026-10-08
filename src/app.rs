@@ -1,6 +1,6 @@
 //! Small native connection/profile interface; terminal mechanics stay upstream.
 use crate::{
-    ControlMasterMode, ProxyKind, Session, SessionImportMode,
+    ControlMasterMode, ProxyAuth, ProxyKind, Session, SessionImportMode,
     appearance::{
         self, AppearanceOverride, AppearanceSettings, TerminalAppearance, TerminalCursorStyle,
         TerminalFontFamily, TerminalPalette,
@@ -2088,7 +2088,9 @@ impl App {
                                     self.terminal_focus = None;
                                 }
                             });
-                            if self.draft.ssh.proxy_kind != ProxyKind::None {
+                            if self.draft.ssh.proxy_kind == ProxyKind::None {
+                                self.draft.ssh.proxy_auth = ProxyAuth::None;
+                            } else {
                                 ui.label("Proxy host");
                                 if ui
                                     .text_edit_singleline(&mut self.draft.ssh.proxy_host)
@@ -2100,12 +2102,55 @@ impl App {
                                 if ui.text_edit_singleline(&mut self.proxy_port).has_focus() {
                                     self.terminal_focus = None;
                                 }
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Authentication");
+                                    ui.selectable_value(
+                                        &mut self.draft.ssh.proxy_auth,
+                                        ProxyAuth::None,
+                                        "None",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.draft.ssh.proxy_auth,
+                                        ProxyAuth::Environment,
+                                        "Environment credentials",
+                                    );
+                                });
+                                if self.draft.ssh.proxy_auth == ProxyAuth::Environment {
+                                    ui.small(
+                                        "Set INSPIRUM_PROXY_USERNAME and INSPIRUM_PROXY_PASSWORD before starting Inspirum. Values are read only by the proxy helper and are never stored in the profile or placed in ProxyCommand argv.",
+                                    );
+                                }
                                 ui.small(
-                                    "ProxyJump and structured proxy transport cannot be enabled together. HTTP/SOCKS proxy authentication is not stored or supported yet.",
+                                    "ProxyJump and structured proxy transport cannot be enabled together. If the proxy fails or denies authentication/tunnelling, the SSH connection fails; it never retries directly.",
                                 );
-                                ui.small(
-                                    "Inspirum supplies a built-in transport helper to OpenSSH ProxyCommand. If the proxy fails or denies the tunnel, the SSH connection fails; it does not retry directly.",
+                            }
+
+                            ui.separator();
+                            ui.strong("OpenSSH algorithm policy");
+                            ui.small(
+                                "Blank fields inherit OpenSSH/config defaults. Values are passed to OpenSSH; Inspirum does not implement or silently enable cryptography.",
+                            );
+                            for (label, value, hint) in [
+                                ("Ciphers", &mut self.draft.ssh.ciphers, "e.g. chacha20-poly1305@openssh.com,aes256-gcm@openssh.com"),
+                                ("MACs", &mut self.draft.ssh.macs, "e.g. hmac-sha2-256-etm@openssh.com"),
+                                ("KEX", &mut self.draft.ssh.kex_algorithms, "e.g. sntrup761x25519-sha512@openssh.com"),
+                                ("Host key", &mut self.draft.ssh.host_key_algorithms, "e.g. ssh-ed25519,rsa-sha2-512"),
+                            ] {
+                                ui.label(label);
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(value).hint_text(hint),
                                 );
+                                if response.has_focus() {
+                                    self.terminal_focus = None;
+                                }
+                            }
+                            let algorithm_warnings = crate::algorithm_policy_warnings(&self.draft.ssh);
+                            if algorithm_warnings.is_empty() {
+                                ui.small("No known legacy algorithm request detected.");
+                            } else {
+                                for warning in algorithm_warnings {
+                                    ui.colored_label(egui::Color32::YELLOW, warning);
+                                }
                             }
 
                             ui.separator();
