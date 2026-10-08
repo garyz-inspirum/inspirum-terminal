@@ -82,51 +82,42 @@ jobs:
             kill "$pid"
             wait "$pid" || true
           done
-          # Native acceptance smoke: run the actual production Iced binary, not
-          # only the disconnected design prototype. Use an empty non-secret
-          # profile location and never contact a real SSH host.
-          production=target/release/inspirum-terminal
-          "$production" --ui iced --profiles "$RUNNER_TEMP/iced-production-empty.json" >preview-artifacts/production-empty.log 2>&1 &
-          production_pid=$!
-          production_window=""
-          for attempt in $(seq 1 40); do
-            production_window=$(xdotool search --onlyvisible --name '^Inspirum Terminal
-        if: always()
+      - name: Smoke-test production Iced window
+        if: runner.os == 'Linux'
         shell: bash
         run: |
-          mkdir -p preview-artifacts/source
-          cp -r prototypes/iced-shell/src preview-artifacts/source/
-          cp prototypes/iced-shell/Cargo.toml preview-artifacts/source/
-          cp prototypes/iced-shell/README.md preview-artifacts/README.md
-          cp docs/design/gui-redesign.md preview-artifacts/GUI-DESIGN.md
-          cp prototypes/iced-shell/Cargo.lock preview-artifacts/source/ 2>/dev/null || true
-          cp Cargo.lock preview-artifacts/production-Cargo.lock 2>/dev/null || true
-          mkdir -p preview-artifacts/production
-          cp prototypes/iced-shell/target/release/inspirum-iced-preview* preview-artifacts/ 2>/dev/null || true
-          cp target/release/inspirum-terminal* preview-artifacts/production/ 2>/dev/null || true
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: iced-gui-${{ runner.os }}
-          path: preview-artifacts
-          if-no-files-found: error
- 2>/dev/null | head -1 || true)
-            test -n "$production_window" && break
-            kill -0 "$production_pid" || { cat preview-artifacts/production-empty.log; exit 1; }
+          mkdir -p preview-artifacts/screenshots
+          Xvfb :100 -screen 0 1440x1000x24 &
+          xvfb_pid=$!
+          export DISPLAY=:100
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/iced-production-runtime"
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          trap 'kill "${app_pid:-}" "$xvfb_pid" 2>/dev/null || true' EXIT
+          sleep 2
+          target/release/inspirum-terminal --ui iced --profiles "$RUNNER_TEMP/iced-production-empty.json" > preview-artifacts/production.log 2>&1 &
+          app_pid=$!
+          window=""
+          for attempt in $(seq 1 40); do
+            window=$(xdotool search --onlyvisible --name '^Inspirum Terminal$' 2>/dev/null | head -1 || true)
+            test -n "$window" && break
+            kill -0 "$app_pid" || { cat preview-artifacts/production.log; exit 1; }
             sleep 1
           done
-          test -n "$production_window" || { cat preview-artifacts/production-empty.log; exit 1; }
+          test -n "$window" || { echo "Production Iced window did not appear"; cat preview-artifacts/production.log; exit 1; }
           sleep 2
-          import -window "$production_window" preview-artifacts/screenshots/production-empty.png
-          xdotool windowfocus "$production_window" key ctrl+n
-          sleep 1
-          kill -0 "$production_pid" || { cat preview-artifacts/production-empty.log; exit 1; }
-          import -window "$production_window" preview-artifacts/screenshots/production-new-connection.png
-          xdotool windowfocus "$production_window" key Escape
-          sleep 1
-          import -window "$production_window" preview-artifacts/screenshots/production-after-escape.png
-          kill "$production_pid"
-          wait "$production_pid" || true
+          import -window "$window" preview-artifacts/screenshots/production-empty.png
+          xdotool windowfocus "$window" key ctrl+n
+          sleep 2
+          kill -0 "$app_pid" || { cat preview-artifacts/production.log; exit 1; }
+          import -window "$window" preview-artifacts/screenshots/production-new-connection.png
+          xdotool windowfocus "$window" key Escape
+          sleep 2
+          import -window "$window" preview-artifacts/screenshots/production-after-escape.png
+          opened_diff=$(compare -metric AE preview-artifacts/screenshots/production-empty.png preview-artifacts/screenshots/production-new-connection.png null: 2>&1 || true)
+          closed_diff=$(compare -metric AE preview-artifacts/screenshots/production-new-connection.png preview-artifacts/screenshots/production-after-escape.png null: 2>&1 || true)
+          echo "Dialog opening changed $opened_diff pixels; closing changed $closed_diff pixels"
+          test "$opened_diff" -gt 1000 || { echo "Ctrl+N did not visibly open a dialog"; exit 1; }
+          test "$closed_diff" -gt 1000 || { echo "Escape did not visibly close the dialog"; exit 1; }
       - name: Prepare preview artifact
         if: always()
         shell: bash
