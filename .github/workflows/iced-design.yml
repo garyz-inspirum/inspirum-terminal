@@ -123,18 +123,22 @@ jobs:
           # Exercise the production sidebar search field with native pointer
           # focus and keyboard input. Compare the focused, empty textbox with
           # the typed state, not the full window (which may contain caret blinks).
-          xdotool mousemove --window "$window" 95 125 click 1
+          # The sidebar search is below the New connection button (y=180).
+          xdotool mousemove --window "$window" 110 181 click 1
           sleep 1
           import -window "$window" preview-artifacts/screenshots/production-search-focused.png
           xdotool type --clearmodifiers --delay 5 "focusprobe"
           sleep 1
           kill -0 "$app_pid" || { cat preview-artifacts/production.log; exit 1; }
           import -window "$window" preview-artifacts/screenshots/production-search-typed.png
-          convert preview-artifacts/screenshots/production-search-focused.png -crop 165x36+10+107 +repage "$RUNNER_TEMP/search-focused.png"
-          convert preview-artifacts/screenshots/production-search-typed.png -crop 165x36+10+107 +repage "$RUNNER_TEMP/search-typed.png"
+          convert preview-artifacts/screenshots/production-search-focused.png -crop 225x40+15+161 +repage "$RUNNER_TEMP/search-focused.png"
+          convert preview-artifacts/screenshots/production-search-typed.png -crop 225x40+15+161 +repage "$RUNNER_TEMP/search-typed.png"
           input_diff=$(compare -metric AE "$RUNNER_TEMP/search-focused.png" "$RUNNER_TEMP/search-typed.png" null: 2>&1 || true)
           echo "Native search text entry changed $input_diff pixels"
           test "$input_diff" -gt 120 || { echo "Sidebar search field did not visibly respond to native typing"; exit 1; }
+          workspace_diff=$(compare -metric AE preview-artifacts/screenshots/production-after-escape.png preview-artifacts/screenshots/production-search-typed.png null: 2>&1 || true)
+          echo "Search interaction differs from empty workspace by $workspace_diff pixels"
+          test "$workspace_diff" -lt 50000 || { echo "Clicking sidebar search unexpectedly opened an overlay"; exit 1; }
       - name: Prepare preview artifact
         if: always()
         shell: bash
