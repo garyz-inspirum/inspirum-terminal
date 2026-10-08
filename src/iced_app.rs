@@ -6,7 +6,7 @@
 use crate::{
     ProxyAuth, ProxyKind, Session,
     command_palette::{self, PaletteItem, Snippet, SnippetLibrary},
-    load_sessions,
+    SessionImportMode, import_sessions, load_sessions,
     remote_edit::{self, SaveOutcome},
     save_session_edit, save_sessions, session_matches_query, session_profile_key, sftp, terminal,
     terminal_ux::{self, PasteDecision, PastePolicy},
@@ -547,6 +547,7 @@ enum Dialog {
         directory: bool,
     },
     FileName(FileNameAction),
+    ImportProfiles,
     About,
 }
 
@@ -559,6 +560,9 @@ enum Message {
     SelectNextTab,
     SelectPreviousTab,
     New,
+    ImportProfiles,
+    ImportPath(String),
+    ConfirmImportProfiles,
     Commands,
     CommandQuery(String),
     CommandSender(String),
@@ -1357,6 +1361,7 @@ struct App {
     snippet_body: String,
     sidebar_collapsed: bool,
     form: ConnectionForm,
+    import_path: String,
     editing_profile: Option<String>,
     dialog: Option<Dialog>,
     scale: f64,
@@ -1411,6 +1416,7 @@ impl App {
             snippet_body: String::new(),
             sidebar_collapsed: false,
             form: ConnectionForm::default(),
+            import_path: String::new(),
             editing_profile: None,
             dialog: None,
             scale: 1.0,
@@ -2111,6 +2117,41 @@ impl App {
                 self.form = ConnectionForm::default();
                 self.dialog = Some(Dialog::Connection);
                 return operation::focus("connection-host");
+            }
+            Message::ImportProfiles => {
+                self.import_path.clear();
+                self.dialog = Some(Dialog::ImportProfiles);
+                return operation::focus("import-path");
+            }
+            Message::ImportPath(value) => self.import_path = value,
+            Message::ConfirmImportProfiles => {
+                let path = self.import_path.trim();
+                if path.is_empty() {
+                    self.status = "Choose a profile import file path.".into();
+                    return Task::none();
+                }
+                match import_sessions(
+                    std::path::Path::new(path),
+                    &self.profiles,
+                    SessionImportMode::Merge,
+                ) {
+                    Ok(imported) => match save_sessions(&self.profiles_path, &imported) {
+                        Ok(()) => {
+                            let added = imported.len().saturating_sub(self.profiles.len());
+                            self.profiles = imported;
+                            self.dialog = None;
+                            self.import_path.clear();
+                            self.status =
+                                format!("Imported {added} validated non-secret SSH profile(s).");
+                        }
+                        Err(error) => {
+                            self.status = format!("Cannot save imported profiles: {error:#}");
+                        }
+                    },
+                    Err(error) => {
+                        self.status = format!("Profile import rejected: {error:#}");
+                    }
+                }
             }
             Message::Commands => {
                 self.command_query.clear();
@@ -3418,7 +3459,11 @@ impl App {
                         .size(16)
                         .color(MUTED),
                     space::vertical().height(8),
-                    action("+  New connection", Message::New).style(primary),
+                    row![
+                        action("+  New connection", Message::New).style(primary),
+                        action("Import profiles", Message::ImportProfiles),
+                    ]
+                    .spacing(8),
                     space::vertical().height(10),
                     saved,
                     space::vertical().height(8),
@@ -4497,6 +4542,29 @@ impl App {
                 .spacing(16)
                 .into()
             }
+            Dialog::ImportProfiles => column![
+                text("Import SSH profiles").size(24),
+                text("Merge a validated non-secret Inspirum profile JSON file into the current library. Existing profiles are never overwritten by import.")
+                    .color(MUTED),
+                field(
+                    "Import file",
+                    "/path/to/profiles.json",
+                    &self.import_path,
+                    Message::ImportPath
+                )
+                .id("import-path"),
+                text("Conflicting folder/name entries, invalid SSH policy, secret-bearing unsupported fields, oversized files, and malformed JSON are rejected before the active profile store is changed.")
+                    .size(12)
+                    .color(MUTED),
+                row![
+                    space::horizontal(),
+                    action("Cancel", Message::CloseDialog),
+                    action("Import and merge", Message::ConfirmImportProfiles).style(primary),
+                ]
+                .spacing(8),
+            ]
+            .spacing(14)
+            .into(),
             Dialog::About => column![
                 text("Production Iced migration").size(24),
                 text("This is the production Iced migration shell. It reads and writes the validated Inspirum profile store, opens live SSH sessions through the existing OpenSSH/PTY backend, and uses the WindTerm-style workspace structure.\n\nThe terminal path includes guarded paste, reconnect, splits, selection/copy, scrollback and remote mouse support. The Files utility pane uses the existing validated SFTP backend for navigation, upload/download, overwrite confirmation, progress/cancel/retry/resume, rename, folder creation and confirmed delete.\n\nRemaining migration work is focused on deeper terminal fidelity, remote-editor parity, visual QA and native interaction regression testing.")
