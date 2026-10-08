@@ -1729,7 +1729,19 @@ impl App {
             .unwrap_or_else(egui_term::TerminalMode::empty)
     }
 
+    fn focused_pane_matches(&self, id: u64) -> bool {
+        self.tabs
+            .get(self.active)
+            .and_then(|tab| tab.panes.get(tab.focus))
+            .is_some_and(|pane| pane.id == id && !pane.exited)
+    }
+
     fn send_to_terminal(&mut self, id: u64, bytes: Vec<u8>) -> bool {
+        // Clipboard reads and paste confirmations are asynchronous. A tab or
+        // split-focus change must not send clipboard contents to an old pane.
+        if !self.focused_pane_matches(id) {
+            return false;
+        }
         self.command_terminal(id, egui_term::BackendCommand::Write(bytes))
     }
 
@@ -3192,6 +3204,14 @@ impl App {
                     .map(move |contents| Message::ClipboardRead(id, contents));
             }
             Message::ClipboardRead(id, contents) => {
+                // A delayed clipboard read cannot create a paste confirmation
+                // for a session that the user has already left.
+                if !self.focused_pane_matches(id) {
+                    self.status =
+                        "Paste cancelled because the original SSH pane is no longer focused."
+                            .into();
+                    return Task::none();
+                }
                 let Some(text) = contents else {
                     self.status = "Clipboard does not contain text.".into();
                     return Task::none();
@@ -5261,6 +5281,49 @@ fn primary(theme: &Theme, status: button::Status) -> button::Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delayed_clipboard_paste_is_cancelled_after_switching_tabs() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-stale-paste-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session {
+            name: "test".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let original = app.new_terminal_pane(profile.clone());
+        let original_id = original.id;
+        let next = app.new_terminal_pane(profile.clone());
+        let next_id = next.id;
+        app.tabs.push(Workspace::new(profile.clone(), original));
+        app.tabs.push(Workspace::new(profile, next));
+        app.active = 0;
+        assert!(app.focused_pane_matches(original_id));
+        app.active = 1;
+        assert!(!app.focused_pane_matches(original_id));
+        assert!(app.focused_pane_matches(next_id));
+
+        // Neither an implicit one-line paste nor a multiline confirmation
+        // may target a session after the user has switched away.
+        let _ = app.update(Message::ClipboardRead(
+            original_id,
+            Some("private clipboard text\\nsecond line".into()),
+        ));
+        assert!(app.dialog.is_none());
+        assert!(app.status.contains("cancelled"));
+        assert!(!app.send_to_terminal(original_id, b"secret".to_vec()));
+
+        app.dialog = Some(Dialog::PasteConfirm {
+            id: original_id,
+            text: "line one\\nline two".into(),
+        });
+        let _ = app.update(Message::ConfirmPaste);
+        assert!(app.dialog.is_none());
+        assert!(app.status.contains("cancelled"));
+    }
 
     #[test]
     fn stale_canvas_events_cannot_refocus_a_different_session() {
