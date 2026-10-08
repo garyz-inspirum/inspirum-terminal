@@ -2659,7 +2659,9 @@ impl App {
                             .as_ref()
                             .is_some_and(|editor| editor.saving || editor.dirty)
                         {
-                            self.status = "Remote editor open result ignored to protect unsaved changes.".into();
+                            self.status =
+                                "Remote editor open result ignored to protect unsaved changes."
+                                    .into();
                             return Task::none();
                         }
                         let text = handle
