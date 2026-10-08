@@ -4729,6 +4729,32 @@ mod tests {
     }
 
     #[test]
+    fn terminal_keys_send_committed_cjk_text_without_preedit_bytes() {
+        let none = keyboard::Modifiers::default();
+        let key = keyboard::Key::Character("中".into());
+
+        assert_eq!(
+            terminal_key_bytes(
+                &key,
+                none,
+                Some("中文"),
+                egui_term::TerminalMode::empty(),
+            ),
+            Some("中文".as_bytes().to_vec())
+        );
+
+        assert_eq!(
+            terminal_key_bytes(
+                &key,
+                none,
+                None,
+                egui_term::TerminalMode::empty(),
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn port_is_optional_but_zero_is_not() {
         let inherited = ConnectionForm {
             host: "server.example".into(),
