@@ -82,6 +82,51 @@ jobs:
             kill "$pid"
             wait "$pid" || true
           done
+          # Native acceptance smoke: run the actual production Iced binary, not
+          # only the disconnected design prototype. Use an empty non-secret
+          # profile location and never contact a real SSH host.
+          production=target/release/inspirum-terminal
+          "$production" --ui iced --profiles "$RUNNER_TEMP/iced-production-empty.json" >preview-artifacts/production-empty.log 2>&1 &
+          production_pid=$!
+          production_window=""
+          for attempt in $(seq 1 40); do
+            production_window=$(xdotool search --onlyvisible --name '^Inspirum Terminal
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p preview-artifacts/source
+          cp -r prototypes/iced-shell/src preview-artifacts/source/
+          cp prototypes/iced-shell/Cargo.toml preview-artifacts/source/
+          cp prototypes/iced-shell/README.md preview-artifacts/README.md
+          cp docs/design/gui-redesign.md preview-artifacts/GUI-DESIGN.md
+          cp prototypes/iced-shell/Cargo.lock preview-artifacts/source/ 2>/dev/null || true
+          cp Cargo.lock preview-artifacts/production-Cargo.lock 2>/dev/null || true
+          mkdir -p preview-artifacts/production
+          cp prototypes/iced-shell/target/release/inspirum-iced-preview* preview-artifacts/ 2>/dev/null || true
+          cp target/release/inspirum-terminal* preview-artifacts/production/ 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: iced-gui-${{ runner.os }}
+          path: preview-artifacts
+          if-no-files-found: error
+ 2>/dev/null | head -1 || true)
+            test -n "$production_window" && break
+            kill -0 "$production_pid" || { cat preview-artifacts/production-empty.log; exit 1; }
+            sleep 1
+          done
+          test -n "$production_window" || { cat preview-artifacts/production-empty.log; exit 1; }
+          sleep 2
+          import -window "$production_window" preview-artifacts/screenshots/production-empty.png
+          xdotool windowfocus "$production_window" key ctrl+n
+          sleep 1
+          kill -0 "$production_pid" || { cat preview-artifacts/production-empty.log; exit 1; }
+          import -window "$production_window" preview-artifacts/screenshots/production-new-connection.png
+          xdotool windowfocus "$production_window" key Escape
+          sleep 1
+          import -window "$production_window" preview-artifacts/screenshots/production-after-escape.png
+          kill "$production_pid"
+          wait "$production_pid" || true
       - name: Prepare preview artifact
         if: always()
         shell: bash
