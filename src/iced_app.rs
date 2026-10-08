@@ -1170,9 +1170,8 @@ fn terminal_key_bytes(
         + 2 * u8::from(modifiers.alt())
         + 4 * u8::from(modifiers.control());
     let modified_cursor = |suffix: u8| {
-        (xterm_modifier > 1).then(|| {
-            format!("\x1b[1;{}{}", xterm_modifier, suffix as char).into_bytes()
-        })
+        (xterm_modifier > 1)
+            .then(|| format!("\x1b[1;{}{}", xterm_modifier, suffix as char).into_bytes())
     };
 
     match key.as_ref() {
