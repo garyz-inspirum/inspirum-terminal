@@ -640,6 +640,10 @@ enum Message {
     Folder(String),
     IdentityFile(String),
     ProxyJump(String),
+    Ciphers(String),
+    Macs(String),
+    KexAlgorithms(String),
+    HostKeyAlgorithms(String),
     ConnectTimeout(String),
     Keepalive(String),
     RemoteCommand(String),
@@ -1155,6 +1159,10 @@ struct ConnectionForm {
     folder: String,
     identity_file: String,
     proxy_jump: String,
+    ciphers: String,
+    macs: String,
+    kex_algorithms: String,
+    host_key_algorithms: String,
     connect_timeout: String,
     keepalive: String,
     remote_command: String,
@@ -1173,6 +1181,10 @@ impl Default for ConnectionForm {
             folder: String::new(),
             identity_file: String::new(),
             proxy_jump: String::new(),
+            ciphers: String::new(),
+            macs: String::new(),
+            kex_algorithms: String::new(),
+            host_key_algorithms: String::new(),
             connect_timeout: String::new(),
             keepalive: String::new(),
             remote_command: String::new(),
@@ -1196,6 +1208,10 @@ impl ConnectionForm {
             folder: session.folder.clone(),
             identity_file: session.ssh.identity_file.clone(),
             proxy_jump: session.ssh.proxy_jump.clone(),
+            ciphers: session.ssh.ciphers.clone(),
+            macs: session.ssh.macs.clone(),
+            kex_algorithms: session.ssh.kex_algorithms.clone(),
+            host_key_algorithms: session.ssh.host_key_algorithms.clone(),
             connect_timeout: session
                 .ssh
                 .connect_timeout_seconds
@@ -1210,6 +1226,10 @@ impl ConnectionForm {
             base: Some(session.clone()),
             advanced: !session.ssh.identity_file.is_empty()
                 || !session.ssh.proxy_jump.is_empty()
+                || !session.ssh.ciphers.is_empty()
+                || !session.ssh.macs.is_empty()
+                || !session.ssh.kex_algorithms.is_empty()
+                || !session.ssh.host_key_algorithms.is_empty()
                 || session.ssh.connect_timeout_seconds.is_some()
                 || session.ssh.server_alive_interval_seconds.is_some()
                 || !session.ssh.remote_command.is_empty(),
@@ -1267,6 +1287,10 @@ impl ConnectionForm {
 
         session.ssh.identity_file = self.identity_file.trim().to_owned();
         session.ssh.proxy_jump = self.proxy_jump.trim().to_owned();
+        session.ssh.ciphers = self.ciphers.trim().to_owned();
+        session.ssh.macs = self.macs.trim().to_owned();
+        session.ssh.kex_algorithms = self.kex_algorithms.trim().to_owned();
+        session.ssh.host_key_algorithms = self.host_key_algorithms.trim().to_owned();
         session.ssh.connect_timeout_seconds =
             Self::optional_positive_u16("Connect timeout", &self.connect_timeout)?;
         session.ssh.server_alive_interval_seconds =
@@ -2882,6 +2906,10 @@ impl App {
             Message::Folder(value) => self.form.folder = value,
             Message::IdentityFile(value) => self.form.identity_file = value,
             Message::ProxyJump(value) => self.form.proxy_jump = value,
+            Message::Ciphers(value) => self.form.ciphers = value,
+            Message::Macs(value) => self.form.macs = value,
+            Message::KexAlgorithms(value) => self.form.kex_algorithms = value,
+            Message::HostKeyAlgorithms(value) => self.form.host_key_algorithms = value,
             Message::ConnectTimeout(value) => self.form.connect_timeout = value,
             Message::Keepalive(value) => self.form.keepalive = value,
             Message::RemoteCommand(value) => self.form.remote_command = value,
@@ -3897,6 +3925,33 @@ impl App {
                                     &self.form.proxy_jump,
                                     Message::ProxyJump
                                 ),
+                                text("Algorithm policy · leave empty to inherit OpenSSH defaults")
+                                    .size(11)
+                                    .color(MUTED),
+                                field(
+                                    "Ciphers",
+                                    "e.g. chacha20-poly1305@openssh.com,aes256-gcm@openssh.com",
+                                    &self.form.ciphers,
+                                    Message::Ciphers
+                                ),
+                                field(
+                                    "MACs",
+                                    "OpenSSH comma-separated policy",
+                                    &self.form.macs,
+                                    Message::Macs
+                                ),
+                                field(
+                                    "Key exchange",
+                                    "OpenSSH KexAlgorithms policy",
+                                    &self.form.kex_algorithms,
+                                    Message::KexAlgorithms
+                                ),
+                                field(
+                                    "Host key algorithms",
+                                    "OpenSSH HostKeyAlgorithms policy",
+                                    &self.form.host_key_algorithms,
+                                    Message::HostKeyAlgorithms
+                                ),
                                 row![
                                     field(
                                         "Connect timeout",
@@ -3918,7 +3973,7 @@ impl App {
                                     &self.form.remote_command,
                                     Message::RemoteCommand
                                 ),
-                                text("These values write directly into the existing Session::ssh model and use its current validation. Advanced settings not exposed here yet are preserved when editing an existing profile.")
+                                text("These values write directly into the existing Session::ssh model and use its current validation. Algorithm fields inherit OpenSSH/config defaults when empty; legacy algorithms still require explicit user input and retain the existing warning policy. Other advanced settings not exposed here yet are preserved when editing an existing profile.")
                                     .size(12)
                                     .color(MUTED),
                             ]
