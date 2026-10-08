@@ -114,10 +114,12 @@ jobs:
           sleep 2
           import -window "$window" preview-artifacts/screenshots/production-after-escape.png
           opened_diff=$(compare -metric AE preview-artifacts/screenshots/production-empty.png preview-artifacts/screenshots/production-new-connection.png null: 2>&1 || true)
-          closed_diff=$(compare -metric AE preview-artifacts/screenshots/production-new-connection.png preview-artifacts/screenshots/production-after-escape.png null: 2>&1 || true)
-          echo "Dialog opening changed $opened_diff pixels; closing changed $closed_diff pixels"
+          restored_diff=$(compare -metric AE preview-artifacts/screenshots/production-empty.png preview-artifacts/screenshots/production-after-escape.png null: 2>&1 || true)
+          echo "Dialog opening changed $opened_diff pixels; after Escape, $restored_diff pixels differ from the empty workspace"
           test "$opened_diff" -gt 1000 || { echo "Ctrl+N did not visibly open a dialog"; exit 1; }
-          test "$closed_diff" -gt 1000 || { echo "Escape did not visibly close the dialog"; exit 1; }
+          # Focus/caret blinking can change pixels without dismissing a modal.
+          # After Escape, the screen must largely match the original workspace.
+          test "$restored_diff" -lt "$((opened_diff / 3))" || { echo "Escape did not restore the empty workspace"; exit 1; }
       - name: Prepare preview artifact
         if: always()
         shell: bash
