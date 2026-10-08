@@ -1,7 +1,7 @@
 # Inspirum terminal: GUI redesign
 
-Status: design baseline and native interaction prototype; not a production migration.
-Date: 7 October 2026. Tracking: issue #78; native preview PR #83.
+Status: production Iced migration in progress; legacy egui frontend retained as fallback; not yet promoted as complete.
+Date: 8 October 2026. Tracking: issue #78; migration PR #83.
 
 ## 1. Design brief
 
@@ -9,7 +9,7 @@ The user rejected the existing interface as cluttered, difficult to read and dif
 
 The main screen answers three questions immediately: Which session am I using? Which pane receives my input? Where do I go to connect or transfer a file? Configuration must not compete with the task being performed.
 
-The current source couples UI and terminal ownership to eframe/egui_term. Framework migration is a separate engineering decision from interaction design. Iced is the preferred candidate for the redesigned shell, subject to an actual terminal integration and measurement gate.
+The migration now uses Iced 0.14 for the production candidate shell while preserving the existing OpenSSH launch policy, PTY/parser ownership, paste safeguards, profile store and transfer backends. The legacy egui frontend remains available as a fallback until native interaction, visual and performance acceptance is complete.
 
 ## 2. Design process and evidence
 
@@ -24,7 +24,7 @@ The current source couples UI and terminal ownership to eframe/egui_term. Framew
 | Measure | Latency, startup, CPU, memory and stress report | Measured budgets on named hardware; no performance claims from a mock shell |
 | Promote | Full feature mapping plus native platform acceptance | Only then replace the default production frontend |
 
-The prototype is evidence of design exploration, not user acceptance. Model tests are not native interaction tests. A successful build does not prove the interface is pleasant, accessible or complete.
+The migration branch now contains a live production-backend Iced implementation rather than only fixture UI. It opens real SSH sessions through the existing OpenSSH/PTY path, renders live terminal state, handles keyboard/mouse/selection/scrollback, and integrates the existing SFTP transfer and remote-editor backends. This is still not user acceptance: successful CI does not prove the interface is pleasant, accessible or complete.
 
 ## 3. Primary task flows
 
@@ -61,7 +61,7 @@ Connecting, authentication requested, connected, disconnected, host-key conflict
 - A small status bar shows real session state, encoding/terminal context and relevant jobs. Do not invent latency or throughput readings.
 - Global preferences and support tools live in dedicated dialogs/panels. Advanced forms do not occupy the default session tree.
 
-The first native preview implements independent tabs, split/grid resizing and a lower resizable files drawer. Sidebar resizing, genuine connection lifecycle, complete keyboard focus trapping and full menus are not yet implemented in that preview.
+The current Iced candidate implements independent tabs, split/grid resizing, reconnect/close lifecycle, a lower resizable Files drawer, live SFTP transfers, remote editing, saved-session launch shortcuts, and validated merge-only profile import. Sidebar width remains fixed apart from collapse/expand, and complete native focus/IME/accessibility acceptance is still outstanding.
 
 ## 5. Visual system
 
@@ -108,13 +108,13 @@ The full current behaviour is defined by source and tests, not by a stale checke
 
 ## 7. Framework decision: Iced
 
-**Decision: use Iced 0.14 for the isolated design prototype and evaluate it for the replacement shell. Do not change the production default yet.**
+**Decision: continue the production migration on Iced 0.14 while keeping the legacy frontend available until the native acceptance gates below pass.**
 
-Iced supplies native application structure, theming, tasks/subscriptions and pane grids that support dynamic splits and resizing. The preview pins Iced 0.14.0. It uses tiny-skia for the first deterministic layout study. This is not proof that a future Iced terminal is faster than egui or WindTerm.
+Iced supplies native application structure, theming, tasks/subscriptions and pane grids that support dynamic splits and resizing. The migration pins Iced 0.14.0 and enables WGPU (Metal-capable on macOS) with tiny-skia retained as a fallback. This renderer choice alone is not proof that the Iced frontend is faster than egui or WindTerm; native measurements are still required.
 
 The possible terminal widget, iced_term 0.8.0, uses an Alacritty backend but must be audited rather than treated as a drop-in replacement. Current application code uses egui_term's PTY and parser ownership. Preserve and separate reusable profile, SSH launch/trust policy, transfer and remote-editor logic from rendering; review egui-coupled event, selection, clipboard, paste and process-lifecycle code explicitly.
 
-The next integration spike must show a real SSH session with safe host-key handling, Unicode/CJK/IME, scrollback, resize, selection, clipboard, multiline/bracketed paste, alternate-screen apps, mouse reporting, multiple panes and clean shutdown. Compare GPU and fallback rendering on named hardware. Do not ship the fixture text display as a terminal.
+The live Iced path now covers real SSH sessions, safe host-key policy, committed CJK text, scrollback, resize, selection, clipboard guards, multiline paste confirmation, mouse reporting, multiple panes and session shutdown. Remaining acceptance includes native IME composition behaviour, alternate-screen/full-screen application testing, edge-case mouse modes, focus restoration/accessibility, and measured GPU/fallback performance on named hardware.
 
 Primary references checked 7 October 2026:
 
@@ -140,7 +140,7 @@ Primary references checked 7 October 2026:
 | Memory | Bounded per-session scrollback, queues and file pages | Measure RSS for 1, 10 and 30 tabs; no universal MB promise yet |
 | File-list interaction | No UI stall on large directories | Test 10k/100k-entry fixtures with paging/virtualisation |
 
-Keep PTY I/O, DNS/authentication, transfers, filesystem work, search and remote-editor operations off the UI thread. Bound queues and apply backpressure; never drop terminal protocol bytes to improve apparent speed. Coalesce redundant redraw/resize requests, not data. Virtualise visible rows, cache text/layout where valid, and avoid holding parser/transfer locks through an entire frame. No meaningless animations or per-frame system polling.
+Keep PTY I/O, DNS/authentication, transfers, filesystem work, search and remote-editor operations off the UI thread. Bound queues and apply backpressure; never drop terminal protocol bytes to improve apparent speed. The current Iced path coalesces duplicate PTY wakeups, defers active-terminal snapshots behind a short frame boundary, skips unchanged snapshots, and caches terminal canvas geometry per visible row so a one-line update does not rebuild every row. Resize events are reduced to actual terminal row/column changes. No terminal protocol bytes are dropped.
 
 Benchmark with a real terminal: burst output, ANSI styling, Unicode, selection during output, long scrollback, multiple sessions, a live transfer while typing, and close/cancel under load. Record both median and tail latency, plus resource cleanup.
 
@@ -155,8 +155,8 @@ Benchmark with a real terminal: burst output, ANSI styling, Unicode, selection d
 7. Test 100/125/150/200 percent scale and Unicode labels. Inspect actual rendered screens, not only screenshots of a design tool.
 8. Repeat keyboard, clipboard, IME, scrollback and shutdown checks natively on Linux, Windows and macOS.
 
-The first preview workflow records Linux screenshots and builds the three native executables. It does not establish macOS/Windows visual acceptance, real terminal correctness, user approval or performance acceptance.
+The Iced workflow builds the production candidate on Linux, Windows and macOS and records Linux design-state screenshots. CI also exercises the production Iced feature build. macOS/Windows visual acceptance, named-hardware latency measurements, real-network interactive acceptance and user approval are still outstanding.
 
 ## 10. Delivery boundary
 
-PR #83 is an isolated design-preview change, not closure of #78. No production GUI replacement, new protocol, credential storage, signing/notarisation or feature removal is included. The next milestone is the reviewed native layout plus a real-PTY Iced spike with safety and performance evidence.
+PR #83 is the production Iced migration branch, but it is not closure of #78. It keeps the legacy frontend available and does not add credential storage, signing/notarisation, or an unsafe trust bypass. Promotion requires green native CI plus the visual/usability, real-network, IME/full-screen-terminal and measured responsiveness acceptance still listed above.
