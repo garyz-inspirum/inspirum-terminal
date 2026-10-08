@@ -839,6 +839,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                 } else if *button == mouse::Button::Left {
                     state.selecting = true;
                     state.remote_button = None;
+                    state.last_report_cell = Some(Self::report_cell(position));
                     Some(
                         canvas::Action::publish(Message::TerminalSelectStart(
                             self.pane, self.id, position.x, position.y,
@@ -878,6 +879,14 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                     }
                     None
                 } else if state.selecting {
+                    // Selection boundaries follow terminal cells, not individual pixels.
+                    // Coalesce intra-cell mouse moves so a fast drag cannot flood the
+                    // UI loop with full terminal-selection snapshots.
+                    let cell = Self::report_cell(position);
+                    if state.last_report_cell == Some(cell) {
+                        return None;
+                    }
+                    state.last_report_cell = Some(cell);
                     Some(
                         canvas::Action::publish(Message::TerminalSelectUpdate(
                             self.id, position.x, position.y,
