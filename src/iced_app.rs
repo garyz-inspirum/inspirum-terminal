@@ -3206,9 +3206,9 @@ impl App {
             Message::ClipboardRead(id, contents) => {
                 // A delayed clipboard read cannot create a paste confirmation
                 // for a session that the user has already left.
-                if !self.focused_pane_matches(id) {
+                if !self.focused_pane_matches(id) || self.dialog.is_some() {
                     self.status =
-                        "Paste cancelled because the original SSH pane is no longer focused."
+                        "Paste cancelled because terminal focus or the active dialog changed."
                             .into();
                     return Task::none();
                 }
@@ -5315,6 +5315,18 @@ mod tests {
         assert!(app.dialog.is_none());
         assert!(app.status.contains("cancelled"));
         assert!(!app.send_to_terminal(original_id, b"secret".to_vec()));
+
+        // The user opened a connection form while the clipboard was loading.
+        // The old paste response must not replace the active dialog.
+        app.active = 0;
+        app.dialog = Some(Dialog::Connection);
+        let _ = app.update(Message::ClipboardRead(
+            original_id,
+            Some("new dialog must remain visible".into()),
+        ));
+        assert!(matches!(app.dialog, Some(Dialog::Connection)));
+        assert!(app.status.contains("cancelled"));
+        app.active = 1;
 
         app.dialog = Some(Dialog::PasteConfirm {
             id: original_id,
