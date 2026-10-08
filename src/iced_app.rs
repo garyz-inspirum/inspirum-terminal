@@ -1530,10 +1530,9 @@ impl App {
         let id = self.next_terminal_id;
         self.next_terminal_id = self.next_terminal_id.saturating_add(1);
 
-        let refresh_pending = Arc::new(AtomicBool::new(false));
         let mut pane = TerminalPane {
             id,
-            profile: profile.clone(),
+            profile,
             terminal: None,
             display: None,
             display_generation: 0,
@@ -1542,23 +1541,32 @@ impl App {
             terminal_title: None,
             error: None,
             exited: false,
-            refresh_pending: refresh_pending.clone(),
+            refresh_pending: Arc::new(AtomicBool::new(false)),
         };
 
-        let Some(bridge) = self.pty_bridge.clone() else {
-            pane.error = Some(
-                "Terminal event bridge is still initializing. Close and reopen this session."
-                    .into(),
-            );
-            return pane;
-        };
+        // Iced subscriptions are initialized asynchronously. A fast click on a saved
+        // profile must leave a pending connection, not a permanent error pane.
+        if let Some(bridge) = &self.pty_bridge {
+            Self::start_terminal_pane(&mut pane, bridge, self.ssh_config.as_deref());
+        }
+        pane
+    }
 
-        let bridge = Arc::new(Mutex::new(bridge));
-        let event_refresh_pending = refresh_pending.clone();
+    fn start_terminal_pane(
+        pane: &mut TerminalPane,
+        bridge: &PtyBridgeSender,
+        config: Option<&std::path::Path>,
+    ) {
+        if pane.terminal.is_some() || pane.error.is_some() || pane.exited {
+            return;
+        }
+
+        let bridge = Arc::new(Mutex::new(bridge.clone()));
+        let refresh_pending = pane.refresh_pending.clone();
         let event_sink: Arc<dyn Fn(u64, egui_term::PtyEvent) + Send + Sync> =
             Arc::new(move |id, event| {
                 let is_wakeup = matches!(&event, egui_term::PtyEvent::Wakeup);
-                if is_wakeup && event_refresh_pending.swap(true, Ordering::AcqRel) {
+                if is_wakeup && refresh_pending.swap(true, Ordering::AcqRel) {
                     return;
                 }
 
@@ -1566,24 +1574,29 @@ impl App {
                     .lock()
                     .is_ok_and(|sender| sender.unbounded_send((id, event)).is_ok());
                 if is_wakeup && !sent {
-                    event_refresh_pending.store(false, Ordering::Release);
+                    refresh_pending.store(false, Ordering::Release);
                 }
             });
 
-        match terminal::connect_with_event_sink(
-            id,
-            &profile,
-            self.ssh_config.as_deref(),
-            event_sink,
-        ) {
-            Ok(terminal) => {
+        match terminal::connect_with_event_sink(pane.id, &pane.profile, config, event_sink) {
+            Ok(mut terminal) => {
+                // The UI may already have measured this pane while the bridge was
+                // initializing. Apply that size to the newly started PTY.
+                if let Some((columns, rows)) = pane.terminal_grid_size {
+                    terminal.process_command(egui_term::BackendCommand::Resize(
+                        egui_term::Size::new(
+                            columns as f32 * TERMINAL_CELL_WIDTH,
+                            rows as f32 * TERMINAL_CELL_HEIGHT,
+                        ),
+                        egui_term::Size::new(TERMINAL_CELL_WIDTH, TERMINAL_CELL_HEIGHT),
+                    ));
+                }
                 pane.terminal = Some(terminal);
             }
             Err(error) => {
                 pane.error = Some(format!("{error:#}"));
             }
         }
-        pane
     }
 
     fn send_to_focused_terminal(&mut self, bytes: Vec<u8>) {
@@ -1767,7 +1780,11 @@ impl App {
                 self.tabs.push(Workspace::new(profile, terminal));
                 self.activate_tab(self.tabs.len() - 1);
             }
-            self.status = "SSH session opened through the production OpenSSH/PTY backend.".into();
+            self.status = if self.pty_bridge.is_some() {
+                "SSH session opened through the production OpenSSH/PTY backend.".into()
+            } else {
+                "SSH session queued until the terminal event bridge is ready.".into()
+            };
         }
         self.dialog = None;
     }
@@ -3215,8 +3232,21 @@ impl App {
             }
             Message::Scale(delta) => self.scale = (self.scale + delta).clamp(0.85, 1.50),
             Message::PtyBridgeReady(sender) => {
-                self.pty_bridge = Some(sender);
-                self.status = "Terminal event bridge ready.".into();
+                self.pty_bridge = Some(sender.clone());
+                let mut started = 0;
+                for tab in &mut self.tabs {
+                    for (_, pane) in tab.panes.iter_mut() {
+                        if pane.terminal.is_none() && pane.error.is_none() && !pane.exited {
+                            Self::start_terminal_pane(pane, &sender, self.ssh_config.as_deref());
+                            started += 1;
+                        }
+                    }
+                }
+                self.status = if started == 0 {
+                    "Terminal event bridge ready.".into()
+                } else {
+                    format!("Terminal event bridge ready; started {started} pending session(s).")
+                };
             }
             Message::PtyEvent(id, event) => {
                 let wakeup = matches!(&event, egui_term::PtyEvent::Wakeup);
@@ -4915,6 +4945,45 @@ fn primary(theme: &Theme, status: button::Status) -> button::Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn early_ssh_open_waits_for_bridge_and_retries_once_with_existing_pane_id() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-pending-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session {
+            name: "invalid test host".into(),
+            host: "-o".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        let id = pane.id;
+        assert!(pane.terminal.is_none());
+        assert!(pane.error.is_none());
+        app.tabs.push(Workspace::new(profile, pane));
+
+        // Resize received before the bridge comes up must remain attached to the
+        // same pane when the backend is started.
+        app.resize_terminal(id, iced::Size::new(800.0, 500.0));
+        let size = app.tabs[0].panes.iter().next().unwrap().1.terminal_grid_size;
+        assert!(size.is_some());
+
+        let (sender, _receiver) = mpsc::unbounded();
+        let _ = app.update(Message::PtyBridgeReady(sender.clone()));
+        let pending = app.tabs[0].panes.iter().next().unwrap().1;
+        assert_eq!(pending.id, id);
+        assert_eq!(pending.terminal_grid_size, size);
+        // Invalid host fails Session validation before invoking any SSH process.
+        assert!(pending.error.is_some());
+
+        let previous_error = pending.error.clone();
+        let _ = app.update(Message::PtyBridgeReady(sender));
+        let pane = app.tabs[0].panes.iter().next().unwrap().1;
+        assert_eq!(pane.id, id);
+        assert_eq!(pane.error, previous_error);
+    }
 
     #[test]
     fn terminal_mouse_motion_coalesces_within_a_cell() {
