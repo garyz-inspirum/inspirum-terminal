@@ -5160,6 +5160,29 @@ mod tests {
     }
 
     #[test]
+    fn pty_burst_schedules_only_one_deferred_frame_until_refresh() {
+        let profiles_path = std::env::temp_dir().join(format!(
+            "inspirum-iced-frame-test-{}-missing.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(profiles_path, None);
+        assert!(!app.terminal_frame_scheduled);
+
+        // Multiple sessions can wake in the same interval, but only one Iced
+        // frame may be scheduled. No network connection is required.
+        let _ = app.update(Message::PtyEvent(1001, egui_term::PtyEvent::Wakeup));
+        assert!(app.terminal_frame_scheduled);
+        let _ = app.update(Message::PtyEvent(1002, egui_term::PtyEvent::Wakeup));
+        assert!(app.terminal_frame_scheduled);
+
+        let _ = app.update(Message::TerminalFrame);
+        assert!(!app.terminal_frame_scheduled);
+
+        let _ = app.update(Message::PtyEvent(1001, egui_term::PtyEvent::Wakeup));
+        assert!(app.terminal_frame_scheduled);
+    }
+
+    #[test]
     fn port_is_optional_but_zero_is_not() {
         let inherited = ConnectionForm {
             host: "server.example".into(),
