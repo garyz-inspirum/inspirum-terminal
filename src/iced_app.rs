@@ -5071,9 +5071,21 @@ fn policy_field<'a>(
     column![
         text(label).size(12).color(MUTED),
         row![
-            action("Inherit", message(None)).style(if value.is_none() { selected_button } else { quiet }),
-            action("Enable", message(Some(true))).style(if value == Some(true) { selected_button } else { quiet }),
-            action("Disable", message(Some(false))).style(if value == Some(false) { selected_button } else { quiet }),
+            action("Inherit", message(None)).style(if value.is_none() {
+                selected_button
+            } else {
+                quiet
+            }),
+            action("Enable", message(Some(true))).style(if value == Some(true) {
+                selected_button
+            } else {
+                quiet
+            }),
+            action("Disable", message(Some(false))).style(if value == Some(false) {
+                selected_button
+            } else {
+                quiet
+            }),
         ]
         .spacing(8),
     ]
