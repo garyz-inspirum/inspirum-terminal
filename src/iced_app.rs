@@ -384,12 +384,14 @@ impl std::fmt::Debug for RemoteEditHandle {
 }
 
 struct RemoteEditorState {
+    id: u64,
     session: Session,
     session_key: String,
     remote: String,
     handle: RemoteEditHandle,
     content: text_editor::Content,
     saving: bool,
+    dirty: bool,
     conflict: bool,
     discard_confirm: bool,
     error: Option<String>,
@@ -601,6 +603,7 @@ enum Message {
     FilesRequestRenameRemote,
     FilesRequestEditRemote,
     RemoteEditorOpened {
+        request_id: u64,
         session: Session,
         session_key: String,
         remote: String,
@@ -608,7 +611,10 @@ enum Message {
     },
     RemoteEditorAction(text_editor::Action),
     RemoteEditorSave(bool),
-    RemoteEditorSaved(Result<SaveOutcome, String>),
+    RemoteEditorSaved {
+        editor_id: u64,
+        result: Result<SaveOutcome, String>,
+    },
     RemoteEditorClose,
     RemoteEditorDiscard,
     RemoteEditorKeepEditing,
@@ -1474,6 +1480,8 @@ struct App {
     transfer_bridge: Option<TransferBridgeSender>,
     next_terminal_id: u64,
     next_transfer_id: u64,
+    next_remote_editor_id: u64,
+    remote_editor_open_generation: u64,
 }
 
 impl App {
@@ -1530,6 +1538,8 @@ impl App {
             transfer_bridge: None,
             next_terminal_id: 1,
             next_transfer_id: 1,
+            next_remote_editor_id: 1,
+            remote_editor_open_generation: 0,
         }
     }
 
@@ -2406,11 +2416,9 @@ impl App {
                     .get(index)
                     .map(|tab| session_profile_key(&tab.profile));
                 let dirty_editor = closing_key.as_deref().is_some_and(|key| {
-                    self.remote_editor
-                        .as_ref()
-                        .filter(|editor| editor.session_key == key)
-                        .and_then(|editor| editor.handle.0.lock().ok())
-                        .is_some_and(|editor| editor.is_dirty())
+                    self.remote_editor.as_ref().is_some_and(|editor| {
+                        editor.session_key == key && (editor.dirty || editor.saving)
+                    })
                 });
                 if dirty_editor {
                     self.status =
@@ -2423,12 +2431,9 @@ impl App {
             Message::ConfirmClose(index) => {
                 if index < self.tabs.len() {
                     let closing_key = session_profile_key(&self.tabs[index].profile);
-                    let dirty_editor = self
-                        .remote_editor
-                        .as_ref()
-                        .filter(|editor| editor.session_key == closing_key)
-                        .and_then(|editor| editor.handle.0.lock().ok())
-                        .is_some_and(|editor| editor.is_dirty());
+                    let dirty_editor = self.remote_editor.as_ref().is_some_and(|editor| {
+                        editor.session_key == closing_key && (editor.dirty || editor.saving)
+                    });
                     if dirty_editor {
                         self.dialog = None;
                         self.status =
@@ -2577,6 +2582,10 @@ impl App {
                 return operation::focus("file-name");
             }
             Message::FilesRequestEditRemote => {
+                if self.remote_editor.as_ref().is_some_and(|editor| editor.saving || editor.dirty) {
+                    self.status = "Save or explicitly discard the current remote editor before opening another file.".into();
+                    return Task::none();
+                }
                 let Some(entry) = self.files.selected_remote.clone() else {
                     self.status = "Select a remote text file to edit.".into();
                     return Task::none();
@@ -2595,6 +2604,9 @@ impl App {
                 let config = self.ssh_config.clone();
                 let open_session = session.clone();
                 let open_remote = remote.clone();
+                self.remote_editor_open_generation =
+                    self.remote_editor_open_generation.wrapping_add(1);
+                let request_id = self.remote_editor_open_generation;
                 self.status = format!("Opening remote editor for {remote}...");
                 return Task::perform(
                     async move {
@@ -2608,6 +2620,7 @@ impl App {
                         .map_err(|error| format!("{error:#}"))
                     },
                     move |result| Message::RemoteEditorOpened {
+                        request_id,
                         session,
                         session_key,
                         remote,
@@ -2616,11 +2629,16 @@ impl App {
                 );
             }
             Message::RemoteEditorOpened {
+                request_id,
                 session,
                 session_key,
                 remote,
                 result,
-            } => match result {
+            } => {
+                if request_id != self.remote_editor_open_generation {
+                    return Task::none();
+                }
+                match result {
                 Ok(handle) => {
                     let active_session_key = self
                         .tabs
@@ -2637,13 +2655,17 @@ impl App {
                         .lock()
                         .map(|editor| editor.text().to_owned())
                         .unwrap_or_default();
+                    let id = self.next_remote_editor_id;
+                    self.next_remote_editor_id = self.next_remote_editor_id.saturating_add(1);
                     self.remote_editor = Some(RemoteEditorState {
+                        id,
                         session,
                         session_key,
                         remote: remote.clone(),
                         handle,
                         content: text_editor::Content::with_text(&text),
                         saving: false,
+                        dirty: false,
                         conflict: false,
                         discard_confirm: false,
                         error: None,
@@ -2653,13 +2675,22 @@ impl App {
                 Err(error) => {
                     self.status = format!("Remote editor could not open file: {error}");
                 }
-            },
+                }
+            }
             Message::RemoteEditorAction(action) => {
                 if let Some(editor) = self.remote_editor.as_mut() {
+                    // Saving holds the mutex through network I/O. Never wait for it
+                    // in a UI input callback.
+                    if editor.saving {
+                        return Task::none();
+                    }
                     editor.content.perform(action);
                     let text = editor.content.text();
                     if let Ok(mut remote) = editor.handle.0.lock() {
                         *remote.text_mut() = text;
+                        editor.dirty = remote.is_dirty();
+                    } else {
+                        editor.dirty = true;
                     }
                     editor.conflict = false;
                     editor.error = None;
@@ -2675,6 +2706,7 @@ impl App {
                 editor.saving = true;
                 editor.error = None;
                 let handle = editor.handle.clone();
+                let editor_id = editor.id;
                 let session = editor.session.clone();
                 let config = self.ssh_config.clone();
                 self.status = format!("Saving {}...", editor.remote);
@@ -2688,16 +2720,20 @@ impl App {
                             .save(&session, config.as_deref(), force)
                             .map_err(|error| format!("{error:#}"))
                     },
-                    Message::RemoteEditorSaved,
+                    move |result| Message::RemoteEditorSaved { editor_id, result },
                 );
             }
-            Message::RemoteEditorSaved(result) => {
+            Message::RemoteEditorSaved { editor_id, result } => {
                 let Some(editor) = self.remote_editor.as_mut() else {
                     return Task::none();
                 };
+                if editor.id != editor_id {
+                    return Task::none();
+                }
                 editor.saving = false;
                 match result {
                     Ok(SaveOutcome::Saved) => {
+                        editor.dirty = false;
                         editor.conflict = false;
                         editor.error = None;
                         self.status =
@@ -2722,11 +2758,11 @@ impl App {
                 }
             }
             Message::RemoteEditorClose => {
-                let dirty = self
-                    .remote_editor
-                    .as_ref()
-                    .and_then(|editor| editor.handle.0.lock().ok())
-                    .is_some_and(|editor| editor.is_dirty());
+                if self.remote_editor.as_ref().is_some_and(|editor| editor.saving) {
+                    self.status = "Remote editor is saving; close it once the save finishes.".into();
+                    return Task::none();
+                }
+                let dirty = self.remote_editor.as_ref().is_some_and(|editor| editor.dirty);
                 if dirty {
                     if let Some(editor) = self.remote_editor.as_mut() {
                         editor.discard_confirm = true;
@@ -4176,12 +4212,8 @@ impl App {
                     .as_ref()
                     .filter(|editor| active_session == Some(editor.session_key.as_str()))
                 {
-                    let dirty = editor
-                        .handle
-                        .0
-                        .lock()
-                        .ok()
-                        .is_some_and(|remote| remote.is_dirty());
+                    // Rendering must not wait on an in-flight SFTP save.
+                    let dirty = editor.dirty;
                     container(
                         column![
                             row![
@@ -5060,6 +5092,31 @@ mod tests {
         *app.tabs[1].panes.get_mut(focus_before).unwrap() = replacement;
         assert!(!app.active_pane_matches(focus_before, next_id));
         assert!(app.active_pane_matches(focus_before, new_id));
+    }
+
+    #[test]
+    fn stale_remote_editor_callbacks_cannot_modify_current_status() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-editor-generation-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.remote_editor_open_generation = 4;
+        app.status = "Current editor remains active".into();
+        let original_status = app.status.clone();
+        let _ = app.update(Message::RemoteEditorOpened {
+            request_id: 3,
+            session: Session::default(),
+            session_key: "previous".into(),
+            remote: "/tmp/old.txt".into(),
+            result: Err("stale SFTP open failure".into()),
+        });
+        assert_eq!(app.status, original_status);
+        let _ = app.update(Message::RemoteEditorSaved {
+            editor_id: 12,
+            result: Ok(SaveOutcome::Conflict),
+        });
+        assert_eq!(app.status, original_status);
     }
 
     #[test]
