@@ -75,12 +75,12 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
     .subscription(|_: &App| {
         Subscription::batch([
             event::listen_with(|event, status, _| match &event {
-                // Text inputs may mark Escape as handled. A modal must still
-                // receive it so keyboard users can dismiss the dialog.
+                // A focused text field can consume Escape. Route only this
+                // captured key to dialog dismissal; never leak it to SSH.
                 iced::Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(keyboard::key::Named::Escape),
                     ..
-                }) => Some(Message::Event(event)),
+                }) if status == event::Status::Captured => Some(Message::DismissModalKey),
                 iced::Event::Keyboard(_) if status == event::Status::Ignored => {
                     Some(Message::Event(event))
                 }
@@ -580,6 +580,7 @@ enum Message {
     DeleteSnippet(usize),
     About,
     CloseDialog,
+    DismissModalKey,
     AskClose(usize),
     ConfirmClose(usize),
     ToggleFiles,
@@ -2375,6 +2376,11 @@ impl App {
                 self.editing_profile = None;
                 self.form = ConnectionForm::default();
                 self.files.name_input.clear();
+            }
+            Message::DismissModalKey => {
+                if self.dialog.is_some() {
+                    return self.update(Message::CloseDialog);
+                }
             }
             Message::AskClose(index) => {
                 let closing_key = self
