@@ -748,6 +748,18 @@ impl Default for TerminalCanvasState {
     }
 }
 
+impl TerminalCanvasState {
+    /// Return true only when mouse motion crosses into a different terminal cell.
+    /// This avoids one UI update per pixel during selection and mouse tracking.
+    fn mark_cell_changed(&mut self, cell: (i32, i32)) -> bool {
+        if self.last_report_cell == Some(cell) {
+            return false;
+        }
+        self.last_report_cell = Some(cell);
+        true
+    }
+}
+
 struct TerminalCanvas<'a> {
     pane: pane_grid::Pane,
     id: u64,
@@ -859,11 +871,9 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                                 | egui_term::TerminalMode::MOUSE_MOTION,
                         )
                     {
-                        let cell = Self::report_cell(position);
-                        if state.last_report_cell == Some(cell) {
+                        if !state.mark_cell_changed(Self::report_cell(position)) {
                             return None;
                         }
-                        state.last_report_cell = Some(cell);
                         return Some(
                             canvas::Action::publish(Message::TerminalMouse(
                                 self.pane,
@@ -882,11 +892,9 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                     // Selection boundaries follow terminal cells, not individual pixels.
                     // Coalesce intra-cell mouse moves so a fast drag cannot flood the
                     // UI loop with full terminal-selection snapshots.
-                    let cell = Self::report_cell(position);
-                    if state.last_report_cell == Some(cell) {
+                    if !state.mark_cell_changed(Self::report_cell(position)) {
                         return None;
                     }
-                    state.last_report_cell = Some(cell);
                     Some(
                         canvas::Action::publish(Message::TerminalSelectUpdate(
                             self.id, position.x, position.y,
@@ -898,11 +906,9 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                         .terminal_mode
                         .contains(egui_term::TerminalMode::MOUSE_MOTION)
                 {
-                    let cell = Self::report_cell(position);
-                    if state.last_report_cell == Some(cell) {
+                    if !state.mark_cell_changed(Self::report_cell(position)) {
                         return None;
                     }
-                    state.last_report_cell = Some(cell);
                     Some(
                         canvas::Action::publish(Message::TerminalMouse(
                             self.pane,
@@ -4909,6 +4915,29 @@ fn primary(theme: &Theme, status: button::Status) -> button::Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_mouse_motion_coalesces_within_a_cell() {
+        let mut state = TerminalCanvasState::default();
+        let cell_a = TerminalCanvas::report_cell(iced::Point::new(1.0, 1.0));
+        let same_cell = TerminalCanvas::report_cell(iced::Point::new(
+            TERMINAL_CELL_WIDTH - 0.01,
+            TERMINAL_CELL_HEIGHT - 0.01,
+        ));
+        let next_column = TerminalCanvas::report_cell(iced::Point::new(
+            TERMINAL_CELL_WIDTH,
+            TERMINAL_CELL_HEIGHT - 0.01,
+        ));
+        let next_row = TerminalCanvas::report_cell(iced::Point::new(
+            TERMINAL_CELL_WIDTH,
+            TERMINAL_CELL_HEIGHT,
+        ));
+        assert_eq!(cell_a, same_cell);
+        assert!(state.mark_cell_changed(cell_a));
+        assert!(!state.mark_cell_changed(same_cell));
+        assert!(state.mark_cell_changed(next_column));
+        assert!(state.mark_cell_changed(next_row));
+    }
 
     #[test]
     fn terminal_title_is_bounded_and_control_free() {
