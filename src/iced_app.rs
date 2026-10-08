@@ -661,6 +661,13 @@ enum Message {
     RemoveTag(usize),
     StrictHostKey(bool),
     IdentityFile(String),
+    PublicKeyAuth(Option<bool>),
+    PasswordAuth(Option<bool>),
+    KeyboardInteractiveAuth(Option<bool>),
+    GssapiAuth(Option<bool>),
+    AgentForwarding(Option<bool>),
+    X11Forwarding(Option<bool>),
+    Compression(Option<bool>),
     ProxyJump(String),
     ProxyKind(ProxyKind),
     ProxyHost(String),
@@ -1268,6 +1275,13 @@ struct ConnectionForm {
     tag_input: String,
     strict_host_key: bool,
     identity_file: String,
+    public_key_auth: Option<bool>,
+    password_auth: Option<bool>,
+    keyboard_interactive_auth: Option<bool>,
+    gssapi_auth: Option<bool>,
+    agent_forwarding: Option<bool>,
+    x11_forwarding: Option<bool>,
+    compression: Option<bool>,
     proxy_jump: String,
     proxy_kind: ProxyKind,
     proxy_host: String,
@@ -1298,6 +1312,13 @@ impl Default for ConnectionForm {
             tag_input: String::new(),
             strict_host_key: false,
             identity_file: String::new(),
+            public_key_auth: None,
+            password_auth: None,
+            keyboard_interactive_auth: None,
+            gssapi_auth: None,
+            agent_forwarding: None,
+            x11_forwarding: None,
+            compression: None,
             proxy_jump: String::new(),
             proxy_kind: ProxyKind::None,
             proxy_host: String::new(),
@@ -1333,6 +1354,13 @@ impl ConnectionForm {
             tag_input: String::new(),
             strict_host_key: session.strict,
             identity_file: session.ssh.identity_file.clone(),
+            public_key_auth: session.ssh.public_key_auth,
+            password_auth: session.ssh.password_auth,
+            keyboard_interactive_auth: session.ssh.keyboard_interactive_auth,
+            gssapi_auth: session.ssh.gssapi_auth,
+            agent_forwarding: session.ssh.agent_forwarding,
+            x11_forwarding: session.ssh.x11_forwarding,
+            compression: session.ssh.compression,
             proxy_jump: session.ssh.proxy_jump.clone(),
             proxy_kind: session.ssh.proxy_kind,
             proxy_host: session.ssh.proxy_host.clone(),
@@ -1360,6 +1388,13 @@ impl ConnectionForm {
             base: Some(session.clone()),
             advanced: session.strict
                 || !session.ssh.identity_file.is_empty()
+                || session.ssh.public_key_auth.is_some()
+                || session.ssh.password_auth.is_some()
+                || session.ssh.keyboard_interactive_auth.is_some()
+                || session.ssh.gssapi_auth.is_some()
+                || session.ssh.agent_forwarding.is_some()
+                || session.ssh.x11_forwarding.is_some()
+                || session.ssh.compression.is_some()
                 || !session.ssh.proxy_jump.is_empty()
                 || session.ssh.proxy_kind != ProxyKind::None
                 || !session.ssh.ciphers.is_empty()
@@ -1422,6 +1457,13 @@ impl ConnectionForm {
         session.strict = self.strict_host_key;
 
         session.ssh.identity_file = self.identity_file.trim().to_owned();
+        session.ssh.public_key_auth = self.public_key_auth;
+        session.ssh.password_auth = self.password_auth;
+        session.ssh.keyboard_interactive_auth = self.keyboard_interactive_auth;
+        session.ssh.gssapi_auth = self.gssapi_auth;
+        session.ssh.agent_forwarding = self.agent_forwarding;
+        session.ssh.x11_forwarding = self.x11_forwarding;
+        session.ssh.compression = self.compression;
         session.ssh.proxy_jump = self.proxy_jump.trim().to_owned();
         session.ssh.proxy_kind = self.proxy_kind;
         if self.proxy_kind == ProxyKind::None {
@@ -3304,6 +3346,13 @@ impl App {
             }
             Message::StrictHostKey(value) => self.form.strict_host_key = value,
             Message::IdentityFile(value) => self.form.identity_file = value,
+            Message::PublicKeyAuth(value) => self.form.public_key_auth = value,
+            Message::PasswordAuth(value) => self.form.password_auth = value,
+            Message::KeyboardInteractiveAuth(value) => self.form.keyboard_interactive_auth = value,
+            Message::GssapiAuth(value) => self.form.gssapi_auth = value,
+            Message::AgentForwarding(value) => self.form.agent_forwarding = value,
+            Message::X11Forwarding(value) => self.form.x11_forwarding = value,
+            Message::Compression(value) => self.form.compression = value,
             Message::ProxyJump(value) => self.form.proxy_jump = value,
             Message::ProxyKind(value) => self.form.proxy_kind = value,
             Message::ProxyHost(value) => self.form.proxy_host = value,
@@ -4484,6 +4533,22 @@ impl App {
                                     &self.form.identity_file,
                                     Message::IdentityFile
                                 ),
+                                text("Authentication · Inherit follows SSH config defaults")
+                                    .size(11)
+                                    .color(MUTED),
+                                policy_field("Public-key authentication", self.form.public_key_auth, Message::PublicKeyAuth),
+                                policy_field("Password authentication", self.form.password_auth, Message::PasswordAuth),
+                                policy_field("Keyboard-interactive authentication", self.form.keyboard_interactive_auth, Message::KeyboardInteractiveAuth),
+                                policy_field("Kerberos / GSSAPI authentication", self.form.gssapi_auth, Message::GssapiAuth),
+                                text("Session behavior · inherited unless explicitly overridden")
+                                    .size(11)
+                                    .color(MUTED),
+                                policy_field("SSH agent forwarding", self.form.agent_forwarding, Message::AgentForwarding),
+                                policy_field("X11 forwarding", self.form.x11_forwarding, Message::X11Forwarding),
+                                policy_field("Compression", self.form.compression, Message::Compression),
+                                text("Only enable agent or X11 forwarding for remote hosts you trust.")
+                                    .size(11)
+                                    .color(MUTED),
                                 field(
                                     "ProxyJump",
                                     "bastion or user@bastion:2222",
@@ -4998,6 +5063,24 @@ fn field<'a>(
     .into()
 }
 
+fn policy_field<'a>(
+    label: &'a str,
+    value: Option<bool>,
+    message: fn(Option<bool>) -> Message,
+) -> Element<'a, Message> {
+    column![
+        text(label).size(12).color(MUTED),
+        row![
+            action("Inherit", message(None)).style(if value.is_none() { selected_button } else { quiet }),
+            action("Enable", message(Some(true))).style(if value == Some(true) { selected_button } else { quiet }),
+            action("Disable", message(Some(false))).style(if value == Some(false) { selected_button } else { quiet }),
+        ]
+        .spacing(8),
+    ]
+    .spacing(6)
+    .into()
+}
+
 fn action<'a>(label: impl Into<String>, message: Message) -> button::Button<'a, Message> {
     button(text(label.into()).size(14))
         .padding([8, 12])
@@ -5263,6 +5346,39 @@ mod tests {
         assert_eq!(updated.ssh.identity_file, "/tmp/new-key");
         assert_eq!(updated.ssh.password_auth, Some(false));
         assert_eq!(updated.ssh.agent_forwarding, Some(true));
+    }
+
+    #[test]
+    fn iced_advanced_authentication_and_forwarding_policies_round_trip() {
+        let mut original = Session {
+            name: "secure".into(),
+            host: "server.example".into(),
+            ..Session::default()
+        };
+        original.ssh.public_key_auth = Some(true);
+        original.ssh.password_auth = Some(false);
+        original.ssh.keyboard_interactive_auth = Some(false);
+        original.ssh.gssapi_auth = Some(true);
+        original.ssh.agent_forwarding = Some(false);
+        original.ssh.x11_forwarding = Some(true);
+        original.ssh.compression = Some(true);
+        original.ssh.gssapi_delegate_credentials = Some(false);
+
+        let mut form = ConnectionForm::from_session(&original);
+        assert!(form.advanced);
+        assert_eq!(form.public_key_auth, Some(true));
+        assert_eq!(form.password_auth, Some(false));
+        form.agent_forwarding = Some(true);
+        form.password_auth = None;
+        let updated = form.session().expect("valid advanced SSH policy");
+        assert_eq!(updated.ssh.public_key_auth, Some(true));
+        assert_eq!(updated.ssh.password_auth, None);
+        assert_eq!(updated.ssh.keyboard_interactive_auth, Some(false));
+        assert_eq!(updated.ssh.gssapi_auth, Some(true));
+        assert_eq!(updated.ssh.agent_forwarding, Some(true));
+        assert_eq!(updated.ssh.x11_forwarding, Some(true));
+        assert_eq!(updated.ssh.compression, Some(true));
+        assert_eq!(updated.ssh.gssapi_delegate_credentials, Some(false));
     }
 
     #[test]
