@@ -3308,9 +3308,13 @@ impl App {
             ]
             .spacing(6)
             .align_y(iced::Center),
-            action("+  New connection", Message::New)
-                .style(primary)
-                .width(Fill),
+            row![
+                action("+  New connection", Message::New)
+                    .style(primary)
+                    .width(Fill),
+                action("Import", Message::ImportProfiles),
+            ]
+            .spacing(6),
             text_input("Search sessions...", &self.query)
                 .id("session-search")
                 .on_input_maybe(self.dialog.is_none().then_some(Message::Search))
