@@ -4596,6 +4596,36 @@ mod tests {
     }
 
     #[test]
+    fn connection_form_round_trips_structured_proxy_without_credentials() {
+        let mut session = Session {
+            name: "server".into(),
+            host: "server.example".into(),
+            ..Session::default()
+        };
+        session.ssh.proxy_kind = ProxyKind::Socks5;
+        session.ssh.proxy_host = "proxy.example".into();
+        session.ssh.proxy_port = Some(1080);
+        session.ssh.proxy_auth = ProxyAuth::Environment;
+
+        let form = ConnectionForm::from_session(&session);
+        assert!(form.advanced);
+        let updated = form.session().expect("structured proxy");
+
+        assert_eq!(updated.ssh.proxy_kind, ProxyKind::Socks5);
+        assert_eq!(updated.ssh.proxy_host, "proxy.example");
+        assert_eq!(updated.ssh.proxy_port, Some(1080));
+        assert_eq!(updated.ssh.proxy_auth, ProxyAuth::Environment);
+
+        let mut disabled = ConnectionForm::from_session(&session);
+        disabled.proxy_kind = ProxyKind::None;
+        let cleared = disabled.session().expect("disabled structured proxy");
+        assert_eq!(cleared.ssh.proxy_kind, ProxyKind::None);
+        assert!(cleared.ssh.proxy_host.is_empty());
+        assert_eq!(cleared.ssh.proxy_port, None);
+        assert_eq!(cleared.ssh.proxy_auth, ProxyAuth::None);
+    }
+
+    #[test]
     fn command_like_host_is_rejected_by_existing_policy() {
         let form = ConnectionForm {
             host: "-F".into(),
