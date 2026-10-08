@@ -74,7 +74,13 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
     .scale_factor(|app: &App| app.scale as f32)
     .subscription(|_: &App| {
         Subscription::batch([
-            event::listen_with(|event, status, _| match event {
+            event::listen_with(|event, status, _| match &event {
+                // Text inputs may mark Escape as handled. A modal must still
+                // receive it so keyboard users can dismiss the dialog.
+                iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                    ..
+                }) => Some(Message::Event(event)),
                 iced::Event::Keyboard(_) if status == event::Status::Ignored => {
                     Some(Message::Event(event))
                 }
