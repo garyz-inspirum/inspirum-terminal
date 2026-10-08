@@ -5310,7 +5310,7 @@ mod tests {
         // may target a session after the user has switched away.
         let _ = app.update(Message::ClipboardRead(
             original_id,
-            Some("private clipboard text\\nsecond line".into()),
+            Some("private clipboard text\nsecond line".into()),
         ));
         assert!(app.dialog.is_none());
         assert!(app.status.contains("cancelled"));
@@ -5318,7 +5318,7 @@ mod tests {
 
         app.dialog = Some(Dialog::PasteConfirm {
             id: original_id,
-            text: "line one\\nline two".into(),
+            text: "line one\nline two".into(),
         });
         let _ = app.update(Message::ConfirmPaste);
         assert!(app.dialog.is_none());
