@@ -41,6 +41,7 @@ const GREEN: Color = Color::from_rgb8(113, 217, 171);
 const DANGER: Color = Color::from_rgb8(255, 138, 151);
 const TERMINAL_CELL_WIDTH: f32 = 8.4;
 const TERMINAL_CELL_HEIGHT: f32 = 18.0;
+const FILES_PAGE_SIZE: usize = 200;
 
 pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result {
     iced::application(
@@ -449,6 +450,8 @@ struct FilesState {
     remote_error: Option<String>,
     local_generation: u64,
     remote_generation: u64,
+    local_visible: usize,
+    remote_visible: usize,
     selected_local: Option<PathBuf>,
     selected_remote: Option<sftp::RemoteEntry>,
     name_input: String,
@@ -469,12 +472,18 @@ impl FilesState {
             remote_error: None,
             local_generation: 0,
             remote_generation: 0,
+            local_visible: FILES_PAGE_SIZE,
+            remote_visible: FILES_PAGE_SIZE,
             selected_local: None,
             selected_remote: None,
             name_input: String::new(),
             transfers: Vec::new(),
         }
     }
+}
+
+fn next_file_page(current: usize, total: usize) -> usize {
+    current.saturating_add(FILES_PAGE_SIZE).min(total)
 }
 
 fn remote_parent(path: &str) -> String {
@@ -589,6 +598,8 @@ enum Message {
     FilesRefresh,
     FilesLocalUp,
     FilesRemoteUp,
+    FilesShowMoreLocal,
+    FilesShowMoreRemote,
     FilesOpenLocal(PathBuf),
     FilesOpenRemote(String),
     FilesSelectLocal(PathBuf),
@@ -1907,6 +1918,7 @@ impl App {
         if self.files.session_key.as_deref() != Some(key.as_str()) {
             self.files.session_key = Some(key);
             self.files.remote_dir = ".".into();
+            self.files.remote_visible = FILES_PAGE_SIZE;
             self.files.remote_entries.clear();
             self.files.selected_remote = None;
             self.files.remote_error = None;
@@ -2531,6 +2543,7 @@ impl App {
             Message::FilesLocalUp => {
                 if let Some(parent) = self.files.local_dir.parent().map(ToOwned::to_owned) {
                     self.files.local_dir = parent;
+                    self.files.local_visible = FILES_PAGE_SIZE;
                     self.files.selected_local = None;
                     return self.reload_local_files();
                 }
@@ -2539,19 +2552,34 @@ impl App {
                 let parent = remote_parent(&self.files.remote_dir);
                 if parent != self.files.remote_dir {
                     self.files.remote_dir = parent;
+                    self.files.remote_visible = FILES_PAGE_SIZE;
                     self.files.selected_remote = None;
                     return self.reload_remote_files();
                 }
             }
             Message::FilesOpenLocal(path) => {
                 self.files.local_dir = path;
+                self.files.local_visible = FILES_PAGE_SIZE;
                 self.files.selected_local = None;
                 return self.reload_local_files();
             }
             Message::FilesOpenRemote(path) => {
                 self.files.remote_dir = path;
+                self.files.remote_visible = FILES_PAGE_SIZE;
                 self.files.selected_remote = None;
                 return self.reload_remote_files();
+            }
+            Message::FilesShowMoreLocal => {
+                self.files.local_visible = next_file_page(
+                    self.files.local_visible,
+                    self.files.local_entries.len(),
+                );
+            }
+            Message::FilesShowMoreRemote => {
+                self.files.remote_visible = next_file_page(
+                    self.files.remote_visible,
+                    self.files.remote_entries.len(),
+                );
             }
             Message::FilesSelectLocal(path) => {
                 self.files.selected_local = Some(path);
@@ -4089,7 +4117,7 @@ impl App {
         } else if self.files.local_entries.is_empty() {
             local_list = local_list.push(text("Directory is empty.").size(12).color(MUTED));
         } else {
-            for entry in &self.files.local_entries {
+            for entry in self.files.local_entries.iter().take(self.files.local_visible) {
                 let kind = if entry.is_dir { "DIR " } else { "    " };
                 let size = if entry.is_dir {
                     String::new()
@@ -4111,6 +4139,19 @@ impl App {
                     local_list = local_list.push(file);
                 }
             }
+            if self.files.local_visible < self.files.local_entries.len() {
+                local_list = local_list.push(
+                    action(
+                        format!(
+                            "Show more local files ({} of {})",
+                            self.files.local_visible,
+                            self.files.local_entries.len(),
+                        ),
+                        Message::FilesShowMoreLocal,
+                    )
+                    .width(Fill),
+                );
+            }
         }
 
         let mut remote_list = column![].spacing(3);
@@ -4122,7 +4163,7 @@ impl App {
         } else if self.files.remote_entries.is_empty() {
             remote_list = remote_list.push(text("Directory is empty.").size(12).color(MUTED));
         } else {
-            for entry in &self.files.remote_entries {
+            for entry in self.files.remote_entries.iter().take(self.files.remote_visible) {
                 let size = if entry.is_dir {
                     String::new()
                 } else {
@@ -4153,6 +4194,19 @@ impl App {
                     }
                     remote_list = remote_list.push(file);
                 }
+            }
+            if self.files.remote_visible < self.files.remote_entries.len() {
+                remote_list = remote_list.push(
+                    action(
+                        format!(
+                            "Show more remote files ({} of {})",
+                            self.files.remote_visible,
+                            self.files.remote_entries.len(),
+                        ),
+                        Message::FilesShowMoreRemote,
+                    )
+                    .width(Fill),
+                );
             }
         }
 
@@ -5247,6 +5301,16 @@ mod tests {
         *app.tabs[1].panes.get_mut(focus_before).unwrap() = replacement;
         assert!(!app.active_pane_matches(focus_before, next_id));
         assert!(app.active_pane_matches(focus_before, new_id));
+    }
+
+    #[test]
+    fn sftp_file_lists_render_in_bounded_pages() {
+        let files = FilesState::new();
+        assert_eq!(files.local_visible, FILES_PAGE_SIZE);
+        assert_eq!(files.remote_visible, FILES_PAGE_SIZE);
+        assert_eq!(next_file_page(FILES_PAGE_SIZE, 10_000), FILES_PAGE_SIZE * 2);
+        assert_eq!(next_file_page(400, 450), 450);
+        assert_eq!(next_file_page(usize::MAX, 1_000), 1_000);
     }
 
     #[test]
