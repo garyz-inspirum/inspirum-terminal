@@ -74,8 +74,10 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
     .scale_factor(|app: &App| app.scale as f32)
     .subscription(|_: &App| {
         Subscription::batch([
-            event::listen_with(|event, _, _| match event {
-                iced::Event::Keyboard(_) => Some(Message::Event(event)),
+            event::listen_with(|event, status, _| match event {
+                iced::Event::Keyboard(_) if status == event::Status::Ignored => {
+                    Some(Message::Event(event))
+                }
                 _ => None,
             }),
             Subscription::run(pty_bridge),
@@ -2931,9 +2933,6 @@ impl App {
             }
             Message::PtyEvent(id, event) => {
                 let wakeup = matches!(&event, egui_term::PtyEvent::Wakeup);
-                if wakeup {
-                    self.mark_terminal_refresh_delivered(id);
-                }
                 let exited = matches!(
                     &event,
                     egui_term::PtyEvent::Exit | egui_term::PtyEvent::ChildExit(_)
@@ -2955,6 +2954,12 @@ impl App {
                 }
                 if wakeup || exited {
                     self.refresh_terminal(id, exited);
+                }
+                if wakeup {
+                    // Keep the producer-side coalescing gate closed until the potentially
+                    // expensive terminal snapshot is complete. This prevents sustained PTY
+                    // output from continuously refilling the UI queue while a frame renders.
+                    self.mark_terminal_refresh_delivered(id);
                 }
                 if exited {
                     self.status = format!("Terminal {id} exited.");
