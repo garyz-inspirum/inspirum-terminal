@@ -4,9 +4,9 @@
 //! Live PTY rendering is introduced separately so the GUI migration cannot bypass
 //! host-key, argv, paste, process-lifecycle, or transfer safeguards.
 use crate::{
-    ProxyAuth, ProxyKind, Session,
+    ProxyAuth, ProxyKind, Session, SessionImportMode,
     command_palette::{self, PaletteItem, Snippet, SnippetLibrary},
-    SessionImportMode, import_sessions, load_sessions,
+    import_sessions, load_sessions,
     remote_edit::{self, SaveOutcome},
     save_session_edit, save_sessions, session_matches_query, session_profile_key, sftp, terminal,
     terminal_ux::{self, PasteDecision, PastePolicy},
@@ -1031,15 +1031,14 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
             state.generation.set(self.generation);
         }
 
-        let background_geometry =
-            state
-                .background_cache
-                .draw(renderer, bounds.size(), |frame| {
-                    frame.fill(
-                        &canvas::Path::rectangle(iced::Point::ORIGIN, bounds.size()),
-                        rgb(self.snapshot.background),
-                    );
-                });
+        let background_geometry = state
+            .background_cache
+            .draw(renderer, bounds.size(), |frame| {
+                frame.fill(
+                    &canvas::Path::rectangle(iced::Point::ORIGIN, bounds.size()),
+                    rgb(self.snapshot.background),
+                );
+            });
 
         let caches = state.row_caches.borrow();
         let mut geometries = Vec::with_capacity(self.snapshot.rows + 1);
@@ -1368,8 +1367,7 @@ impl ConnectionForm {
             session.ssh.proxy_auth = ProxyAuth::None;
         } else {
             session.ssh.proxy_host = self.proxy_host.trim().to_owned();
-            session.ssh.proxy_port =
-                Self::optional_positive_u16("Proxy port", &self.proxy_port)?;
+            session.ssh.proxy_port = Self::optional_positive_u16("Proxy port", &self.proxy_port)?;
             session.ssh.proxy_auth = self.proxy_auth;
         }
         session.ssh.ciphers = self.ciphers.trim().to_owned();
@@ -2776,10 +2774,7 @@ impl App {
                                 .file_name()
                                 .map(|value| format!("Upload {}", value.to_string_lossy()))
                                 .unwrap_or_else(|| {
-                                    format!(
-                                        "Upload {}",
-                                        prepared.pending.local.to_string_lossy()
-                                    )
+                                    format!("Upload {}", prepared.pending.local.to_string_lossy())
                                 }),
                             TransferDirection::Download => {
                                 format!("Download {}", prepared.pending.remote)
@@ -3530,7 +3525,10 @@ impl App {
             }
 
             let saved: Element<'_, Message> = if self.profiles.is_empty() {
-                text("No saved SSH sessions yet.").size(12).color(MUTED).into()
+                text("No saved SSH sessions yet.")
+                    .size(12)
+                    .color(MUTED)
+                    .into()
             } else {
                 column![
                     text("SAVED SESSIONS").size(11).color(MUTED),
@@ -4981,22 +4979,12 @@ mod tests {
         let key = keyboard::Key::Character("中".into());
 
         assert_eq!(
-            terminal_key_bytes(
-                &key,
-                none,
-                Some("中文"),
-                egui_term::TerminalMode::empty(),
-            ),
+            terminal_key_bytes(&key, none, Some("中文"), egui_term::TerminalMode::empty(),),
             Some("中文".as_bytes().to_vec())
         );
 
         assert_eq!(
-            terminal_key_bytes(
-                &key,
-                none,
-                None,
-                egui_term::TerminalMode::empty(),
-            ),
+            terminal_key_bytes(&key, none, None, egui_term::TerminalMode::empty(),),
             None
         );
     }
