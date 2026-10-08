@@ -1413,6 +1413,7 @@ struct App {
     load_error: Option<String>,
     paste_policy: PastePolicy,
     pty_bridge: Option<PtyBridgeSender>,
+    terminal_frame_scheduled: bool,
     transfer_bridge: Option<TransferBridgeSender>,
     next_terminal_id: u64,
     next_transfer_id: u64,
@@ -1468,6 +1469,7 @@ impl App {
             load_error,
             paste_policy: PastePolicy::ConfirmMultiline,
             pty_bridge: None,
+            terminal_frame_scheduled: false,
             transfer_bridge: None,
             next_terminal_id: 1,
             next_transfer_id: 1,
@@ -3164,10 +3166,10 @@ impl App {
                 if exited {
                     self.status = format!("Terminal {id} exited.");
                 }
-                if wakeup || exited {
-                    // Defer the expensive terminal snapshot off the PTY event itself. Keeping
-                    // refresh_pending set during this short frame delay coalesces high-volume
-                    // output and leaves the UI event loop room to service pointer/keyboard input.
+                if (wakeup || exited) && !self.terminal_frame_scheduled {
+                    // One deferred frame for the entire window. Under concurrent SSH output,
+                    // per-pane wakeup gates stay closed until the batch has been rendered.
+                    self.terminal_frame_scheduled = true;
                     return Task::perform(
                         async {
                             thread::sleep(Duration::from_millis(12));
@@ -3177,6 +3179,7 @@ impl App {
                 }
             }
             Message::TerminalFrame => {
+                self.terminal_frame_scheduled = false;
                 if !self.tabs.is_empty() {
                     self.refresh_workspace_displays(self.active);
                 }
