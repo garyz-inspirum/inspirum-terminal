@@ -638,6 +638,7 @@ enum Message {
     User(String),
     Port(String),
     Folder(String),
+    StrictHostKey(bool),
     IdentityFile(String),
     ProxyJump(String),
     ProxyKind(ProxyKind),
@@ -1161,6 +1162,7 @@ struct ConnectionForm {
     user: String,
     port: String,
     folder: String,
+    strict_host_key: bool,
     identity_file: String,
     proxy_jump: String,
     proxy_kind: ProxyKind,
@@ -1187,6 +1189,7 @@ impl Default for ConnectionForm {
             user: String::new(),
             port: String::new(),
             folder: String::new(),
+            strict_host_key: false,
             identity_file: String::new(),
             proxy_jump: String::new(),
             proxy_kind: ProxyKind::None,
@@ -1218,6 +1221,7 @@ impl ConnectionForm {
                 .map(|value| value.to_string())
                 .unwrap_or_default(),
             folder: session.folder.clone(),
+            strict_host_key: session.strict,
             identity_file: session.ssh.identity_file.clone(),
             proxy_jump: session.ssh.proxy_jump.clone(),
             proxy_kind: session.ssh.proxy_kind,
@@ -1244,7 +1248,8 @@ impl ConnectionForm {
                 .unwrap_or_default(),
             remote_command: session.ssh.remote_command.clone(),
             base: Some(session.clone()),
-            advanced: !session.ssh.identity_file.is_empty()
+            advanced: session.strict
+                || !session.ssh.identity_file.is_empty()
                 || !session.ssh.proxy_jump.is_empty()
                 || session.ssh.proxy_kind != ProxyKind::None
                 || !session.ssh.ciphers.is_empty()
@@ -1302,9 +1307,7 @@ impl ConnectionForm {
         session.user = self.user.trim().to_owned();
         session.port = port;
         session.folder = self.folder.trim().to_owned();
-        if self.base.is_none() {
-            session.strict = false;
-        }
+        session.strict = self.strict_host_key;
 
         session.ssh.identity_file = self.identity_file.trim().to_owned();
         session.ssh.proxy_jump = self.proxy_jump.trim().to_owned();
@@ -2936,6 +2939,7 @@ impl App {
             Message::User(value) => self.form.user = value,
             Message::Port(value) => self.form.port = value,
             Message::Folder(value) => self.form.folder = value,
+            Message::StrictHostKey(value) => self.form.strict_host_key = value,
             Message::IdentityFile(value) => self.form.identity_file = value,
             Message::ProxyJump(value) => self.form.proxy_jump = value,
             Message::ProxyKind(value) => self.form.proxy_kind = value,
@@ -3949,6 +3953,31 @@ impl App {
                     form = form.push(
                         container(
                             column![
+                                text("Host key verification").size(11).color(MUTED),
+                                row![
+                                    action(
+                                        "Ask on new/changed host",
+                                        Message::StrictHostKey(false)
+                                    )
+                                    .style(if !self.form.strict_host_key {
+                                        selected_button
+                                    } else {
+                                        quiet
+                                    }),
+                                    action(
+                                        "Known hosts only",
+                                        Message::StrictHostKey(true)
+                                    )
+                                    .style(if self.form.strict_host_key {
+                                        selected_button
+                                    } else {
+                                        quiet
+                                    }),
+                                ]
+                                .spacing(8),
+                                text("Host-key verification is always enabled. “Known hosts only” refuses unknown hosts; “Ask” keeps OpenSSH's interactive trust prompt.")
+                                    .size(11)
+                                    .color(MUTED),
                                 field(
                                     "Identity file",
                                     "~/.ssh/id_ed25519 or other key path",
