@@ -20,7 +20,7 @@ use iced::{
     Border, Color, Element, Fill, Font, Subscription, Task, Theme, event, font, keyboard, mouse,
 };
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -723,7 +723,9 @@ struct TerminalCanvasState {
     last_position: Option<iced::Point>,
     last_report_cell: Option<(i32, i32)>,
     generation: Cell<u64>,
-    cache: canvas::Cache,
+    row_hashes: RefCell<Vec<u64>>,
+    row_caches: RefCell<Vec<canvas::Cache>>,
+    background_cache: canvas::Cache,
 }
 
 impl Default for TerminalCanvasState {
@@ -735,7 +737,9 @@ impl Default for TerminalCanvasState {
             last_position: None,
             last_report_cell: None,
             generation: Cell::new(u64::MAX),
-            cache: canvas::Cache::new(),
+            row_hashes: RefCell::new(Vec::new()),
+            row_caches: RefCell::new(Vec::new()),
+            background_cache: canvas::Cache::new(),
         }
     }
 }
@@ -996,88 +1000,130 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
         }
 
         if state.generation.get() != self.generation {
-            state.cache.clear();
+            use std::{
+                collections::hash_map::DefaultHasher,
+                hash::{Hash, Hasher},
+            };
+
+            let mut new_hashes = Vec::with_capacity(self.snapshot.rows);
+            for row in 0..self.snapshot.rows {
+                let mut hasher = DefaultHasher::new();
+                self.snapshot.background.hash(&mut hasher);
+                self.snapshot.columns.hash(&mut hasher);
+                row.hash(&mut hasher);
+                if let Some(&(start, end)) = self.snapshot.row_ranges.get(row) {
+                    self.snapshot.cells[start..end].hash(&mut hasher);
+                }
+                new_hashes.push(hasher.finish());
+            }
+
+            let mut hashes = state.row_hashes.borrow_mut();
+            let mut caches = state.row_caches.borrow_mut();
+            hashes.resize(self.snapshot.rows, u64::MAX);
+            caches.resize_with(self.snapshot.rows, canvas::Cache::new);
+            for row in 0..self.snapshot.rows {
+                if hashes[row] != new_hashes[row] {
+                    caches[row].clear();
+                    hashes[row] = new_hashes[row];
+                }
+            }
+            state.background_cache.clear();
             state.generation.set(self.generation);
         }
 
-        let geometry = state.cache.draw(renderer, bounds.size(), |frame| {
-            frame.fill(
-                &canvas::Path::rectangle(iced::Point::ORIGIN, bounds.size()),
-                rgb(self.snapshot.background),
-            );
-
-            for cell in &self.snapshot.cells {
-                let x = cell.column as f32 * TERMINAL_CELL_WIDTH;
-                let y = cell.row as f32 * TERMINAL_CELL_HEIGHT;
-                if x >= bounds.width || y >= bounds.height {
-                    continue;
-                }
-
-                let cell_width = if cell.wide {
-                    TERMINAL_CELL_WIDTH * 2.0
-                } else {
-                    TERMINAL_CELL_WIDTH
-                };
-                let background = if cell.cursor {
-                    cell.cursor_color
-                } else {
-                    cell.background
-                };
-                if background != self.snapshot.background || cell.cursor {
+        let background_geometry =
+            state
+                .background_cache
+                .draw(renderer, bounds.size(), |frame| {
                     frame.fill(
-                        &canvas::Path::rectangle(
-                            iced::Point::new(x, y),
-                            iced::Size::new(cell_width + 0.5, TERMINAL_CELL_HEIGHT + 0.5),
-                        ),
-                        rgb(background),
+                        &canvas::Path::rectangle(iced::Point::ORIGIN, bounds.size()),
+                        rgb(self.snapshot.background),
                     );
-                }
+                });
 
-                if !matches!(cell.character, ' ' | '\t' | '\0') {
-                    let mut terminal_font = Font::MONOSPACE;
-                    if cell.bold {
-                        terminal_font.weight = font::Weight::Bold;
+        let caches = state.row_caches.borrow();
+        let mut geometries = Vec::with_capacity(self.snapshot.rows + 1);
+        geometries.push(background_geometry);
+
+        for row in 0..self.snapshot.rows {
+            let Some(&(start, end)) = self.snapshot.row_ranges.get(row) else {
+                continue;
+            };
+            let geometry = caches[row].draw(renderer, bounds.size(), |frame| {
+                for cell in &self.snapshot.cells[start..end] {
+                    let x = cell.column as f32 * TERMINAL_CELL_WIDTH;
+                    let y = cell.row as f32 * TERMINAL_CELL_HEIGHT;
+                    if x >= bounds.width || y >= bounds.height {
+                        continue;
                     }
-                    if cell.italic {
-                        terminal_font.style = font::Style::Italic;
-                    }
-                    let foreground = if cell.cursor {
-                        cell.background
+
+                    let cell_width = if cell.wide {
+                        TERMINAL_CELL_WIDTH * 2.0
                     } else {
-                        cell.foreground
+                        TERMINAL_CELL_WIDTH
                     };
-                    frame.fill_text(canvas::Text {
-                        content: cell.character.to_string(),
-                        position: iced::Point::new(x, y - 1.0),
-                        color: rgb(foreground),
-                        size: iced::Pixels(15.0),
-                        font: terminal_font,
-                        ..canvas::Text::default()
-                    });
-                }
+                    let background = if cell.cursor {
+                        cell.cursor_color
+                    } else {
+                        cell.background
+                    };
+                    if background != self.snapshot.background || cell.cursor {
+                        frame.fill(
+                            &canvas::Path::rectangle(
+                                iced::Point::new(x, y),
+                                iced::Size::new(cell_width + 0.5, TERMINAL_CELL_HEIGHT + 0.5),
+                            ),
+                            rgb(background),
+                        );
+                    }
 
-                if cell.underline {
-                    frame.fill(
-                        &canvas::Path::rectangle(
-                            iced::Point::new(x, y + TERMINAL_CELL_HEIGHT - 2.0),
-                            iced::Size::new(cell_width, 1.0),
-                        ),
-                        rgb(cell.foreground),
-                    );
-                }
-                if cell.strikeout {
-                    frame.fill(
-                        &canvas::Path::rectangle(
-                            iced::Point::new(x, y + TERMINAL_CELL_HEIGHT * 0.55),
-                            iced::Size::new(cell_width, 1.0),
-                        ),
-                        rgb(cell.foreground),
-                    );
-                }
-            }
-        });
+                    if !matches!(cell.character, ' ' | '\t' | '\0') {
+                        let mut terminal_font = Font::MONOSPACE;
+                        if cell.bold {
+                            terminal_font.weight = font::Weight::Bold;
+                        }
+                        if cell.italic {
+                            terminal_font.style = font::Style::Italic;
+                        }
+                        let foreground = if cell.cursor {
+                            cell.background
+                        } else {
+                            cell.foreground
+                        };
+                        frame.fill_text(canvas::Text {
+                            content: cell.character.to_string(),
+                            position: iced::Point::new(x, y - 1.0),
+                            color: rgb(foreground),
+                            size: iced::Pixels(15.0),
+                            font: terminal_font,
+                            ..canvas::Text::default()
+                        });
+                    }
 
-        vec![geometry]
+                    if cell.underline {
+                        frame.fill(
+                            &canvas::Path::rectangle(
+                                iced::Point::new(x, y + TERMINAL_CELL_HEIGHT - 2.0),
+                                iced::Size::new(cell_width, 1.0),
+                            ),
+                            rgb(cell.foreground),
+                        );
+                    }
+                    if cell.strikeout {
+                        frame.fill(
+                            &canvas::Path::rectangle(
+                                iced::Point::new(x, y + TERMINAL_CELL_HEIGHT * 0.55),
+                                iced::Size::new(cell_width, 1.0),
+                            ),
+                            rgb(cell.foreground),
+                        );
+                    }
+                }
+            });
+            geometries.push(geometry);
+        }
+
+        geometries
     }
 }
 
