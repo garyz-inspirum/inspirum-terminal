@@ -1510,8 +1510,7 @@ impl App {
                     continue;
                 }
                 if let Some(terminal) = pane.terminal.as_mut() {
-                    let snapshot =
-                        terminal.display_snapshot(&egui_term::TerminalTheme::default());
+                    let snapshot = terminal.display_snapshot(&egui_term::TerminalTheme::default());
                     if pane.display.as_ref() != Some(&snapshot) {
                         pane.display = Some(snapshot);
                         pane.display_generation = pane.display_generation.wrapping_add(1);
@@ -1557,8 +1556,7 @@ impl App {
         for (_, pane) in tab.panes.iter_mut() {
             if pane.display_dirty {
                 if let Some(terminal) = pane.terminal.as_mut() {
-                    let snapshot =
-                        terminal.display_snapshot(&egui_term::TerminalTheme::default());
+                    let snapshot = terminal.display_snapshot(&egui_term::TerminalTheme::default());
                     if pane.display.as_ref() != Some(&snapshot) {
                         pane.display = Some(snapshot);
                         pane.display_generation = pane.display_generation.wrapping_add(1);
