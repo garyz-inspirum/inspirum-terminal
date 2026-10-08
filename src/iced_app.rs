@@ -1556,19 +1556,6 @@ impl App {
         None
     }
 
-    fn mark_terminal_refresh_delivered(&mut self, id: u64) {
-        for (tab_index, tab) in self.tabs.iter_mut().enumerate() {
-            for (_, pane) in tab.panes.iter_mut() {
-                if pane.id == id {
-                    if tab_index == self.active {
-                        pane.refresh_pending.store(false, Ordering::Release);
-                    }
-                    return;
-                }
-            }
-        }
-    }
-
     fn refresh_terminal_display(&mut self, id: u64) {
         for tab in &mut self.tabs {
             for (_, pane) in tab.panes.iter_mut() {
