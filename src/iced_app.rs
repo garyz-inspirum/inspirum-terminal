@@ -5817,6 +5817,7 @@ mod tests {
         let pane = app.new_terminal_pane(profile.clone());
         let id = pane.id;
         app.tabs.push(Workspace::new(profile, pane));
+        app.refresh_workspace_displays(0);
         assert!(!app.terminal_frame_scheduled);
         assert!(!app.tabs[0].panes.iter().next().unwrap().1.display_dirty);
 
