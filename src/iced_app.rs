@@ -642,6 +642,10 @@ enum Message {
     User(String),
     Port(String),
     Folder(String),
+    Favorite(bool),
+    TagInput(String),
+    AddTag,
+    RemoveTag(usize),
     StrictHostKey(bool),
     IdentityFile(String),
     ProxyJump(String),
@@ -1232,6 +1236,9 @@ struct ConnectionForm {
     user: String,
     port: String,
     folder: String,
+    favorite: bool,
+    tags: Vec<String>,
+    tag_input: String,
     strict_host_key: bool,
     identity_file: String,
     proxy_jump: String,
@@ -1259,6 +1266,9 @@ impl Default for ConnectionForm {
             user: String::new(),
             port: String::new(),
             folder: String::new(),
+            favorite: false,
+            tags: Vec::new(),
+            tag_input: String::new(),
             strict_host_key: false,
             identity_file: String::new(),
             proxy_jump: String::new(),
@@ -1291,6 +1301,9 @@ impl ConnectionForm {
                 .map(|value| value.to_string())
                 .unwrap_or_default(),
             folder: session.folder.clone(),
+            favorite: session.favorite,
+            tags: session.tags.clone(),
+            tag_input: String::new(),
             strict_host_key: session.strict,
             identity_file: session.ssh.identity_file.clone(),
             proxy_jump: session.ssh.proxy_jump.clone(),
@@ -1377,6 +1390,8 @@ impl ConnectionForm {
         session.user = self.user.trim().to_owned();
         session.port = port;
         session.folder = self.folder.trim().to_owned();
+        session.favorite = self.favorite;
+        session.tags = self.tags.clone();
         session.strict = self.strict_host_key;
 
         session.ssh.identity_file = self.identity_file.trim().to_owned();
@@ -3104,6 +3119,35 @@ impl App {
             Message::User(value) => self.form.user = value,
             Message::Port(value) => self.form.port = value,
             Message::Folder(value) => self.form.folder = value,
+            Message::Favorite(value) => self.form.favorite = value,
+            Message::TagInput(value) => self.form.tag_input = value,
+            Message::AddTag => {
+                let tag = self.form.tag_input.trim();
+                if tag.is_empty() {
+                    self.form.error = Some("Tag cannot be empty.".into());
+                } else if tag.len() > 64 || tag.chars().any(char::is_control) {
+                    self.form.error =
+                        Some("Tag must be at most 64 bytes without control characters.".into());
+                } else if self.form.tags.len() >= 32 {
+                    self.form.error = Some("At most 32 profile tags are supported.".into());
+                } else if self
+                    .form
+                    .tags
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(tag))
+                {
+                    self.form.error = Some("That tag is already present.".into());
+                } else {
+                    self.form.tags.push(tag.to_owned());
+                    self.form.tag_input.clear();
+                    self.form.error = None;
+                }
+            }
+            Message::RemoveTag(index) => {
+                if index < self.form.tags.len() {
+                    self.form.tags.remove(index);
+                }
+            }
             Message::StrictHostKey(value) => self.form.strict_host_key = value,
             Message::IdentityFile(value) => self.form.identity_file = value,
             Message::ProxyJump(value) => self.form.proxy_jump = value,
@@ -4176,6 +4220,49 @@ impl App {
                         &self.form.folder,
                         Message::Folder
                     ),
+                    row![
+                        text("Favourite").size(13).color(MUTED),
+                        action(
+                            if self.form.favorite { "Pinned" } else { "Not pinned" },
+                            Message::Favorite(!self.form.favorite)
+                        )
+                        .style(if self.form.favorite {
+                            selected_button
+                        } else {
+                            quiet
+                        }),
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Center),
+                    column![
+                        text("Tags").size(13).color(MUTED),
+                        row![
+                            text_input("Add profile tag", &self.form.tag_input)
+                                .id("connection-tag")
+                                .on_input(Message::TagInput)
+                                .on_submit(Message::AddTag)
+                                .padding(11),
+                            action("Add", Message::AddTag),
+                        ]
+                        .spacing(8),
+                        row(
+                            self.form
+                                .tags
+                                .iter()
+                                .enumerate()
+                                .map(|(index, tag)| {
+                                    action(
+                                        format!("{tag}  x"),
+                                        Message::RemoveTag(index)
+                                    )
+                                    .style(quiet)
+                                    .into()
+                                })
+                                .collect::<Vec<Element<'_, Message>>>()
+                        )
+                        .spacing(6),
+                    ]
+                    .spacing(7),
                     action(
                         if self.form.advanced {
                             "-  Advanced SSH options"
@@ -4861,6 +4948,32 @@ mod tests {
         assert_eq!(updated.ssh.identity_file, "/tmp/new-key");
         assert_eq!(updated.ssh.password_auth, Some(false));
         assert_eq!(updated.ssh.agent_forwarding, Some(true));
+    }
+
+    #[test]
+    fn connection_form_preserves_profile_favourite_and_tags() {
+        let mut session = Session {
+            name: "server".into(),
+            host: "server.example".into(),
+            favorite: true,
+            tags: vec!["prod".into(), "radio".into()],
+            ..Session::default()
+        };
+
+        let mut form = ConnectionForm::from_session(&session);
+        assert!(form.favorite);
+        assert_eq!(form.tags, session.tags);
+        form.tags.push("night".into());
+
+        let updated = form.session().expect("organized profile");
+        assert!(updated.favorite);
+        assert_eq!(updated.tags, vec!["prod", "radio", "night"]);
+
+        session.favorite = false;
+        let unpinned = ConnectionForm::from_session(&session)
+            .session()
+            .expect("unpinned profile");
+        assert!(!unpinned.favorite);
     }
 
     #[test]
