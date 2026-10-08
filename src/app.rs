@@ -1,6 +1,6 @@
 //! Small native connection/profile interface; terminal mechanics stay upstream.
 use crate::{
-    ControlMasterMode, ProxyKind, Session, SessionImportMode,
+    ControlMasterMode, ProxyAuth, ProxyKind, Session, SessionImportMode,
     appearance::{
         self, AppearanceOverride, AppearanceSettings, TerminalAppearance, TerminalCursorStyle,
         TerminalFontFamily, TerminalPalette,
@@ -356,15 +356,35 @@ fn render_terminal_tab(
     let mut close = false;
 
     if show_pane_header {
-        ui.horizontal(|ui| {
-            ui.strong(&tab.name);
-            if terminal_focus == Some(tab.id) && !tab.exited {
-                ui.strong("● FOCUSED");
-            }
-            if ui.small_button("Close pane").clicked() {
-                close = true;
-            }
-        });
+        let focused = terminal_focus == Some(tab.id) && !tab.exited;
+        egui::Frame::NONE
+            .fill(if focused {
+                egui::Color32::from_rgb(46, 52, 60)
+            } else {
+                egui::Color32::from_rgb(34, 36, 40)
+            })
+            .inner_margin(egui::Margin::symmetric(6, 3))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(if focused { "●" } else { "○" });
+                    ui.strong(&tab.name);
+                    if tab.exited {
+                        ui.small("disconnected");
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button("×")
+                            .on_hover_text("Close this pane")
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                        if focused {
+                            ui.small("ACTIVE");
+                        }
+                    });
+                });
+            });
     }
     if tab.exited {
         ui.horizontal(|ui| {
@@ -2088,7 +2108,9 @@ impl App {
                                     self.terminal_focus = None;
                                 }
                             });
-                            if self.draft.ssh.proxy_kind != ProxyKind::None {
+                            if self.draft.ssh.proxy_kind == ProxyKind::None {
+                                self.draft.ssh.proxy_auth = ProxyAuth::None;
+                            } else {
                                 ui.label("Proxy host");
                                 if ui
                                     .text_edit_singleline(&mut self.draft.ssh.proxy_host)
@@ -2100,12 +2122,55 @@ impl App {
                                 if ui.text_edit_singleline(&mut self.proxy_port).has_focus() {
                                     self.terminal_focus = None;
                                 }
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Authentication");
+                                    ui.selectable_value(
+                                        &mut self.draft.ssh.proxy_auth,
+                                        ProxyAuth::None,
+                                        "None",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.draft.ssh.proxy_auth,
+                                        ProxyAuth::Environment,
+                                        "Environment credentials",
+                                    );
+                                });
+                                if self.draft.ssh.proxy_auth == ProxyAuth::Environment {
+                                    ui.small(
+                                        "Set INSPIRUM_PROXY_USERNAME and INSPIRUM_PROXY_PASSWORD before starting Inspirum. Values are read only by the proxy helper and are never stored in the profile or placed in ProxyCommand argv.",
+                                    );
+                                }
                                 ui.small(
-                                    "ProxyJump and structured proxy transport cannot be enabled together. HTTP/SOCKS proxy authentication is not stored or supported yet.",
+                                    "ProxyJump and structured proxy transport cannot be enabled together. If the proxy fails or denies authentication/tunnelling, the SSH connection fails; it never retries directly.",
                                 );
-                                ui.small(
-                                    "Inspirum supplies a built-in transport helper to OpenSSH ProxyCommand. If the proxy fails or denies the tunnel, the SSH connection fails; it does not retry directly.",
+                            }
+
+                            ui.separator();
+                            ui.strong("OpenSSH algorithm policy");
+                            ui.small(
+                                "Blank fields inherit OpenSSH/config defaults. Values are passed to OpenSSH; Inspirum does not implement or silently enable cryptography.",
+                            );
+                            for (label, value, hint) in [
+                                ("Ciphers", &mut self.draft.ssh.ciphers, "e.g. chacha20-poly1305@openssh.com,aes256-gcm@openssh.com"),
+                                ("MACs", &mut self.draft.ssh.macs, "e.g. hmac-sha2-256-etm@openssh.com"),
+                                ("KEX", &mut self.draft.ssh.kex_algorithms, "e.g. sntrup761x25519-sha512@openssh.com"),
+                                ("Host key", &mut self.draft.ssh.host_key_algorithms, "e.g. ssh-ed25519,rsa-sha2-512"),
+                            ] {
+                                ui.label(label);
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(value).hint_text(hint),
                                 );
+                                if response.has_focus() {
+                                    self.terminal_focus = None;
+                                }
+                            }
+                            let algorithm_warnings = crate::algorithm_policy_warnings(&self.draft.ssh);
+                            if algorithm_warnings.is_empty() {
+                                ui.small("No known legacy algorithm request detected.");
+                            } else {
+                                for warning in algorithm_warnings {
+                                    ui.colored_label(egui::Color32::YELLOW, warning);
+                                }
                             }
 
                             ui.separator();
@@ -3465,16 +3530,19 @@ impl App {
                 ui.separator();
             }
 
-            ui.group(|ui| {
+            egui::CollapsingHeader::new("Workspace")
+                .default_open(false)
+                .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.strong("SSH workspace");
-                    if ui.button("Split horizontal").clicked() {
+                    if ui.small_button("Split ↔").on_hover_text("Split side by side").clicked() {
                         split_requested = Some(SplitAxis::Horizontal);
                     }
-                    if ui.button("Split vertical").clicked() {
+                    if ui.small_button("Split ↕").on_hover_text("Split top and bottom").clicked() {
                         split_requested = Some(SplitAxis::Vertical);
                     }
+                    ui.separator();
                     ui.label("Layout");
+
                     let path = ui.add(
                         egui::TextEdit::singleline(&mut self.workspace_path)
                             .desired_width(220.0)
@@ -3550,9 +3618,20 @@ impl App {
                     ui.small(&self.workspace_notice);
                 }
             });
-            ui.separator();
+
 
             let terminal_focus = self.terminal_focus;
+            if self.workspace_panes.len() >= 2 {
+                ui.horizontal(|ui| {
+                    ui.small(match self.workspace_axis {
+                        SplitAxis::Horizontal => "SPLIT · side by side",
+                        SplitAxis::Vertical => "SPLIT · stacked",
+                    });
+                    if self.sync_input.armed() {
+                        ui.small("· SYNC INPUT");
+                    }
+                });
+            }
             let split_ids: Vec<u64> = self
                 .workspace_panes
                 .iter()
@@ -3635,15 +3714,12 @@ impl App {
                     close_pane = Some(tab.id);
                 }
             } else {
-                ui.heading("Connect to an SSH server");
-                ui.label("Enter a host or existing ~/.ssh/config alias, then Connect.");
-                ui.label(
-                    "Advanced SSH profiles support identity files, ProxyJump, forwarding, keepalive, X11 and agent forwarding.",
-                );
-                ui.label("Click the terminal to type. Close a tab to disconnect.");
-                ui.label(
-                    "Verify host key fingerprints through an independent trusted channel before accepting.",
-                );
+                ui.vertical_centered(|ui| {
+                    ui.add_space(64.0);
+                    ui.heading("No session open");
+                    ui.label("Choose a saved session in Resource Manager or create a new connection.");
+                    ui.small("Ctrl/Cmd+Enter connects the current profile.");
+                });
                 ui.label("No sessions are automatically connected on startup.");
             }
         });

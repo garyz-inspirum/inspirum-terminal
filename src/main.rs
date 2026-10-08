@@ -1,7 +1,7 @@
 mod diagnostics;
 
 use anyhow::{Context, Result, bail, ensure};
-use inspirum_terminal::{ProxyKind, app::App};
+use inspirum_terminal::{ProxyAuth, ProxyKind, app::App};
 use std::{ffi::OsString, path::PathBuf};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -24,6 +24,7 @@ fn parse_proxy_helper(args: &[OsString]) -> Result<()> {
     let mut mode = None;
     let mut proxy_host = None;
     let mut proxy_port = None;
+    let mut proxy_auth = ProxyAuth::None;
     let mut target_host = None;
     let mut target_port = None;
     let mut index = 0;
@@ -47,6 +48,13 @@ fn parse_proxy_helper(args: &[OsString]) -> Result<()> {
                 })
             }
             "--proxy-host" => proxy_host = Some(value.to_owned()),
+            "--proxy-auth" => {
+                proxy_auth = match value {
+                    "none" => ProxyAuth::None,
+                    "environment" => ProxyAuth::Environment,
+                    _ => bail!("unsupported proxy authentication source"),
+                }
+            }
             "--proxy-port" => {
                 proxy_port = Some(value.parse::<u16>().context("invalid proxy port")?)
             }
@@ -59,6 +67,7 @@ fn parse_proxy_helper(args: &[OsString]) -> Result<()> {
     }
     inspirum_terminal::proxy::run_stdio(
         mode.context("proxy helper mode is required")?,
+        proxy_auth,
         proxy_host.as_deref().context("proxy host is required")?,
         proxy_port.context("proxy port is required")?,
         target_host.as_deref().context("target host is required")?,
