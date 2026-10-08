@@ -2264,9 +2264,49 @@ impl App {
                 self.form = ConnectionForm::default();
                 self.files.name_input.clear();
             }
-            Message::AskClose(index) => self.dialog = Some(Dialog::Close(index)),
+            Message::AskClose(index) => {
+                let closing_key = self
+                    .tabs
+                    .get(index)
+                    .map(|tab| session_profile_key(&tab.profile));
+                let dirty_editor = closing_key.as_deref().is_some_and(|key| {
+                    self.remote_editor
+                        .as_ref()
+                        .filter(|editor| editor.session_key == key)
+                        .and_then(|editor| editor.handle.0.lock().ok())
+                        .is_some_and(|editor| editor.is_dirty())
+                });
+                if dirty_editor {
+                    self.status =
+                        "Save or explicitly discard the remote editor changes before closing this SSH session."
+                            .into();
+                } else {
+                    self.dialog = Some(Dialog::Close(index));
+                }
+            }
             Message::ConfirmClose(index) => {
                 if index < self.tabs.len() {
+                    let closing_key = session_profile_key(&self.tabs[index].profile);
+                    let dirty_editor = self
+                        .remote_editor
+                        .as_ref()
+                        .filter(|editor| editor.session_key == closing_key)
+                        .and_then(|editor| editor.handle.0.lock().ok())
+                        .is_some_and(|editor| editor.is_dirty());
+                    if dirty_editor {
+                        self.dialog = None;
+                        self.status =
+                            "Session close cancelled because the remote editor has unsaved changes."
+                                .into();
+                        return Task::none();
+                    }
+                    if self
+                        .remote_editor
+                        .as_ref()
+                        .is_some_and(|editor| editor.session_key == closing_key)
+                    {
+                        self.remote_editor = None;
+                    }
                     self.tabs.remove(index);
                     if index < self.active {
                         self.active -= 1;
