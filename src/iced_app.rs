@@ -4443,6 +4443,38 @@ mod tests {
     }
 
     #[test]
+    fn connection_form_round_trips_advanced_algorithm_policy() {
+        let mut session = Session {
+            name: "server".into(),
+            host: "server.example".into(),
+            ..Session::default()
+        };
+        session.ssh.ciphers = "chacha20-poly1305@openssh.com".into();
+        session.ssh.macs = "hmac-sha2-512-etm@openssh.com".into();
+        session.ssh.kex_algorithms = "curve25519-sha256".into();
+        session.ssh.host_key_algorithms = "ssh-ed25519".into();
+
+        let form = ConnectionForm::from_session(&session);
+        assert!(form.advanced);
+        let updated = form.session().expect("advanced algorithm policy");
+
+        assert_eq!(updated.ssh.ciphers, session.ssh.ciphers);
+        assert_eq!(updated.ssh.macs, session.ssh.macs);
+        assert_eq!(updated.ssh.kex_algorithms, session.ssh.kex_algorithms);
+        assert_eq!(
+            updated.ssh.host_key_algorithms,
+            session.ssh.host_key_algorithms
+        );
+
+        let invalid = ConnectionForm {
+            host: "server.example".into(),
+            ciphers: "aes256-gcm@openssh.com, aes128-gcm@openssh.com".into(),
+            ..Default::default()
+        };
+        assert!(invalid.session().is_err());
+    }
+
+    #[test]
     fn command_like_host_is_rejected_by_existing_policy() {
         let form = ConnectionForm {
             host: "-F".into(),
