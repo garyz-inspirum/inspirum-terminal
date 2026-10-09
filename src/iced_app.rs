@@ -142,9 +142,48 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
             }),
             Subscription::run(pty_bridge),
             Subscription::run(transfer_bridge),
+            Subscription::run(frame_bridge),
         ])
     })
     .run()
+}
+
+type FrameBridgeSender = std::sync::mpsc::Sender<()>;
+
+/// Keep the 12 ms frame coalescing delay off Iced's async executor. One
+/// persistent OS worker handles requests; no thread is spawned per redraw.
+fn frame_timer_worker(
+    requests: std::sync::mpsc::Receiver<()>,
+    mut emit_frame: impl FnMut() -> bool,
+) {
+    while requests.recv().is_ok() {
+        thread::sleep(Duration::from_millis(12));
+        if !emit_frame() {
+            break;
+        }
+    }
+}
+
+fn frame_bridge() -> impl Stream<Item = Message> {
+    iced::stream::channel(8, async |mut output| {
+        let (requests, receiver) = std::sync::mpsc::channel();
+        let (tick_sender, mut ticks) = mpsc::unbounded();
+        thread::spawn(move || {
+            frame_timer_worker(receiver, || tick_sender.unbounded_send(()).is_ok());
+        });
+        if output
+            .send(Message::FrameBridgeReady(requests))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        while ticks.next().await.is_some() {
+            if output.send(Message::TerminalFrame).await.is_err() {
+                break;
+            }
+        }
+    })
 }
 
 type PtyBridgeSender = mpsc::UnboundedSender<(u64, egui_term::PtyEvent)>;
@@ -783,6 +822,7 @@ enum Message {
     Scale(f64),
     PtyBridgeReady(PtyBridgeSender),
     PtyEvent(u64, egui_term::PtyEvent),
+    FrameBridgeReady(FrameBridgeSender),
     TerminalFrame,
     TransferBridgeReady(TransferBridgeSender),
     TransferEvent(TransferEvent),
@@ -1620,6 +1660,7 @@ struct App {
     paste_policy: PastePolicy,
     pty_bridge: Option<PtyBridgeSender>,
     terminal_frame_scheduled: bool,
+    frame_bridge: Option<FrameBridgeSender>,
     transfer_bridge: Option<TransferBridgeSender>,
     next_terminal_id: u64,
     next_transfer_id: u64,
@@ -1684,6 +1725,7 @@ impl App {
             paste_policy: PastePolicy::ConfirmMultiline,
             pty_bridge: None,
             terminal_frame_scheduled: false,
+            frame_bridge: None,
             transfer_bridge: None,
             next_terminal_id: 1,
             next_transfer_id: 1,
@@ -1909,15 +1951,19 @@ impl App {
         if self.terminal_frame_scheduled {
             return Task::none();
         }
-        // Reuse the same 12 ms redraw gate for PTY output, mouse selection
-        // and scrollback. This bounds snapshot generation during fast drags.
+        // A dedicated timer worker enforces the 12 ms redraw gate without
+        // occupying the async executor during typing, SFTP, or clipboard tasks.
         self.terminal_frame_scheduled = true;
-        Task::perform(
-            async {
-                thread::sleep(Duration::from_millis(12));
-            },
-            |_| Message::TerminalFrame,
-        )
+        if self
+            .frame_bridge
+            .as_ref()
+            .is_some_and(|bridge| bridge.send(()).is_ok())
+        {
+            return Task::none();
+        }
+        // During startup or after timer shutdown, refresh immediately rather
+        // than leaving terminal output behind a permanently pending frame.
+        Task::perform(async {}, |_| Message::TerminalFrame)
     }
 
     fn defer_terminal_refresh(&mut self, id: u64) -> Task<Message> {
@@ -3653,6 +3699,9 @@ impl App {
                 if wakeup || exited {
                     return self.schedule_terminal_frame();
                 }
+            }
+            Message::FrameBridgeReady(sender) => {
+                self.frame_bridge = Some(sender);
             }
             Message::TerminalFrame => {
                 self.terminal_frame_scheduled = false;
@@ -5590,6 +5639,22 @@ mod tests {
         assert!(operation.as_mut().now_or_never().is_none());
         release.send(()).expect("release blocking test worker");
         assert_eq!(iced::futures::executor::block_on(operation), Ok(42));
+    }
+
+    #[test]
+    fn frame_timer_worker_ticks_only_on_requests_and_exits_cleanly() {
+        let (requests, receiver) = std::sync::mpsc::channel();
+        let (sender, ticks) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            frame_timer_worker(receiver, || sender.send(()).is_ok());
+        });
+        // The worker stays idle when no terminal frame has been requested.
+        assert!(ticks.recv_timeout(Duration::from_millis(30)).is_err());
+        requests.send(()).unwrap();
+        assert!(ticks.recv_timeout(Duration::from_secs(2)).is_ok());
+        assert!(ticks.try_recv().is_err());
+        drop(requests);
+        worker.join().expect("frame timer worker exited");
     }
 
     #[test]
