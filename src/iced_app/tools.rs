@@ -982,6 +982,10 @@ impl App {
                     return Task::none();
                 }
                 let text = self.command_sender.clone();
+                if text.is_empty() {
+                    self.status = "Command sender text is empty.".into();
+                    return Task::none();
+                }
                 match terminal_ux::classify_paste(self.paste_policy, &text) {
                     PasteDecision::Block => self.status = "Command blocked by paste policy.".into(),
                     _ => {

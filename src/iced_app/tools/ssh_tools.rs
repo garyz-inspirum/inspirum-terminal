@@ -19,18 +19,18 @@ impl App {
     }
     pub(super) fn ssh_result(&mut self, data: Data) {
         match data {
-            Data::TunnelStatus(key, running) => {
-                if self.tools.tunnel_target.as_deref() == Some(&key) {
-                    self.status = if running {
-                        "Tunnel manager is running."
-                    } else {
-                        "Tunnel manager has exited."
-                    }
-                    .into();
-                    if !running {
-                        self.tools.tunnel = None;
-                        self.tools.tunnel_target = None;
-                    }
+            Data::TunnelStatus(key, running)
+                if self.tools.tunnel_target.as_deref() == Some(&key) =>
+            {
+                self.status = if running {
+                    "Tunnel manager is running."
+                } else {
+                    "Tunnel manager has exited."
+                }
+                .into();
+                if !running {
+                    self.tools.tunnel = None;
+                    self.tools.tunnel_target = None;
                 }
             }
             Data::Text(value) => self.tools.output = value,
@@ -38,26 +38,24 @@ impl App {
                 self.tools.report = value;
                 self.status = "Sanitized support report generated.".into();
             }
-            Data::Host(key, target, value) => {
+            Data::Host(key, target, value)
                 if self
                     .tools
                     .target
                     .as_ref()
-                    .is_some_and(|s| session_profile_key(s) == key)
-                {
-                    self.tools.host_target = Some(target);
-                    self.tools.output = value;
-                }
+                    .is_some_and(|s| session_profile_key(s) == key) =>
+            {
+                self.tools.host_target = Some(target);
+                self.tools.output = value;
             }
-            Data::Tmux(key, sessions) => {
+            Data::Tmux(key, sessions)
                 if self
                     .tools
                     .target
                     .as_ref()
-                    .is_some_and(|s| session_profile_key(s) == key)
-                {
-                    self.tools.tmux = sessions;
-                }
+                    .is_some_and(|s| session_profile_key(s) == key) =>
+            {
+                self.tools.tmux = sessions;
             }
             Data::Tunnel(key, tunnel) => {
                 self.tools.tunnel_target = Some(key);
@@ -389,20 +387,18 @@ impl App {
                 }
                 Err(e) => self.status = e,
             },
-            Action::ScpStart(upload) => {
-                if self.tools.scp_cancel.is_none() {
-                    match self.tool_target() {
-                        Ok(session) => {
-                            self.tools.confirm = Some(Confirm::Scp {
-                                session,
-                                upload,
-                                local: PathBuf::from(self.tools.scp_local.trim()),
-                                remote: self.tools.scp_remote.trim().to_owned(),
-                                overwrite: self.tools.scp_overwrite,
-                            })
-                        }
-                        Err(e) => self.status = e,
+            Action::ScpStart(upload) if self.tools.scp_cancel.is_none() => {
+                match self.tool_target() {
+                    Ok(session) => {
+                        self.tools.confirm = Some(Confirm::Scp {
+                            session,
+                            upload,
+                            local: PathBuf::from(self.tools.scp_local.trim()),
+                            remote: self.tools.scp_remote.trim().to_owned(),
+                            overwrite: self.tools.scp_overwrite,
+                        })
                     }
+                    Err(e) => self.status = e,
                 }
             }
             Action::ScpOverwrite(v) => self.tools.scp_overwrite = v,
@@ -412,22 +408,18 @@ impl App {
                     self.tools.scp_status = "Cancelling SCP…".into();
                 }
             }
-            Action::ScpProgress(id, done, total) => {
-                if id == self.tools.scp_id {
-                    self.tools.scp_progress = (done, total);
-                }
+            Action::ScpProgress(id, done, total) if id == self.tools.scp_id => {
+                self.tools.scp_progress = (done, total);
             }
-            Action::ScpDone(id, result) => {
-                if id == self.tools.scp_id {
-                    self.tools.scp_cancel = None;
-                    self.tools.scp_status = match result {
-                        Ok(s) => s,
-                        Err(e) => {
-                            self.tools.errors.record(&e);
-                            e
-                        }
-                    };
-                }
+            Action::ScpDone(id, result) if id == self.tools.scp_id => {
+                self.tools.scp_cancel = None;
+                self.tools.scp_status = match result {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.tools.errors.record(&e);
+                        e
+                    }
+                };
             }
             Action::GenerateReport => {
                 let profile = self.tools.target.clone();

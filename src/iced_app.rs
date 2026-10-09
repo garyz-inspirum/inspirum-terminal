@@ -2747,39 +2747,7 @@ impl App {
                     }
                 }
             }
-            Message::CommandSend => {
-                if self.tools.sender_sync {
-                    return self.tool_update(tools::Action::SendCommand);
-                }
-                let text = self.command_sender.clone();
-                if text.is_empty() {
-                    self.status = "Command sender text is empty.".into();
-                    return Task::none();
-                }
-                let Some(id) = self.focused_terminal_id() else {
-                    self.status = "Focus a connected terminal before sending command text.".into();
-                    return Task::none();
-                };
-                match terminal_ux::classify_paste(self.paste_policy, &text) {
-                    PasteDecision::Send => {
-                        if self.send_to_terminal(id, text.into_bytes()) {
-                            self.status = "Command text sent to the focused terminal.".into();
-                        }
-                    }
-                    PasteDecision::Confirm => {
-                        self.dialog = Some(Dialog::PasteConfirm {
-                            id,
-                            targets: self.paste_targets(id),
-                            text,
-                        });
-                        self.status =
-                            "Multiline command text is waiting for explicit confirmation.".into();
-                    }
-                    PasteDecision::Block => {
-                        self.status = "Command text blocked by the paste safety policy.".into();
-                    }
-                }
-            }
+            Message::CommandSend => return self.tool_update(tools::Action::SendCommand),
             Message::SnippetName(value) => self.snippet_name = value,
             Message::SnippetBody(value) => self.snippet_body = value,
             Message::SaveSnippet => {
@@ -4016,10 +3984,10 @@ impl App {
                     keyboard::Key::Named(Named::Tab) if modifiers.command() => {
                         return self.update(Message::SelectNextTab);
                     }
-                    keyboard::Key::Character("w") if modifiers.command() => {
-                        if !self.tabs.is_empty() {
-                            return self.update(Message::AskClose(self.active));
-                        }
+                    keyboard::Key::Character("w")
+                        if modifiers.command() && !self.tabs.is_empty() =>
+                    {
+                        return self.update(Message::AskClose(self.active));
                     }
                     keyboard::Key::Character("n") if modifiers.command() => {
                         return self.update(Message::New);
