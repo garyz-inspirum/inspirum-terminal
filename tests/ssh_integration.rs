@@ -594,13 +594,13 @@ fn connect_timeout_terminates_stalled_ssh_handshake() {
 fn changed_host_key_rejected_even_in_ask_mode() {
     let p = fixture();
     let (mut b, rx) = open(&p, 702, false, "changed-config");
+    // A rejected OpenSSH client can exit almost immediately. Observe its
+    // diagnostic through the live PTY before relying on the Exit event;
+    // checking only after Exit races the terminal reader under CI load.
+    wait_text(&mut b, "REMOTE HOST IDENTIFICATION HAS CHANGED");
+    wait_text(&mut b, "Host key verification failed");
     wait_exit(&rx, 702);
     let text = grid(&mut b);
-    assert!(
-        text.contains("REMOTE HOST IDENTIFICATION HAS CHANGED"),
-        "{text}"
-    );
-    assert!(text.contains("Host key verification failed"), "{text}");
     assert!(!text.contains("FIXTURE_AUTHENTICATED"), "{text}");
     println!("PASS changed pinned host key rejected with StrictHostKeyChecking=ask");
 }
