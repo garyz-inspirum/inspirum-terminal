@@ -19,6 +19,20 @@ impl App {
     }
     pub(super) fn ssh_result(&mut self, data: Data) {
         match data {
+            Data::TunnelStatus(key, running) => {
+                if self.tools.tunnel_target.as_deref() == Some(&key) {
+                    self.status = if running {
+                        "Tunnel manager is running."
+                    } else {
+                        "Tunnel manager has exited."
+                    }
+                    .into();
+                    if !running {
+                        self.tools.tunnel = None;
+                        self.tools.tunnel_target = None;
+                    }
+                }
+            }
             Data::Text(value) => self.tools.output = value,
             Data::Report(value) => {
                 self.tools.report = value;
@@ -293,6 +307,20 @@ impl App {
                 }
             }
             Action::TunnelExposure(v) => self.tools.tunnel_exposure = v,
+            Action::CheckTunnels => {
+                if let (Some(tunnel), Some(key)) = (&self.tools.tunnel, &self.tools.tunnel_target) {
+                    let tunnel = tunnel.clone();
+                    let key = key.clone();
+                    return self.tool_job(move || {
+                        tunnel
+                            .lock()
+                            .map_err(|_| "Tunnel state lock failed.".to_owned())?
+                            .is_running()
+                            .map(|running| Data::TunnelStatus(key, running))
+                            .map_err(|e| format!("{e:#}"))
+                    });
+                }
+            }
             Action::StopTunnels => {
                 if self.tools.busy {
                     return Task::none();
@@ -453,7 +481,7 @@ impl App {
                     for(index,label,value)in[(0,"IdentitiesOnly",session.ssh.identities_only),(1,"GSSAPI credential delegation",session.ssh.gssapi_delegate_credentials)]{policy=policy.push(column![text(label).size(12),row![act("Inherit",Action::SshPolicy(index,None)).style(if value.is_none(){selected_button}else{quiet}),act("Enable",Action::SshPolicy(index,Some(true))).style(if value==Some(true){selected_button}else{quiet}),act("Disable",Action::SshPolicy(index,Some(false))).style(if value==Some(false){selected_button}else{quiet})].spacing(5)]);}
                     policy=policy.push(text("Credential delegation exposes credentials to the remote host. Enable only for trusted hosts.").size(12)).push(act("Save advanced profile policy",Action::SaveSshPolicy));
                 }
-                column![text("SSH management").size(24),text(title),input("known_hosts override (blank uses OpenSSH default)",&self.tools.known_hosts,Field::KnownHosts),row![act("Inspect trusted key",Action::InspectKey),act("Remove trusted key…",Action::AskRemoveKey)].spacing(6),scrollable(text(&self.tools.output).font(Font::MONOSPACE).size(12)).height(120),policy,row![act("Check ControlMaster",Action::MasterCheck),act("Close ControlMaster…",Action::MasterClose)].spacing(6),text(format!("Tunnel manager: {}",self.tools.tunnel_target.as_deref().unwrap_or("stopped"))),checkbox(self.tools.tunnel_exposure).label("Acknowledge non-loopback tunnel listener exposure").on_toggle(|v|msg(Action::TunnelExposure(v))),row![act("Start tunnels",Action::StartTunnels),act("Stop tunnels",Action::StopTunnels)].spacing(6),row![act("Refresh tmux sessions",Action::TmuxRefresh),act("Open SFTP terminal",Action::SftpTerminal)].spacing(6),tmux_list,input("New tmux session name",&self.tools.tmux_name,Field::TmuxName),act("Create tmux session",Action::TmuxCreate)].spacing(10).into()
+                column![text("SSH management").size(24),text(title),input("known_hosts override (blank uses OpenSSH default)",&self.tools.known_hosts,Field::KnownHosts),row![act("Inspect trusted key",Action::InspectKey),act("Remove trusted key…",Action::AskRemoveKey)].spacing(6),scrollable(text(&self.tools.output).font(Font::MONOSPACE).size(12)).height(120),policy,row![act("Check ControlMaster",Action::MasterCheck),act("Close ControlMaster…",Action::MasterClose)].spacing(6),text(format!("Tunnel manager: {}",self.tools.tunnel_target.as_deref().unwrap_or("stopped"))),checkbox(self.tools.tunnel_exposure).label("Acknowledge non-loopback tunnel listener exposure").on_toggle(|v|msg(Action::TunnelExposure(v))),row![act("Start tunnels",Action::StartTunnels),act("Stop tunnels",Action::StopTunnels),act("Check status",Action::CheckTunnels)].spacing(6),row![act("Refresh tmux sessions",Action::TmuxRefresh),act("Open SFTP terminal",Action::SftpTerminal)].spacing(6),tmux_list,input("New tmux session name",&self.tools.tmux_name,Field::TmuxName),act("Create tmux session",Action::TmuxCreate)].spacing(10).into()
             }
         }
     }

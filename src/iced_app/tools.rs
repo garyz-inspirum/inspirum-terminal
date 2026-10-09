@@ -99,6 +99,7 @@ pub(super) enum Data {
     Host(String, terminal::HostKeyTarget, String),
     Tmux(String, Vec<crate::tmux::TmuxSession>),
     Tunnel(String, Arc<Mutex<terminal::TunnelProcess>>),
+    TunnelStatus(String, bool),
 }
 impl std::fmt::Debug for Data {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -169,6 +170,7 @@ pub(super) enum Action {
     MasterClose,
     StartTunnels,
     StopTunnels,
+    CheckTunnels,
     TmuxRefresh,
     TmuxAttach(String),
     TmuxCreate,
@@ -645,6 +647,10 @@ impl App {
             Action::WorkspaceReconnect(v) => self.tools.workspace_reconnect = v,
             Action::SaveWorkspace => {
                 if let Some(tab) = self.tabs.get(self.active) {
+                    if tab.panes.iter().any(|(_, pane)| pane.sftp) {
+                        self.status = "Saved SSH workspaces cannot contain SFTP terminals.".into();
+                        return Task::none();
+                    }
                     let mut profiles = Vec::new();
                     let tree =
                         capture_workspace_tree(tab.panes.layout(), &tab.panes, &mut profiles);
@@ -1071,6 +1077,9 @@ impl App {
             .iter()
             .flat_map(|t| t.panes.iter().map(|(_, p)| p.id))
             .collect();
+        let tabs: BTreeSet<_> = self.tabs.iter().map(|t| t.id).collect();
+        self.tools.tab_labels.retain(|id, _| tabs.contains(id));
+        self.tools.selected_tabs.retain(|id| tabs.contains(id));
         self.tools.histories.retain(|id, _| ids.contains(id));
         self.tools.logs.retain(|id, _| ids.contains(id));
         self.tools.log_pending.retain(|id| ids.contains(id));
