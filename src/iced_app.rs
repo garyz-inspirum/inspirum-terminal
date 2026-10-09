@@ -5433,9 +5433,15 @@ mod tests {
     }
 
     #[test]
-    fn iced_slow_trace_parsing_is_explicit_and_does_not_log_secrets() {
-        assert_eq!(parse_iced_trace_threshold("25"), Some(Duration::from_millis(25)));
-        assert_eq!(parse_iced_trace_threshold(" 100 "), Some(Duration::from_millis(100)));
+    fn iced_slow_trace_parsing_requires_positive_millisecond_threshold() {
+        assert_eq!(
+            parse_iced_trace_threshold("25"),
+            Some(Duration::from_millis(25))
+        );
+        assert_eq!(
+            parse_iced_trace_threshold(" 100 "),
+            Some(Duration::from_millis(100))
+        );
         assert_eq!(parse_iced_trace_threshold("0"), None);
         assert_eq!(parse_iced_trace_threshold(""), None);
         assert_eq!(parse_iced_trace_threshold("not-a-number"), None);
