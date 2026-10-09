@@ -888,6 +888,7 @@ struct TerminalCanvasState {
     row_hashes: RefCell<Vec<u64>>,
     row_caches: RefCell<Vec<canvas::Cache>>,
     background_cache: canvas::Cache,
+    background_key: Cell<Option<(f32, f32, [u8; 3])>>,
 }
 
 impl Default for TerminalCanvasState {
@@ -902,6 +903,7 @@ impl Default for TerminalCanvasState {
             row_hashes: RefCell::new(Vec::new()),
             row_caches: RefCell::new(Vec::new()),
             background_cache: canvas::Cache::new(),
+            background_key: Cell::new(None),
         }
     }
 }
@@ -914,6 +916,17 @@ impl TerminalCanvasState {
             return false;
         }
         self.last_report_cell = Some(cell);
+        true
+    }
+
+    /// Background geometry is independent of text/PTY generations. Refresh it
+    /// only when the terminal background color or canvas bounds actually change.
+    fn background_changed(&self, width: f32, height: f32, color: [u8; 3]) -> bool {
+        let key = (width, height, color);
+        if self.background_key.get() == Some(key) {
+            return false;
+        }
+        self.background_key.set(Some(key));
         true
     }
 }
@@ -1205,8 +1218,11 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                     hashes[row] = new_hashes[row];
                 }
             }
-            state.background_cache.clear();
             state.generation.set(self.generation);
+        }
+
+        if state.background_changed(bounds.width, bounds.height, self.snapshot.background) {
+            state.background_cache.clear();
         }
 
         let background_geometry = state
@@ -5814,6 +5830,21 @@ mod tests {
         let pane = app.tabs[0].panes.iter().next().unwrap().1;
         assert_eq!(pane.id, id);
         assert_eq!(pane.error, previous_error);
+    }
+
+    #[test]
+    fn background_cache_ignores_text_generations_but_tracks_size_and_color() {
+        let state = TerminalCanvasState::default();
+        let black = [0, 0, 0];
+        let navy = [12, 18, 30];
+        assert!(state.background_changed(800.0, 600.0, black));
+        assert!(!state.background_changed(800.0, 600.0, black));
+        // This remains cached when PTY output advances the text generation.
+        state.generation.set(42);
+        assert!(!state.background_changed(800.0, 600.0, black));
+        assert!(state.background_changed(801.0, 600.0, black));
+        assert!(!state.background_changed(801.0, 600.0, black));
+        assert!(state.background_changed(801.0, 600.0, navy));
     }
 
     #[test]
