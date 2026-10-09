@@ -156,6 +156,23 @@ fn transfer_bridge() -> impl Stream<Item = Message> {
     })
 }
 
+/// Run blocking SFTP and filesystem work on its own OS worker, rather than
+/// occupying Iced's asynchronous executor. This keeps pointer, keyboard and
+/// PTY event handling responsive while a remote host is slow or unreachable.
+async fn run_blocking_result<T, F>(work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let (sender, receiver) = iced::futures::channel::oneshot::channel();
+    thread::spawn(move || {
+        let _ = sender.send(work());
+    });
+    receiver
+        .await
+        .unwrap_or_else(|_| Err("Background file operation ended unexpectedly.".into()))
+}
+
 fn send_transfer_event(sender: &TransferBridgeSender, event: TransferEvent) {
     let _ = sender.unbounded_send(event);
 }
@@ -1959,7 +1976,7 @@ impl App {
         let directory = self.files.local_dir.clone();
 
         Task::perform(
-            async move {
+            run_blocking_result(move || {
                 sftp::local_entries(&directory)
                     .map(|paths| {
                         paths
@@ -1986,7 +2003,7 @@ impl App {
                             .collect::<Vec<_>>()
                     })
                     .map_err(|error| format!("{error:#}"))
-            },
+            }),
             move |result| Message::FilesLocalLoaded(generation, result),
         )
     }
@@ -2004,10 +2021,10 @@ impl App {
         let config = self.ssh_config.clone();
 
         Task::perform(
-            async move {
+            run_blocking_result(move || {
                 sftp::list_remote(&profile, config.as_deref(), &directory)
                     .map_err(|error| format!("{error:#}"))
-            },
+            }),
             move |result| Message::FilesRemoteLoaded(generation, result),
         )
     }
@@ -2030,7 +2047,7 @@ impl App {
         let conflict = upload_conflicts_with_remote_entries(&local, &self.files.remote_entries);
 
         Task::perform(
-            async move {
+            run_blocking_result(move || {
                 let metadata = std::fs::metadata(&local)
                     .map_err(|error| format!("read upload source: {error}"))?;
                 if !metadata.is_file() {
@@ -2054,7 +2071,7 @@ impl App {
                     },
                     conflict,
                 })
-            },
+            }),
             Message::FilesTransferPrepared,
         )
     }
@@ -2076,7 +2093,7 @@ impl App {
         let remote = sftp::join_remote(&self.files.remote_dir, &remote_entry.name);
 
         Task::perform(
-            async move {
+            run_blocking_result(move || {
                 let local = sftp::local_destination(&local_dir, &remote_entry.name)
                     .map_err(|error| format!("{error:#}"))?;
                 let conflict = local.exists();
@@ -2091,7 +2108,7 @@ impl App {
                     },
                     conflict,
                 })
-            },
+            }),
             Message::FilesTransferPrepared,
         )
     }
@@ -2715,7 +2732,7 @@ impl App {
                 let request_id = self.remote_editor_open_generation;
                 self.status = format!("Opening remote editor for {remote}...");
                 return Task::perform(
-                    async move {
+                    run_blocking_result(move || {
                         remote_edit::RemoteEdit::open(
                             &open_session,
                             config.as_deref(),
@@ -2724,7 +2741,7 @@ impl App {
                         )
                         .map(|editor| RemoteEditHandle(Arc::new(Mutex::new(editor))))
                         .map_err(|error| format!("{error:#}"))
-                    },
+                    }),
                     move |result| Message::RemoteEditorOpened {
                         request_id,
                         session,
@@ -2833,7 +2850,7 @@ impl App {
                 let config = self.ssh_config.clone();
                 self.status = format!("Saving {}...", editor.remote);
                 return Task::perform(
-                    async move {
+                    run_blocking_result(move || {
                         let mut remote = handle
                             .0
                             .lock()
@@ -2841,7 +2858,7 @@ impl App {
                         remote
                             .save(&session, config.as_deref(), force)
                             .map_err(|error| format!("{error:#}"))
-                    },
+                    }),
                     move |result| Message::RemoteEditorSaved { editor_id, result },
                 );
             }
@@ -2955,11 +2972,11 @@ impl App {
                 match action {
                     FileNameAction::MkdirLocal(directory) => {
                         return Task::perform(
-                            async move {
+                            run_blocking_result(move || {
                                 sftp::mkdir_local(&directory, &name)
                                     .map(|path| format!("Created local {}", path.to_string_lossy()))
                                     .map_err(|error| format!("{error:#}"))
-                            },
+                            }),
                             |result| Message::FilesMutationFinished {
                                 remote: false,
                                 session_key: None,
@@ -2975,11 +2992,11 @@ impl App {
                         let config = self.ssh_config.clone();
                         let path = sftp::join_remote(&directory, &name);
                         return Task::perform(
-                            async move {
+                            run_blocking_result(move || {
                                 sftp::mkdir_remote(&session, config.as_deref(), &path)
                                     .map(|_| format!("Created remote {path}"))
                                     .map_err(|error| format!("{error:#}"))
-                            },
+                            }),
                             move |result| Message::FilesMutationFinished {
                                 remote: true,
                                 session_key: Some(session_key.clone()),
@@ -2989,13 +3006,13 @@ impl App {
                     }
                     FileNameAction::RenameLocal(path) => {
                         return Task::perform(
-                            async move {
+                            run_blocking_result(move || {
                                 sftp::rename_local(&path, &name)
                                     .map(|target| {
                                         format!("Renamed local {}", target.to_string_lossy())
                                     })
                                     .map_err(|error| format!("{error:#}"))
-                            },
+                            }),
                             |result| Message::FilesMutationFinished {
                                 remote: false,
                                 session_key: None,
@@ -3011,11 +3028,11 @@ impl App {
                         let config = self.ssh_config.clone();
                         let to = sftp::join_remote(&remote_parent(&from), &name);
                         return Task::perform(
-                            async move {
+                            run_blocking_result(move || {
                                 sftp::rename_remote(&session, config.as_deref(), &from, &to)
                                     .map(|_| format!("Renamed remote to {to}"))
                                     .map_err(|error| format!("{error:#}"))
-                            },
+                            }),
                             move |result| Message::FilesMutationFinished {
                                 remote: true,
                                 session_key: Some(session_key.clone()),
@@ -3094,11 +3111,11 @@ impl App {
                     Dialog::FileDeleteLocal(path) => {
                         let label = path.to_string_lossy().into_owned();
                         return Task::perform(
-                            async move {
+                            run_blocking_result(move || {
                                 sftp::delete_local(&path)
                                     .map(|_| format!("Deleted local {label}"))
                                     .map_err(|error| format!("{error:#}"))
-                            },
+                            }),
                             |result| Message::FilesDeleteFinished {
                                 remote: false,
                                 session_key: None,
@@ -3115,11 +3132,11 @@ impl App {
                         let config = self.ssh_config.clone();
                         let label = path.clone();
                         return Task::perform(
-                            async move {
+                            run_blocking_result(move || {
                                 sftp::delete_remote(&session, config.as_deref(), &path, directory)
                                     .map(|_| format!("Deleted remote {label}"))
                                     .map_err(|error| format!("{error:#}"))
-                            },
+                            }),
                             move |result| Message::FilesDeleteFinished {
                                 remote: true,
                                 session_key: Some(session_key.clone()),
@@ -5367,6 +5384,22 @@ mod tests {
         let _ = app.update(Message::ConfirmPaste);
         assert!(app.dialog.is_none());
         assert!(app.status.contains("cancelled"));
+    }
+
+    #[test]
+    fn blocking_file_worker_keeps_the_iced_executor_free() {
+        use iced::futures::FutureExt as _;
+
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let mut operation = Box::pin(run_blocking_result(move || {
+            blocked.recv().expect("worker release signal");
+            Ok::<usize, String>(42)
+        }));
+
+        // Polling the Iced-side future must not wait for the blocking worker.
+        assert!(operation.as_mut().now_or_never().is_none());
+        release.send(()).expect("release blocking test worker");
+        assert_eq!(iced::futures::executor::block_on(operation), Ok(42));
     }
 
     #[test]
