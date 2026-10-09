@@ -467,7 +467,11 @@ impl TerminalBackend {
                 std::mem::swap(&mut foreground, &mut background);
             }
 
-            let cursor = content.grid.cursor.point == indexed.point;
+            // Full-screen applications use DECTCEM to hide the cursor. The
+            // live input cursor also must not be painted over scrollback.
+            let cursor = content.terminal_mode.contains(TermMode::SHOW_CURSOR)
+                && content.grid.display_offset() == 0
+                && content.grid.cursor.point == indexed.point;
             let cursor_color = theme.get_color(content.cursor.fg);
             let [fg_r, fg_g, fg_b, _] = foreground.to_array();
             let [cell_bg_r, cell_bg_g, cell_bg_b, _] = background.to_array();

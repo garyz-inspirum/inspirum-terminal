@@ -184,3 +184,69 @@ fn terminal_high_volume_benchmark() {
         elapsed.as_secs_f64()
     );
 }
+
+#[test]
+fn display_snapshot_honors_application_cursor_hide_and_show() {
+    let mut backend = backend_for(
+        "printf '\\033[?25lCURSOR_HIDDEN'; read -r resume; \
+         printf '\\033[?25hCURSOR_SHOWN'; read -r done",
+    );
+    let theme = egui_term::TerminalTheme::default();
+    let _ = wait_for_text(&mut backend, "CURSOR_HIDDEN", Duration::from_secs(5));
+    let hidden = backend.display_snapshot(&theme);
+    assert!(
+        hidden.cells.iter().all(|cell| !cell.cursor),
+        "DECTCEM hide must remove the cursor from the Iced display snapshot"
+    );
+
+    backend.process_command(BackendCommand::Write(b"resume\n".to_vec()));
+    let _ = wait_for_text(&mut backend, "CURSOR_SHOWN", Duration::from_secs(5));
+    let shown = backend.display_snapshot(&theme);
+    assert_eq!(shown.cells.iter().filter(|cell| cell.cursor).count(), 1);
+    assert_ne!(hidden, shown);
+}
+
+#[test]
+fn display_snapshot_does_not_paint_live_cursor_over_scrollback() {
+    let mut backend = backend_for(
+        "i=0; while [ \"$i\" -lt 100 ]; do \
+         printf 'history-%03d\\n' \"$i\"; i=$((i + 1)); done; \
+         printf 'CURSOR_HISTORY_READY\\033[H'; read -r done",
+    );
+    let theme = egui_term::TerminalTheme::default();
+    let _ = wait_for_text(&mut backend, "CURSOR_HISTORY_READY", Duration::from_secs(5));
+    assert_eq!(backend.sync().grid.cursor.point.line.0, 0);
+    assert_eq!(
+        backend
+            .display_snapshot(&theme)
+            .cells
+            .iter()
+            .filter(|cell| cell.cursor)
+            .count(),
+        1
+    );
+
+    // A one-line scroll still leaves the live cursor row inside the viewport;
+    // position matching alone would incorrectly draw it over history.
+    backend.process_command(BackendCommand::Scroll(1));
+    assert!(backend.sync().grid.display_offset() > 0);
+    assert!(
+        backend
+            .display_snapshot(&theme)
+            .cells
+            .iter()
+            .all(|cell| !cell.cursor)
+    );
+
+    backend.process_command(BackendCommand::Scroll(-1));
+    assert_eq!(backend.sync().grid.display_offset(), 0);
+    assert_eq!(
+        backend
+            .display_snapshot(&theme)
+            .cells
+            .iter()
+            .filter(|cell| cell.cursor)
+            .count(),
+        1
+    );
+}

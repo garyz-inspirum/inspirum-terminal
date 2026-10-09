@@ -114,7 +114,7 @@ Iced supplies native application structure, theming, tasks/subscriptions and pan
 
 The possible terminal widget, iced_term 0.8.0, uses an Alacritty backend but must be audited rather than treated as a drop-in replacement. Current application code uses egui_term's PTY and parser ownership. Preserve and separate reusable profile, SSH launch/trust policy, transfer and remote-editor logic from rendering; review egui-coupled event, selection, clipboard, paste and process-lifecycle code explicitly.
 
-The live Iced path now covers real SSH sessions, safe host-key policy, committed CJK text, scrollback, resize, selection, clipboard guards, multiline paste confirmation, mouse reporting, multiple panes and session shutdown. Remaining acceptance includes native IME composition behaviour, alternate-screen/full-screen application testing, edge-case mouse modes, focus restoration/accessibility, and measured GPU/fallback performance on named hardware.
+The live Iced path now covers real SSH sessions, safe host-key policy, committed CJK text, scrollback, resize, selection, clipboard guards, multiline paste confirmation, mouse reporting, multiple panes and session shutdown. Display snapshots honor application cursor hide/show (DECTCEM) and suppress the live cursor while viewing scrollback. Disposable local PTY tests exercise hide/show and scrolling back to the live cursor on Unix; these do not establish Windows ConPTY or full-screen GUI acceptance. Remaining acceptance includes native IME composition behaviour, alternate-screen/full-screen application testing, edge-case mouse modes, focus restoration/accessibility, and measured GPU/fallback performance on named hardware.
 
 Primary references checked 7 October 2026:
 
