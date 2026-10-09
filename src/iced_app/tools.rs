@@ -1003,7 +1003,7 @@ impl App {
                 if let Some(text) =
                     command_palette::complete_snippet(&self.tools.completion, &self.snippets)
                 {
-                    self.command_sender = text;
+                    self.stage_command(text);
                 } else {
                     self.status = "Completion requires one uniquely matching snippet name.".into();
                 }
@@ -1552,11 +1552,21 @@ impl App {
                 act(
                     "Confirm multiline paste",
                     Action::PastePolicy(PastePolicy::ConfirmMultiline)
-                ),
+                )
+                .style(if self.paste_policy == PastePolicy::ConfirmMultiline {
+                    selected_button
+                } else {
+                    quiet
+                }),
                 act(
                     "Confirm every paste",
                     Action::PastePolicy(PastePolicy::ConfirmAll)
-                ),
+                )
+                .style(if self.paste_policy == PastePolicy::ConfirmAll {
+                    selected_button
+                } else {
+                    quiet
+                }),
                 act(
                     "Block multiline",
                     Action::PastePolicy(PastePolicy::BlockMultiline)
@@ -1586,8 +1596,10 @@ impl App {
                 Field::Completion
             ),
             act("Stage unique completion", Action::CompleteSnippet),
-            text_input("Remote text to send", &self.command_sender)
-                .on_input(Message::CommandSender)
+            text_editor(&self.command_content)
+                .placeholder("Remote text to send")
+                .on_action(Message::CommandEdit)
+                .height(140)
                 .padding(8),
             checkbox(self.tools.sender_sync)
                 .label("Send to selected Workspace sync targets")
@@ -1711,6 +1723,49 @@ mod tests {
         let profile = session(name);
         let pane = app.new_terminal_pane(profile.clone());
         app.tabs.push(Workspace::new(profile, pane));
+    }
+    #[test]
+    fn multiline_command_editor_stages_enter_without_sending() {
+        let (mut app, _dir) = app();
+        let _ = app.update(Message::CommandEdit(text_editor::Action::Edit(
+            text_editor::Edit::Paste(Arc::new("printf one".into())),
+        )));
+        let _ = app.update(Message::CommandEdit(text_editor::Action::Edit(
+            text_editor::Edit::Enter,
+        )));
+        let _ = app.update(Message::CommandEdit(text_editor::Action::Edit(
+            text_editor::Edit::Paste(Arc::new("printf two".into())),
+        )));
+        assert_eq!(
+            app.command_sender.lines().collect::<Vec<_>>(),
+            vec!["printf one", "printf two"]
+        );
+        assert!(app.tabs.is_empty());
+        assert!(app.tools.confirm.is_none());
+        assert!(app.dialog.is_none());
+    }
+    #[test]
+    fn snippet_editor_renames_existing_snippet_and_preserves_multiline_body() {
+        let (mut app, _dir) = app();
+        app.snippets.snippets.push(Snippet {
+            name: "old".into(),
+            body: "first\nsecond".into(),
+        });
+        let _ = app.update(Message::EditSnippet("old".into()));
+        assert_eq!(app.snippet_content.text(), "first\nsecond");
+        let _ = app.update(Message::SnippetName("renamed".into()));
+        let _ = app.update(Message::SaveSnippet);
+        assert_eq!(app.snippets.snippets.len(), 1);
+        assert_eq!(app.snippets.snippets[0].name, "renamed");
+        assert_eq!(
+            command_palette::load_library(&app.snippets_path)
+                .unwrap()
+                .snippets[0]
+                .body,
+            "first\nsecond"
+        );
+        assert!(app.editing_snippet.is_none());
+        assert!(app.command_sender.is_empty());
     }
     #[test]
     fn all_tool_panels_construct_without_a_connection() {

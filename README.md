@@ -5,6 +5,7 @@ Inspirum Terminal is a fully open-source Apache-2.0, cross-platform native SSH c
 Current scope:
 
 - native Iced desktop window (the default build and launcher);
+- Iced GPU rendering on Linux/Windows and native tiny-skia rendering on macOS;
 - Iced canvas terminal rendering with the shared `egui_term` PTY/state backend;
 - SSH sessions, interactive SFTP tabs, a graphical SFTP browser/transfer queue, and explicit SCP upload/download operations launched through the system OpenSSH client tools;
 - saved, non-secret connection profiles with search, rename-on-save, editable duplication, confirmed deletion, and validated JSON import/export;

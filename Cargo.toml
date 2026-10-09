@@ -21,7 +21,13 @@ tempfile = "3"
 directories = "6"
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 egui_term = { path = "vendor/egui_term" }
+# Iced's macOS GPU backend currently pulls historical crates without verified
+# license text. Use its native tiny-skia renderer on macOS until that is resolved.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
 iced = { version = "=0.14.0", optional = true, default-features = false, features = ["wgpu", "tiny-skia", "x11", "thread-pool", "crisp", "canvas", "advanced-shaping"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+iced = { version = "=0.14.0", optional = true, default-features = false, features = ["tiny-skia", "thread-pool", "crisp", "canvas", "advanced-shaping"] }
 
 [profile.dev]
 debug = 0

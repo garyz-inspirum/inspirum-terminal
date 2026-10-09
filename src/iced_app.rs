@@ -745,13 +745,15 @@ enum Message {
     ConfirmImportProfiles,
     Commands,
     CommandQuery(String),
-    CommandSender(String),
+    CommandEdit(text_editor::Action),
     CommandStage(usize),
     CommandSend,
     SnippetName(String),
-    SnippetBody(String),
+    SnippetEdit(text_editor::Action),
+    EditSnippet(String),
+    CancelSnippetEdit,
     SaveSnippet,
-    DeleteSnippet(usize),
+    DeleteSnippet(String),
     About,
     CloseDialog,
     DismissModalKey,
@@ -1768,8 +1770,11 @@ struct App {
     snippets: SnippetLibrary,
     command_query: String,
     command_sender: String,
+    command_content: text_editor::Content,
     snippet_name: String,
     snippet_body: String,
+    snippet_content: text_editor::Content,
+    editing_snippet: Option<String>,
     sidebar_collapsed: bool,
     profile_visible: usize,
     profile_matches: Vec<usize>,
@@ -1842,8 +1847,11 @@ impl App {
             snippets,
             command_query: String::new(),
             command_sender: String::new(),
+            command_content: text_editor::Content::new(),
             snippet_name: String::new(),
             snippet_body: String::new(),
+            snippet_content: text_editor::Content::new(),
+            editing_snippet: None,
             sidebar_collapsed: false,
             profile_visible: PROFILE_PAGE_SIZE,
             profile_matches,
@@ -2610,6 +2618,11 @@ impl App {
         refresh_active
     }
 
+    fn stage_command(&mut self, text: String) {
+        self.command_content = text_editor::Content::with_text(&text);
+        self.command_sender = text;
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         let _slow = SlowIcedScope::start("event_update");
         match message {
@@ -2709,14 +2722,17 @@ impl App {
                 return operation::focus("command-query");
             }
             Message::CommandQuery(value) => self.command_query = value,
-            Message::CommandSender(value) => self.command_sender = value,
+            Message::CommandEdit(action) => {
+                self.command_content.perform(action);
+                self.command_sender = self.command_content.text();
+            }
             Message::CommandStage(index) => {
                 let items = iced_palette_items(&self.command_query, &self.snippets);
                 if let Some(item) = items.get(index).cloned() {
                     match item {
                         PaletteItem::Snippet { index, name } => {
                             if let Some(snippet) = self.snippets.snippets.get(index) {
-                                self.command_sender = snippet.body.clone();
+                                self.stage_command(snippet.body.clone());
                                 self.status =
                                     format!("Snippet '{name}' staged. Press Send explicitly.");
                             }
@@ -2749,41 +2765,64 @@ impl App {
             }
             Message::CommandSend => return self.tool_update(tools::Action::SendCommand),
             Message::SnippetName(value) => self.snippet_name = value,
-            Message::SnippetBody(value) => self.snippet_body = value,
+            Message::SnippetEdit(action) => {
+                self.snippet_content.perform(action);
+                self.snippet_body = self.snippet_content.text();
+            }
+            Message::EditSnippet(name) => {
+                if let Some(snippet) = self.snippets.snippets.iter().find(|s| s.name == name) {
+                    self.snippet_name = snippet.name.clone();
+                    self.snippet_body = snippet.body.clone();
+                    self.snippet_content = text_editor::Content::with_text(&snippet.body);
+                    self.editing_snippet = Some(name);
+                }
+            }
+            Message::CancelSnippetEdit => {
+                self.editing_snippet = None;
+                self.snippet_name.clear();
+                self.snippet_body.clear();
+                self.snippet_content = text_editor::Content::new();
+            }
             Message::SaveSnippet => {
                 let candidate = Snippet {
                     name: self.snippet_name.trim().to_owned(),
                     body: self.snippet_body.clone(),
                 };
-                match candidate.validate() {
-                    Err(error) => self.status = format!("Invalid snippet: {error:#}"),
-                    Ok(())
-                        if self
-                            .snippets
-                            .snippets
-                            .iter()
-                            .any(|snippet| snippet.name.eq_ignore_ascii_case(&candidate.name)) =>
-                    {
-                        self.status = "Snippet name already exists.".into();
-                    }
+                if let Err(error) = candidate.validate() {
+                    self.status = format!("Invalid snippet: {error:#}");
+                    return Task::none();
+                }
+                let editing = self
+                    .editing_snippet
+                    .as_ref()
+                    .and_then(|name| self.snippets.snippets.iter().position(|s| s.name == *name));
+                if self.editing_snippet.is_some() && editing.is_none() {
+                    self.status = "The snippet being edited has changed or was removed. Reload it before saving.".into();
+                    return Task::none();
+                }
+                if self.snippets.snippets.iter().enumerate().any(|(i, s)| {
+                    Some(i) != editing && s.name.eq_ignore_ascii_case(&candidate.name)
+                }) {
+                    self.status = "Snippet name already exists.".into();
+                    return Task::none();
+                }
+                let mut library = self.snippets.clone();
+                if let Some(index) = editing {
+                    library.snippets[index] = candidate;
+                } else {
+                    library.snippets.push(candidate);
+                }
+                match command_palette::save_library(&self.snippets_path, &library) {
                     Ok(()) => {
-                        self.snippets.snippets.push(candidate);
-                        match command_palette::save_library(&self.snippets_path, &self.snippets) {
-                            Ok(()) => {
-                                self.snippet_name.clear();
-                                self.snippet_body.clear();
-                                self.status = "Snippet saved.".into();
-                            }
-                            Err(error) => {
-                                self.snippets.snippets.pop();
-                                self.status = format!("Cannot save snippet: {error:#}");
-                            }
-                        }
+                        self.snippets = library;
+                        let _ = self.update(Message::CancelSnippetEdit);
+                        self.status = "Snippet saved.".into();
                     }
+                    Err(error) => self.status = format!("Cannot save snippet: {error:#}"),
                 }
             }
-            Message::DeleteSnippet(index) => {
-                if index < self.snippets.snippets.len() {
+            Message::DeleteSnippet(name) => {
+                if let Some(index) = self.snippets.snippets.iter().position(|s| s.name == name) {
                     let removed = self.snippets.snippets.remove(index);
                     match command_palette::save_library(&self.snippets_path, &self.snippets) {
                         Ok(()) => self.status = format!("Snippet '{}' deleted.", removed.name),
@@ -5296,10 +5335,12 @@ impl App {
                     text_input("Snippet name", &self.snippet_name)
                         .on_input(Message::SnippetName)
                         .padding(9),
-                    text_input("Snippet body (non-secret remote text)", &self.snippet_body)
-                        .on_input(Message::SnippetBody)
+                    text_editor(&self.snippet_content)
+                        .placeholder("Snippet body (non-secret remote text)")
+                        .on_action(Message::SnippetEdit)
+                        .height(100)
                         .padding(9),
-                    action("Save snippet", Message::SaveSnippet),
+                    row![action("Save snippet", Message::SaveSnippet), action("Clear draft", Message::CancelSnippetEdit)].spacing(6),
                 ]
                 .spacing(6);
                 for (index, snippet) in self.snippets.snippets.iter().enumerate().take(8) {
@@ -5319,7 +5360,8 @@ impl App {
                                 )
                             ),
                             space::horizontal(),
-                            action("Delete", Message::DeleteSnippet(index)),
+                            action("Edit", Message::EditSnippet(snippet.name.clone())),
+                            action("Delete", Message::DeleteSnippet(snippet.name.clone())),
                         ]
                         .spacing(6)
                         .align_y(iced::Center),
@@ -5331,9 +5373,10 @@ impl App {
                     container(
                         column![
                             text("COMMAND SENDER · FOCUSED PANE").size(11).color(BLUE),
-                            text_input("Remote-shell text to stage", &self.command_sender)
-                                .on_input(Message::CommandSender)
-                                .on_submit(Message::CommandSend)
+                            text_editor(&self.command_content)
+                                .placeholder("Remote-shell text to stage")
+                                .on_action(Message::CommandEdit)
+                                .height(120)
                                 .padding(10),
                             row![
                                 action("Send explicitly", Message::CommandSend).style(primary),
