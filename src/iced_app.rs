@@ -42,6 +42,7 @@ const DANGER: Color = Color::from_rgb8(255, 138, 151);
 const TERMINAL_CELL_WIDTH: f32 = 8.4;
 const TERMINAL_CELL_HEIGHT: f32 = 18.0;
 const FILES_PAGE_SIZE: usize = 200;
+const PROFILE_PAGE_SIZE: usize = 100;
 
 pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result {
     iced::application(
@@ -503,6 +504,10 @@ fn next_file_page(current: usize, total: usize) -> usize {
     current.saturating_add(FILES_PAGE_SIZE).min(total)
 }
 
+fn next_profile_page(current: usize, total: usize) -> usize {
+    current.saturating_add(PROFILE_PAGE_SIZE).min(total)
+}
+
 fn upload_conflicts_with_remote_entries(
     local: &std::path::Path,
     entries: &[sftp::RemoteEntry],
@@ -600,6 +605,7 @@ enum Dialog {
 #[derive(Clone, Debug)]
 enum Message {
     Search(String),
+    ShowMoreProfiles,
     Open(usize),
     EditProfile(usize),
     SelectTab(usize),
@@ -1549,6 +1555,7 @@ struct App {
     snippet_name: String,
     snippet_body: String,
     sidebar_collapsed: bool,
+    profile_visible: usize,
     form: ConnectionForm,
     import_path: String,
     editing_profile: Option<String>,
@@ -1607,6 +1614,7 @@ impl App {
             snippet_name: String::new(),
             snippet_body: String::new(),
             sidebar_collapsed: false,
+            profile_visible: PROFILE_PAGE_SIZE,
             form: ConnectionForm::default(),
             import_path: String::new(),
             editing_profile: None,
@@ -2322,7 +2330,16 @@ impl App {
             Message::Search(value) => {
                 if self.dialog.is_none() {
                     self.query = value;
+                    self.profile_visible = PROFILE_PAGE_SIZE;
                 }
+            }
+            Message::ShowMoreProfiles => {
+                let matches = self
+                    .profiles
+                    .iter()
+                    .filter(|profile| session_matches_query(profile, &self.query))
+                    .count();
+                self.profile_visible = next_profile_page(self.profile_visible, matches);
             }
             Message::Open(index) => {
                 self.open(index);
@@ -3797,6 +3814,11 @@ impl App {
         ]
         .spacing(12);
 
+        let matches = self
+            .profiles
+            .iter()
+            .filter(|profile| session_matches_query(profile, &self.query))
+            .count();
         let mut current_group = String::new();
         let mut count = 0;
         for (index, profile) in self
@@ -3804,6 +3826,7 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, profile)| session_matches_query(profile, &self.query))
+            .take(self.profile_visible)
         {
             let group = if profile.folder.trim().is_empty() {
                 "Ungrouped"
@@ -3854,6 +3877,14 @@ impl App {
 
         if count == 0 {
             list = list.push(text("No matching saved sessions").color(MUTED));
+        } else if count < matches {
+            list = list.push(
+                action(
+                    format!("Show more sessions ({count} of {matches})"),
+                    Message::ShowMoreProfiles,
+                )
+                .width(Fill),
+            );
         }
 
         container(
@@ -5302,6 +5333,34 @@ fn primary(theme: &Theme, status: button::Status) -> button::Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_session_sidebar_pages_reset_after_search_changes() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-profile-page-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.profiles = (0..250)
+            .map(|index| Session {
+                name: format!("server-{index}"),
+                host: format!("host-{index}.example.invalid"),
+                ..Session::default()
+            })
+            .collect();
+
+        assert_eq!(app.profile_visible, PROFILE_PAGE_SIZE);
+        let _ = app.update(Message::ShowMoreProfiles);
+        assert_eq!(app.profile_visible, PROFILE_PAGE_SIZE * 2);
+        let _ = app.update(Message::ShowMoreProfiles);
+        assert_eq!(app.profile_visible, 250);
+        let _ = app.update(Message::ShowMoreProfiles);
+        assert_eq!(app.profile_visible, 250);
+
+        let _ = app.update(Message::Search("host-2".into()));
+        assert_eq!(app.profile_visible, PROFILE_PAGE_SIZE);
+        assert_eq!(next_profile_page(usize::MAX, 250), 250);
+    }
 
     #[test]
     fn upload_conflict_check_does_not_need_to_clone_remote_directory() {
