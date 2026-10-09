@@ -29,6 +29,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - name: Linux desktop dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev xvfb xdotool imagemagick fonts-dejavu-core
@@ -44,6 +46,8 @@ jobs:
         run: cargo test --manifest-path prototypes/iced-shell/Cargo.toml
       - name: Production Iced shell tests
         run: cargo test --features iced-ui
+      - name: Production Iced shell Clippy
+        run: cargo clippy --locked --features iced-ui --all-targets -- -D warnings
       - name: Build production Iced shell
         run: cargo build --release --features iced-ui
       - name: Build native preview

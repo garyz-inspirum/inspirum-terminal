@@ -269,7 +269,7 @@ fn send_transfer_event(sender: &TransferBridgeSender, event: TransferEvent) {
     let _ = sender.unbounded_send(event);
 }
 
-fn run_transfer_worker(
+struct TransferWorker {
     id: u64,
     pending: PendingTransfer,
     overwrite: bool,
@@ -278,7 +278,19 @@ fn run_transfer_worker(
     cancel: Arc<AtomicBool>,
     config: Option<PathBuf>,
     sender: TransferBridgeSender,
-) {
+}
+
+fn run_transfer_worker(worker: TransferWorker) {
+    let TransferWorker {
+        id,
+        pending,
+        overwrite,
+        resume_path,
+        resume_requested,
+        cancel,
+        config,
+        sender,
+    } = worker;
     let start = match (pending.direction, resume_requested) {
         (TransferDirection::Download, true) => {
             let Some(partial) = resume_path.as_deref() else {
@@ -445,10 +457,10 @@ impl Workspace {
     }
 
     fn split(&mut self, axis: pane_grid::Axis, terminal: TerminalPane) {
-        if self.panes.len() < 4 {
-            if let Some((pane, _)) = self.panes.split(axis, self.focus, terminal) {
-                self.focus = pane;
-            }
+        if self.panes.len() < 4
+            && let Some((pane, _)) = self.panes.split(axis, self.focus, terminal)
+        {
+            self.focus = pane;
         }
     }
 }
@@ -1328,25 +1340,25 @@ fn terminal_key_bytes(
 ) -> Option<Vec<u8>> {
     use keyboard::key::Named;
 
-    if modifiers.control() {
-        if let keyboard::Key::Character(value) = key.as_ref() {
-            let mut chars = value.chars();
-            if let (Some(ch), None) = (chars.next(), chars.next()) {
-                let ch = ch.to_ascii_lowercase();
-                let control = match ch {
-                    'a'..='z' => Some((ch as u8 - b'a') + 1),
-                    ' ' | '@' => Some(0),
-                    '[' => Some(0x1b),
-                    '\\' => Some(0x1c),
-                    ']' => Some(0x1d),
-                    '^' => Some(0x1e),
-                    '_' => Some(0x1f),
-                    '?' => Some(0x7f),
-                    _ => None,
-                };
-                if let Some(control) = control {
-                    return Some(vec![control]);
-                }
+    if modifiers.control()
+        && let keyboard::Key::Character(value) = key.as_ref()
+    {
+        let mut chars = value.chars();
+        if let (Some(ch), None) = (chars.next(), chars.next()) {
+            let ch = ch.to_ascii_lowercase();
+            let control = match ch {
+                'a'..='z' => Some((ch as u8 - b'a') + 1),
+                ' ' | '@' => Some(0),
+                '[' => Some(0x1b),
+                '\\' => Some(0x1c),
+                ']' => Some(0x1d),
+                '^' => Some(0x1e),
+                '_' => Some(0x1f),
+                '?' => Some(0x7f),
+                _ => None,
+            };
+            if let Some(control) = control {
+                return Some(vec![control]);
             }
         }
     }
@@ -2081,14 +2093,13 @@ impl App {
     fn toggle_files(&mut self) {
         if let Some(pane) = self.files_dock.take() {
             self.dock.close(pane);
-        } else if !self.tabs.is_empty() {
-            if let Some((pane, split)) =
+        } else if !self.tabs.is_empty()
+            && let Some((pane, split)) =
                 self.dock
                     .split(pane_grid::Axis::Horizontal, self.terminal_dock, Dock::Files)
-            {
-                self.files_dock = Some(pane);
-                self.dock.resize(split, 0.62);
-            }
+        {
+            self.files_dock = Some(pane);
+            self.dock.resize(split, 0.62);
         }
     }
 
@@ -2319,7 +2330,7 @@ impl App {
         let spawn = thread::Builder::new()
             .name(format!("sftp-transfer-{id}"))
             .spawn(move || {
-                run_transfer_worker(
+                run_transfer_worker(TransferWorker {
                     id,
                     pending,
                     overwrite,
@@ -2328,7 +2339,7 @@ impl App {
                     cancel,
                     config,
                     sender,
-                );
+                });
             });
 
         if let Err(error) = spawn {
