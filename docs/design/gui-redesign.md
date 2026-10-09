@@ -144,6 +144,18 @@ Keep PTY I/O, DNS/authentication, transfers, filesystem work, search and remote-
 
 Benchmark with a real terminal: burst output, ANSI styling, Unicode, selection during output, long scrollback, multiple sessions, a live transfer while typing, and close/cancel under load. Record both median and tail latency, plus resource cleanup.
 
+### Opt-in slow-stage tracing
+
+To diagnose the reported macOS click-to-focus lag, start the actual Iced binary with:
+
+```bash
+INSPIRUM_ICED_TRACE_MS=25 ./inspirum-terminal --ui iced 2> iced-timings.log
+```
+
+This prints a line **only when** one of these synchronous stages takes at least 25 ms: `startup`, `event_update`, `view_layout`, `terminal_snapshot`, or `terminal_canvas_draw`. Set a different positive millisecond threshold if needed. Tracing is disabled unless explicitly requested, and trace records contain only static stage names and elapsed times, not SSH hosts, commands, passwords, clipboard text, terminal output or file paths. If sharing results, extract only lines beginning `iced slow` from the log; unrelated process diagnostics may include sensitive data.
+
+These timings measure **CPU-stage durations, not input-to-screen latency**. A slow-GPU presentation or OS event delivery issue may need native macOS Instruments tracing. For acceptance, measure on the affected Mac and record its model, macOS version, display scale, renderer and connected-tab count. Never claim the p95 budget is met from these logs alone.
+
 ## 9. Native review script
 
 1. Launch at 1280x800 and at the documented minimum size. Confirm no SSH settings form occupies the workspace.
