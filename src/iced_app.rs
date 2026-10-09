@@ -1556,6 +1556,7 @@ struct App {
     snippet_body: String,
     sidebar_collapsed: bool,
     profile_visible: usize,
+    profile_matches: Vec<usize>,
     form: ConnectionForm,
     import_path: String,
     editing_profile: Option<String>,
@@ -1583,6 +1584,9 @@ impl App {
                 Some(format!("Could not load profiles: {error:#}")),
             ),
         };
+        // Save matching indices once so every terminal redraw does not rescan
+        // and lowercase the full session library.
+        let profile_matches = (0..profiles.len()).collect();
         let snippets_path = command_palette::snippets_path(&profiles_path);
         let snippets = match command_palette::load_library(&snippets_path) {
             Ok(library) => library,
@@ -1615,6 +1619,7 @@ impl App {
             snippet_body: String::new(),
             sidebar_collapsed: false,
             profile_visible: PROFILE_PAGE_SIZE,
+            profile_matches,
             form: ConnectionForm::default(),
             import_path: String::new(),
             editing_profile: None,
@@ -1631,6 +1636,17 @@ impl App {
             next_remote_editor_id: 1,
             remote_editor_open_generation: 0,
         }
+    }
+
+    fn refresh_profile_matches(&mut self) {
+        self.profile_matches = self
+            .profiles
+            .iter()
+            .enumerate()
+            .filter_map(|(index, profile)| {
+                session_matches_query(profile, &self.query).then_some(index)
+            })
+            .collect();
     }
 
     fn new_terminal_pane(&mut self, profile: Session) -> TerminalPane {
@@ -2331,15 +2347,12 @@ impl App {
                 if self.dialog.is_none() {
                     self.query = value;
                     self.profile_visible = PROFILE_PAGE_SIZE;
+                    self.refresh_profile_matches();
                 }
             }
             Message::ShowMoreProfiles => {
-                let matches = self
-                    .profiles
-                    .iter()
-                    .filter(|profile| session_matches_query(profile, &self.query))
-                    .count();
-                self.profile_visible = next_profile_page(self.profile_visible, matches);
+                self.profile_visible =
+                    next_profile_page(self.profile_visible, self.profile_matches.len());
             }
             Message::Open(index) => {
                 self.open(index);
@@ -2404,6 +2417,7 @@ impl App {
                         Ok(()) => {
                             let added = imported.len().saturating_sub(self.profiles.len());
                             self.profiles = imported;
+                            self.refresh_profile_matches();
                             self.dialog = None;
                             self.import_path.clear();
                             self.status =
@@ -3500,6 +3514,7 @@ impl App {
                 }) {
                     Ok((profiles, session)) => {
                         self.profiles = profiles;
+                        self.refresh_profile_matches();
                         self.dialog = None;
                         self.editing_profile = None;
                         self.form = ConnectionForm::default();
@@ -3814,19 +3829,14 @@ impl App {
         ]
         .spacing(12);
 
-        let matches = self
-            .profiles
-            .iter()
-            .filter(|profile| session_matches_query(profile, &self.query))
-            .count();
+        let matches = self.profile_matches.len();
         let mut current_group = String::new();
         let mut count = 0;
         for (index, profile) in self
-            .profiles
+            .profile_matches
             .iter()
-            .enumerate()
-            .filter(|(_, profile)| session_matches_query(profile, &self.query))
             .take(self.profile_visible)
+            .filter_map(|&index| self.profiles.get(index).map(|profile| (index, profile)))
         {
             let group = if profile.folder.trim().is_empty() {
                 "Ungrouped"
@@ -5348,7 +5358,9 @@ mod tests {
                 ..Session::default()
             })
             .collect();
+        app.refresh_profile_matches();
 
+        assert_eq!(app.profile_matches.len(), 250);
         assert_eq!(app.profile_visible, PROFILE_PAGE_SIZE);
         let _ = app.update(Message::ShowMoreProfiles);
         assert_eq!(app.profile_visible, PROFILE_PAGE_SIZE * 2);
@@ -5359,7 +5371,53 @@ mod tests {
 
         let _ = app.update(Message::Search("host-2".into()));
         assert_eq!(app.profile_visible, PROFILE_PAGE_SIZE);
+        assert_eq!(app.profile_matches.len(), 61);
         assert_eq!(next_profile_page(usize::MAX, 250), 250);
+    }
+
+    #[test]
+    fn profile_search_cache_only_rebuilds_on_profile_or_query_changes() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-profile-cache-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.profiles = vec![
+            Session {
+                name: "alpha".into(),
+                host: "alpha.example.invalid".into(),
+                ..Session::default()
+            },
+            Session {
+                name: "beta".into(),
+                host: "beta.example.invalid".into(),
+                ..Session::default()
+            },
+        ];
+        app.refresh_profile_matches();
+        assert_eq!(app.profile_matches, vec![0, 1]);
+
+        let _ = app.update(Message::Search("beta".into()));
+        assert_eq!(app.profile_matches, vec![1]);
+
+        // An unchanged search needs no full profile scan for every GUI redraw.
+        let cached = app.profile_matches.clone();
+        let _ = app.update(Message::ShowMoreProfiles);
+        assert_eq!(app.profile_matches, cached);
+
+        app.profiles.insert(
+            0,
+            Session {
+                name: "beta-new".into(),
+                host: "new.example.invalid".into(),
+                ..Session::default()
+            },
+        );
+        app.refresh_profile_matches();
+        assert_eq!(app.profile_matches, vec![0, 2]);
+
+        let _ = app.update(Message::Search(String::new()));
+        assert_eq!(app.profile_matches, vec![0, 1, 2]);
     }
 
     #[test]
