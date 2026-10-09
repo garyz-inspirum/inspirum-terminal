@@ -622,6 +622,27 @@ pub fn connect_with_event_sink(
     .context("create native PTY and start OpenSSH")
 }
 
+/// Toolkit-neutral interactive SFTP PTY used by the Iced frontend.
+pub fn connect_sftp_with_event_sink(
+    id: u64,
+    session: &Session,
+    config: Option<&Path>,
+    event_sink: Arc<dyn Fn(u64, egui_term::PtyEvent) + Send + Sync>,
+) -> Result<egui_term::TerminalBackend> {
+    let args = sftp_launch_args(session, config)?;
+    check_sftp(Path::new("sftp"))?;
+    egui_term::TerminalBackend::new_with_event_sink(
+        id,
+        egui_term::BackendSettings {
+            shell: "sftp".into(),
+            args,
+            working_directory: None,
+        },
+        event_sink,
+    )
+    .context("create native PTY and start OpenSSH sftp")
+}
+
 pub fn connect_sftp(
     id: u64,
     context: eframe::egui::Context,

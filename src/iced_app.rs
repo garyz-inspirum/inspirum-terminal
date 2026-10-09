@@ -1,8 +1,10 @@
 //! Production Iced application shell.
 //!
 //! This module intentionally reuses the existing validated Session/profile model.
-//! Live PTY rendering is introduced separately so the GUI migration cannot bypass
+//! The frontend uses the live PTY backend and preserves
 //! host-key, argv, paste, process-lifecycle, or transfer safeguards.
+mod tools;
+
 use crate::{
     ProxyAuth, ProxyKind, Session, SessionImportMode,
     command_palette::{self, PaletteItem, Snippet, SnippetLibrary},
@@ -135,6 +137,20 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                     key: keyboard::Key::Named(keyboard::key::Named::Escape),
                     ..
                 }) if status == event::Status::Captured => Some(Message::DismissModalKey),
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                    if modifiers.command()
+                        && matches!(
+                            key.as_ref(),
+                            keyboard::Key::Character(
+                                "," | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8"
+                            )
+                        ) =>
+                {
+                    Some(Message::Event(event))
+                }
+                iced::Event::Window(iced::window::Event::FileDropped(_)) => {
+                    Some(Message::Event(event))
+                }
                 iced::Event::Keyboard(_) if status == event::Status::Ignored => {
                     Some(Message::Event(event))
                 }
@@ -427,6 +443,7 @@ fn run_transfer_worker(worker: TransferWorker) {
 }
 
 struct TerminalPane {
+    sftp: bool,
     id: u64,
     profile: Session,
     terminal: Option<egui_term::TerminalBackend>,
@@ -434,6 +451,8 @@ struct TerminalPane {
     display_generation: u64,
     display_dirty: bool,
     terminal_grid_size: Option<(u16, u16)>,
+    cell_size: (f32, f32),
+    canvas_size: Option<iced::Size>,
     terminal_title: Option<String>,
     error: Option<String>,
     exited: bool,
@@ -441,6 +460,7 @@ struct TerminalPane {
 }
 
 struct Workspace {
+    id: u64,
     profile: Session,
     panes: pane_grid::State<TerminalPane>,
     focus: pane_grid::Pane,
@@ -448,8 +468,10 @@ struct Workspace {
 
 impl Workspace {
     fn new(profile: Session, terminal: TerminalPane) -> Self {
+        let id = terminal.id;
         let (panes, focus) = pane_grid::State::new(terminal);
         Self {
+            id,
             profile,
             panes,
             focus,
@@ -685,12 +707,14 @@ enum FileNameAction {
 
 #[derive(Clone)]
 enum Dialog {
+    Tools,
     Connection,
     Commands,
     Close(usize),
     PasteConfirm {
         id: u64,
         text: String,
+        targets: Vec<u64>,
     },
     FileOverwrite(PendingTransfer),
     FileDeleteLocal(PathBuf),
@@ -707,6 +731,7 @@ enum Dialog {
 
 #[derive(Clone, Debug)]
 enum Message {
+    Tool(tools::Action),
     Search(String),
     ShowMoreProfiles,
     Open(usize),
@@ -790,7 +815,7 @@ enum Message {
     FilesRemoteLoaded(u64, Result<Vec<sftp::RemoteEntry>, String>),
     ToggleSidebar,
     RequestPaste,
-    ClipboardRead(u64, Option<String>),
+    ClipboardRead(u64, Vec<u64>, Option<String>),
     ConfirmPaste,
     Reconnect(pane_grid::Pane),
     Split(pane_grid::Axis),
@@ -841,6 +866,8 @@ enum Message {
     TerminalResized(u64, iced::Size),
     TerminalSelectStart(pane_grid::Pane, u64, f32, f32),
     TerminalSelectUpdate(u64, f32, f32),
+    PanePaste(pane_grid::Pane, u64),
+    SelectionFinished(u64, f32, f32, bool),
     TerminalMouse(
         pane_grid::Pane,
         u64,
@@ -865,19 +892,6 @@ enum Message {
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
     command_palette::palette_items(query, library)
-        .into_iter()
-        .filter(|item| {
-            matches!(
-                item,
-                PaletteItem::Snippet { .. }
-                    | PaletteItem::LocalAction { id: "connect", .. }
-                    | PaletteItem::LocalAction {
-                        id: "close-active",
-                        ..
-                    }
-            )
-        })
-        .collect()
 }
 
 fn sanitize_terminal_title(title: &str) -> Option<String> {
@@ -892,6 +906,8 @@ fn sanitize_terminal_title(title: &str) -> Option<String> {
 
 struct TerminalCanvasState {
     selecting: bool,
+    pointer_hidden: bool,
+    opacity: Cell<f32>,
     remote_button: Option<egui_term::MouseButton>,
     modifiers: keyboard::Modifiers,
     last_position: Option<iced::Point>,
@@ -907,6 +923,8 @@ impl Default for TerminalCanvasState {
     fn default() -> Self {
         Self {
             selecting: false,
+            pointer_hidden: false,
+            opacity: Cell::new(1.0),
             remote_button: None,
             modifiers: keyboard::Modifiers::default(),
             last_position: None,
@@ -949,6 +967,7 @@ struct TerminalCanvas<'a> {
     generation: u64,
     terminal_mode: egui_term::TerminalMode,
     snapshot: &'a egui_term::DisplaySnapshot,
+    appearance: crate::appearance::TerminalAppearance,
 }
 
 impl TerminalCanvas<'_> {
@@ -984,10 +1003,21 @@ impl TerminalCanvas<'_> {
         }
     }
 
+    #[cfg(test)]
     fn report_cell(position: iced::Point) -> (i32, i32) {
         (
             (position.x / TERMINAL_CELL_WIDTH).floor() as i32,
             (position.y / TERMINAL_CELL_HEIGHT).floor() as i32,
+        )
+    }
+    fn cell_size(&self) -> (f32, f32) {
+        terminal_cell_size(&self.appearance)
+    }
+    fn cell_at(&self, position: iced::Point) -> (i32, i32) {
+        let (width, height) = self.cell_size();
+        (
+            (position.x / width).floor() as i32,
+            (position.y / height).floor() as i32,
         )
     }
 }
@@ -1008,6 +1038,12 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
         }
 
         match event {
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { .. })
+                if position.is_some() && self.appearance.hide_pointer_while_typing =>
+            {
+                state.pointer_hidden = true;
+                Some(canvas::Action::request_redraw())
+            }
             iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
                 state.modifiers = *modifiers;
                 None
@@ -1018,7 +1054,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                 if self.remote_mouse_enabled(state.modifiers) {
                     state.selecting = false;
                     state.remote_button = Some(terminal_button);
-                    state.last_report_cell = Some(Self::report_cell(position));
+                    state.last_report_cell = Some(self.cell_at(position));
                     Some(
                         canvas::Action::publish(Message::TerminalMouse(
                             self.pane,
@@ -1034,18 +1070,27 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                 } else if *button == mouse::Button::Left {
                     state.selecting = true;
                     state.remote_button = None;
-                    state.last_report_cell = Some(Self::report_cell(position));
+                    state.last_report_cell = Some(self.cell_at(position));
                     Some(
                         canvas::Action::publish(Message::TerminalSelectStart(
                             self.pane, self.id, position.x, position.y,
                         ))
                         .and_capture(),
                     )
+                } else if (*button == mouse::Button::Middle && self.appearance.middle_click_paste)
+                    || (*button == mouse::Button::Right && self.appearance.right_click_paste)
+                {
+                    Some(
+                        canvas::Action::publish(Message::PanePaste(self.pane, self.id))
+                            .and_capture(),
+                    )
                 } else {
                     None
                 }
             }
             iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                let was_hidden = state.pointer_hidden;
+                state.pointer_hidden = false;
                 let position = position?;
                 if let Some(button) = state.remote_button {
                     if self.remote_mouse_enabled(state.modifiers)
@@ -1054,7 +1099,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                                 | egui_term::TerminalMode::MOUSE_MOTION,
                         )
                     {
-                        if !state.mark_cell_changed(Self::report_cell(position)) {
+                        if !state.mark_cell_changed(self.cell_at(position)) {
                             return None;
                         }
                         return Some(
@@ -1075,7 +1120,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                     // Selection boundaries follow terminal cells, not individual pixels.
                     // Coalesce intra-cell mouse moves so a fast drag cannot flood the
                     // UI loop with full terminal-selection snapshots.
-                    if !state.mark_cell_changed(Self::report_cell(position)) {
+                    if !state.mark_cell_changed(self.cell_at(position)) {
                         return None;
                     }
                     Some(
@@ -1089,7 +1134,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                         .terminal_mode
                         .contains(egui_term::TerminalMode::MOUSE_MOTION)
                 {
-                    if !state.mark_cell_changed(Self::report_cell(position)) {
+                    if !state.mark_cell_changed(self.cell_at(position)) {
                         return None;
                     }
                     Some(
@@ -1105,7 +1150,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                         .and_capture(),
                     )
                 } else {
-                    None
+                    was_hidden.then(canvas::Action::request_redraw)
                 }
             }
             iced::Event::Mouse(mouse::Event::ButtonReleased(button)) => {
@@ -1128,8 +1173,11 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                 } else if state.selecting && *button == mouse::Button::Left {
                     state.selecting = false;
                     position.or(state.last_position).map(|position| {
-                        canvas::Action::publish(Message::TerminalSelectUpdate(
-                            self.id, position.x, position.y,
+                        canvas::Action::publish(Message::SelectionFinished(
+                            self.id,
+                            position.x,
+                            position.y,
+                            self.appearance.select_to_copy,
                         ))
                         .and_capture()
                     })
@@ -1140,7 +1188,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
             iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 let lines = match delta {
                     mouse::ScrollDelta::Lines { y, .. } => *y,
-                    mouse::ScrollDelta::Pixels { y, .. } => *y / TERMINAL_CELL_HEIGHT,
+                    mouse::ScrollDelta::Pixels { y, .. } => *y / self.cell_size().1,
                 };
                 let lines = lines.round() as i32;
                 if lines == 0 {
@@ -1177,7 +1225,9 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
         if cursor.position_in(bounds).is_some() {
-            if state.selecting {
+            if state.pointer_hidden && self.appearance.hide_pointer_while_typing {
+                mouse::Interaction::Hidden
+            } else if state.selecting {
                 mouse::Interaction::Grabbing
             } else if self.remote_mouse_enabled(state.modifiers) {
                 mouse::Interaction::Pointer
@@ -1202,15 +1252,18 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
             Color::from_rgb8(value[0], value[1], value[2])
         }
 
+        let (cell_width, cell_height) = self.cell_size();
         if state.generation.get() != self.generation {
             use std::{
                 collections::hash_map::DefaultHasher,
                 hash::{Hash, Hasher},
             };
 
+            let appearance_key = format!("{:?}", self.appearance);
             let mut new_hashes = Vec::with_capacity(self.snapshot.rows);
             for row in 0..self.snapshot.rows {
                 let mut hasher = DefaultHasher::new();
+                appearance_key.hash(&mut hasher);
                 self.snapshot.background.hash(&mut hasher);
                 self.snapshot.columns.hash(&mut hasher);
                 row.hash(&mut hasher);
@@ -1233,7 +1286,9 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
             state.generation.set(self.generation);
         }
 
-        if state.background_changed(bounds.width, bounds.height, self.snapshot.background) {
+        if state.opacity.replace(self.appearance.opacity) != self.appearance.opacity
+            || state.background_changed(bounds.width, bounds.height, self.snapshot.background)
+        {
             state.background_cache.clear();
         }
 
@@ -1242,7 +1297,10 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
             .draw(renderer, bounds.size(), |frame| {
                 frame.fill(
                     &canvas::Path::rectangle(iced::Point::ORIGIN, bounds.size()),
-                    rgb(self.snapshot.background),
+                    Color {
+                        a: self.appearance.opacity,
+                        ..rgb(self.snapshot.background)
+                    },
                 );
             });
 
@@ -1256,41 +1314,54 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
             };
             let geometry = caches[row].draw(renderer, bounds.size(), |frame| {
                 for cell in &self.snapshot.cells[start..end] {
-                    let x = cell.column as f32 * TERMINAL_CELL_WIDTH;
-                    let y = cell.row as f32 * TERMINAL_CELL_HEIGHT;
+                    let x = cell.column as f32 * cell_width;
+                    let y = cell.row as f32 * cell_height;
                     if x >= bounds.width || y >= bounds.height {
                         continue;
                     }
 
                     let cell_width = if cell.wide {
-                        TERMINAL_CELL_WIDTH * 2.0
+                        cell_width * 2.0
                     } else {
-                        TERMINAL_CELL_WIDTH
+                        cell_width
                     };
-                    let background = if cell.cursor {
+                    let background = if cell.cursor
+                        && self.appearance.cursor_style
+                            == crate::appearance::TerminalCursorStyle::Block
+                    {
                         cell.cursor_color
                     } else {
                         cell.background
                     };
-                    if background != self.snapshot.background || cell.cursor {
+                    if background != self.snapshot.background
+                        || (cell.cursor
+                            && self.appearance.cursor_style
+                                == crate::appearance::TerminalCursorStyle::Block)
+                    {
                         frame.fill(
                             &canvas::Path::rectangle(
                                 iced::Point::new(x, y),
-                                iced::Size::new(cell_width + 0.5, TERMINAL_CELL_HEIGHT + 0.5),
+                                iced::Size::new(cell_width + 0.5, cell_height + 0.5),
                             ),
                             rgb(background),
                         );
                     }
 
                     if !matches!(cell.character, ' ' | '\t' | '\0') {
-                        let mut terminal_font = Font::MONOSPACE;
+                        let mut terminal_font = match self.appearance.font_family {
+                            crate::appearance::TerminalFontFamily::Monospace => Font::MONOSPACE,
+                            crate::appearance::TerminalFontFamily::Proportional => Font::DEFAULT,
+                        };
                         if cell.bold {
                             terminal_font.weight = font::Weight::Bold;
                         }
                         if cell.italic {
                             terminal_font.style = font::Style::Italic;
                         }
-                        let foreground = if cell.cursor {
+                        let foreground = if cell.cursor
+                            && self.appearance.cursor_style
+                                == crate::appearance::TerminalCursorStyle::Block
+                        {
                             cell.background
                         } else {
                             cell.foreground
@@ -1299,16 +1370,32 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                             content: cell.character.to_string(),
                             position: iced::Point::new(x, y - 1.0),
                             color: rgb(foreground),
-                            size: iced::Pixels(15.0),
+                            size: iced::Pixels(self.appearance.font_size),
                             font: terminal_font,
                             ..canvas::Text::default()
                         });
                     }
 
+                    if cell.cursor
+                        && self.appearance.cursor_style
+                            != crate::appearance::TerminalCursorStyle::Block
+                    {
+                        let (offset, size) = match self.appearance.cursor_style {
+                            crate::appearance::TerminalCursorStyle::Underline => (
+                                iced::Point::new(x, y + cell_height - 2.0),
+                                iced::Size::new(cell_width, 2.0),
+                            ),
+                            _ => (iced::Point::new(x, y), iced::Size::new(2.0, cell_height)),
+                        };
+                        frame.fill(
+                            &canvas::Path::rectangle(offset, size),
+                            rgb(cell.cursor_color),
+                        );
+                    }
                     if cell.underline {
                         frame.fill(
                             &canvas::Path::rectangle(
-                                iced::Point::new(x, y + TERMINAL_CELL_HEIGHT - 2.0),
+                                iced::Point::new(x, y + cell_height - 2.0),
                                 iced::Size::new(cell_width, 1.0),
                             ),
                             rgb(cell.foreground),
@@ -1317,7 +1404,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                     if cell.strikeout {
                         frame.fill(
                             &canvas::Path::rectangle(
-                                iced::Point::new(x, y + TERMINAL_CELL_HEIGHT * 0.55),
+                                iced::Point::new(x, y + cell_height * 0.55),
                                 iced::Size::new(cell_width, 1.0),
                             ),
                             rgb(cell.foreground),
@@ -1330,6 +1417,13 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
 
         geometries
     }
+}
+
+fn terminal_cell_size(appearance: &crate::appearance::TerminalAppearance) -> (f32, f32) {
+    (
+        appearance.font_size * 0.6,
+        appearance.font_size * (18.0 / 14.0),
+    )
 }
 
 fn terminal_key_bytes(
@@ -1658,6 +1752,7 @@ impl ConnectionForm {
 }
 
 struct App {
+    tools: tools::State,
     profiles_path: PathBuf,
     ssh_config: Option<PathBuf>,
     profiles: Vec<Session>,
@@ -1722,7 +1817,16 @@ impl App {
                 SnippetLibrary::default()
             }
         };
+        let mut tools = tools::State::load(&profiles_path);
+        for message in &tools.load_errors {
+            tools.errors.record(message);
+            load_error = Some(match load_error {
+                Some(existing) => format!("{existing}\n{message}"),
+                None => message.clone(),
+            });
+        }
         Self {
+            tools,
             profiles_path,
             ssh_config,
             profiles,
@@ -1774,10 +1878,15 @@ impl App {
     }
 
     fn new_terminal_pane(&mut self, profile: Session) -> TerminalPane {
+        self.new_terminal_pane_kind(profile, false)
+    }
+
+    fn new_terminal_pane_kind(&mut self, profile: Session, sftp: bool) -> TerminalPane {
         let id = self.next_terminal_id;
         self.next_terminal_id = self.next_terminal_id.saturating_add(1);
 
         let mut pane = TerminalPane {
+            sftp,
             id,
             profile,
             terminal: None,
@@ -1785,6 +1894,8 @@ impl App {
             display_generation: 0,
             display_dirty: true,
             terminal_grid_size: None,
+            cell_size: (TERMINAL_CELL_WIDTH, TERMINAL_CELL_HEIGHT),
+            canvas_size: None,
             terminal_title: None,
             error: None,
             exited: false,
@@ -1825,17 +1936,22 @@ impl App {
                 }
             });
 
-        match terminal::connect_with_event_sink(pane.id, &pane.profile, config, event_sink) {
+        let connection = if pane.sftp {
+            terminal::connect_sftp_with_event_sink(pane.id, &pane.profile, config, event_sink)
+        } else {
+            terminal::connect_with_event_sink(pane.id, &pane.profile, config, event_sink)
+        };
+        match connection {
             Ok(mut terminal) => {
                 // The UI may already have measured this pane while the bridge was
                 // initializing. Apply that size to the newly started PTY.
                 if let Some((columns, rows)) = pane.terminal_grid_size {
                     terminal.process_command(egui_term::BackendCommand::Resize(
                         egui_term::Size::new(
-                            columns as f32 * TERMINAL_CELL_WIDTH,
-                            rows as f32 * TERMINAL_CELL_HEIGHT,
+                            columns as f32 * pane.cell_size.0,
+                            rows as f32 * pane.cell_size.1,
                         ),
-                        egui_term::Size::new(TERMINAL_CELL_WIDTH, TERMINAL_CELL_HEIGHT),
+                        egui_term::Size::new(pane.cell_size.0, pane.cell_size.1),
                     ));
                 }
                 pane.terminal = Some(terminal);
@@ -1847,17 +1963,20 @@ impl App {
     }
 
     fn send_to_focused_terminal(&mut self, bytes: Vec<u8>) {
-        let Some(tab) = self.tabs.get_mut(self.active) else {
+        let Some(id) = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.panes.get(t.focus))
+            .map(|p| p.id)
+        else {
             return;
         };
-        let Some(pane) = tab.panes.get_mut(tab.focus) else {
-            return;
-        };
-        if pane.exited {
-            return;
-        }
-        if let Some(terminal) = pane.terminal.as_mut() {
-            terminal.process_command(egui_term::BackendCommand::Write(bytes));
+        let mut targets = self.tools.sync.destinations(id);
+        targets.push(id);
+        for target in targets {
+            if self.active_terminal_matches(target) {
+                self.command_terminal(target, egui_term::BackendCommand::Write(bytes.clone()));
+            }
         }
     }
 
@@ -1913,13 +2032,27 @@ impl App {
             .is_some_and(|pane| pane.id == id && !pane.exited)
     }
 
+    fn paste_targets(&self, id: u64) -> Vec<u64> {
+        let mut targets = self.tools.sync.destinations(id);
+        targets.retain(|target| self.active_terminal_matches(*target));
+        targets.push(id);
+        targets.sort_unstable();
+        targets
+    }
     fn send_to_terminal(&mut self, id: u64, bytes: Vec<u8>) -> bool {
-        // Clipboard reads and paste confirmations are asynchronous. A tab or
-        // split-focus change must not send clipboard contents to an old pane.
         if !self.focused_pane_matches(id) {
             return false;
         }
-        self.command_terminal(id, egui_term::BackendCommand::Write(bytes))
+        let targets = self.paste_targets(id);
+        let mut sent = false;
+        for target in targets {
+            let result =
+                self.command_terminal(target, egui_term::BackendCommand::Write(bytes.clone()));
+            if target == id {
+                sent = result;
+            }
+        }
+        sent
     }
 
     fn command_terminal(&mut self, id: u64, command: egui_term::BackendCommand) -> bool {
@@ -2007,7 +2140,12 @@ impl App {
         for (_, pane) in tab.panes.iter_mut() {
             if pane.display_dirty {
                 if let Some(terminal) = pane.terminal.as_mut() {
-                    let snapshot = terminal.display_snapshot(&egui_term::TerminalTheme::default());
+                    let appearance = self
+                        .tools
+                        .appearance
+                        .effective_for(&session_profile_key(&pane.profile));
+                    let snapshot =
+                        terminal.display_snapshot(&crate::app::terminal_theme(&appearance));
                     if pane.display.as_ref() != Some(&snapshot) {
                         pane.display = Some(snapshot);
                         pane.display_generation = pane.display_generation.wrapping_add(1);
@@ -2021,6 +2159,9 @@ impl App {
 
     fn activate_tab(&mut self, index: usize) {
         if index < self.tabs.len() {
+            if self.active != index {
+                self.tools.sync.set_armed(false);
+            }
             self.active = index;
             self.refresh_workspace_displays(index);
         }
@@ -2038,28 +2179,28 @@ impl App {
     }
 
     fn resize_terminal(&mut self, id: u64, size: iced::Size) {
-        let width = (size.width - 28.0).max(1.0);
-        let height = (size.height - 28.0).max(1.0);
-        let columns = (width / TERMINAL_CELL_WIDTH).floor().max(1.0) as u16;
-        let lines = (height / TERMINAL_CELL_HEIGHT).floor().max(1.0) as u16;
-        let grid_size = (columns, lines);
-
         for tab in &mut self.tabs {
             for (_, pane) in tab.panes.iter_mut() {
                 if pane.id != id {
                     continue;
                 }
-                if pane.terminal_grid_size == Some(grid_size) {
+                let appearance = self
+                    .tools
+                    .appearance
+                    .effective_for(&session_profile_key(&pane.profile));
+                let cell = terminal_cell_size(&appearance);
+                let columns = ((size.width - 28.0).max(1.0) / cell.0).floor().max(1.0) as u16;
+                let lines = ((size.height - 28.0).max(1.0) / cell.1).floor().max(1.0) as u16;
+                pane.canvas_size = Some(size);
+                if pane.terminal_grid_size == Some((columns, lines)) && pane.cell_size == cell {
                     return;
                 }
-                pane.terminal_grid_size = Some(grid_size);
+                pane.terminal_grid_size = Some((columns, lines));
+                pane.cell_size = cell;
                 if let Some(terminal) = pane.terminal.as_mut() {
                     terminal.process_command(egui_term::BackendCommand::Resize(
-                        egui_term::Size::new(
-                            columns as f32 * TERMINAL_CELL_WIDTH,
-                            lines as f32 * TERMINAL_CELL_HEIGHT,
-                        ),
-                        egui_term::Size::new(TERMINAL_CELL_WIDTH, TERMINAL_CELL_HEIGHT),
+                        egui_term::Size::new(columns as f32 * cell.0, lines as f32 * cell.1),
+                        egui_term::Size::new(cell.0, cell.1),
                     ));
                 }
                 return;
@@ -2472,8 +2613,9 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         let _slow = SlowIcedScope::start("event_update");
         match message {
+            Message::Tool(action) => return self.tool_update(action),
             Message::Search(value) => {
-                if self.dialog.is_none() {
+                if self.dialog.is_none() || matches!(self.dialog, Some(Dialog::Tools)) {
                     self.query = value;
                     self.profile_visible = PROFILE_PAGE_SIZE;
                     self.refresh_profile_matches();
@@ -2588,12 +2730,27 @@ impl App {
                                 self.dialog = None;
                                 return self.update(Message::AskClose(self.active));
                             }
+                            "quick-switch" => {
+                                return self
+                                    .tool_update(tools::Action::Open(tools::Panel::Workspace));
+                            }
+                            "search-history" => {
+                                return self
+                                    .tool_update(tools::Action::Open(tools::Panel::History));
+                            }
+                            "toggle-sync" => {
+                                return self
+                                    .tool_update(tools::Action::SyncArm(!self.tools.sync.armed()));
+                            }
                             _ => {}
                         },
                     }
                 }
             }
             Message::CommandSend => {
+                if self.tools.sender_sync {
+                    return self.tool_update(tools::Action::SendCommand);
+                }
                 let text = self.command_sender.clone();
                 if text.is_empty() {
                     self.status = "Command sender text is empty.".into();
@@ -2610,7 +2767,11 @@ impl App {
                         }
                     }
                     PasteDecision::Confirm => {
-                        self.dialog = Some(Dialog::PasteConfirm { id, text });
+                        self.dialog = Some(Dialog::PasteConfirm {
+                            id,
+                            targets: self.paste_targets(id),
+                            text,
+                        });
                         self.status =
                             "Multiline command text is waiting for explicit confirmation.".into();
                     }
@@ -2696,6 +2857,7 @@ impl App {
                 }
             }
             Message::ConfirmClose(index) => {
+                self.tools.sync.set_armed(false);
                 if index < self.tabs.len() {
                     let closing_key = session_profile_key(&self.tabs[index].profile);
                     let dirty_editor = self.remote_editor.as_ref().is_some_and(|editor| {
@@ -2716,6 +2878,7 @@ impl App {
                         self.remote_editor = None;
                     }
                     self.tabs.remove(index);
+                    self.prune_tool_panes();
                     if index < self.active {
                         self.active -= 1;
                     }
@@ -3389,13 +3552,17 @@ impl App {
                     self.status = "Focus a connected terminal before pasting.".into();
                     return Task::none();
                 };
+                let targets = self.paste_targets(id);
                 return iced::clipboard::read()
-                    .map(move |contents| Message::ClipboardRead(id, contents));
+                    .map(move |contents| Message::ClipboardRead(id, targets.clone(), contents));
             }
-            Message::ClipboardRead(id, contents) => {
+            Message::ClipboardRead(id, targets, contents) => {
                 // A delayed clipboard read cannot create a paste confirmation
                 // for a session that the user has already left.
-                if !self.focused_pane_matches(id) || self.dialog.is_some() {
+                if !self.focused_pane_matches(id)
+                    || targets != self.paste_targets(id)
+                    || self.dialog.is_some()
+                {
                     self.status =
                         "Paste cancelled because terminal focus or the active dialog changed."
                             .into();
@@ -3419,7 +3586,11 @@ impl App {
                         }
                     }
                     PasteDecision::Confirm => {
-                        self.dialog = Some(Dialog::PasteConfirm { id, text });
+                        self.dialog = Some(Dialog::PasteConfirm {
+                            id,
+                            targets: self.paste_targets(id),
+                            text,
+                        });
                         self.status =
                             "Multiline paste is waiting for explicit confirmation.".into();
                     }
@@ -3430,8 +3601,10 @@ impl App {
                 }
             }
             Message::ConfirmPaste => {
-                if let Some(Dialog::PasteConfirm { id, text }) = self.dialog.take() {
-                    if self.send_to_terminal(id, text.into_bytes()) {
+                if let Some(Dialog::PasteConfirm { id, targets, text }) = self.dialog.take() {
+                    if targets == self.paste_targets(id)
+                        && self.send_to_terminal(id, text.into_bytes())
+                    {
                         self.status = "Paste sent after explicit confirmation.".into();
                     } else {
                         self.status =
@@ -3452,6 +3625,19 @@ impl App {
                 ) {
                     return self.defer_terminal_refresh(id);
                 }
+            }
+            Message::PanePaste(pane, id) => {
+                if self.active_pane_matches(pane, id) {
+                    self.tabs[self.active].focus = pane;
+                    return self.update(Message::RequestPaste);
+                }
+            }
+            Message::SelectionFinished(id, x, y, copy) => {
+                let task = self.update(Message::TerminalSelectUpdate(id, x, y));
+                if copy && self.focused_pane_matches(id) {
+                    return Task::batch([task, self.update(Message::CopySelection(id))]);
+                }
+                return task;
             }
             Message::TerminalSelectUpdate(id, x, y) => {
                 if !self.active_terminal_matches(id) {
@@ -3511,14 +3697,15 @@ impl App {
                 self.status = "No terminal text is selected.".into();
             }
             Message::Reconnect(pane_id) => {
+                self.tools.sync.set_armed(false);
                 let profile = self
                     .tabs
                     .get(self.active)
                     .and_then(|tab| tab.panes.get(pane_id))
-                    .map(|pane| pane.profile.clone());
+                    .map(|pane| (pane.profile.clone(), pane.sftp));
 
-                if let Some(profile) = profile {
-                    let replacement = self.new_terminal_pane(profile);
+                if let Some((profile, sftp)) = profile {
+                    let replacement = self.new_terminal_pane_kind(profile, sftp);
                     let connected = replacement.terminal.is_some();
                     let failed = replacement.error.is_some();
                     if let Some(tab) = self.tabs.get_mut(self.active)
@@ -3535,11 +3722,25 @@ impl App {
                         };
                     }
                 }
+                self.prune_tool_panes();
             }
             Message::Split(axis) => {
+                if self
+                    .tabs
+                    .get(self.active)
+                    .is_some_and(|t| t.panes.len() >= 4)
+                {
+                    return Task::none();
+                }
+                self.tools.sync.set_armed(false);
                 self.dialog = None;
-                if let Some(profile) = self.tabs.get(self.active).map(|tab| tab.profile.clone()) {
-                    let terminal = self.new_terminal_pane(profile);
+                if let Some((profile, sftp)) = self
+                    .tabs
+                    .get(self.active)
+                    .and_then(|tab| tab.panes.get(tab.focus))
+                    .map(|p| (p.profile.clone(), p.sftp))
+                {
+                    let terminal = self.new_terminal_pane_kind(profile, sftp);
                     if let Some(tab) = self.tabs.get_mut(self.active) {
                         tab.split(axis, terminal);
                     }
@@ -3562,6 +3763,7 @@ impl App {
             }
             Message::Drag(_) => {}
             Message::ClosePane(pane) => {
+                self.tools.sync.set_armed(false);
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     if tab.panes.len() == 1 {
                         self.dialog = Some(Dialog::Close(self.active));
@@ -3569,6 +3771,7 @@ impl App {
                         tab.focus = sibling;
                     }
                 }
+                self.prune_tool_panes();
             }
             Message::DockResize(event) => {
                 self.dock.resize(event.split, event.ratio.clamp(0.30, 0.75));
@@ -3668,6 +3871,7 @@ impl App {
             }
             Message::Scale(delta) => self.scale = (self.scale + delta).clamp(0.85, 1.50),
             Message::PtyBridgeReady(sender) => {
+                self.start_configured_profile();
                 self.pty_bridge = Some(sender.clone());
                 let mut attempted = 0;
                 let mut started = 0;
@@ -3734,9 +3938,34 @@ impl App {
                 self.terminal_frame_scheduled = false;
                 if !self.tabs.is_empty() {
                     self.refresh_workspace_displays(self.active);
+                    let logged: Vec<_> = self
+                        .tabs
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, t)| {
+                            *index != self.active
+                                && t.panes
+                                    .iter()
+                                    .any(|(_, p)| self.tools.logs.contains_key(&p.id))
+                        })
+                        .map(|(index, _)| index)
+                        .collect();
+                    for index in logged {
+                        self.refresh_workspace_displays(index);
+                    }
                 }
+                self.refresh_visible_history();
+                return self.capture_session_logs();
             }
             Message::TerminalResized(id, size) => self.resize_terminal(id, size),
+            Message::Event(iced::Event::Window(iced::window::Event::FileDropped(path))) => {
+                if self.dialog.is_none() && self.files_dock.is_some() && !self.tabs.is_empty() {
+                    self.files.selected_local = Some(path);
+                    return self.request_upload();
+                }
+                self.status =
+                    "Open Files for the target session before dropping an upload file.".into();
+            }
             Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
                 key,
                 modifiers,
@@ -3745,6 +3974,20 @@ impl App {
             })) => {
                 use keyboard::key::Named;
 
+                if modifiers.command()
+                    && key.as_ref() == keyboard::Key::Character(",")
+                    && (self.dialog.is_none() || matches!(self.dialog, Some(Dialog::Tools)))
+                {
+                    return self.tool_update(tools::Action::Open(tools::Panel::Profiles));
+                }
+                if matches!(self.dialog, Some(Dialog::Tools))
+                    && modifiers.command()
+                    && let keyboard::Key::Character(value) = key.as_ref()
+                    && let Ok(index) = value.parse::<usize>()
+                    && (1..=8).contains(&index)
+                {
+                    return self.tool_update(tools::Action::Open(tools::Panel::ALL[index - 1]));
+                }
                 if self.dialog.is_some() {
                     if matches!(self.dialog, Some(Dialog::PasteConfirm { .. }))
                         && matches!(key.as_ref(), keyboard::Key::Named(Named::Enter))
@@ -3840,8 +4083,12 @@ impl App {
                     .padding([3, 8])
                     .style(card),
                 text("Inspirum").size(19),
-                text("Production Iced shell").size(12).color(MUTED),
+                text("Native SSH workspace").size(12).color(MUTED),
                 space::horizontal(),
+                action(
+                    "Tools",
+                    Message::Tool(tools::Action::Open(tools::Panel::Profiles))
+                ),
                 action("Commands", Message::Commands),
                 action("A-", Message::Scale(-0.1)),
                 action("A+", Message::Scale(0.1)),
@@ -3856,6 +4103,13 @@ impl App {
         let footer = container(
             row![
                 text("ICED").size(12).color(BLUE),
+                text(if self.tools.sync.armed() {
+                    format!("SYNC ARMED · {} panes", self.tools.sync.selected_count())
+                } else {
+                    String::new()
+                })
+                .size(12)
+                .color(DANGER),
                 text(&self.status).size(12).color(MUTED),
                 space::horizontal(),
                 if active_transfers > 0 {
@@ -4140,9 +4394,23 @@ impl App {
                 .and_then(|pane| pane.terminal_title.as_deref())
                 .unwrap_or(&tab.profile.name)
                 .to_owned();
+            let label = self
+                .tools
+                .tab_labels
+                .get(&tab.id)
+                .copied()
+                .unwrap_or_default();
+            let color = match label {
+                crate::tab_management::TabVisualLabel::None => MUTED,
+                crate::tab_management::TabVisualLabel::Blue => BLUE,
+                crate::tab_management::TabVisualLabel::Green => GREEN,
+                crate::tab_management::TabVisualLabel::Amber => Color::from_rgb8(245, 190, 80),
+                crate::tab_management::TabVisualLabel::Red => DANGER,
+            };
             tabs = tabs.push(
                 container(
                     row![
+                        text(label.marker()).color(color),
                         action(tab_label, Message::SelectTab(index)).style(
                             if index == self.active {
                                 selected_button
@@ -4272,6 +4540,10 @@ impl App {
                     generation: pane.display_generation,
                     terminal_mode,
                     snapshot,
+                    appearance: self
+                        .tools
+                        .appearance
+                        .effective_for(&session_profile_key(&pane.profile)),
                 })
                 .width(Fill)
                 .height(Fill)
@@ -4700,6 +4972,7 @@ impl App {
 
     fn dialog_view<'a>(&'a self, dialog: &'a Dialog) -> Element<'a, Message> {
         let body: Element<'_, Message> = match dialog {
+            Dialog::Tools => self.tools_view(),
             Dialog::Connection => {
                 let editing = self.editing_profile.is_some();
                 let mut form = column![
@@ -5010,6 +5283,7 @@ impl App {
                     row![
                         space::horizontal(),
                         action("Cancel", Message::CloseDialog),
+                        action("Save only", Message::Tool(tools::Action::SaveDraft)),
                         action(
                             if editing { "Save changes" } else { "Save and open" },
                             Message::Submit
@@ -5133,7 +5407,7 @@ impl App {
             ]
             .spacing(20)
             .into(),
-            Dialog::PasteConfirm { id: _, text: paste } => {
+            Dialog::PasteConfirm { text: paste, .. } => {
                 let line_count = paste
                     .as_bytes()
                     .iter()
@@ -5314,8 +5588,8 @@ impl App {
             .spacing(14)
             .into(),
             Dialog::About => column![
-                text("Production Iced migration").size(24),
-                text("This is the production Iced migration shell. It reads and writes the validated Inspirum profile store, opens live SSH sessions through the existing OpenSSH/PTY backend, and uses the WindTerm-style workspace structure.\n\nThe terminal path includes guarded paste, reconnect, splits, selection/copy, scrollback and remote mouse support. The Files utility pane uses the existing validated SFTP backend for navigation, upload/download, overwrite confirmation, progress/cancel/retry/resume, rename, folder creation and confirmed delete.\n\nRemaining migration work is focused on deeper terminal fidelity, remote-editor parity, visual QA and native interaction regression testing.")
+                text("Inspirum Terminal · Iced").size(24),
+                text("Inspirum Terminal uses Iced for the desktop interface and the shared OpenSSH/PTY backend for terminal sessions.\n\nTools includes profiles and startup, tabs and saved split workspaces, synchronized input, history and logging, terminal appearance and pointer preferences, SSH trust and multiplexing, forwarding, tmux, SCP, snippets and sanitized support reports.\n\nThe Files pane provides graphical SFTP transfers and remote editing. Clipboard and command sends retain explicit confirmation and terminal identity checks.")
                     .color(MUTED),
                 action("Back to workspace", Message::CloseDialog).style(primary),
             ]
@@ -5324,7 +5598,11 @@ impl App {
         };
 
         container(scrollable(body))
-            .width(600)
+            .width(if matches!(dialog, Dialog::Tools) {
+                880
+            } else {
+                600
+            })
             .max_height(720)
             .padding(28)
             .style(active_card)
@@ -5625,6 +5903,7 @@ mod tests {
         // may target a session after the user has switched away.
         let _ = app.update(Message::ClipboardRead(
             original_id,
+            vec![original_id],
             Some("private clipboard text\nsecond line".into()),
         ));
         assert!(app.dialog.is_none());
@@ -5637,6 +5916,7 @@ mod tests {
         app.dialog = Some(Dialog::Connection);
         let _ = app.update(Message::ClipboardRead(
             original_id,
+            vec![original_id],
             Some("new dialog must remain visible".into()),
         ));
         assert!(matches!(app.dialog, Some(Dialog::Connection)));
@@ -5645,6 +5925,7 @@ mod tests {
 
         app.dialog = Some(Dialog::PasteConfirm {
             id: original_id,
+            targets: vec![original_id],
             text: "line one\nline two".into(),
         });
         let _ = app.update(Message::ConfirmPaste);

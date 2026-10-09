@@ -6,11 +6,11 @@ license = "Apache-2.0"
 description = "An early native SSH terminal using system OpenSSH"
 repository = "https://github.com/garyz-inspirum/inspirum-terminal"
 readme = "README.md"
-keywords = ["ssh", "terminal", "egui", "openssh"]
+keywords = ["ssh", "terminal", "iced", "openssh"]
 categories = ["command-line-utilities", "network-programming"]
 
 [features]
-default = []
+default = ["iced-ui"]
 iced-ui = ["dep:iced"]
 
 [dependencies]

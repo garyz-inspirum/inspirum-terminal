@@ -4,8 +4,8 @@ Inspirum Terminal is a fully open-source Apache-2.0, cross-platform native SSH c
 
 Current scope:
 
-- native `eframe`/egui desktop window;
-- terminal rendering and PTY integration through `egui_term`;
+- native Iced desktop window (the default build and launcher);
+- Iced canvas terminal rendering with the shared `egui_term` PTY/state backend;
 - SSH sessions, interactive SFTP tabs, a graphical SFTP browser/transfer queue, and explicit SCP upload/download operations launched through the system OpenSSH client tools;
 - saved, non-secret connection profiles with search, rename-on-save, editable duplication, confirmed deletion, and validated JSON import/export;
   Export refuses to overwrite an existing destination; replace-import requires explicit confirmation.
@@ -67,12 +67,16 @@ cargo run --locked
 Optional arguments:
 
 ```text
-inspirum-terminal [--profiles PATH] [--ssh-config PATH]
+inspirum-terminal [--profiles PATH] [--ssh-config PATH] [--ui iced|legacy]
 ```
 
-`--profiles` changes the JSON profile location. `--ssh-config` passes one explicit configuration file to OpenSSH. Otherwise OpenSSH uses its normal configuration and identity discovery. The SFTP button opens an interactive OpenSSH `sftp` tab. The Files button opens the graphical SFTP browser and transfer queue. The SCP button opens explicit OpenSSH `scp` upload/download operations with overwrite safeguards; see [graphical SFTP](docs/sftp-browser.md) and [SCP operations](docs/scp.md). Structured HTTP CONNECT and SOCKS5 proxy transport currently supports no-auth proxies only; see [proxy transport](docs/proxy.md).
+`--profiles` changes the JSON profile location. `--ssh-config` passes one explicit configuration file to OpenSSH. Otherwise OpenSSH uses its normal configuration and identity discovery. Tools → SSH tools opens interactive OpenSSH `sftp` terminals, manages trust, multiplexing, tunnels and tmux. The Files button opens the graphical SFTP browser and transfer queue. Tools → SCP opens explicit OpenSSH `scp` upload/download operations with overwrite safeguards; see [graphical SFTP](docs/sftp-browser.md) and [SCP operations](docs/scp.md). Structured HTTP CONNECT and SOCKS5 proxy transport currently supports no-auth proxies only; see [proxy transport](docs/proxy.md).
 
 Click a terminal to give it keyboard focus. Moving the pointer away does not transfer that focus. The tmux controls are explicit and never run on ordinary Connect; see [tmux-aware SSH sessions](docs/tmux.md). Verify new host-key fingerprints through an independent trusted channel before accepting them. The Host key trust panel can inspect/remove entries from the default user `known_hosts` file or an explicitly selected file; it never auto-accepts a replacement key. If your SSH config uses a custom `UserKnownHostsFile`, select that file explicitly before inspecting or removing entries.
+
+Open **Tools** or press **Ctrl+,** (Command+, on macOS) for profiles/startup, workspace/tab management, history/logging, appearance, SSH tools, SCP, diagnostics and snippets. In Tools, Ctrl/Command+1 through +8 selects the corresponding panel. Saved layouts preserve up to four panes, split directions and ratios; loading startup/workspace metadata never reconnects without an explicit restore. Synchronized input requires explicit pane selection and arming, and changing tabs or targets disarms it. The command palette provides quick switching, history search and sync control; snippets stage text until Send is pressed.
+
+Appearance controls apply globally or to a saved profile, including colors, font, cursor, opacity and pointer behavior. History uses the backend's retained scrollback. Session logging writes output snapshots to an explicitly chosen new file; terminal output may contain secrets. `--ui legacy` retains the previous frontend for comparison. `cargo build --no-default-features` can build that comparison frontend alone.
 
 ## Local support diagnostics
 

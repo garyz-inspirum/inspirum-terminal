@@ -1,3 +1,9 @@
+The default Iced frontend supports up to four panes. Saved layouts retain the exact split tree, axes and ratios. Older version-1 one/two-pane layouts remain readable; the optional `tree` field supplies the extended topology. Loading a layout, including startup metadata, does not connect. Restore requires both the saved reconnect opt-in and an explicit user action.
+
+Open **Tools → Workspace** to save/load/restore a layout, find/reorder/color tabs, confirm bulk closes, select synchronized-input targets and arm input mirroring. Target edits, tab changes, reconnects and closes disarm mirroring. Input only reaches live selected panes in the active workspace. Delayed paste confirmations retain the original target IDs and are cancelled if focus or the target plan changes.
+
+The following describes the previous frontend, retained with `--ui legacy`:
+
 # SSH workspace
 
 Feature #22 adds a bounded two-pane SSH workspace on top of the existing tab lifecycle.

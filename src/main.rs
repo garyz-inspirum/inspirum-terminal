@@ -100,7 +100,7 @@ fn main() -> Result<()> {
                      Usage: inspirum-terminal [--profiles PATH] [--ssh-config PATH] [--ui legacy|iced]\n\
                      Diagnostics: --diagnostics [--diagnostic-profile NAME] [--diagnostics-output PATH]\n\
                      Native SSH terminal. Requires system OpenSSH and a graphical desktop.\n\
-                     The Iced frontend requires a build with --features iced-ui.\n\
+                     Iced is the default frontend; --ui legacy selects the comparison frontend.\n\
                      Diagnostics require no desktop and never connect to a server.",
                     env!("CARGO_PKG_VERSION")
                 );

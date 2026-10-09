@@ -123,7 +123,7 @@ fn synchronized_event_bytes(event: &egui::Event) -> Option<Vec<u8>> {
     }
 }
 
-fn terminal_theme(appearance: &TerminalAppearance) -> TerminalTheme {
+pub(crate) fn terminal_theme(appearance: &TerminalAppearance) -> TerminalTheme {
     let mut palette = ColorPalette::default();
     match appearance.palette {
         TerminalPalette::DefaultDark => {}
@@ -327,7 +327,7 @@ fn appearance_controls(
     }
 }
 
-fn full_profile_override(appearance: &TerminalAppearance) -> AppearanceOverride {
+pub(crate) fn full_profile_override(appearance: &TerminalAppearance) -> AppearanceOverride {
     AppearanceOverride {
         font_family: Some(appearance.font_family),
         font_size: Some(appearance.font_size),
@@ -3809,6 +3809,7 @@ impl App {
                 let layout = WorkspaceLayout {
                     version: 1,
                     axis: self.workspace_axis,
+                    tree: None,
                     reconnect_on_restore: self.workspace_reconnect_on_restore,
                     panes,
                 };
