@@ -733,4 +733,7 @@ pub mod terminal_ux;
 pub mod tmux;
 pub mod workspace;
 
+#[cfg(feature = "iced-ui")]
+pub mod iced_app;
+
 pub mod app;

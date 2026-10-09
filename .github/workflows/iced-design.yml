@@ -1,0 +1,165 @@
+name: Iced design preview
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'prototypes/iced-shell/**'
+      - 'src/iced_app.rs'
+      - 'src/main.rs'
+      - 'src/lib.rs'
+      - 'src/terminal.rs'
+      - 'vendor/egui_term/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/iced-design.yml'
+permissions:
+  contents: read
+concurrency:
+  group: iced-design-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  preview:
+    name: Native preview (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev xvfb xdotool imagemagick fonts-dejavu-core
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            prototypes/iced-shell -> target
+          cache-on-failure: true
+      - name: Format source for preview artifact
+        run: cargo fmt --manifest-path prototypes/iced-shell/Cargo.toml
+      - name: Unit and interaction-model tests
+        run: cargo test --manifest-path prototypes/iced-shell/Cargo.toml
+      - name: Production Iced shell tests
+        run: cargo test --features iced-ui
+      - name: Production Iced shell Clippy
+        run: cargo clippy --locked --features iced-ui --all-targets -- -D warnings
+      - name: Build production Iced shell
+        run: cargo build --release --features iced-ui
+      - name: Build native preview
+        if: runner.os == 'Linux'
+        run: cargo build --release --manifest-path prototypes/iced-shell/Cargo.toml
+      - name: Capture native Linux design states
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p preview-artifacts/screenshots
+          Xvfb :99 -screen 0 1440x1000x24 &
+          export DISPLAY=:99
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/iced-runtime"
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          sleep 2
+          binary=prototypes/iced-shell/target/release/inspirum-iced-preview
+          for state in empty terminal split files dialog; do
+            "$binary" --preview="$state" >"preview-artifacts/$state.log" 2>&1 &
+            pid=$!
+            window=""
+            for attempt in $(seq 1 40); do
+              window=$(xdotool search --onlyvisible --name 'Inspirum - Iced design preview' 2>/dev/null | head -1 || true)
+              test -n "$window" && break
+              kill -0 "$pid" || { cat "preview-artifacts/$state.log"; exit 1; }
+              sleep 1
+            done
+            test -n "$window" || { cat "preview-artifacts/$state.log"; exit 1; }
+            sleep 2
+            import -window "$window" "preview-artifacts/screenshots/$state.png"
+            if [ "$state" = "empty" ]; then
+              xdotool windowfocus "$window" key ctrl+n
+              sleep 1
+              import -window "$window" preview-artifacts/screenshots/keyboard-new-connection.png
+              xdotool key Escape
+            fi
+            kill "$pid"
+            wait "$pid" || true
+          done
+      - name: Smoke-test production Iced window
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p preview-artifacts/screenshots
+          Xvfb :100 -screen 0 1440x1000x24 &
+          xvfb_pid=$!
+          export DISPLAY=:100
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/iced-production-runtime"
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          trap 'kill "${app_pid:-}" "$xvfb_pid" 2>/dev/null || true' EXIT
+          sleep 2
+          target/release/inspirum-terminal --ui iced --profiles "$RUNNER_TEMP/iced-production-empty.json" > preview-artifacts/production.log 2>&1 &
+          app_pid=$!
+          window=""
+          for attempt in $(seq 1 40); do
+            window=$(xdotool search --onlyvisible --name '^Inspirum Terminal$' 2>/dev/null | head -1 || true)
+            test -n "$window" && break
+            kill -0 "$app_pid" || { cat preview-artifacts/production.log; exit 1; }
+            sleep 1
+          done
+          test -n "$window" || { echo "Production Iced window did not appear"; cat preview-artifacts/production.log; exit 1; }
+          sleep 2
+          import -window "$window" preview-artifacts/screenshots/production-empty.png
+          xdotool windowfocus "$window" key ctrl+n
+          sleep 2
+          kill -0 "$app_pid" || { cat preview-artifacts/production.log; exit 1; }
+          import -window "$window" preview-artifacts/screenshots/production-new-connection.png
+          xdotool windowfocus "$window" key Escape
+          sleep 2
+          import -window "$window" preview-artifacts/screenshots/production-after-escape.png
+          opened_diff=$(compare -metric AE preview-artifacts/screenshots/production-empty.png preview-artifacts/screenshots/production-new-connection.png null: 2>&1 || true)
+          restored_diff=$(compare -metric AE preview-artifacts/screenshots/production-empty.png preview-artifacts/screenshots/production-after-escape.png null: 2>&1 || true)
+          echo "Dialog opening changed $opened_diff pixels; after Escape, $restored_diff pixels differ from the empty workspace"
+          test "$opened_diff" -gt 1000 || { echo "Ctrl+N did not visibly open a dialog"; exit 1; }
+          # Focus/caret blinking can change pixels without dismissing a modal.
+          # After Escape, the screen must largely match the original workspace.
+          test "$restored_diff" -lt "$((opened_diff / 3))" || { echo "Escape did not restore the empty workspace"; exit 1; }
+          # Exercise the production sidebar search field with native pointer
+          # focus and keyboard input. Compare the focused, empty textbox with
+          # the typed state, not the full window (which may contain caret blinks).
+          # The sidebar search is below the New connection button (y=180).
+          xdotool mousemove --window "$window" 110 181 click 1
+          sleep 1
+          import -window "$window" preview-artifacts/screenshots/production-search-focused.png
+          xdotool type --clearmodifiers --delay 5 "focusprobe"
+          sleep 1
+          kill -0 "$app_pid" || { cat preview-artifacts/production.log; exit 1; }
+          import -window "$window" preview-artifacts/screenshots/production-search-typed.png
+          convert preview-artifacts/screenshots/production-search-focused.png -crop 225x40+15+161 +repage "$RUNNER_TEMP/search-focused.png"
+          convert preview-artifacts/screenshots/production-search-typed.png -crop 225x40+15+161 +repage "$RUNNER_TEMP/search-typed.png"
+          input_diff=$(compare -metric AE "$RUNNER_TEMP/search-focused.png" "$RUNNER_TEMP/search-typed.png" null: 2>&1 || true)
+          echo "Native search text entry changed $input_diff pixels"
+          test "$input_diff" -gt 120 || { echo "Sidebar search field did not visibly respond to native typing"; exit 1; }
+          workspace_diff=$(compare -metric AE preview-artifacts/screenshots/production-after-escape.png preview-artifacts/screenshots/production-search-typed.png null: 2>&1 || true)
+          echo "Search interaction differs from empty workspace by $workspace_diff pixels"
+          test "$workspace_diff" -lt 50000 || { echo "Clicking sidebar search unexpectedly opened an overlay"; exit 1; }
+      - name: Prepare preview artifact
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p preview-artifacts/source
+          cp -r prototypes/iced-shell/src preview-artifacts/source/
+          cp prototypes/iced-shell/Cargo.toml preview-artifacts/source/
+          cp prototypes/iced-shell/README.md preview-artifacts/README.md
+          cp docs/design/gui-redesign.md preview-artifacts/GUI-DESIGN.md
+          cp prototypes/iced-shell/Cargo.lock preview-artifacts/source/ 2>/dev/null || true
+          cp Cargo.lock preview-artifacts/production-Cargo.lock 2>/dev/null || true
+          mkdir -p preview-artifacts/production
+          cp prototypes/iced-shell/target/release/inspirum-iced-preview* preview-artifacts/ 2>/dev/null || true
+          cp target/release/inspirum-terminal* preview-artifacts/production/ 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: iced-gui-${{ runner.os }}
+          path: preview-artifacts
+          if-no-files-found: error

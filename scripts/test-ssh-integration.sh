@@ -60,6 +60,9 @@ printf '%s\\n' "$$" > "'''+str(d)+'''/remote.pid"
 printf 'FIXTURE_AUTHENTICATED\\n'
 if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
  printf 'REMOTE_COMMAND:%s\\n' "$SSH_ORIGINAL_COMMAND"
+ # Allow the PTY reader to observe the marker before the short-lived
+ # remote-command session closes (otherwise this test races on CI).
+ sleep 1
  exit 0
 fi
 while IFS= read -r line; do

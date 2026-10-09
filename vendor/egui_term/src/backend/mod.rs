@@ -1,5 +1,6 @@
 pub mod settings;
 
+use crate::theme::TerminalTheme;
 use crate::types::Size;
 use alacritty_terminal::event::{Event, EventListener, Notify, OnResize, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
@@ -48,6 +49,13 @@ pub fn serialize_windows_program(program: &str) -> Result<String> {
     Ok(format!("\"{program}\""))
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MouseModifiers {
+    pub shift: bool,
+    pub alt: bool,
+    pub command: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum BackendCommand {
     Write(Vec<u8>),
@@ -57,6 +65,7 @@ pub enum BackendCommand {
     SelectUpdate(f32, f32),
     ProcessLink(LinkAction, Point),
     MouseReport(MouseButton, Modifiers, Point, bool),
+    MouseReportAt(MouseButton, MouseModifiers, f32, f32, bool),
 }
 
 #[derive(Debug, Clone)]
@@ -77,7 +86,7 @@ impl From<TermMode> for MouseMode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseButton {
     LeftButton = 0,
     MiddleButton = 1,
@@ -190,11 +199,46 @@ impl TerminalBackend {
         pty_event_proxy_sender: Sender<(u64, PtyEvent)>,
         settings: BackendSettings,
     ) -> Result<Self> {
-        Self::new_with_subscription_spawner(
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || app_context.request_repaint());
+        Self::new_with_waker(id, pty_event_proxy_sender, settings, wake)
+    }
+
+    /// Construct the PTY/parser backend without coupling it to a particular GUI toolkit.
+    ///
+    /// The callback only schedules a frontend refresh. Terminal bytes, parsing, resize,
+    /// process shutdown, and PTY ownership remain in this backend.
+    pub fn new_with_waker(
+        id: u64,
+        pty_event_proxy_sender: Sender<(u64, PtyEvent)>,
+        settings: BackendSettings,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<Self> {
+        let event_sink: Arc<dyn Fn(u64, PtyEvent) + Send + Sync> = Arc::new(move |id, event| {
+            let _ = pty_event_proxy_sender.send((id, event));
+        });
+        Self::new_with_event_sink_and_subscription_spawner(
             id,
-            app_context,
-            pty_event_proxy_sender,
             settings,
+            event_sink,
+            wake,
+            |builder, subscription| builder.spawn(subscription),
+        )
+    }
+
+    /// Construct the PTY/parser backend with a toolkit-neutral event sink.
+    ///
+    /// This is used by non-egui frontends to receive PTY lifecycle/output events
+    /// without adding a polling loop or changing terminal/process ownership.
+    pub fn new_with_event_sink(
+        id: u64,
+        settings: BackendSettings,
+        event_sink: Arc<dyn Fn(u64, PtyEvent) + Send + Sync>,
+    ) -> Result<Self> {
+        Self::new_with_event_sink_and_subscription_spawner(
+            id,
+            settings,
+            event_sink,
+            Arc::new(|| {}),
             |builder, subscription| builder.spawn(subscription),
         )
     }
@@ -205,6 +249,29 @@ impl TerminalBackend {
         app_context: egui::Context,
         pty_event_proxy_sender: Sender<(u64, PtyEvent)>,
         settings: BackendSettings,
+        spawn_subscription: F,
+    ) -> Result<Self>
+    where
+        F: FnOnce(thread::Builder, Box<dyn FnOnce() + Send + 'static>) -> Result<JoinHandle<()>>,
+    {
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || app_context.request_repaint());
+        let event_sink: Arc<dyn Fn(u64, PtyEvent) + Send + Sync> = Arc::new(move |id, event| {
+            let _ = pty_event_proxy_sender.send((id, event));
+        });
+        Self::new_with_event_sink_and_subscription_spawner(
+            id,
+            settings,
+            event_sink,
+            wake,
+            spawn_subscription,
+        )
+    }
+
+    fn new_with_event_sink_and_subscription_spawner<F>(
+        id: u64,
+        settings: BackendSettings,
+        event_sink: Arc<dyn Fn(u64, PtyEvent) + Send + Sync>,
+        wake: Arc<dyn Fn() + Send + Sync>,
         spawn_subscription: F,
     ) -> Result<Self>
     where
@@ -249,10 +316,8 @@ impl TerminalBackend {
             while !thread_shutdown.load(Ordering::Acquire) {
                 match event_receiver.recv_timeout(Duration::from_millis(50)) {
                     Ok(event) => {
-                        if pty_event_proxy_sender.send((id, event.clone())).is_err() {
-                            break;
-                        }
-                        app_context.request_repaint();
+                        event_sink(id, event.clone());
+                        wake();
                         if let Event::Exit = event {
                             break;
                         }
@@ -306,6 +371,17 @@ impl TerminalBackend {
             BackendCommand::MouseReport(button, modifiers, point, pressed) => {
                 self.process_mouse_report(button, modifiers, point, pressed);
             }
+            BackendCommand::MouseReportAt(button, modifiers, x, y, pressed) => {
+                let point = Self::selection_point(x, y, &self.size, term.grid().display_offset());
+                self.process_mouse_report_flags(
+                    button,
+                    modifiers.shift,
+                    modifiers.alt,
+                    modifiers.command,
+                    point,
+                    pressed,
+                );
+            }
         };
     }
 
@@ -325,16 +401,9 @@ impl TerminalBackend {
     }
 
     pub fn selectable_content(&self) -> String {
-        let content = self.last_content();
-        let mut result = String::new();
-        if let Some(range) = content.selectable_range {
-            for indexed in content.grid.display_iter() {
-                if range.contains(indexed.point) {
-                    result.push(indexed.c);
-                }
-            }
-        }
-        result
+        let term = self.term.clone();
+        let terminal = term.lock();
+        terminal.selection_to_string().unwrap_or_default()
     }
 
     pub fn sync(&mut self) -> &RenderableContent {
@@ -356,6 +425,89 @@ impl TerminalBackend {
 
     pub fn last_content(&self) -> &RenderableContent {
         &self.last_content
+    }
+
+    /// Return the currently visible terminal grid with resolved colors and text attributes.
+    ///
+    /// This keeps toolkit-specific rendering outside the PTY/parser backend while preserving the
+    /// exact Alacritty cell model. The supplied theme controls ANSI/named-color resolution.
+    pub fn display_snapshot(&mut self, theme: &TerminalTheme) -> DisplaySnapshot {
+        let content = self.sync();
+        let global_bg = theme.get_color(alacritty_terminal::vte::ansi::Color::Named(
+            alacritty_terminal::vte::ansi::NamedColor::Background,
+        ));
+        let [bg_r, bg_g, bg_b, _] = global_bg.to_array();
+        let mut cells = Vec::with_capacity(
+            content.terminal_size.num_cols as usize * content.terminal_size.num_lines as usize,
+        );
+
+        for indexed in content.grid.display_iter() {
+            let flags = indexed.cell.flags;
+            if flags.contains(term::cell::Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+
+            let line = indexed.point.line.0 + content.grid.display_offset() as i32;
+            if line < 0 || line >= content.terminal_size.num_lines as i32 {
+                continue;
+            }
+
+            let selected = content
+                .selectable_range
+                .is_some_and(|range| range.contains(indexed.point));
+            let inverse = flags.contains(term::cell::Flags::INVERSE);
+            let dim = flags.intersects(term::cell::Flags::DIM | term::cell::Flags::DIM_BOLD);
+
+            let mut foreground = theme.get_color(indexed.fg);
+            let mut background = theme.get_color(indexed.bg);
+            if dim {
+                foreground = foreground.linear_multiply(0.7);
+            }
+            if inverse || selected {
+                std::mem::swap(&mut foreground, &mut background);
+            }
+
+            // Full-screen applications use DECTCEM to hide the cursor. The
+            // live input cursor also must not be painted over scrollback.
+            let cursor = content.terminal_mode.contains(TermMode::SHOW_CURSOR)
+                && content.grid.display_offset() == 0
+                && content.grid.cursor.point == indexed.point;
+            let cursor_color = theme.get_color(content.cursor.fg);
+            let [fg_r, fg_g, fg_b, _] = foreground.to_array();
+            let [cell_bg_r, cell_bg_g, cell_bg_b, _] = background.to_array();
+            let [cursor_r, cursor_g, cursor_b, _] = cursor_color.to_array();
+
+            cells.push(DisplayCell {
+                character: if flags.contains(term::cell::Flags::HIDDEN) {
+                    ' '
+                } else {
+                    indexed.c
+                },
+                row: line as usize,
+                column: indexed.point.column.0,
+                foreground: [fg_r, fg_g, fg_b],
+                background: [cell_bg_r, cell_bg_g, cell_bg_b],
+                cursor_color: [cursor_r, cursor_g, cursor_b],
+                bold: flags.intersects(term::cell::Flags::BOLD | term::cell::Flags::DIM_BOLD),
+                italic: flags
+                    .intersects(term::cell::Flags::ITALIC | term::cell::Flags::BOLD_ITALIC),
+                underline: flags.intersects(term::cell::Flags::ALL_UNDERLINES),
+                strikeout: flags.contains(term::cell::Flags::STRIKEOUT),
+                wide: flags.contains(term::cell::Flags::WIDE_CHAR),
+                cursor,
+            });
+        }
+
+        let rows = content.terminal_size.num_lines as usize;
+        let row_ranges = display_row_ranges(rows, &cells);
+
+        DisplaySnapshot {
+            rows,
+            columns: content.terminal_size.num_cols as usize,
+            background: [bg_r, bg_g, bg_b],
+            row_ranges,
+            cells,
+        }
     }
 
     /// Snapshot retained scrollback plus the visible screen without changing viewport state.
@@ -453,14 +605,33 @@ impl TerminalBackend {
         point: Point,
         pressed: bool,
     ) {
+        self.process_mouse_report_flags(
+            button,
+            modifiers.contains(Modifiers::SHIFT),
+            modifiers.contains(Modifiers::ALT),
+            modifiers.contains(Modifiers::COMMAND),
+            point,
+            pressed,
+        );
+    }
+
+    fn process_mouse_report_flags(
+        &self,
+        button: MouseButton,
+        shift: bool,
+        alt: bool,
+        command: bool,
+        point: Point,
+        pressed: bool,
+    ) {
         let mut mods = 0;
-        if modifiers.contains(Modifiers::SHIFT) {
+        if shift {
             mods += 4;
         }
-        if modifiers.contains(Modifiers::ALT) {
+        if alt {
             mods += 8;
         }
-        if modifiers.contains(Modifiers::COMMAND) {
+        if command {
             mods += 16;
         }
 
@@ -641,6 +812,50 @@ fn visible_regex_match_iter<'a>(
         .take_while(move |rm| rm.start().line <= viewport_end)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DisplayCell {
+    pub character: char,
+    pub row: usize,
+    pub column: usize,
+    pub foreground: [u8; 3],
+    pub background: [u8; 3],
+    pub cursor_color: [u8; 3],
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strikeout: bool,
+    pub wide: bool,
+    pub cursor: bool,
+}
+
+fn display_row_ranges(rows: usize, cells: &[DisplayCell]) -> Vec<(usize, usize)> {
+    let mut row_ranges = vec![(usize::MAX, 0); rows];
+    for (index, cell) in cells.iter().enumerate() {
+        if let Some(range) = row_ranges.get_mut(cell.row) {
+            if range.0 == usize::MAX {
+                range.0 = index;
+            }
+            range.1 = index + 1;
+        }
+    }
+    for range in &mut row_ranges {
+        if range.0 == usize::MAX {
+            *range = (0, 0);
+        }
+    }
+    row_ranges
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplaySnapshot {
+    pub rows: usize,
+    pub columns: usize,
+    pub background: [u8; 3],
+    /// Contiguous cell index range for each visible row. Empty rows use (0, 0).
+    pub row_ranges: Vec<(usize, usize)>,
+    pub cells: Vec<DisplayCell>,
+}
+
 pub struct RenderableContent {
     pub grid: Grid<Cell>,
     pub hovered_hyperlink: Option<RangeInclusive<Point>>,
@@ -679,5 +894,49 @@ pub struct EventProxy(mpsc::Sender<Event>);
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         let _ = self.0.send(event.clone());
+    }
+}
+
+#[cfg(test)]
+mod display_snapshot_tests {
+    use super::*;
+
+    fn cell(row: usize, column: usize, character: char) -> DisplayCell {
+        DisplayCell {
+            character,
+            row,
+            column,
+            foreground: [255, 255, 255],
+            background: [0, 0, 0],
+            cursor_color: [255, 255, 255],
+            bold: false,
+            italic: false,
+            underline: false,
+            strikeout: false,
+            wide: false,
+            cursor: false,
+        }
+    }
+
+    #[test]
+    fn row_ranges_cover_contiguous_visible_cells_and_empty_rows() {
+        let cells = vec![
+            cell(0, 0, 'a'),
+            cell(0, 1, 'b'),
+            cell(2, 0, 'c'),
+            cell(2, 1, 'd'),
+            cell(2, 2, 'e'),
+        ];
+
+        assert_eq!(
+            display_row_ranges(4, &cells),
+            vec![(0, 2), (0, 0), (2, 5), (0, 0)]
+        );
+    }
+
+    #[test]
+    fn row_ranges_ignore_cells_outside_visible_row_count() {
+        let cells = vec![cell(0, 0, 'a'), cell(4, 0, 'x')];
+        assert_eq!(display_row_ranges(2, &cells), vec![(0, 1), (0, 0)]);
     }
 }
