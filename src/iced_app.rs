@@ -23,11 +23,11 @@ use std::{
     cell::{Cell, RefCell},
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const BG: Color = Color::from_rgb8(14, 18, 25);
@@ -43,6 +43,58 @@ const TERMINAL_CELL_WIDTH: f32 = 8.4;
 const TERMINAL_CELL_HEIGHT: f32 = 18.0;
 const FILES_PAGE_SIZE: usize = 200;
 const PROFILE_PAGE_SIZE: usize = 100;
+
+// Enable on demand with INSPIRUM_ICED_TRACE_MS=25. There is no per-frame
+// console output and no clock read when the setting is absent.
+static ICED_TRACE_THRESHOLD: OnceLock<Option<Duration>> = OnceLock::new();
+
+fn parse_iced_trace_threshold(raw: &str) -> Option<Duration> {
+    raw.trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+}
+
+fn iced_trace_threshold() -> Option<Duration> {
+    *ICED_TRACE_THRESHOLD.get_or_init(|| {
+        std::env::var("INSPIRUM_ICED_TRACE_MS")
+            .ok()
+            .and_then(|raw| parse_iced_trace_threshold(&raw))
+    })
+}
+
+struct SlowIcedScope {
+    stage: &'static str,
+    started: Option<Instant>,
+}
+
+impl SlowIcedScope {
+    fn start(stage: &'static str) -> Self {
+        Self {
+            stage,
+            started: iced_trace_threshold().map(|_| Instant::now()),
+        }
+    }
+}
+
+impl Drop for SlowIcedScope {
+    fn drop(&mut self) {
+        if let (Some(started), Some(threshold)) = (self.started, iced_trace_threshold()) {
+            let elapsed = started.elapsed();
+            if elapsed >= threshold {
+                // Intentionally never include Message data, hostnames, text,
+                // clipboard contents, terminal output or filesystem paths.
+                eprintln!(
+                    "iced slow {}: {:.1} ms (threshold {} ms)",
+                    self.stage,
+                    elapsed.as_secs_f64() * 1000.0,
+                    threshold.as_millis()
+                );
+            }
+        }
+    }
+}
 
 pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result {
     iced::application(
@@ -1080,6 +1132,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
         bounds: iced::Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
+        let _slow = SlowIcedScope::start("terminal_canvas_draw");
         fn rgb(value: [u8; 3]) -> Color {
             Color::from_rgb8(value[0], value[1], value[2])
         }
@@ -1576,6 +1629,7 @@ struct App {
 
 impl App {
     fn boot(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> Self {
+        let _slow = SlowIcedScope::start("startup");
         let (dock, terminal_dock) = pane_grid::State::new(Dock::Terminal);
         let (profiles, mut load_error) = match load_sessions(&profiles_path) {
             Ok(profiles) => (profiles, None),
@@ -1872,6 +1926,7 @@ impl App {
     }
 
     fn refresh_workspace_displays(&mut self, index: usize) {
+        let _slow = SlowIcedScope::start("terminal_snapshot");
         let Some(tab) = self.tabs.get_mut(index) else {
             return;
         };
@@ -2342,6 +2397,7 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let _slow = SlowIcedScope::start("event_update");
         match message {
             Message::Search(value) => {
                 if self.dialog.is_none() {
@@ -3689,6 +3745,7 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        let _slow = SlowIcedScope::start("view_layout");
         let active_transfers = self
             .files
             .transfers
@@ -5373,6 +5430,16 @@ mod tests {
         assert_eq!(app.profile_visible, PROFILE_PAGE_SIZE);
         assert_eq!(app.profile_matches.len(), 61);
         assert_eq!(next_profile_page(usize::MAX, 250), 250);
+    }
+
+    #[test]
+    fn iced_slow_trace_parsing_is_explicit_and_does_not_log_secrets() {
+        assert_eq!(parse_iced_trace_threshold("25"), Some(Duration::from_millis(25)));
+        assert_eq!(parse_iced_trace_threshold(" 100 "), Some(Duration::from_millis(100)));
+        assert_eq!(parse_iced_trace_threshold("0"), None);
+        assert_eq!(parse_iced_trace_threshold(""), None);
+        assert_eq!(parse_iced_trace_threshold("not-a-number"), None);
+        assert_eq!(parse_iced_trace_threshold("-10"), None);
     }
 
     #[test]
