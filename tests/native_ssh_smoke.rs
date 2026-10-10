@@ -289,9 +289,13 @@ fn native_proxyjump_enforces_hop_trust_and_no_direct_fallback() {
 fn native_forwarded_agent_identity_is_only_available_when_enabled() {
     let fixture = fixture();
     let events = fixture.join("server.log");
+    // Distinct native OpenSSH sessions test both negative consent and a
+    // fresh re-enable after teardown. An earlier allowed agent must not
+    // leak into the disabled session, and re-enabling must still work.
     for (id, enabled, expected) in [
         (9971, true, "NATIVE_AGENT_FORWARDED"),
         (9972, false, "NATIVE_AGENT_DISABLED"),
+        (9973, true, "NATIVE_AGENT_FORWARDED"),
     ] {
         let session = Session {
             name: "Disposable agent forwarding".into(),
@@ -319,14 +323,24 @@ fn native_forwarded_agent_identity_is_only_available_when_enabled() {
         wait_exit(&receiver, id);
         drop(terminal);
     }
-    assert!(event_count(&events, "AGENT_FORWARDED") >= 1);
-    assert!(event_count(&events, "AGENT_DISABLED") >= 1);
+    assert_eq!(
+        event_count(&events, "AGENT_FORWARDED"),
+        2,
+        "fresh reconnect must regain forwarding only when explicitly enabled"
+    );
+    assert_eq!(
+        event_count(&events, "AGENT_DISABLED"),
+        1,
+        "disabled session must not retain an earlier forwarded agent"
+    );
     assert_eq!(
         event_count(&events, "SESSION_OPEN"),
         event_count(&events, "SESSION_CLOSED:"),
         "agent fixture left an SSH session open"
     );
-    println!("PASS native Unix SSH agent forwarding opt-in/opt-out, identity listing and cleanup");
+    println!(
+        "PASS native Unix SSH agent forwarding enable/disable/re-enable, identity listing and cleanup"
+    );
 }
 
 fn fixture_port(fixture: &Path, name: &str) -> u16 {
