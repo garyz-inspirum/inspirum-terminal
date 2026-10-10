@@ -2302,13 +2302,9 @@ const BOTTOM_QUEUE_MIN_VIEWPORT: f32 = 24.0;
 const SIDE_FILES_EXTRA_CHROME: f32 = 30.0;
 const SIDE_QUEUE_MAX_VIEWPORT: f32 = 144.0;
 
-/// Transfer-queue viewport for a bottom dock of `dock_height` pixels, or
-/// `None` when the queue must collapse to a single summary line so the
-/// listings keep at least `list_min_height`.
-fn bottom_queue_viewport_height(dock_height: f32, policy: FilesLayoutPolicy) -> Option<f32> {
-    files_queue_viewport_height(dock_height, false, policy)
-}
-
+/// Transfer-queue viewport for a dock of `dock_height` pixels, or `None`
+/// when the queue must collapse to a single summary line so the listings
+/// keep at least `list_min_height` each.
 fn files_queue_viewport_height(
     dock_height: f32,
     side_dock: bool,
@@ -8035,15 +8031,15 @@ mod tests {
         assert!(policy.compact_actions);
         // 1280x800 bottom dock keeps the full queue viewport.
         assert_eq!(
-            bottom_queue_viewport_height(366.0, policy),
+            files_queue_viewport_height(366.0, false, policy),
             Some(policy.queue_viewport_height)
         );
         // 960x640 bottom dock (~254px) collapses the queue to a summary line
         // so the listings keep two full rows.
-        assert_eq!(bottom_queue_viewport_height(254.0, policy), None);
+        assert_eq!(files_queue_viewport_height(254.0, false, policy), None);
         // Just enough spare space keeps a small viewport rather than collapsing.
         let tight = BOTTOM_FILES_CHROME + policy.list_min_height + BOTTOM_QUEUE_MIN_VIEWPORT;
-        assert_eq!(bottom_queue_viewport_height(tight, policy), Some(BOTTOM_QUEUE_MIN_VIEWPORT));
+        assert_eq!(files_queue_viewport_height(tight, false, policy), Some(BOTTOM_QUEUE_MIN_VIEWPORT));
         // 1280x800 side dock (~600px) keeps two listings and a bounded queue.
         let side = files_queue_viewport_height(600.0, true, policy).expect("side queue");
         assert!(side >= BOTTOM_QUEUE_MIN_VIEWPORT && side <= SIDE_QUEUE_MAX_VIEWPORT);
