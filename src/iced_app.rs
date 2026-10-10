@@ -2283,6 +2283,25 @@ fn bottom_files_split_ratio() -> f32 {
     0.38
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FilesLayoutPolicy {
+    list_min_height: f32,
+    queue_viewport_height: f32,
+    compact_actions: bool,
+}
+
+fn bottom_files_layout_policy() -> FilesLayoutPolicy {
+    FilesLayoutPolicy {
+        // Enough for the pane header and one complete file-row hit target at
+        // the supported minimum window size. The surrounding column uses
+        // fixed-height overflow regions so this space cannot be consumed by
+        // transfer history.
+        list_min_height: 72.0,
+        queue_viewport_height: 48.0,
+        compact_actions: true,
+    }
+}
+
 impl App {
     fn boot(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> Self {
         let _slow = SlowIcedScope::start("startup");
@@ -6087,6 +6106,7 @@ impl App {
                 transfer_list.push(text("No transfers for this session.").size(11).color(MUTED));
         }
 
+        let bottom_layout = bottom_files_layout_policy();
         let file_panels: Element<'_, Message> = if self.files_side_dock {
             column![local_panel, remote_panel]
                 .spacing(8)
@@ -6095,7 +6115,7 @@ impl App {
         } else {
             row![local_panel, remote_panel]
                 .spacing(8)
-                .height(Fill)
+                .height(bottom_layout.list_min_height)
                 .into()
         };
         let actions_panel: Element<'_, Message> = if self.files_side_dock {
@@ -6125,15 +6145,12 @@ impl App {
             .spacing(6)
             .into()
         } else {
-            column![
+            scrollable(
                 row![
                     action("Upload ->", Message::FilesRequestUpload),
                     action("<- Download", Message::FilesRequestDownload),
                     action("New local folder", Message::FilesRequestMkdirLocal),
                     action("New remote folder", Message::FilesRequestMkdirRemote),
-                ]
-                .spacing(8),
-                row![
                     action("Rename local", Message::FilesRequestRenameLocal),
                     action("Rename remote", Message::FilesRequestRenameRemote),
                     action("Edit remote", Message::FilesRequestEditRemote),
@@ -6141,10 +6158,35 @@ impl App {
                     action("Delete remote", Message::FilesRequestDeleteRemote),
                 ]
                 .spacing(8),
-            ]
-            .spacing(8)
+            )
+            .direction(scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::default(),
+            ))
+            .height(if bottom_layout.compact_actions {
+                34
+            } else {
+                68
+            })
             .into()
         };
+
+        let queue_viewport_height = if self.files_side_dock {
+            144.0
+        } else {
+            bottom_layout.queue_viewport_height
+        };
+        let transfer_queue = container(
+            column![
+                text("TRANSFER QUEUE").size(11).color(MUTED),
+                scrollable(transfer_list).height(queue_viewport_height),
+            ]
+            .spacing(6),
+        )
+        .padding(8)
+        .width(Fill)
+        .style(surface);
+
+        let content_spacing = if self.files_side_dock { 8 } else { 4 };
 
         container(
             column![
@@ -6253,20 +6295,12 @@ impl App {
                 } else {
                     container(text(""))
                 },
-                container(
-                    column![
-                        text("TRANSFER QUEUE").size(11).color(MUTED),
-                        transfer_list,
-                    ]
-                    .spacing(6)
-                )
-                .padding(8)
-                .style(surface),
+                transfer_queue,
             ]
-            .spacing(8)
+            .spacing(content_spacing)
             .height(Fill),
         )
-        .padding(10)
+        .padding(if self.files_side_dock { 10 } else { 8 })
         .height(Fill)
         .width(Fill)
         .style(card)
@@ -7940,8 +7974,11 @@ mod tests {
     }
 
     #[test]
-    fn bottom_files_dock_reserves_space_for_its_fixed_controls() {
-        assert_eq!(bottom_files_split_ratio(), 0.38);
+    fn bottom_files_layout_bounds_queue_and_reserves_a_hit_target_row() {
+        let policy = bottom_files_layout_policy();
+        assert!(policy.queue_viewport_height <= 56.0);
+        assert!(policy.list_min_height >= 72.0);
+        assert!(policy.compact_actions);
     }
 
     #[test]
