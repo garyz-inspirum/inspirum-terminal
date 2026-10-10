@@ -172,6 +172,8 @@ This prints a line **only when** one of these synchronous stages takes at least 
 
 With this option enabled, clicks on the **terminal canvas** also report `iced slow click_to_canvas_draw` when the interval from the delivered selection event to the next focused canvas drawing exceeds the selected threshold. This lets an affected Mac distinguish a delayed application redraw from a slower GPU-present or OS event-delivery path. It does not instrument ordinary Iced text inputs; for median/p95 diagnosis lower the threshold (for example to 1 ms), test at least 30 clicks, and use only that stage's static timing lines. Tracing stores only pane IDs and monotonic instants in a bounded in-memory map; neither hostnames nor terminal text are logged.
 
+After recording a local trace with `INSPIRUM_ICED_TRACE_MS=1`, run `python3 scripts/analyze-iced-trace.py iced-timings.log` to report click-to-canvas p50/p95 using nearest-rank percentiles. The script discards all nonmatching log lines and warns when fewer than 30 clicks are present. These measurements are **not** click-to-visible-caret or GPU-present timings, and cannot close #78 without named-hardware external observation.
+
 These timings measure **CPU-stage durations, not input-to-screen latency**. A slow-GPU presentation or OS event delivery issue may need native macOS Instruments tracing. For acceptance, measure on the affected Mac and record its model, macOS version, display scale, renderer and connected-tab count. Never claim the p95 budget is met from these logs alone.
 
 ## 9. Native review script
