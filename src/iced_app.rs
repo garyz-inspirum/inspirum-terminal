@@ -4506,7 +4506,8 @@ impl App {
                     .map(|(id, _)| *id);
                 if let Some(pane) = shell {
                     if tab.panes.len() == 1 {
-                        self.status = "This is the last SSH pane. Close the tab to disconnect it.".into();
+                        self.status =
+                            "This is the last SSH pane. Close the tab to disconnect it.".into();
                         return Task::none();
                     }
                     let result = self.update(Message::ClosePane(pane));
@@ -7580,7 +7581,11 @@ mod tests {
         assert_eq!(app.tabs[0].panes.len(), 2);
         let _ = app.update(Message::TogglePrivacyLock);
         let _ = app.update(Message::ToggleAuxiliaryShell);
-        assert_eq!(app.tabs[0].panes.len(), 2, "privacy lock blocks shell changes");
+        assert_eq!(
+            app.tabs[0].panes.len(),
+            2,
+            "privacy lock blocks shell changes"
+        );
     }
 
     #[test]
