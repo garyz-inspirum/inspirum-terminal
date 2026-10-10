@@ -76,7 +76,11 @@ async def monitored_shell(
     stdout.write("NATIVE_SMOKE_READY\r\n")
     buffer = ""
     try:
-        while chunk := await stdin.read(8192):
+        while True:
+            chunk = await stdin.read(8192)
+            if not chunk:
+                events.write("SHELL_STREAM_EOF")
+                return
             buffer += chunk.replace("\r\n", "\n").replace("\r", "\n")
             while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
@@ -95,7 +99,12 @@ async def monitored_shell(
                 elif line == "exit":
                     events.write("SESSION_EXIT_REQUEST")
                     return
+    except Exception as exc:
+        # No private material or server input is included in diagnostics.
+        events.write(f"SHELL_HANDLER_EXCEPTION:{type(exc).__name__}")
+        raise
     finally:
+        events.write("SHELL_HANDLER_ENDED")
         events.write("SESSION_CLOSED:clean")
 
 
@@ -476,6 +485,11 @@ async def main() -> int:
                 await asyncio.to_thread(xvfb.wait)
             server.close()
             await server.wait_closed()
+            # Always retain only synthetic lifecycle markers. This is critical
+            # when a PTY appears then unexpectedly exits before GUI assertions.
+            (destination / "ssh-fixture-events.txt").write_text(
+                events.path.read_text(encoding="utf-8"), encoding="utf-8"
+            )
     return 0
 
 
