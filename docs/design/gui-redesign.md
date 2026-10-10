@@ -159,7 +159,7 @@ Selected, hovered, focused, disabled, pending and error states need separate tre
 Users could not tell a button, tab or link from a plain label because resting buttons had no fill or outline. The rule is now explicit and enforced by a unit test (`clickable_controls_are_distinct_from_labels_at_rest`):
 
 - **Every clickable control** (buttons, tabs, sidebar session rows, file rows, close/add controls) has a resting fill `#1A2330` and a 1 px outline `#485A73` with 5 px radius. Hover brightens the fill to `#263244` with an accent outline; pressed darkens; disabled uses the panel colour with the divider outline and secondary text.
-- **Selected** controls (active tab, selected file row, enabled toggles) use the elevated fill with accent text *and* accent outline.
+- **Selected** controls (active tab, selected file row, enabled toggles) use an accent-tinted fill `#263A58` with an accent outline; the text stays the main text colour so selection never reduces legibility.
 - **Primary** action keeps the accent fill with dark text.
 - **Labels, headers, metadata and status text** never have a fill or outline. Section headers (`LOCAL`, `REMOTE`, `TRANSFER QUEUE`) stay small muted caps.
 - Links only occur inside terminal content, where URL highlighting already uses the accent colour.

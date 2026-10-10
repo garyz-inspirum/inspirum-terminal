@@ -7144,7 +7144,7 @@ fn quiet(_: &Theme, status: button::Status) -> button::Style {
     let (background, border_color, text_color) = match status {
         button::Status::Hovered => (CONTROL_HOVER, BLUE, FG),
         button::Status::Pressed => (CONTROL_PRESSED, BLUE, FG),
-        button::Status::Disabled => (PANEL, LINE, MUTED),
+        button::Status::Disabled => (ELEVATED, LINE, MUTED),
         button::Status::Active => (CONTROL_FILL, CONTROL_BORDER, FG),
     };
     button::Style {
@@ -7159,11 +7159,18 @@ fn quiet(_: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// Selected fill: the accent at low alpha over the elevated surface, so the
+/// state reads from the row itself while the text stays high contrast.
+const SELECTED_FILL: Color = Color::from_rgb8(38, 58, 88);
+
 fn selected_button(theme: &Theme, status: button::Status) -> button::Style {
     let base = quiet(theme, status);
     button::Style {
-        background: Some(ELEVATED.into()),
-        text_color: BLUE,
+        background: Some(SELECTED_FILL.into()),
+        // Keep selected text as bright as resting text; accent lives in the
+        // fill and outline. Accent-coloured text on an accent-tinted fill was
+        // the least readable state in the dock.
+        text_color: FG,
         border: Border {
             color: BLUE,
             ..base.border
@@ -7204,10 +7211,9 @@ mod tests {
         let rest = super::quiet(&theme, Status::Active);
         let hover = super::quiet(&theme, Status::Hovered);
         assert_ne!(rest.border.color, hover.border.color);
-        assert_eq!(
-            super::selected_button(&theme, Status::Active).border.color,
-            super::BLUE
-        );
+        let selected = super::selected_button(&theme, Status::Active);
+        assert_eq!(selected.border.color, super::BLUE);
+        assert_eq!(selected.text_color, super::FG);
         assert_eq!(super::primary(&theme, Status::Active).text_color, super::BG);
     }
 
