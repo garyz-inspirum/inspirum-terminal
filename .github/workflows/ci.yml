@@ -133,6 +133,17 @@ jobs:
         env:
           INSPIRUM_TEST_TMPDIR: ${{ runner.temp }}
         run: scripts/test-ssh-integration.sh
+      - name: Install disposable Kerberos fixture dependencies
+        if: runner.os == 'Linux'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get install -y krb5-kdc krb5-admin-server krb5-user
+      - name: Real GSSAPI and delegation acceptance (isolated KDC)
+        if: runner.os == 'Linux'
+        env:
+          INSPIRUM_TEST_TMPDIR: ${{ runner.temp }}
+        run: python3 -B scripts/test-native-gssapi.py
       - name: Build CI release candidate
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package CI release candidate
