@@ -295,8 +295,14 @@ fn native_local_remote_and_dynamic_ssh_forwarding() {
     let fixture = fixture();
     let echo_port = fixture_port(&fixture, "echo-port");
     let remote_port = fixture_port(&fixture, "remote-port");
-    let local_port = ephemeral_port();
-    let socks_port = ephemeral_port();
+    let mut local_port = ephemeral_port();
+    while local_port == remote_port {
+        local_port = ephemeral_port();
+    }
+    let mut socks_port = ephemeral_port();
+    while socks_port == local_port || socks_port == remote_port {
+        socks_port = ephemeral_port();
+    }
 
     // The destination for the reverse forward runs in this test, not in a
     // production service or on an externally reachable interface.
