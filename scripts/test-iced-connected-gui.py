@@ -205,6 +205,11 @@ async def main() -> int:
         server = await asyncssh.create_server(
             lambda: MonitoredServer(trusted, events),
             "127.0.0.1", 0, server_host_keys=[str(host)], encoding="utf-8",
+            # A real remote program receives cursor-key escape sequences from
+            # its PTY. AsyncSSH's server-side line editor consumes those keys
+            # itself, so disable it in this transport fixture and observe the
+            # exact bytes delivered by the production Iced terminal backend.
+            line_editor=False,
             sftp_factory=lambda chan: isolated_sftp_server(chan, remote_root, events),
             session_factory=lambda stdin, stdout, stderr: monitored_shell(
                 stdin, stdout, stderr, events
@@ -538,7 +543,8 @@ async def main() -> int:
                     f"Free-type draft edit screenshot change: {free_type_pixels} pixels\n"
                     f"Focus-mode screenshot change: {focus_pixels} pixels\n"
                     f"Privacy-curtain screenshot change: {privacy_pixels} pixels\n"
-                    f"Alternate-screen screenshot change: {fullscreen_pixels} pixels\n"                    f"Remote-key mode screenshot change: {remote_keys_pixels} pixels\n"
+                    f"Alternate-screen screenshot change: {fullscreen_pixels} pixels\n"
+                    f"Remote-key mode screenshot change: {remote_keys_pixels} pixels\n"
                     "PASS: real remote-key Left arrow reached the isolated SFTP-capable SSH shell\n"
                     "PASS: privacy-locked and free-type synthetic text never reached SSH\n"
                     "All keys generated in isolated temporary fixture; no real host or credential.\n",
