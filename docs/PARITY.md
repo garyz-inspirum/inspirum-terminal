@@ -21,13 +21,15 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 
 ## Updated native acceptance evidence — 10 October 2026
 
+Canonical [UI acceptance matrix and evidence index](ui-acceptance.md): snapshot `8b6dbbe74b1c2188e4f0ccb4b33bfa7420aff018` (merged #121), post-merge native CI [38034556562](https://github.com/garyz-inspirum/inspirum-terminal/actions/runs/38034556562) successful. Only #78 and roadmap #1 are open at this snapshot; closed implementation issues do not waive device acceptance.
+
 **Production GUI:** Iced 0.14 is the sole application UI since merged #84; egui/eframe fallback is removed. Focus, privacy and paste guards are tested. PR #95 enables Metal/WGPU with tiny-skia fallback on Apple Silicon with full license-notice and downloaded-artifact CI checks, but **a compiled renderer is not evidence of lower click latency**. Hardware click-to-caret, native IME/CJK, connected SSH full-screen apps, split panes and SFTP visuals remain open in #78.
 
 **Advanced SSH:** #88 verified ProxyJump routing with changed-key/failing-jump rejection and real local/remote/SOCKS forwarding, same-port reconnect and listener cleanup on Linux x64, Windows x64 and macOS arm64. #93 verified Linux agent forwarding; the native Unix fixture also verifies enable → disable → re-enable, identity visibility and session cleanup on Linux and macOS. #99 verified X11 forwarding on/off through Linux Xvfb/xauth with a system OpenSSH control. The UI explicitly labels Windows agent and Windows/macOS X11 runtime as unverified, and those platforms are not claimed. This completes bounded issue #66 without extrapolating unsupported runtime evidence. Linux Kerberos/GSSAPI (#89/#92) remains a Linux-only runtime claim.
 
-**Interactions:** #86 privacy view, #87 multiline paste confirmation, #90 focus mode, #91 isolated local navigation, #97 optional vi bindings and #98 nested delimiter matching are merged. Free-type local draft (#100) is a separate in-review PR and must not be counted as merged before green CI.
+**Interactions:** #86 privacy view, #87 multiline paste confirmation, #90 focus mode, #91 isolated local navigation, #97 optional vi bindings and #98 nested delimiter matching are merged. Free-type local draft (#100), auxiliary SSH shell (#117), right/bottom Files explorer (#120), and pane-local remote cursor keys with source-first synchronized input (#121) are merged. Bounded interaction issue #64 is closed; per-destination encoding and failed-source isolation have native/test evidence described in the acceptance matrix.
 
-**Scope still open:** #64 interaction/explorer parity, #78 live GUI usability and #1 full WindTerm functional parity including local shell, Telnet, raw TCP, serial and X/Y/ZModem. Unsigned prerelease packages must not be described as signed or notarized.
+**Scope still open:** #78 live GUI/device usability and #1 full WindTerm functional parity including local shell, Telnet, raw TCP, serial and X/Y/ZModem. #64 and #66 are closed with bounded evidence and documented limitations, not universal platform/UI sign-off. Unsigned prerelease packages must not be described as signed or notarized.
 
 ## Foundation and release engineering
 
@@ -64,11 +66,11 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Identity-file path editor plus validated profile persistence; private-key contents and passphrases are never stored. Linux encrypted-key and agent authentication are verified; cross-platform native public-key authentication/trust/lifecycle smoke passes on all three targets.
 - [x] ProxyJump profile/UI and discrete `-J` argv support with isolated native three-platform jump routing and no-direct-fallback negative checks in #88. Structured proxy controls are separately implemented.
 - [x] Local, remote, and dynamic forwarding profile/UI with discrete `-L`/`-R`/`-D`, `ExitOnForwardFailure=yes`, and real TCP/SOCKS bytes plus listener cleanup on Linux/macOS/Windows in #88.
-- [x] Agent/X11 forwarding UI has Inherit/Enable/Disable policy and risk text. Disposable Linux ssh-agent forwarding (#93) and Xvfb/xauth X11 forwarding (#99) runtime opt-in/opt-out passed; cross-platform runtime tests remain pending under #66.
+- [x] Agent/X11 forwarding UI has Inherit/Enable/Disable policy and risk text. Disposable Linux ssh-agent forwarding (#93) and Xvfb/xauth X11 forwarding (#99) runtime opt-in/opt-out passed; macOS agent enable/disable/re-enable is also verified. Windows agent and Windows/macOS X11 remain explicitly native-unverified; closed #66 does not claim those runtimes.
 - [x] Connection timeout, server keepalive interval, and compression profile/UI; compression also has Inherit/Enable/Disable policy. Cipher/algorithm policy UI remains planned.
 - [x] Explicit reconnect button for an exited SSH tab; reconnect starts a fresh OpenSSH/PTy session from the tab's original profile and does not replay terminal input. Network-loss and host-key-change reconnect acceptance remains pending.
 - [x] Headless and graphical support diagnostics share one privacy-safe report core: local OpenSSH/platform capability probes, allowlisted current app launch-policy summary, bounded sanitized in-memory recent-error categories, deterministic/redaction tests and no-clobber export. No passwords, passphrases, private-key material, authentication responses, arbitrary environment dump, terminal contents or raw error text are included (#20/#33). See [diagnostics](diagnostics.md).
-- [x] Native Windows/macOS authentication, trust, terminal I/O, resize, reconnect and cleanup smoke plus ProxyJump and -L/-R/-D forwarding byte roundtrips in #88. Agent and X11 runtime support on Windows/macOS is **not** verified (#66).
+- [x] Native Windows/macOS authentication, trust, terminal I/O, resize, reconnect and cleanup smoke plus ProxyJump and -L/-R/-D forwarding byte roundtrips in #88. macOS agent forwarding is verified; Windows agent and Windows/macOS X11 runtime support is **not** verified (bounded closed #66).
 
 ## Sessions and workspace
 
@@ -78,7 +80,7 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Search, rename-on-save, editable duplicate, and confirmed delete for saved profiles; operations preserve atomic persistence and do not disconnect already-open tabs.
 - [x] Validated non-secret JSON profile import/export with collision-safe merge and confirmed replace; missing import sources are errors and the complete merged candidate must fit the file-size limit before any store change. Imported local identity paths may require adjustment on another machine.
 - [x] Folder/tag/favorite profile organization and startup-session selection completed under closed #55.
-- [x] Bounded two-pane horizontal/vertical SSH splits with independent PTY lifecycle (#22).
+- [x] Horizontal/vertical SSH splits with independent PTY lifecycle and a four-pane workspace limit; auxiliary SSH shell uses the same grid (#22/#117).
 - [x] Persisted workspace layouts load as metadata only and reconnect only after saved opt-in plus an explicit restore action (#22).
 - [x] Advanced tab search/color and workspace actions completed under closed #56.
 - [x] Synchronized input requires explicit pane targets plus a prominent armed state; close/reconnect disarms it and multiline paste remains confirmation-gated (#22).
@@ -98,7 +100,7 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] Reproducible 5,000-line high-volume scrollback regression plus opt-in 20,000-line release benchmark and `/usr/bin/time` memory wrapper are documented for #23; no universal latency or memory guarantee is claimed.
 - [x] Opt-in per-tab screen-snapshot session logging is off by default, creates a new file without overwrite, never records local keystrokes, and documents that remote output can contain sensitive material (#21).
 - [x] Command palette, explicit command sender, quick bar, snippets and completion implemented under closed #60.
-- [x] Focus/scrollback modes (#90/#91/#97), preview/lock (#87/#86) and delimiter emphasis (#98) merged. Local free-type compose draft is under CI in #100; remote-cursor and explorer/shell parity remain #64.
+- [x] Focus/scrollback modes (#90/#91/#97), preview/lock (#87/#86) and delimiter emphasis (#98) merged. Local free-type compose draft (#100), remote cursor-key mode (#121), and explorer/auxiliary SSH shell (#120/#117) are merged; #64 is closed. Native device usability remains #78.
 
 ## Files and remote workflows
 
@@ -112,7 +114,7 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 
 ## Phase 3 — SSH workflow and product polish
 
-Active bounded queue:
+Bounded implementation queue (closed does not mean full device acceptance):
 
 - [x] #55 SSH profile organization: folders, tags, favorites and startup sessions
 - [x] #56 Advanced tab and workspace management
@@ -123,9 +125,11 @@ Active bounded queue:
 - [x] #61 Local file manager and drag/drop integration for SSH transfers
 - [x] #62 Safe remote editor workflow over SFTP
 - [x] #63 Advanced SSH algorithm policy and authenticated proxy support
-- [ ] #64 WindTerm-class interaction modes, panes, enhanced paste and screen lock
+- [x] #64 WindTerm-class interaction modes, panes, enhanced paste and screen lock (bounded completion through #121; hardware/UI acceptance remains #78)
 - [x] #65 Real Kerberos/GSSAPI authentication acceptance (Linux isolated KDC; other OSes not runtime verified)
 - [x] #66 Cross-platform advanced SSH acceptance: ProxyJump, forwarding, agent and X11
+
+- [ ] #78 WindTerm-class UI visual and interaction acceptance on named native devices; retain the full original acceptance scope.
 
 Phase 3 intentionally stays SSH-first. Local shell, Telnet, raw TCP, serial and X/Y/ZModem begin only after these product-polish and evidence gaps are completed or explicitly descoped.
 
@@ -141,9 +145,9 @@ Phase 3 intentionally stays SSH-first. Local shell, Telnet, raw TCP, serial and 
 
 Unchecked items below are not implemented and are not a WindTerm parity claim.
 
-- [x] Alt+Enter focus (#90) and per-pane Shift+Enter local navigation (#91/#97) with vi-like scrollback and remote-input isolation. Inline local free-type composer is in PR #100 under CI; full remote cursor editing remains outside the implemented scope (#64).
-- [x] Guarded paste preview/optional newline normalization (#87) and in-app privacy curtain (#86) have verified Linux/Windows/macOS CI. Explorer/shell side-pane parity remains incomplete (#64).
-- [x] Visible nested-bracket matching emphasis and targeted iced row-cache invalidation (#98). General text highlighting beyond existing search and offscreen delimiter matching remain tracked in #64/#57.
+- [x] Alt+Enter focus (#90) and per-pane Shift+Enter local navigation (#91/#97) with vi-like scrollback and remote-input isolation. Inline local free-type composer (#100) and explicit pane-local remote cursor-key delivery (#121) are merged. Remote applications interpret the keys; arbitrary remote text editing/cursor placement is not claimed.
+- [x] Guarded paste preview/optional newline normalization (#87) and in-app privacy curtain (#86) have verified Linux/Windows/macOS CI. Dockable right/bottom Files explorer (#120) and auxiliary SSH shell (#117) are merged; their physical-device usability remains #78.
+- [x] Visible nested-bracket matching emphasis and targeted iced row-cache invalidation (#98). Visible-row URL highlighting is also implemented. General highlighting, offscreen delimiter matching, wrapped/OSC 8 links and click-to-open are not claimed; a complete inventory remains part of #1, not an open #64 task.
 - [x] Select-to-copy and configurable middle/right-click paste implemented under closed #58; verify live OS-specific mouse acceptance under GUI issue #78.
 - [x] Hide-pointer setting and advanced workspace/tab management implemented under closed #58/#56; device-specific rendering/focus acceptance remains #78.
 - [ ] Complete advertised WindTerm feature inventory reconciled against the [source README](https://github.com/garyz-inspirum/WindTerm/blob/master/README.md); any proposed exclusion requires an explicit scope decision.
