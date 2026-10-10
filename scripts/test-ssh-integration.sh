@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 # Respect standard Cargo overrides; keep generated credentials outside the checkout.
 export TERM=xterm-256color
 python3 - <<'PY'
-import atexit, getpass, os, pathlib, shutil, socket, subprocess, tempfile, time
+import atexit, getpass, os, pathlib, secrets, shutil, socket, subprocess, tempfile, time
 default_tmp = str(pathlib.Path(os.environ['CARGO_TARGET_DIR']).resolve().parent) if os.environ.get('CARGO_TARGET_DIR') else tempfile.gettempdir()
 root=pathlib.Path(os.environ.get('INSPIRUM_TEST_TMPDIR', default_tmp))
 root.mkdir(parents=True, exist_ok=True)
@@ -68,6 +68,14 @@ fi
 while IFS= read -r line; do
  case "$line" in
  echo:*) printf 'REMOTE_ECHO:%s\\n' "${line#echo:}" ;;
+ x11-probe)
+  if [ -z "${DISPLAY:-}" ]; then
+   printf 'X11_NO_DISPLAY\\n'
+  elif case "$DISPLAY" in localhost:*) true ;; *) false ;; esac && timeout 5 xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
+   printf 'X11_FORWARDED\\n'
+  else
+   printf 'X11_UNUSABLE\\n'
+  fi ;;
  agent-probe)
   if [ -z "${SSH_AUTH_SOCK:-}" ]; then
    printf 'AGENT_NO_SOCKET\\n'
@@ -108,7 +116,10 @@ AllowUsers {getpass.getuser()}
 AllowTcpForwarding yes
 # Disposable loopback fixture only. Client profile opt-in is verified below.
 AllowAgentForwarding yes
-X11Forwarding no
+X11Forwarding yes
+X11UseLocalhost yes
+XAuthLocation /usr/bin/xauth
+SetEnv XAUTHORITY={d}/remote-xauth
 PermitTunnel no
 PermitTTY yes
 PrintMotd no
@@ -379,8 +390,35 @@ Host *
     time.sleep(.05)
  with (d/'sshd.log').open('w+') as log, (d/'jump_sshd.log').open('w+') as jump_log, (d/'sftp_sshd.log').open('w+') as sftp_log, (d/'tmux_sshd.log').open('w+') as tmux_log, (d/'password_sshd.log').open('w+') as password_log, (d/'mfa_sshd.log').open('w+') as mfa_log:
   processes=[]
-  server=jump_server=sftp_server=tmux_server=password_server=mfa_server=agent=None
+  server=jump_server=sftp_server=tmux_server=password_server=mfa_server=agent=xvfb=None
   try:
+   # A real local X11 display and auth cookie are required to prove that
+   # the remote client's proxied DISPLAY works, rather than only checking
+   # the OpenSSH CLI arguments. Both auth files remain inside this fixture.
+   local_xauth=d/'local-xauth'
+   remote_xauth=d/'remote-xauth'
+   display_number=next((
+    value for value in range(150, 210)
+    if not pathlib.Path(f'/tmp/.X11-unix/X{value}').exists()
+    and not pathlib.Path(f'/tmp/.X{value}-lock').exists()
+   ), None)
+   if display_number is None: raise RuntimeError('no free isolated Xvfb display number')
+   display=f':{display_number}'
+   cookie=secrets.token_hex(16)
+   subprocess.run(
+    ['xauth','-f',str(local_xauth),'add',display,'.',cookie],
+    stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True
+   )
+   xvfb=subprocess.Popen(
+    ['Xvfb',display,'-screen','0','1024x768x24','-nolisten','tcp','-auth',str(local_xauth)],
+    stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL
+   )
+   processes.append(xvfb)
+   deadline=time.monotonic()+6
+   while not pathlib.Path(f'/tmp/.X11-unix/X{display_number}').exists():
+    if xvfb.poll() is not None: raise RuntimeError('isolated Xvfb exited before display ready')
+    if time.monotonic()>deadline: raise RuntimeError('isolated Xvfb display not ready')
+    time.sleep(.05)
    server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'sshd_config')],stdout=log,stderr=log)
    processes.append(server)
    jump_server=subprocess.Popen([sshd,'-D','-e','-f',str(d/'jump_sshd_config')],stdout=jump_log,stderr=jump_log)
@@ -425,6 +463,8 @@ Host *
     os.environ,
     INSPIRUM_SSH_FIXTURE=str(d),
     SSH_AUTH_SOCK=str(agent_sock),
+    DISPLAY=display,
+    XAUTHORITY=str(local_xauth),
     INSPIRUM_PRIV_AUTH_FIXTURE='1' if privileged_auth else '0',
     INSPIRUM_FIXTURE_PASSWORD=fixture_password,
    )
@@ -444,6 +484,17 @@ Host *
                  if key in baseline.stdout), 'NO_MARKER')
     raise RuntimeError(f'isolated system OpenSSH -A baseline failed: {marker}')
    print('PASS isolated system OpenSSH -A forwarding baseline',flush=True)
+   x11_control=subprocess.run(
+    ['ssh','-X','-F',str(d/'config'),'-tt','127.0.0.1'],
+    env=env,
+    input='x11-probe\\nexit\\n'.replace('\\n','\n'),
+    capture_output=True,text=True,timeout=22,check=False,
+   )
+   if x11_control.returncode != 0 or 'X11_FORWARDED' not in x11_control.stdout:
+    marker=next((key for key in ('X11_NO_DISPLAY','X11_UNUSABLE')
+                 if key in x11_control.stdout), 'NO_MARKER')
+    raise RuntimeError(f'isolated system OpenSSH -X baseline failed: {marker}')
+   print('PASS isolated system OpenSSH -X forwarding baseline',flush=True)
    cmd=['cargo','test','--locked','--test','ssh_integration','--test','sftp_policy','--','--ignored','--nocapture','--test-threads=1']
    print('RUN:',' '.join(cmd),flush=True)
    auth_summary=(f'; password sshd: 127.0.0.1:{password_port}; MFA sshd: 127.0.0.1:{mfa_port}' if privileged_auth else '; password/MFA fixture skipped (passwordless sudo unavailable)')
