@@ -16,18 +16,18 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 - [x] CI and release workflows pin Rust 1.95.0.
 - [ ] Releases remain unsigned/unnotarized until credential-backed signing is enabled and independently verified.
 - [x] Isolated Linux Kerberos/GSSAPI runtime acceptance (authentication, delegation on/off, missing and expired tickets) merged in #89/#92. macOS/Windows runtime GSSAPI has **not** been verified. Issue #65 is closed with these documented limitations.
-- [x] Native ProxyJump and TCP -L/-R/-D forwarding tested on Linux/macOS/Windows in #88, including failure/host-key guardrails and cleanup. Isolated real agent forwarding (#93) and X11 forwarding (#99) tested on Linux only; issue #66 remains open for macOS/Windows platform restrictions/runtime evidence.
+- [x] Advanced SSH acceptance (#66): ProxyJump and TCP -L/-R/-D pass on Linux/macOS/Windows with failure, trust, reconnect and teardown checks; real agent forwarding passes on Linux and macOS with enable/disable/re-enable isolation; Linux X11 passes through Xvfb/xauth. Windows agent and Windows/macOS X11 remain explicitly unverified in the connection UI and documentation, so no runtime support is claimed.
 - [ ] Full WindTerm parity. Not claimed.
 
 ## Updated native acceptance evidence — 10 October 2026
 
 **Production GUI:** Iced 0.14 is the sole application UI since merged #84; egui/eframe fallback is removed. Focus, privacy and paste guards are tested. PR #95 enables Metal/WGPU with tiny-skia fallback on Apple Silicon with full license-notice and downloaded-artifact CI checks, but **a compiled renderer is not evidence of lower click latency**. Hardware click-to-caret, native IME/CJK, connected SSH full-screen apps, split panes and SFTP visuals remain open in #78.
 
-**Advanced SSH:** #88 verified actual ProxyJump routing with changed-key/failing-jump rejection and real local/remote/SOCKS forwarding plus cleanup on Linux x64, Windows x64 and macOS arm64. #93 verified generated ssh-agent forwarding allowed/denied through Linux sshd. #99 verified X11 forwarding on/off through Linux Xvfb/xauth, with a system OpenSSH control. Platform support is **not** claimed for agent/X11 runtime on Windows/macOS without further test evidence. Linux Kerberos/GSSAPI (#89/#92) is real KDC fixture evidence and does not imply Windows/macOS GSSAPI support.
+**Advanced SSH:** #88 verified ProxyJump routing with changed-key/failing-jump rejection and real local/remote/SOCKS forwarding, same-port reconnect and listener cleanup on Linux x64, Windows x64 and macOS arm64. #93 verified Linux agent forwarding; the native Unix fixture also verifies enable → disable → re-enable, identity visibility and session cleanup on Linux and macOS. #99 verified X11 forwarding on/off through Linux Xvfb/xauth with a system OpenSSH control. The UI explicitly labels Windows agent and Windows/macOS X11 runtime as unverified, and those platforms are not claimed. This completes bounded issue #66 without extrapolating unsupported runtime evidence. Linux Kerberos/GSSAPI (#89/#92) remains a Linux-only runtime claim.
 
 **Interactions:** #86 privacy view, #87 multiline paste confirmation, #90 focus mode, #91 isolated local navigation, #97 optional vi bindings and #98 nested delimiter matching are merged. Free-type local draft (#100) is a separate in-review PR and must not be counted as merged before green CI.
 
-**Scope still open:** #64 interaction/explorer parity, #66 remaining platform capability acceptance, #78 live GUI usability and #1 full WindTerm functional parity including local shell, Telnet, raw TCP, serial and X/Y/ZModem. Unsigned prerelease packages must not be described as signed or notarized.
+**Scope still open:** #64 interaction/explorer parity, #78 live GUI usability and #1 full WindTerm functional parity including local shell, Telnet, raw TCP, serial and X/Y/ZModem. Unsigned prerelease packages must not be described as signed or notarized.
 
 ## Foundation and release engineering
 
@@ -125,7 +125,7 @@ Active bounded queue:
 - [x] #63 Advanced SSH algorithm policy and authenticated proxy support
 - [ ] #64 WindTerm-class interaction modes, panes, enhanced paste and screen lock
 - [x] #65 Real Kerberos/GSSAPI authentication acceptance (Linux isolated KDC; other OSes not runtime verified)
-- [ ] #66 Cross-platform advanced SSH acceptance: ProxyJump, forwarding, agent and X11
+- [x] #66 Cross-platform advanced SSH acceptance: ProxyJump, forwarding, agent and X11
 
 Phase 3 intentionally stays SSH-first. Local shell, Telnet, raw TCP, serial and X/Y/ZModem begin only after these product-polish and evidence gaps are completed or explicitly descoped.
 
