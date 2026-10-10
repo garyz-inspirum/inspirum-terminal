@@ -20,13 +20,14 @@ serde_json = "1"
 tempfile = "3"
 directories = "6"
 terminal_core = { package = "inspirum-terminal-core", path = "vendor/terminal-core" }
-# Iced's macOS GPU backend currently pulls historical crates without verified
-# license text. Use its native tiny-skia renderer on macOS until that is resolved.
+# Enable the Metal/WGPU backend on macOS and retain tiny-skia as a fallback.
+# The third-party notice verifier must pass for this native target before
+# enabling GPU acceleration in distributed builds; never waive license checks.
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 iced = { version = "=0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "x11", "wayland", "thread-pool", "crisp", "canvas", "advanced-shaping", "advanced"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-iced = { version = "=0.14.0", default-features = false, features = ["tiny-skia", "thread-pool", "crisp", "canvas", "advanced-shaping", "advanced"] }
+iced = { version = "=0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "thread-pool", "crisp", "canvas", "advanced-shaping", "advanced"] }
 
 [profile.dev]
 debug = 0
