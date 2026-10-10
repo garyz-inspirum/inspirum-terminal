@@ -52,6 +52,16 @@ Neither screenshots nor the SFTP handshake alone are integrity proof. This
 synthetic Linux result does not replace the broader backend matrix above or
 human/native-device acceptance on Linux, macOS, or Windows.
 
+Issue #78's bottom-dock regression keeps the connected production acceptance
+in bottom orientation at 1280x800. The retained Linux artifact shows both file
+rows and transfer controls before interaction, then completed Upload and
+Download queue entries; exact fixture bytes in the disposable local and chroot
+roots remain the transfer oracle. A retained 960x640 resize shows the action
+rows but clips the local and remote listings, so this evidence is limited to
+the normal 1280x800 acceptance size and is not a claim of minimum-window,
+hardware, IME, cross-platform, or universal usability. Issue #78 remains open,
+and roadmap issue #1 is unchanged.
+
 
 ## Local file manager and drag/drop transfers
 
