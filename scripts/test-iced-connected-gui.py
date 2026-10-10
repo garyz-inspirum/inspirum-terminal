@@ -73,25 +73,25 @@ async def monitored_shell(
     del stderr
     events.write("SESSION_OPEN")
     events.write("SESSION_STARTED")
-    stdout.write("NATIVE_SMOKE_READY\\r\\n")
+    stdout.write("NATIVE_SMOKE_READY\r\n")
     buffer = ""
     try:
         while chunk := await stdin.read(8192):
-            buffer += chunk.replace("\\r\\n", "\\n").replace("\\r", "\\n")
-            while "\\n" in buffer:
-                line, buffer = buffer.split("\\n", 1)
+            buffer += chunk.replace("\r\n", "\n").replace("\r", "\n")
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
                 if line == "echo:FREE_TYPE_PROBE":
                     events.write("UNEXPECTED_FREE_TYPE_PTY_INPUT")
                 elif line == "echo:LOCK_PROBE":
                     events.write("UNEXPECTED_LOCKED_PTY_INPUT")
                 elif line == "screen-on":
                     events.write("SCREEN_ON")
-                    stdout.write("\\x1b[?1049h\\x1b[2J\\x1b[H\\x1b[44;97mNATIVE_FULLSCREEN_ACTIVE\\x1b[0m\\r\\n")
+                    stdout.write("\x1b[?1049h\x1b[2J\x1b[H\x1b[44;97mNATIVE_FULLSCREEN_ACTIVE\x1b[0m\r\n")
                 elif line == "screen-off":
                     events.write("SCREEN_OFF")
-                    stdout.write("\\x1b[?1049l")
+                    stdout.write("\x1b[?1049l")
                 elif line.startswith("echo:"):
-                    stdout.write(f"NATIVE_ECHO:{line[5:]}\\r\\n")
+                    stdout.write(f"NATIVE_ECHO:{line[5:]}\r\n")
                 elif line == "exit":
                     events.write("SESSION_EXIT_REQUEST")
                     return
