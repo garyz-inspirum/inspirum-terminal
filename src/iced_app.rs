@@ -6685,11 +6685,13 @@ mod tests {
     #[test]
     fn free_type_shortcut_requires_explicit_command_shift_chord() {
         let key = keyboard::Key::Character("e".into());
-        assert!(free_type_chord(
-            &key,
-            keyboard::Modifiers::COMMAND | keyboard::Modifiers::SHIFT
-        ));
-        assert!(!free_type_chord(&key, keyboard::Modifiers::COMMAND));
+        let command = if cfg!(target_os = "macos") {
+            keyboard::Modifiers::LOGO
+        } else {
+            keyboard::Modifiers::CTRL
+        };
+        assert!(free_type_chord(&key, command | keyboard::Modifiers::SHIFT));
+        assert!(!free_type_chord(&key, command));
         assert!(!free_type_chord(&key, keyboard::Modifiers::SHIFT));
     }
 
