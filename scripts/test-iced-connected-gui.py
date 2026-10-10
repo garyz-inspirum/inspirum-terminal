@@ -60,6 +60,17 @@ class MonitoredServer(fixture.NativeServer):
         return MonitoredSession(self.events)
 
 
+def isolated_sftp_server(
+    chan: asyncssh.SSHServerChannel,
+    root: Path,
+    events: fixture.EventLog,
+) -> asyncssh.SFTPServer:
+    # This is the *real* SSH subsystem used by the Files dock; it is restricted
+    # to a generated disposable directory and not the runner's home folder.
+    events.write("SFTP_SUBSYSTEM_STARTED")
+    return asyncssh.SFTPServer(chan, chroot=str(root))
+
+
 def command(*args: str, env: dict[str, str], timeout: float = 12) -> str:
     result = subprocess.run(
         args, env=env, capture_output=True, text=True,
@@ -118,9 +129,15 @@ async def main() -> int:
         host = fixture.generate_key(root, "host")
         client = fixture.generate_key(root, "client")
         trusted = asyncssh.read_public_key(str(client) + ".pub")
+        remote_root = root / "remote-sftp"
+        remote_root.mkdir()
+        (remote_root / "CONNECTED_SFTP_FIXTURE.txt").write_text(
+            "Isolated Iced SFTP acceptance marker\\n", encoding="utf-8"
+        )
         server = await asyncssh.create_server(
             lambda: MonitoredServer(trusted, events),
             "127.0.0.1", 0, server_host_keys=[str(host)], encoding="utf-8",
+            sftp_factory=lambda chan: isolated_sftp_server(chan, remote_root, events),
         )
         port = server.get_port()
         key_type, key_data = fixture.public_fields(Path(str(host) + ".pub"))
@@ -217,6 +234,10 @@ async def main() -> int:
                     raise RuntimeError(f"split screen changed only {split_pixels} pixels")
 
                 command("xdotool", "windowfocus", window, "key", "--clearmodifiers", "ctrl+shift+f", env=env)
+                await wait_for(
+                    lambda: "SFTP_SUBSYSTEM_STARTED" in events.path.read_text(encoding="utf-8"),
+                    "actual SFTP subsystem opened by Iced Files dock",
+                )
                 await asyncio.sleep(2)
                 screenshot(window, destination / "connected-files-dock.png", env)
                 files_pixels = diff(
@@ -337,6 +358,7 @@ async def main() -> int:
                     raise RuntimeError("two distinct SSH panes were not authenticated")
                 (destination / "connected-acceptance.txt").write_text(
                     "PASS: two authenticated independent OpenSSH PTYs through production Iced\n"
+                    "PASS: native Files dock established actual isolated SSH SFTP subsystem\n"
                     f"Connected split screenshot change: {split_pixels} pixels\n"
                     f"Opened utility dock screenshot change: {files_pixels} pixels\n"
                     f"Free-type draft edit screenshot change: {free_type_pixels} pixels\n"
@@ -347,7 +369,7 @@ async def main() -> int:
                     "All keys generated in isolated temporary fixture; no real host or credential.\n",
                     encoding="utf-8",
                 )
-                print("PASS production Iced GUI: connected split, file dock, draft, focus/privacy, alternate-screen and PTY isolation", flush=True)
+                print("PASS production Iced GUI: connected split, real SFTP, draft, focus/privacy, alternate-screen and PTY isolation", flush=True)
         finally:
             if app is not None and app.poll() is None:
                 app.terminate()
