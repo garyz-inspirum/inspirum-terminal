@@ -2291,16 +2291,18 @@ struct FilesLayoutPolicy {
 }
 
 /// Fixed vertical space in the bottom Files dock outside the listings and the
-/// transfer queue viewport: panel padding, header row, actions bar, spacing,
-/// and the queue's own label and padding.
-const BOTTOM_FILES_CHROME: f32 = 132.0;
-const BOTTOM_QUEUE_MIN_VIEWPORT: f32 = 20.0;
+/// transfer queue viewport, measured on the 1280x800 Linux acceptance
+/// screenshots: panel padding, header row, actions bar with its scrollbar,
+/// column spacing, and the queue's own label and padding.
+const BOTTOM_FILES_CHROME: f32 = 154.0;
+const BOTTOM_QUEUE_MIN_VIEWPORT: f32 = 24.0;
 
-/// Transfer-queue viewport for a bottom dock of `dock_height` pixels. The
-/// queue shrinks to one line before the listings drop below one full row.
-fn bottom_queue_viewport_height(dock_height: f32, policy: FilesLayoutPolicy) -> f32 {
+/// Transfer-queue viewport for a bottom dock of `dock_height` pixels, or
+/// `None` when the queue must collapse to a single summary line so the
+/// listings keep at least `list_min_height`.
+fn bottom_queue_viewport_height(dock_height: f32, policy: FilesLayoutPolicy) -> Option<f32> {
     let spare = dock_height - BOTTOM_FILES_CHROME - policy.list_min_height;
-    spare.clamp(BOTTOM_QUEUE_MIN_VIEWPORT, policy.queue_viewport_height)
+    (spare >= BOTTOM_QUEUE_MIN_VIEWPORT).then(|| spare.min(policy.queue_viewport_height))
 }
 
 fn bottom_files_layout_policy() -> FilesLayoutPolicy {
@@ -2309,7 +2311,7 @@ fn bottom_files_layout_policy() -> FilesLayoutPolicy {
         // the supported minimum window size. The surrounding column uses
         // fixed-height overflow regions so this space cannot be consumed by
         // transfer history.
-        list_min_height: 104.0,
+        list_min_height: 110.0,
         queue_viewport_height: 44.0,
         compact_actions: true,
     }
@@ -6208,19 +6210,33 @@ impl App {
         };
 
         let queue_viewport_height = match bottom_height {
-            None => 144.0,
+            None => Some(144.0),
             Some(height) => bottom_queue_viewport_height(height, bottom_layout),
         };
-        let transfer_queue = container(
-            column![
-                text("TRANSFER QUEUE").size(11).color(MUTED),
-                scrollable(transfer_list).height(queue_viewport_height),
-            ]
-            .spacing(6),
-        )
-        .padding(8)
-        .width(Fill)
-        .style(surface);
+        let transfer_queue = match queue_viewport_height {
+            Some(viewport) => container(
+                column![
+                    text("TRANSFER QUEUE").size(11).color(MUTED),
+                    scrollable(transfer_list).height(viewport),
+                ]
+                .spacing(6),
+            )
+            .padding(8)
+            .width(Fill)
+            .style(surface),
+            // Too short for a queue viewport: keep the listings usable and
+            // summarise the queue on one line instead of eating their row.
+            None => container(
+                text(format!(
+                    "TRANSFER QUEUE · {visible_transfers} for this session · enlarge the window or dock right to review"
+                ))
+                .size(11)
+                .color(MUTED),
+            )
+            .padding([4, 8])
+            .width(Fill)
+            .style(surface),
+        };
 
         let content_spacing = if self.files_side_dock { 8 } else { 4 };
 
@@ -6326,7 +6342,7 @@ impl App {
                     .padding(8)
                     .style(active_card)
                 } else {
-                    container(text(""))
+                    container(column![]).height(0).padding(0)
                 },
                 transfer_queue,
             ]
@@ -8013,12 +8029,14 @@ mod tests {
         assert!(policy.list_min_height >= 104.0);
         assert!(policy.compact_actions);
         // 1280x800 bottom dock keeps the full queue viewport.
-        assert_eq!(bottom_queue_viewport_height(366.0, policy), policy.queue_viewport_height);
-        // 960x640 bottom dock (~254px) gives the queue one line and the
-        // listings keep a full row.
-        let small = bottom_queue_viewport_height(254.0, policy);
-        assert_eq!(small, BOTTOM_QUEUE_MIN_VIEWPORT);
-        assert!(254.0 - BOTTOM_FILES_CHROME - small >= policy.list_min_height - 2.0);
+        assert_eq!(
+            bottom_queue_viewport_height(366.0, policy),
+            Some(policy.queue_viewport_height)
+        );
+        // 960x640 bottom dock (~254px) collapses the queue to a summary line
+        // so the listings keep two full rows.
+        assert_eq!(bottom_queue_viewport_height(254.0, policy), None);
+        assert!(254.0 - BOTTOM_FILES_CHROME + 34.0 >= 2.0 * 31.0 + 48.0);
     }
 
     #[test]
