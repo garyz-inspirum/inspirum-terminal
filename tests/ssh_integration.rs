@@ -436,6 +436,47 @@ fn agent_forwarding_respects_explicit_profile_consent() {
 }
 
 #[test]
+#[ignore = "requires disposable Xvfb+xauth+sshd: scripts/test-ssh-integration.sh"]
+fn x11_forwarding_respects_explicit_profile_consent() {
+    let fixture = fixture();
+    let (mut enabled, enabled_events) = open_with_ssh(
+        &fixture,
+        719,
+        true,
+        "config",
+        SshOptions {
+            x11_forwarding: Some(true),
+            ..SshOptions::default()
+        },
+    );
+    wait_text(&mut enabled, "FIXTURE_AUTHENTICATED");
+    write(&mut enabled, "x11-probe\n");
+    wait_text(&mut enabled, "X11_FORWARDED");
+    write(&mut enabled, "exit\n");
+    wait_exit(&enabled_events, 719);
+
+    // Explicitly opting out must not expose a DISPLAY from the remote
+    // session, even though the sshd is X11-forwarding capable.
+    let (mut disabled, disabled_events) = open_with_ssh(
+        &fixture,
+        720,
+        true,
+        "config",
+        SshOptions {
+            x11_forwarding: Some(false),
+            ..SshOptions::default()
+        },
+    );
+    wait_text(&mut disabled, "FIXTURE_AUTHENTICATED");
+    write(&mut disabled, "x11-probe\n");
+    wait_text(&mut disabled, "X11_NO_DISPLAY");
+    assert!(!grid(&mut disabled).contains("X11_FORWARDED"));
+    write(&mut disabled, "exit\n");
+    wait_exit(&disabled_events, 720);
+    println!("PASS native SSH X11 forwarding requires an explicit client policy");
+}
+
+#[test]
 #[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
 fn password_authenticates_through_pty_prompt_without_echo_or_log_disclosure() {
     if !privileged_auth_fixture_available() {
