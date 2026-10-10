@@ -325,6 +325,14 @@ async def main() -> int:
             file.write(hop_trust)
         with changed_known_hosts.open("a", encoding="utf-8") as file:
             file.write(hop_trust)
+        # The target remains trusted but the jump server presents a different
+        # key. Reject at the hop before any target authentication occurs.
+        wrong_hop_known_hosts = root / "wrong-hop-known_hosts"
+        wrong_hop_known_hosts.write_text(
+            f"[127.0.0.1]:{port} {host_type} {host_data}\n"
+            f"[127.0.0.1]:{jump_port} {wrong_type} {wrong_data}\n",
+            encoding="utf-8",
+        )
         write_config(
             root / "config",
             port=port,
@@ -366,6 +374,20 @@ async def main() -> int:
             jump_port=jump_port,
             identity=client_key,
             known_hosts=changed_known_hosts,
+            global_known_hosts=global_known_hosts,
+        )
+        write_config(
+            root / "jump-wrong-hop-config",
+            port=port,
+            identity=client_key,
+            known_hosts=wrong_hop_known_hosts,
+            global_known_hosts=global_known_hosts,
+        )
+        add_jump_host(
+            root / "jump-wrong-hop-config",
+            jump_port=jump_port,
+            identity=client_key,
+            known_hosts=wrong_hop_known_hosts,
             global_known_hosts=global_known_hosts,
         )
         write_config(
