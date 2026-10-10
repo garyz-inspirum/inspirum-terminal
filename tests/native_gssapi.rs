@@ -10,7 +10,12 @@ use std::{
 use terminal_core::{PtyEvent, TerminalBackend};
 
 fn content(backend: &mut TerminalBackend) -> String {
-    backend.sync().grid.display_iter().map(|cell| cell.c).collect()
+    backend
+        .sync()
+        .grid
+        .display_iter()
+        .map(|cell| cell.c)
+        .collect()
 }
 
 fn wait_for(backend: &mut TerminalBackend, expected: &str) {
@@ -20,7 +25,10 @@ fn wait_for(backend: &mut TerminalBackend, expected: &str) {
         if current.contains(expected) {
             return;
         }
-        assert!(Instant::now() < deadline, "GSSAPI expected {expected:?}; got {current:?}");
+        assert!(
+            Instant::now() < deadline,
+            "GSSAPI expected {expected:?}; got {current:?}"
+        );
         thread::sleep(Duration::from_millis(35));
     }
 }
@@ -69,7 +77,10 @@ fn native_gssapi_only_authentication_and_delegation() {
             if let Ok((_, PtyEvent::Exit)) = receiver.recv_timeout(Duration::from_millis(50)) {
                 break;
             }
-            assert!(Instant::now() < deadline, "missing-ticket GSSAPI SSH did not terminate");
+            assert!(
+                Instant::now() < deadline,
+                "missing-ticket GSSAPI SSH did not terminate"
+            );
         }
         assert!(
             !content(&mut terminal).contains("GSSAPI_UNEXPECTED_ACCESS"),
