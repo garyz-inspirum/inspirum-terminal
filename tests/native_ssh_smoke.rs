@@ -1,8 +1,6 @@
 //! Cross-platform native SSH acceptance using scripts/test-native-ssh-smoke.py.
 use inspirum_terminal::{
-    Session, SshOptions,
-    terminal::connect,
-    terminal_ux::source_first_synced_write,
+    Session, SshOptions, terminal::connect, terminal_ux::source_first_synced_write,
 };
 use std::{
     fs,
