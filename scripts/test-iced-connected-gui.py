@@ -89,6 +89,15 @@ async def monitored_shell(
                 events.write("SHELL_STREAM_EOF")
                 return
             buffer += chunk.replace("\r\n", "\n").replace("\r", "\n")
+            # Cursor-key escape sequences are unbuffered PTY input, not
+            # newline-terminated shell commands. Detect them as bytes arrive;
+            # retain incomplete fragments across SSHReader.read() boundaries.
+            # Only record a fixed synthetic marker, never actual user input.
+            for sequence in ("\x1b[D", "\x1bOD"):
+                while sequence in buffer:
+                    buffer = buffer.replace(sequence, "", 1)
+                    events.write("REMOTE_CURSOR_LEFT")
+                    stdout.write("NATIVE_REMOTE_CURSOR_LEFT\r\n")
             while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
                 if line == "echo:FREE_TYPE_PROBE":
