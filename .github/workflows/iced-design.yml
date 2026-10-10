@@ -49,7 +49,10 @@ jobs:
       - name: Unit and interaction-model tests
         run: cargo test --manifest-path prototypes/iced-shell/Cargo.toml
       - name: Production Iced shell tests
-        run: cargo test --features iced-ui
+        # The production GUI module tests are all library tests. Native CI
+        # independently exercises every integration target, with bounded
+        # Windows execution. Avoid rerunning the full Windows suite here.
+        run: cargo test --locked --lib --features iced-ui
       - name: Production Iced shell Clippy
         run: cargo clippy --locked --features iced-ui --all-targets -- -D warnings
       - name: Build production Iced shell
