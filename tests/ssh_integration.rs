@@ -402,7 +402,7 @@ fn agent_forwarding_respects_explicit_profile_consent() {
         &fixture,
         717,
         true,
-        "config",
+        "agent-forward-config",
         SshOptions {
             agent_forwarding: Some(true),
             ..SshOptions::default()
@@ -420,7 +420,7 @@ fn agent_forwarding_respects_explicit_profile_consent() {
         &fixture,
         718,
         true,
-        "config",
+        "agent-forward-config",
         SshOptions {
             agent_forwarding: Some(false),
             ..SshOptions::default()
