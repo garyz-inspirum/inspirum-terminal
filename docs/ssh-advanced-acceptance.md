@@ -20,6 +20,10 @@ The fixture uses temporary generated keys and known_hosts records, a file-scoped
 
 The Linux `scripts/test-ssh-integration.sh` fixture starts an isolated synthetic `ssh-agent` socket with a generated public-key identity, permits forwarding only on its loopback test sshd, and tests both explicit `ForwardAgent=yes` and `ForwardAgent=no` through `tests/ssh_integration.rs`. Only presence/access to the forwarded agent is tested; keys and agent contents are never printed. Agent forwarding gives a remote host the ability to request signing operations with the local agent and should be enabled only for trusted hosts.
 
+## Local capability preflight (advisory)
+
+In the Iced connection editor, an explicit **X11 Enable** selection produces a warning when the application's environment has no non-empty `DISPLAY`. An explicit **SSH agent Enable** selection on Unix produces an advisory if `SSH_AUTH_SOCK` is not present. Disabled or inherited forwarding is not warned about. These are **local prerequisite hints only**: custom `IdentityAgent`, Windows OpenSSH agent services, XQuartz/VcXsrv and server-side configuration may alter effective capabilities. The application does **not** disable the user's chosen forwarding policy or claim native runtime support based on this environment check. Existing trust and risk warnings remain.
+
 ## Supported versus unverified
 
 | Workflow | Native CI evidence |

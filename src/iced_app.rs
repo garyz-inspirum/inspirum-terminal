@@ -117,6 +117,26 @@ fn focus_mode_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool
         )
 }
 
+/// Advisory only: system OpenSSH and host config remain authoritative.
+/// An absent variable is not proof that a host or platform lacks the feature.
+fn forwarding_preflight_hint(
+    agent: Option<bool>,
+    x11: Option<bool>,
+    agent_socket_present: bool,
+    display_present: bool,
+) -> String {
+    let mut notes = Vec::new();
+    if agent == Some(true) && cfg!(unix) && !agent_socket_present {
+        notes.push("Agent preflight: SSH_AUTH_SOCK is unset. Check ssh-agent/IdentityAgent if forwarding fails.");
+    }
+    if x11 == Some(true) && !display_present {
+        notes.push(
+            "X11 preflight: DISPLAY is unset. Start/configure a local X server before connecting.",
+        );
+    }
+    notes.join(" ")
+}
+
 fn free_type_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
     modifiers.command()
         && modifiers.shift()
@@ -5866,6 +5886,15 @@ impl App {
                                 text("X11 requires a local X server/DISPLAY and remote X11 support; it has not been verified in Windows/macOS native CI.")
                                     .size(11)
                                     .color(MUTED),
+                                text(forwarding_preflight_hint(
+                                    self.form.agent_forwarding,
+                                    self.form.x11_forwarding,
+                                    std::env::var_os("SSH_AUTH_SOCK").is_some_and(|value| !value.is_empty()),
+                                    std::env::var_os("DISPLAY").is_some_and(|value| !value.is_empty()),
+                                ))
+                                    .size(11)
+                                    .color(Color::from_rgb8(240, 190, 100)),
+
                                 field(
                                     "ProxyJump",
                                     "bastion or user@bastion:2222",
@@ -6737,6 +6766,25 @@ mod tests {
         assert!(free_type_chord(&key, command | keyboard::Modifiers::SHIFT));
         assert!(!free_type_chord(&key, command));
         assert!(!free_type_chord(&key, keyboard::Modifiers::SHIFT));
+    }
+
+    #[test]
+    fn forwarding_preflight_is_advisory_and_does_not_claim_platform_support() {
+        assert!(forwarding_preflight_hint(None, None, false, false).is_empty());
+        assert!(forwarding_preflight_hint(Some(false), Some(false), false, false).is_empty());
+        assert!(forwarding_preflight_hint(Some(true), Some(true), true, true).is_empty());
+        let no_display = forwarding_preflight_hint(None, Some(true), true, false);
+        assert!(no_display.contains("DISPLAY is unset"));
+        assert!(!no_display.contains("unsupported"));
+        let no_agent = forwarding_preflight_hint(Some(true), None, false, true);
+        if cfg!(unix) {
+            assert!(no_agent.contains("SSH_AUTH_SOCK is unset"));
+        } else {
+            assert!(
+                no_agent.is_empty(),
+                "Windows OpenSSH agent service may not set SSH_AUTH_SOCK"
+            );
+        }
     }
 
     #[test]
