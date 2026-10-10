@@ -993,6 +993,52 @@ fn sanitize_terminal_title(title: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
+/// Match only delimiters visible in the snapshot. Terminal history is never
+/// searched or retained, and the pair is recalculated only when PTY content
+/// generation changes. Nested pairs and reversed (closing) traversal work.
+fn matched_delimiters(snapshot: &terminal_core::DisplaySnapshot) -> Option<(usize, usize)> {
+    let cursor = snapshot
+        .cells
+        .iter()
+        .position(|cell| cell.cursor && matches!(cell.character, '(' | ')' | '[' | ']' | '{' | '}'))?;
+    let (opening, closing, forward) = match snapshot.cells[cursor].character {
+        '(' => ('(', ')', true),
+        ')' => ('(', ')', false),
+        '[' => ('[', ']', true),
+        ']' => ('[', ']', false),
+        '{' => ('{', '}', true),
+        '}' => ('{', '}', false),
+        _ => return None,
+    };
+    let mut depth = 0_usize;
+    if forward {
+        for index in cursor..snapshot.cells.len() {
+            let ch = snapshot.cells[index].character;
+            if ch == opening {
+                depth += 1;
+            } else if ch == closing {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((cursor, index));
+                }
+            }
+        }
+    } else {
+        for index in (0..=cursor).rev() {
+            let ch = snapshot.cells[index].character;
+            if ch == closing {
+                depth += 1;
+            } else if ch == opening {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((index, cursor));
+                }
+            }
+        }
+    }
+    None
+}
+
 struct TerminalCanvasState {
     selecting: bool,
     pointer_hidden: bool,
@@ -1004,6 +1050,7 @@ struct TerminalCanvasState {
     generation: Cell<u64>,
     row_hashes: RefCell<Vec<u64>>,
     row_caches: RefCell<Vec<canvas::Cache>>,
+    highlighted_delimiters: Cell<Option<(usize, usize)>>,
     background_cache: canvas::Cache,
     background_key: Cell<Option<(f32, f32, [u8; 3])>>,
     ime_cursor: Option<(u64, iced::Rectangle)>,
@@ -1023,6 +1070,7 @@ impl Default for TerminalCanvasState {
             generation: Cell::new(u64::MAX),
             row_hashes: RefCell::new(Vec::new()),
             row_caches: RefCell::new(Vec::new()),
+            highlighted_delimiters: Cell::new(None),
             background_cache: canvas::Cache::new(),
             background_key: Cell::new(None),
             ime_cursor: None,
@@ -1377,6 +1425,8 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
             };
 
             let appearance_key = format!("{:?}", self.appearance);
+            let delimiters = matched_delimiters(self.snapshot);
+            state.highlighted_delimiters.set(delimiters);
             let mut new_hashes = Vec::with_capacity(self.snapshot.rows);
             for row in 0..self.snapshot.rows {
                 let mut hasher = DefaultHasher::new();
@@ -1386,6 +1436,11 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                 row.hash(&mut hasher);
                 if let Some(&(start, end)) = self.snapshot.row_ranges.get(row) {
                     self.snapshot.cells[start..end].hash(&mut hasher);
+                    // A paired bracket on another row must invalidate its
+                    // own cached geometry when the cursor moves elsewhere.
+                    delimiters
+                        .filter(|(a, b)| (start..end).contains(a) || (start..end).contains(b))
+                        .hash(&mut hasher);
                 }
                 new_hashes.push(hasher.finish());
             }
@@ -1430,7 +1485,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                 continue;
             };
             let geometry = caches[row].draw(renderer, bounds.size(), |frame| {
-                for cell in &self.snapshot.cells[start..end] {
+                for (cell_index, cell) in self.snapshot.cells[start..end].iter().enumerate() {
                     let x = cell.column as f32 * cell_width;
                     let y = cell.row as f32 * cell_height;
                     if x >= bounds.width || y >= bounds.height {
@@ -1525,6 +1580,19 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                                 iced::Size::new(cell_width, 1.0),
                             ),
                             rgb(cell.foreground),
+                        );
+                    }
+                    if state.highlighted_delimiters.get().is_some_and(|(a, b)| {
+                        a == start + cell_index || b == start + cell_index
+                    }) {
+                        // Thin accent below both matching delimiters. Do not
+                        // repaint glyphs or change the remote terminal buffer.
+                        frame.fill(
+                            &canvas::Path::rectangle(
+                                iced::Point::new(x, y + cell_height - 3.0),
+                                iced::Size::new(cell_width, 2.0),
+                            ),
+                            BLUE,
                         );
                     }
                 }
