@@ -299,6 +299,17 @@ async def main() -> int:
                 if files_pixels < 3000:
                     raise RuntimeError(f"files dock changed only {files_pixels} pixels")
 
+                # The SFTP browser is a distinct Iced dock which may own
+                # keyboard focus while its listing completes. Explicitly
+                # click the SSH canvas before a terminal-specific shortcut.
+                # This validates real focus transfer rather than relying on
+                # the incidental focus left by opening a utility pane.
+                command(
+                    "xdotool", "windowfocus", window, "mousemove",
+                    "--window", window, "710", "300", "click", "1", env=env,
+                )
+                await asyncio.sleep(.5)
+
                 # Opening Free Type must focus the new pane-local text_editor:
                 # typing goes into the draft, and even Enter is NOT forwarded
                 # to the authenticated OpenSSH PTY until an explicit Send.
