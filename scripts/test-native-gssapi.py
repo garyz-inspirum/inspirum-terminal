@@ -174,7 +174,9 @@ def main() -> int:
         log_files.append(kdc_log)
         kdc_proc = subprocess.Popen(["krb5kdc", "-n"], env=env, stdout=kdc_log, stderr=subprocess.STDOUT)
         wait_tcp(kdc_port, kdc_proc)
-        run(["kinit", "-kt", str(root / "client.keytab"), f"{username}@{REALM}"], env)
+        # OpenSSH cannot delegate a non-forwardable TGT even if the service
+        # principal is marked delegation-eligible.
+        run(["kinit", "-f", "-kt", str(root / "client.keytab"), f"{username}@{REALM}"], env)
         run(["klist", "-s"], env)
 
         sshd_env = env.copy()
