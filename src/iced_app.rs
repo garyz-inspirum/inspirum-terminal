@@ -6629,6 +6629,71 @@ mod tests {
     }
 
     #[test]
+    fn free_type_draft_never_writes_without_explicit_send() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-free-type-{}-missing.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session {
+            name: "free-type test".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        let id = pane.id;
+        app.tabs.push(Workspace::new(profile, pane));
+
+        let _ = app.update(Message::ToggleFreeType(id));
+        assert!(app.free_type.contains_key(&id));
+        assert!(!app.command_terminal(
+            id,
+            terminal_core::BackendCommand::Write(b"no remote output".to_vec())
+        ));
+        let _ = app.update(Message::ClipboardRead(
+            id,
+            vec![id],
+            Some("unapproved paste".into()),
+        ));
+        assert!(app.dialog.is_none(), "clipboard cannot bypass local editing");
+        let _ = app.update(Message::ToggleLocalNavigation);
+        assert!(!app.local_navigation.contains(&id));
+
+        app.free_type.insert(
+            id,
+            text_editor::Content::with_text("first line\nsecond line"),
+        );
+        let _ = app.update(Message::FreeTypeSend(id));
+        assert!(matches!(app.dialog, Some(Dialog::PasteConfirm { .. })));
+        assert_eq!(app.free_type_confirm, Some(id));
+        // Even explicit confirmation must reject a draft that changed since
+        // the preview was constructed.
+        app.free_type.insert(
+            id,
+            text_editor::Content::with_text("modified after preview"),
+        );
+        let _ = app.update(Message::ConfirmPaste);
+        assert!(app.free_type.contains_key(&id));
+        assert!(app.status.contains("cancelled"));
+        assert!(app.dialog.is_none());
+
+        let _ = app.update(Message::FreeTypeDiscard(id));
+        assert!(!app.free_type.contains_key(&id));
+        assert_eq!(app.free_type_confirm, None);
+    }
+
+    #[test]
+    fn free_type_shortcut_requires_explicit_command_shift_chord() {
+        let key = keyboard::Key::Character("e".into());
+        assert!(free_type_chord(
+            &key,
+            keyboard::Modifiers::COMMAND | keyboard::Modifiers::SHIFT
+        ));
+        assert!(!free_type_chord(&key, keyboard::Modifiers::COMMAND));
+        assert!(!free_type_chord(&key, keyboard::Modifiers::SHIFT));
+    }
+
+    #[test]
     fn local_navigation_is_isolated_per_pane_and_blocks_terminal_writes() {
         let path = std::env::temp_dir().join(format!(
             "inspirum-local-navigation-{}-missing.json",
