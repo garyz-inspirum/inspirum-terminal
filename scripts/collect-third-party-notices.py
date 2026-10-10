@@ -22,6 +22,7 @@ PROVENANCE_FILES = {"inspirum_patches.md", "upstream.md"}
 DEFAULT_SUPPLEMENTS = Path(__file__).resolve().parents[1] / "third-party-licenses" / "manifest.json"
 CANONICAL_STANDARD_SOURCES = {
     "CC0-1.0": "https://creativecommons.org/publicdomain/zero/1.0/legalcode.txt",
+    "MIT": "https://opensource.org/license/mit",
 }
 
 
