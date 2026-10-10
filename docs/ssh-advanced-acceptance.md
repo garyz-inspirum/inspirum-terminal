@@ -14,6 +14,7 @@ The test suite checks:
 - Dynamic SOCKS5 forwarding (`-D`) with handshake, connect and payload roundtrip
 - Remote SSH forwarding (`-R`) carrying bytes back to a disposable client-side listener
 - Loopback listener teardown on terminal exit and connection closure
+- Reconnect with the **same** -L/-R/-D listener ports after teardown, rerun -L/SOCKS5 TCP byte roundtrips, confirm the remote -R listener is requested again, and recheck all listener cleanup (on all native CI targets once green)
 
 The fixture uses temporary generated keys and known_hosts records, a file-scoped session profile, loopback-only targets, and deletes itself when finished. It never uses a production SSH server or private credential.
 
