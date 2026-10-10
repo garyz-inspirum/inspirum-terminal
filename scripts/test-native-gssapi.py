@@ -212,6 +212,21 @@ def main() -> int:
         run(["cargo", "test", "--locked", "--test", "native_gssapi", "--",
              "--ignored", "--nocapture", "--test-threads=1"], env, timeout=180)
         print("PASS GSSAPI missing ticket is fail-closed", flush=True)
+
+        # Test a genuine expired credential rather than merely an absent
+        # credential. Fail the fixture if the short lifetime was not applied:
+        # silently continuing with a valid ticket would hide a regression.
+        run(["kinit", "-l", "3s", "-kt", str(root / "client.keytab"),
+             f"{username}@{REALM}"], env)
+        run(["klist", "-s"], env)
+        time.sleep(5)
+        expired = subprocess.run(["klist", "-s"], env=env, timeout=5)
+        if expired.returncode == 0:
+            raise RuntimeError("the disposable short-lived TGT did not expire")
+        env["INSPIRUM_GSSAPI_MODE"] = "expired-ticket"
+        run(["cargo", "test", "--locked", "--test", "native_gssapi", "--",
+             "--ignored", "--nocapture", "--test-threads=1"], env, timeout=180)
+        print("PASS GSSAPI expired ticket is fail-closed", flush=True)
         return 0
     finally:
         for process in (sshd_proc, kdc_proc):
