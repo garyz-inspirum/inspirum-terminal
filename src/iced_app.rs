@@ -1454,6 +1454,9 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                 if self.focused && self.remote_key_mode =>
             {
                 if let Some(action) = remote_vim_key(key, *modifiers) {
+                    if std::env::var_os("INSPIRUM_CI_REMOTE_KEY_TRACE").is_some() {
+                        eprintln!("ci_remote_key: focused canvas handled a navigation key");
+                    }
                     // In modal remote-key mode the canvas owns the shortcut.
                     // Capturing it prevents the general keyboard subscription
                     // from delivering a second identical SSH cursor command.
@@ -2564,6 +2567,16 @@ impl App {
     }
 
     fn send_remote_cursor(&mut self, id: u64, action: RemoteCursorKey) -> bool {
+        let ci_trace = std::env::var_os("INSPIRUM_CI_REMOTE_KEY_TRACE").is_some();
+        if ci_trace {
+            eprintln!(
+                "ci_remote_key: request mode={} focus={} lock={} dialog={}",
+                self.remote_keys.contains(&id),
+                self.focused_pane_matches(id),
+                self.privacy_locked,
+                self.dialog.is_some()
+            );
+        }
         if self.privacy_locked
             || self.dialog.is_some()
             || self.remote_editor.is_some()
@@ -2579,7 +2592,11 @@ impl App {
         // cursor mode (normal vs application), never a source-mode escape.
         Self::write_source_then_mirrors(id, &targets, |target| {
             let bytes = remote_cursor_bytes(action, self.remote_terminal_mode(target));
-            self.command_terminal(target, terminal_core::BackendCommand::Write(bytes))
+            let sent = self.command_terminal(target, terminal_core::BackendCommand::Write(bytes));
+            if ci_trace {
+                eprintln!("ci_remote_key: PTY write accepted={sent}");
+            }
+            sent
         })
     }
 
@@ -3360,6 +3377,9 @@ impl App {
                 }
             }
             Message::RemoteCursorPress(id, action) => {
+                if std::env::var_os("INSPIRUM_CI_REMOTE_KEY_TRACE").is_some() {
+                    eprintln!("ci_remote_key: update received RemoteCursorPress");
+                }
                 if !self.send_remote_cursor(id, action) {
                     self.status = "Remote key cancelled: focus, mode or SSH target changed.".into();
                 }
