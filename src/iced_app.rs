@@ -8042,7 +8042,7 @@ mod tests {
         assert_eq!(files_queue_viewport_height(tight, false, policy), Some(BOTTOM_QUEUE_MIN_VIEWPORT));
         // 1280x800 side dock (~600px) keeps two listings and a bounded queue.
         let side = files_queue_viewport_height(600.0, true, policy).expect("side queue");
-        assert!(side >= BOTTOM_QUEUE_MIN_VIEWPORT && side <= SIDE_QUEUE_MAX_VIEWPORT);
+        assert!((BOTTOM_QUEUE_MIN_VIEWPORT..=SIDE_QUEUE_MAX_VIEWPORT).contains(&side));
     }
 
     #[test]
