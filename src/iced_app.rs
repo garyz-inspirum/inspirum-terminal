@@ -6382,6 +6382,45 @@ mod tests {
     }
 
     #[test]
+    fn delimiter_highlighting_matches_nested_pairs_and_never_guesses() {
+        fn snapshot(input: &str, cursor: usize) -> terminal_core::DisplaySnapshot {
+            let cells: Vec<_> = input
+                .chars()
+                .enumerate()
+                .map(|(column, character)| terminal_core::DisplayCell {
+                    character,
+                    row: 0,
+                    column,
+                    foreground: [255; 3],
+                    background: [0; 3],
+                    cursor_color: [255; 3],
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    strikeout: false,
+                    wide: false,
+                    cursor: column == cursor,
+                })
+                .collect();
+            let length = cells.len();
+            terminal_core::DisplaySnapshot {
+                rows: 1,
+                columns: length,
+                background: [0; 3],
+                row_ranges: vec![(0, length)],
+                cells,
+            }
+        }
+        assert_eq!(matched_delimiters(&snapshot("([x])", 0)), Some((0, 4)));
+        assert_eq!(matched_delimiters(&snapshot("([x])", 1)), Some((1, 3)));
+        assert_eq!(matched_delimiters(&snapshot("([x])", 4)), Some((0, 4)));
+        assert_eq!(matched_delimiters(&snapshot("(a(b)c)", 2)), Some((2, 4)));
+        assert_eq!(matched_delimiters(&snapshot("(a(b)c)", 6)), Some((0, 6)));
+        assert_eq!(matched_delimiters(&snapshot("(broken", 0)), None);
+        assert_eq!(matched_delimiters(&snapshot("plain text", 0)), None);
+    }
+
+    #[test]
     fn local_navigation_is_isolated_per_pane_and_blocks_terminal_writes() {
         let path = std::env::temp_dir().join(format!(
             "inspirum-local-navigation-{}-missing.json",
