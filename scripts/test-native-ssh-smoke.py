@@ -464,6 +464,9 @@ async def main() -> int:
             )
 
         env = dict(os.environ)
+        if agent_dir is not None:
+            # ForwardAgent=yes resolves the same isolated socket as IdentityAgent.
+            env["SSH_AUTH_SOCK"] = str(agent_socket)
         env["INSPIRUM_NATIVE_SSH_FIXTURE"] = str(root)
         command = [
             "cargo",
