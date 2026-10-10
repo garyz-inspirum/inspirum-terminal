@@ -110,7 +110,7 @@ The full current behaviour is defined by source and tests, not by a stale checke
 
 **Decision: Iced 0.14 is the only production frontend. Native acceptance gates remain independent of frontend removal.**
 
-Iced supplies native application structure, theming, tasks/subscriptions and pane grids that support dynamic splits and resizing. The migration pins Iced 0.14.0 and uses WGPU on Linux/Windows and native tiny-skia on macOS. This renderer choice alone is not proof that the Iced frontend is faster than egui or WindTerm; native measurements are still required.
+Iced supplies native application structure, theming, tasks/subscriptions and pane grids that support dynamic splits and resizing. The migration pins Iced 0.14.0. Linux/Windows use WGPU with a tiny-skia fallback. The macOS performance follow-up enables Metal/WGPU with tiny-skia also built, but must pass third-party license-notice verification before distribution. Hardware timing and renderer-selection evidence are still required: merely compiling WGPU is **not** proof that it was selected at runtime or that it is faster than tiny-skia, egui or WindTerm.
 
 The possible terminal widget, iced_term 0.8.0, uses an Alacritty backend but must be audited rather than treated as a drop-in replacement. Current application code uses toolkit-neutral terminal_core for PTY/parser ownership. Profiles, SSH launch/trust, transfers and remote editors retain their shared policies. The backend has no egui runtime dependency.
 
@@ -145,6 +145,8 @@ Keep PTY I/O, DNS/authentication, transfers, filesystem work, search and remote-
 Benchmark with a real terminal: burst output, ANSI styling, Unicode, selection during output, long scrollback, multiple sessions, a live transfer while typing, and close/cancel under load. Record both median and tail latency, plus resource cleanup.
 
 ### Opt-in slow-stage tracing
+
+The macOS GPU experiment is tracked by issue #78. Compare the **same** terminal workload on a named Apple Silicon Mac using the GPU-enabled binary and the prior software-only build. Capture the renderer actually selected, external click-to-caret p50/p95, text entry latency, CPU/GPU and display scale. Falling back to software is permitted if Metal is unavailable; do not hide missing-license notices or claim a speed improvement based on CI compile success.
 
 To diagnose the reported macOS click-to-focus lag, start the actual Iced binary with:
 
