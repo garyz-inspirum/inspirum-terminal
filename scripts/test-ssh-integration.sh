@@ -68,6 +68,12 @@ fi
 while IFS= read -r line; do
  case "$line" in
  echo:*) printf 'REMOTE_ECHO:%s\\n' "${line#echo:}" ;;
+ agent-probe)
+  if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "$SSH_AUTH_SOCK" ] && ssh-add -l >/dev/null 2>&1; then
+   printf 'AGENT_FORWARDED\\n'
+  else
+   printf 'AGENT_NOT_FORWARDED\\n'
+  fi ;;
  size) printf 'REMOTE_SIZE:'; stty size ;;
  exit) exit 0 ;;
  esac
@@ -96,7 +102,8 @@ AuthenticationMethods publickey
 Ciphers aes256-ctr
 AllowUsers {getpass.getuser()}
 AllowTcpForwarding yes
-AllowAgentForwarding no
+# Disposable loopback fixture only. Client profile opt-in is verified below.
+AllowAgentForwarding yes
 X11Forwarding no
 PermitTunnel no
 PermitTTY yes
