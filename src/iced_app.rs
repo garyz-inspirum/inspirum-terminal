@@ -2196,7 +2196,11 @@ impl App {
         // Enforce the mode at the single PTY write boundary, including
         // synchronized input, delayed clipboard callbacks and tool commands.
         if self.local_navigation.contains(&id)
-            && matches!(&command, terminal_core::BackendCommand::Write(_))
+            && matches!(
+                &command,
+                terminal_core::BackendCommand::Write(_)
+                    | terminal_core::BackendCommand::MouseReportAt(..)
+            )
         {
             return false;
         }
@@ -3945,7 +3949,7 @@ impl App {
                 }
             }
             Message::TerminalMouse(pane_id, id, button, modifiers, x, y, pressed) => {
-                if !self.active_pane_matches(pane_id, id) {
+                if self.local_navigation.contains(&id) || !self.active_pane_matches(pane_id, id) {
                     return Task::none();
                 }
                 if let Some(tab) = self.tabs.get_mut(self.active) {
@@ -3962,6 +3966,11 @@ impl App {
                 }
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.focus = pane_id;
+                }
+                // While navigating locally, wheel movements must scroll
+                // the local buffer even if the remote app has mouse mode on.
+                if self.local_navigation.contains(&id) {
+                    return self.update(Message::TerminalScroll(id, lines));
                 }
                 let button = if lines > 0 {
                     terminal_core::MouseButton::ScrollUp
@@ -6318,6 +6327,16 @@ mod tests {
         assert!(
             !app.command_terminal(id, terminal_core::BackendCommand::Write(b"danger".to_vec()))
         );
+        assert!(!app.command_terminal(
+            id,
+            terminal_core::BackendCommand::MouseReportAt(
+                terminal_core::MouseButton::LeftButton,
+                terminal_core::MouseModifiers::default(),
+                0.0,
+                0.0,
+                true,
+            )
+        ));
         let _ = app.update(Message::RequestPaste);
         assert!(app.status.contains("Switch to remote"));
         let _ = app.update(Message::TogglePrivacyLock);
