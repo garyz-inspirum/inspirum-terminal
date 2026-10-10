@@ -2279,6 +2279,10 @@ struct App {
     remote_editor_open_generation: u64,
 }
 
+fn bottom_files_split_ratio() -> f32 {
+    0.38
+}
+
 impl App {
     fn boot(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> Self {
         let _slow = SlowIcedScope::start("startup");
@@ -2832,8 +2836,14 @@ impl App {
             )
         {
             self.files_dock = Some(pane);
-            self.dock
-                .resize(split, if self.files_side_dock { 0.50 } else { 0.62 });
+            self.dock.resize(
+                split,
+                if self.files_side_dock {
+                    0.50
+                } else {
+                    bottom_files_split_ratio()
+                },
+            );
         }
     }
 
@@ -7927,6 +7937,11 @@ mod tests {
         assert_eq!(next_file_page(FILES_PAGE_SIZE, 10_000), FILES_PAGE_SIZE * 2);
         assert_eq!(next_file_page(400, 450), 450);
         assert_eq!(next_file_page(usize::MAX, 1_000), 1_000);
+    }
+
+    #[test]
+    fn bottom_files_dock_reserves_space_for_its_fixed_controls() {
+        assert_eq!(bottom_files_split_ratio(), 0.38);
     }
 
     #[test]

@@ -382,16 +382,7 @@ async def main() -> int:
                 if files_pixels < 3000:
                     raise RuntimeError(f"files dock changed only {files_pixels} pixels")
 
-                # At the production 1280x800 default, the bottom dock allocates
-                # all of its remaining height to the action/footer rows and the
-                # two file lists are clipped. Activate the visibly rendered
-                # "Dock right" control (bounds established from the retained
-                # connected-files-dock screenshot), then capture the resulting
-                # full-height explorer before attempting any file-row click.
-                command(
-                    "xdotool", "mousemove", "--window", window,
-                    "1207", "555", "click", "1", env=env,
-                )
+                # Stay bottom-docked while exercising the native file controls.
                 await wait_for(
                     lambda: "SFTP_LIST_READY" in events.path.read_text(encoding="utf-8"),
                     "completed remote listing before file-row interaction",
@@ -402,33 +393,25 @@ async def main() -> int:
                 )
                 if "WIDTH=1280" not in geometry or "HEIGHT=800" not in geometry:
                     raise RuntimeError(
-                        "connected file coordinates require the production 1280x800 "
+                        "connected bottom-dock coordinates require the production 1280x800 "
                         f"window captured by this fixture; geometry was {geometry!r}"
                     )
-                screenshot(window, destination / "connected-files-side-dock.png", env)
-                side_dock_pixels = diff(
-                    destination / "connected-files-dock.png",
-                    destination / "connected-files-side-dock.png", env,
-                )
-                if side_dock_pixels < 3000:
-                    raise RuntimeError(
-                        f"visible Dock right action changed only {side_dock_pixels} pixels"
-                    )
+                screenshot(window, destination / "connected-files-bottom-dock.png", env)
 
                 # Select the only local fixture row and activate Upload through
                 # native Iced pointer events. Filesystem bytes are the transfer
                 # integrity oracle; a screenshot delta or SFTP handshake alone
                 # is not accepted as proof of a completed GUI transfer.
                 uploaded = remote_root / upload_name
-                # Exact centers come from the retained 1280x800 side-dock
-                # artifact: the named rows are fully visible in separate cards,
-                # above a non-overlapping action toolbar. These are single native
-                # clicks, not coordinate probes or direct message invocation.
+                # Conservative interior points measured from the exact-head
+                # connected-files-bottom-dock.png artifact from run 38042645630:
+                # the local row occupies x=304..770, y=489..537, and Upload
+                # occupies x=304..386, y=562..588 in the 1280x800 window.
                 await click_transfer(
                     window=window,
                     env=env,
-                    row=(1040, 295),
-                    action=(835, 497),
+                    row=(537, 507),
+                    action=(345, 575),
                     completed=lambda: uploaded.is_file()
                     and uploaded.read_bytes() == upload_bytes,
                     label="click-driven SFTP upload into expected remote fixture root",
@@ -445,17 +428,15 @@ async def main() -> int:
                     raise RuntimeError(
                         "download destination unexpectedly exists before native click"
                     )
-                # The completed upload adds a transfer-queue card, shrinking the
-                # file panels and moving the action toolbar upward. Run 38040889866
-                # retained that exact post-upload state: the named remote row is
-                # centered near y=408 and Download is centered near y=467. Capture
-                # the row selection before activating Download so the evidence
-                # proves which remote filename the native click selected.
+                # The exact-head post-upload image from run 38043616299 places
+                # the remote row inside x=789..1246, y=489..520 and Download
+                # inside x=407..503, y=534..560. These conservative interior
+                # points do not overlap the card header or adjacent actions.
                 await click_transfer(
                     window=window,
                     env=env,
-                    row=(1040, 408),
-                    action=(947, 467),
+                    row=(1017, 507),
+                    action=(455, 547),
                     completed=lambda: downloaded.is_file()
                     and downloaded.read_bytes() == download_bytes,
                     label="click-driven SFTP download into expected local fixture root",
@@ -470,6 +451,22 @@ async def main() -> int:
                     raise RuntimeError("click-driven GUI upload failed exact-byte integrity")
                 if downloaded.read_bytes() != download_bytes:
                     raise RuntimeError("click-driven GUI download failed exact-byte integrity")
+
+                # Retain evidence at the supported minimum window size, without
+                # using that resized state for coordinate-driven acceptance.
+                command("xdotool", "windowsize", window, "960", "640", env=env)
+                await asyncio.sleep(.7)
+                minimum_geometry = command(
+                    "xdotool", "getwindowgeometry", "--shell", window, env=env,
+                )
+                if "WIDTH=960" not in minimum_geometry or "HEIGHT=640" not in minimum_geometry:
+                    raise RuntimeError(
+                        "minimum-window evidence requires 960x640 geometry; "
+                        f"geometry was {minimum_geometry!r}"
+                    )
+                screenshot(window, destination / "connected-files-min-window.png", env)
+                command("xdotool", "windowsize", window, "1280", "800", env=env)
+                await asyncio.sleep(.7)
 
                 # The file browser has completed the real SFTP handshake.
                 # End that UI task before testing the independent local-editor
