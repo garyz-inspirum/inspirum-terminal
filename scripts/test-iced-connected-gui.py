@@ -60,6 +60,46 @@ class MonitoredServer(fixture.NativeServer):
         return MonitoredSession(self.events)
 
 
+
+async def monitored_shell(
+    stdin: asyncssh.SSHReader[str],
+    stdout: asyncssh.SSHWriter[str],
+    stderr: asyncssh.SSHWriter[str],
+    events: fixture.EventLog,
+) -> None:
+    # AsyncSSH dispatches all sessions through SSHServerStreamSession when
+    # sftp_factory is configured. In that mode SSHServer.session_requested()
+    # is bypassed, so supply an explicit shell stream handler as well.
+    del stderr
+    events.write("SESSION_OPEN")
+    events.write("SESSION_STARTED")
+    stdout.write("NATIVE_SMOKE_READY\\r\\n")
+    buffer = ""
+    try:
+        while chunk := await stdin.read(8192):
+            buffer += chunk.replace("\\r\\n", "\\n").replace("\\r", "\\n")
+            while "\\n" in buffer:
+                line, buffer = buffer.split("\\n", 1)
+                if line == "echo:FREE_TYPE_PROBE":
+                    events.write("UNEXPECTED_FREE_TYPE_PTY_INPUT")
+                elif line == "echo:LOCK_PROBE":
+                    events.write("UNEXPECTED_LOCKED_PTY_INPUT")
+                elif line == "screen-on":
+                    events.write("SCREEN_ON")
+                    stdout.write("\\x1b[?1049h\\x1b[2J\\x1b[H\\x1b[44;97mNATIVE_FULLSCREEN_ACTIVE\\x1b[0m\\r\\n")
+                elif line == "screen-off":
+                    events.write("SCREEN_OFF")
+                    stdout.write("\\x1b[?1049l")
+                elif line.startswith("echo:"):
+                    stdout.write(f"NATIVE_ECHO:{line[5:]}\\r\\n")
+                elif line == "exit":
+                    events.write("SESSION_EXIT_REQUEST")
+                    return
+    finally:
+        events.write("SESSION_CLOSED:clean")
+
+
+
 def isolated_sftp_server(
     chan: asyncssh.SSHServerChannel,
     root: Path,
@@ -138,6 +178,9 @@ async def main() -> int:
             lambda: MonitoredServer(trusted, events),
             "127.0.0.1", 0, server_host_keys=[str(host)], encoding="utf-8",
             sftp_factory=lambda chan: isolated_sftp_server(chan, remote_root, events),
+            session_factory=lambda stdin, stdout, stderr: monitored_shell(
+                stdin, stdout, stderr, events
+            ),
         )
         port = server.get_port()
         key_type, key_data = fixture.public_fields(Path(str(host) + ".pub"))
