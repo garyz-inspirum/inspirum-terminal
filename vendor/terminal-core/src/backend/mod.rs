@@ -301,7 +301,8 @@ impl TerminalBackend {
             hovered_hyperlink: None,
         };
         let term = Arc::new(FairMutex::new(term));
-        let pty_event_loop = EventLoop::new(term.clone(), event_proxy, pty, false, false)?;
+        // Preserve final diagnostics even when a short-lived child exits before the read event.
+        let pty_event_loop = EventLoop::new(term.clone(), event_proxy, pty, true, false)?;
         let event_loop_rollback = PtyEventLoopRollback::new(Notifier(pty_event_loop.channel()));
         let url_regex = RegexSearch::new(r#"(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file://|git://|ssh:|ftp://)[^\u{0000}-\u{001F}\u{007F}-\u{009F}<>"\s{-}\^⟨⟩`]+"#).unwrap();
         let _pty_event_loop_thread = pty_event_loop.spawn();

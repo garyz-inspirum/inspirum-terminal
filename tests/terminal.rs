@@ -333,6 +333,44 @@ fn explicit_missing_known_hosts_file_is_an_error() {
     assert!(error.contains("does not exist"), "{error}");
 }
 
+#[cfg(unix)]
+#[test]
+fn fast_child_output_is_retained_before_the_exit_notification() {
+    for id in 9000..9008 {
+        let (tx, rx) = mpsc::channel();
+        let mut backend = terminal_core::TerminalBackend::new(
+            id,
+            tx,
+            terminal_core::BackendSettings {
+                shell: "/bin/sh".into(),
+                args: vec!["-c".into(), "printf 'FINAL_DIAGNOSTIC\n'".into()],
+                working_directory: None,
+            },
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "child exit was not reported");
+            if matches!(
+                rx.recv_timeout(Duration::from_millis(50)),
+                Ok((_, terminal_core::PtyEvent::Exit))
+            ) {
+                break;
+            }
+        }
+        let text: String = backend
+            .sync()
+            .grid
+            .display_iter()
+            .map(|cell| cell.c)
+            .collect();
+        assert!(
+            text.contains("FINAL_DIAGNOSTIC"),
+            "child output was lost before Exit"
+        );
+    }
+}
+
 #[test]
 fn terminal_core_receives_actual_ssh_exit() {
     let (tx, rx) = mpsc::channel();
