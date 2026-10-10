@@ -338,7 +338,9 @@ fn native_forwarded_agent_identity_is_only_available_when_enabled() {
         event_count(&events, "SESSION_CLOSED:"),
         "agent fixture left an SSH session open"
     );
-    println!("PASS native Unix SSH agent forwarding enable/disable/re-enable, identity listing and cleanup");
+    println!(
+        "PASS native Unix SSH agent forwarding enable/disable/re-enable, identity listing and cleanup"
+    );
 }
 
 fn fixture_port(fixture: &Path, name: &str) -> u16 {
