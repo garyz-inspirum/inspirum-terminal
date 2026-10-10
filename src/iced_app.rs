@@ -2290,6 +2290,19 @@ struct FilesLayoutPolicy {
     compact_actions: bool,
 }
 
+/// Fixed vertical space in the bottom Files dock outside the listings and the
+/// transfer queue viewport: panel padding, header row, actions bar, spacing,
+/// and the queue's own label and padding.
+const BOTTOM_FILES_CHROME: f32 = 132.0;
+const BOTTOM_QUEUE_MIN_VIEWPORT: f32 = 20.0;
+
+/// Transfer-queue viewport for a bottom dock of `dock_height` pixels. The
+/// queue shrinks to one line before the listings drop below one full row.
+fn bottom_queue_viewport_height(dock_height: f32, policy: FilesLayoutPolicy) -> f32 {
+    let spare = dock_height - BOTTOM_FILES_CHROME - policy.list_min_height;
+    spare.clamp(BOTTOM_QUEUE_MIN_VIEWPORT, policy.queue_viewport_height)
+}
+
 fn bottom_files_layout_policy() -> FilesLayoutPolicy {
     FilesLayoutPolicy {
         // Enough for the pane header and one complete file-row hit target at
@@ -6015,6 +6028,17 @@ impl App {
     }
 
     fn files(&self) -> Element<'_, Message> {
+        if self.files_side_dock {
+            self.files_layout(None)
+        } else {
+            // The bottom dock is a fixed share of the window. Lay the panel
+            // out from its real height so the transfer queue, not the file
+            // listings, is what gives way at the minimum window size.
+            responsive(move |size| self.files_layout(Some(size.height))).into()
+        }
+    }
+
+    fn files_layout(&self, bottom_height: Option<f32>) -> Element<'_, Message> {
         let profile = &self.tabs[self.active].profile;
         let target = if profile.user.is_empty() {
             profile.host.clone()
@@ -6023,24 +6047,19 @@ impl App {
         };
 
         let bottom_layout = bottom_files_layout_policy();
+        let (local_panel, remote_panel) = self.file_listing_panels();
+        // The listings take every pixel the header, actions bar and bounded
+        // transfer queue leave, so completed transfers cannot consume them.
         let file_panels: Element<'_, Message> = if self.files_side_dock {
-            let (local_panel, remote_panel) = self.file_listing_panels();
             column![local_panel, remote_panel]
                 .spacing(8)
                 .height(Fill)
                 .into()
         } else {
-            // Fill whatever the dock gives us, never less than one complete
-            // row. The actions bar and transfer queue below have fixed
-            // heights, so completed transfers cannot consume this space.
-            responsive(move |size| {
-                let (local_panel, remote_panel) = self.file_listing_panels();
-                row![local_panel, remote_panel]
-                    .spacing(8)
-                    .height(size.height.max(bottom_layout.list_min_height))
-                    .into()
-            })
-            .into()
+            row![local_panel, remote_panel]
+                .spacing(8)
+                .height(Fill)
+                .into()
         };
 
         let activity = if self.files.local_loading || self.files.remote_loading {
@@ -6188,10 +6207,9 @@ impl App {
             .into()
         };
 
-        let queue_viewport_height = if self.files_side_dock {
-            144.0
-        } else {
-            bottom_layout.queue_viewport_height
+        let queue_viewport_height = match bottom_height {
+            None => 144.0,
+            Some(height) => bottom_queue_viewport_height(height, bottom_layout),
         };
         let transfer_queue = container(
             column![
@@ -7994,6 +8012,13 @@ mod tests {
         assert!(policy.queue_viewport_height <= 56.0);
         assert!(policy.list_min_height >= 104.0);
         assert!(policy.compact_actions);
+        // 1280x800 bottom dock keeps the full queue viewport.
+        assert_eq!(bottom_queue_viewport_height(366.0, policy), policy.queue_viewport_height);
+        // 960x640 bottom dock (~254px) gives the queue one line and the
+        // listings keep a full row.
+        let small = bottom_queue_viewport_height(254.0, policy);
+        assert_eq!(small, BOTTOM_QUEUE_MIN_VIEWPORT);
+        assert!(254.0 - BOTTOM_FILES_CHROME - small >= policy.list_min_height - 2.0);
     }
 
     #[test]
