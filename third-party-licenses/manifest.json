@@ -274,6 +274,14 @@
       "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/e282618be4c3a3b9542957e0c8540e9588472ce8/LICENSE.txt"
     },
     {
+      "id": "osi/MIT.txt",
+      "origin": "canonical_standard_text",
+      "path": "files/osi/MIT.txt",
+      "sha256": "3e1464b0f88624bd400d41c51669db70c3c729bfd8df0a981cf131f80b2ccce9",
+      "source_url": "https://opensource.org/license/mit",
+      "standard": "MIT"
+    },
+    {
       "id": "profiling-82715511/LICENSE-APACHE",
       "path": "files/profiling-82715511/LICENSE-APACHE",
       "repository": "https://github.com/aclysma/profiling",
@@ -324,6 +332,19 @@
   ],
   "format": 1,
   "packages": [
+    {
+      "files": [
+        "osi/MIT.txt"
+      ],
+      "metadata_repository": "http://github.com/SSheldon/rust-block",
+      "name": "block",
+      "version": "0.1.6",
+      "declared_license": "MIT",
+      "declaration_path": "files/legacy-crates/block-0.1.6-Cargo.toml",
+      "declaration_sha256": "24df2f33b48c9e756a4f864f882c1ab07a159b6c2b790f45af2e8162499b6719",
+      "declaration_url": "https://raw.githubusercontent.com/SSheldon/rust-block/47178790cfc9d4a8b092051d8b413b78bd31254a/Cargo.toml",
+      "revision_provenance": "registry package lacks .cargo_vcs_info.json; version matched at pinned upstream commit"
+    },
     {
       "files": [
         "objc2-4fc083f1/LICENSE.txt"
@@ -402,6 +423,17 @@
         "egui-1669e52a/LICENSE-APACHE",
         "egui-1669e52a/LICENSE-MIT"
       ],
+      "metadata_repository": "https://github.com/emilk/egui/tree/master/crates/egui_glow",
+      "name": "egui_glow",
+      "revision": "1669e52a7ccfc3489c1b0999b9ed48894a0b3887",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "version": "0.31.1"
+    },
+    {
+      "files": [
+        "egui-1669e52a/LICENSE-APACHE",
+        "egui-1669e52a/LICENSE-MIT"
+      ],
       "metadata_repository": "https://github.com/emilk/egui/tree/master/crates/egui-wgpu",
       "name": "egui-wgpu",
       "revision": "1669e52a7ccfc3489c1b0999b9ed48894a0b3887",
@@ -415,17 +447,6 @@
       ],
       "metadata_repository": "https://github.com/emilk/egui/tree/master/crates/egui-winit",
       "name": "egui-winit",
-      "revision": "1669e52a7ccfc3489c1b0999b9ed48894a0b3887",
-      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
-      "version": "0.31.1"
-    },
-    {
-      "files": [
-        "egui-1669e52a/LICENSE-APACHE",
-        "egui-1669e52a/LICENSE-MIT"
-      ],
-      "metadata_repository": "https://github.com/emilk/egui/tree/master/crates/egui_glow",
-      "name": "egui_glow",
       "revision": "1669e52a7ccfc3489c1b0999b9ed48894a0b3887",
       "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
       "version": "0.31.1"
@@ -701,6 +722,19 @@
     },
     {
       "files": [
+        "osi/MIT.txt"
+      ],
+      "metadata_repository": "https://github.com/SSheldon/malloc_buf",
+      "name": "malloc_buf",
+      "version": "0.0.6",
+      "declared_license": "MIT",
+      "declaration_path": "files/legacy-crates/malloc_buf-0.0.6-Cargo.toml",
+      "declaration_sha256": "1c70c91688d9850272e43cee9b189ffe3fe667151d7caf576a36a720f8b28194",
+      "declaration_url": "https://raw.githubusercontent.com/SSheldon/malloc_buf/a7811e5f4c6f9685dd57ad9bfe34e9bf6b0ba4f9/Cargo.toml",
+      "revision_provenance": "registry package lacks .cargo_vcs_info.json; version matched at pinned upstream commit"
+    },
+    {
+      "files": [
         "wgpu-dc1e50e0/LICENSE.APACHE",
         "wgpu-dc1e50e0/LICENSE.MIT"
       ],
@@ -882,22 +916,5 @@
       ]
     }
   ],
-  "unresolved": [
-    {
-      "name": "block",
-      "reason": "exact upstream tag contains no license, copying, or notice text",
-      "repository": "http://github.com/SSheldon/rust-block",
-      "revision": "47178790cfc9d4a8b092051d8b413b78bd31254a",
-      "revision_provenance": "repository tag 0.1.6; registry package has no .cargo_vcs_info.json",
-      "version": "0.1.6"
-    },
-    {
-      "name": "malloc_buf",
-      "reason": "exact upstream tag contains no license, copying, or notice text",
-      "repository": "https://github.com/SSheldon/malloc_buf",
-      "revision": "a7811e5f4c6f9685dd57ad9bfe34e9bf6b0ba4f9",
-      "revision_provenance": "repository tag 0.0.6; registry package has no .cargo_vcs_info.json",
-      "version": "0.0.6"
-    }
-  ]
+  "unresolved": []
 }
