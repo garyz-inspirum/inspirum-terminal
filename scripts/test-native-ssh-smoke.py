@@ -290,6 +290,8 @@ async def main() -> int:
     ).resolve()
     root_base.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix="native-ssh-smoke-", dir=root_base))
+    agent_process = None
+    agent_dir = None
 
     try:
         events = EventLog(root / "server.log")
@@ -436,8 +438,6 @@ async def main() -> int:
 
         # Disposable local UNIX-domain ssh-agent. On Windows, agent forwarding
         # requires separate named-pipe capability acceptance.
-        agent_process = None
-        agent_dir = None
         if os.name != "nt":
             agent_dir = Path(tempfile.mkdtemp(prefix="insp-forward-", dir="/tmp"))
             agent_socket = agent_dir / "agent.sock"
@@ -485,15 +485,6 @@ async def main() -> int:
         try:
             await asyncio.to_thread(run, command, env=env)
         finally:
-            if agent_process is not None:
-                agent_process.terminate()
-                try:
-                    agent_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    agent_process.kill()
-                    agent_process.wait(timeout=5)
-            if agent_dir is not None:
-                shutil.rmtree(agent_dir, ignore_errors=True)
             jump_server.close()
             server.close()
             echo_server.close()
@@ -511,6 +502,17 @@ async def main() -> int:
             raise RuntimeError("the native ProxyJump acceptance never opened its hop")
         return 0
     finally:
+        # Teardown also runs when agent startup, ssh-add or fixture validation
+        # raises before entering the inner cargo-test cleanup block.
+        if agent_process is not None and agent_process.poll() is None:
+            agent_process.terminate()
+            try:
+                agent_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                agent_process.kill()
+                agent_process.wait(timeout=5)
+        if agent_dir is not None:
+            shutil.rmtree(agent_dir, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
 
 
