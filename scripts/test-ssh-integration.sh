@@ -283,6 +283,12 @@ Host *
  ControlPath none
  ProxyCommand none
 ''')
+ # Default fixtures explicitly disable IdentityAgent to keep authentication
+ # deterministic. Agent-forwarding acceptance uses an independent fixture
+ # config which permits the synthetic, local SSH_AUTH_SOCK for forwarding.
+ (d/'agent-forward-config').write_text(
+  (d/'config').read_text().replace(' IdentityAgent none\n','')
+ )
  (d/'encrypted-config').write_text(f'''Host *
  HostName 127.0.0.1
  Port {port}
@@ -425,7 +431,7 @@ Host *
    # Independent OpenSSH control with the same synthetic agent and sshd.
    # If it fails, the fixture is broken; do not blame the application adapter.
    baseline=subprocess.run(
-    ['ssh','-A','-F',str(d/'config'),'-tt','127.0.0.1'],
+    ['ssh','-A','-F',str(d/'agent-forward-config'),'-tt','127.0.0.1'],
     env=env,
     input='agent-probe\\nexit\\n'.replace('\\n','\n'),
     capture_output=True,
