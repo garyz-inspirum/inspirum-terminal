@@ -412,5 +412,58 @@ fn native_local_remote_and_dynamic_ssh_forwarding() {
         );
         thread::sleep(Duration::from_millis(50));
     }
-    println!("PASS native SSH -L, -R, -D forwarding and listener cleanup");
+    // Reconnect immediately with the very same -L/-R/-D specifications.
+    // A stale OpenSSH listener from the first session must not prevent
+    // ExitOnForwardFailure from binding the second session's ports.
+    let remote_requests = event_count(&fixture.join("server.log"), "REMOTE_FORWARD_ALLOW");
+    let (reconnect_sender, reconnect_receiver) = mpsc::channel();
+    let mut reconnected = connect(
+        9961,
+        reconnect_sender,
+        &session,
+        Some(&fixture.join("config")),
+    )
+    .expect("reconnect with the same local, remote and SOCKS listeners");
+    wait_text(&mut reconnected, "NATIVE_SMOKE_READY");
+    round_trip(&mut connect_loopback(local_port), b"RECONNECT_LOCAL");
+    wait_event_count(
+        &fixture.join("server.log"),
+        "REMOTE_FORWARD_ALLOW",
+        remote_requests + 1,
+    );
+
+    let mut socks_reconnected = connect_loopback(socks_port);
+    socks_reconnected.write_all(&[5, 1, 0]).unwrap();
+    let mut greeting = [0; 2];
+    socks_reconnected.read_exact(&mut greeting).unwrap();
+    assert_eq!(greeting, [5, 0], "reconnected SOCKS greeting failed");
+    let [hi, lo] = echo_port.to_be_bytes();
+    socks_reconnected
+        .write_all(&[5, 1, 0, 1, 127, 0, 0, 1, hi, lo])
+        .unwrap();
+    let mut reply = [0; 10];
+    socks_reconnected.read_exact(&mut reply).unwrap();
+    assert_eq!(&reply[0..2], &[5, 0], "reconnected SOCKS routing failed");
+    round_trip(&mut socks_reconnected, b"RECONNECT_SOCKS");
+
+    // Release the forwarded TCP channel before asking the PTY to exit.
+    drop(socks_reconnected);
+    write(&mut reconnected, "exit\n");
+    wait_exit(&reconnect_receiver, 9961);
+    drop(reconnected);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if [local_port, socks_port, remote_port]
+            .into_iter()
+            .all(|port| TcpStream::connect(("127.0.0.1", port)).is_err())
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "reconnected SSH forwarding listener survived second session exit"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    println!("PASS native SSH -L, -R, -D forwarding, reconnect with same ports, and listener cleanup");
 }
