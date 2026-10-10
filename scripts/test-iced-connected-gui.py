@@ -34,6 +34,20 @@ sys.modules[spec.name] = fixture
 spec.loader.exec_module(fixture)
 
 
+class MonitoredSession(fixture.NativeSession):
+    """Never log remote input: report only a fixed synthetic test marker."""
+
+    def handle_line(self, line: str) -> None:
+        if line == "echo:FREE_TYPE_PROBE":
+            self.events.write("UNEXPECTED_FREE_TYPE_PTY_INPUT")
+        super().handle_line(line)
+
+
+class MonitoredServer(fixture.NativeServer):
+    def session_requested(self) -> MonitoredSession:
+        return MonitoredSession(self.events)
+
+
 def command(*args: str, env: dict[str, str], timeout: float = 12) -> str:
     result = subprocess.run(
         args, env=env, capture_output=True, text=True,
@@ -93,7 +107,7 @@ async def main() -> int:
         client = fixture.generate_key(root, "client")
         trusted = asyncssh.read_public_key(str(client) + ".pub")
         server = await asyncssh.create_server(
-            lambda: fixture.NativeServer(trusted, events),
+            lambda: MonitoredServer(trusted, events),
             "127.0.0.1", 0, server_host_keys=[str(host)], encoding="utf-8",
         )
         port = server.get_port()
@@ -200,17 +214,46 @@ async def main() -> int:
                 if files_pixels < 3000:
                     raise RuntimeError(f"files dock changed only {files_pixels} pixels")
 
+                # Opening Free Type must focus the new pane-local text_editor:
+                # typing goes into the draft, and even Enter is NOT forwarded
+                # to the authenticated OpenSSH PTY until an explicit Send.
+                command(
+                    "xdotool", "windowfocus", window, "key", "--clearmodifiers",
+                    "ctrl+shift+e", env=env,
+                )
+                await asyncio.sleep(.9)
+                screenshot(window, destination / "connected-free-type-empty.png", env)
+                command(
+                    "xdotool", "type", "--clearmodifiers", "--delay", "30",
+                    "echo:FREE_TYPE_PROBE", env=env,
+                )
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await asyncio.sleep(.9)
+                screenshot(window, destination / "connected-free-type-draft.png", env)
+                free_type_pixels = diff(
+                    destination / "connected-free-type-empty.png",
+                    destination / "connected-free-type-draft.png", env,
+                )
+                if free_type_pixels < 250:
+                    raise RuntimeError(
+                        f"free-type keyboard text did not visibly populate the local editor: "
+                        f"{free_type_pixels} pixels changed"
+                    )
                 event_log = events.path.read_text(encoding="utf-8")
+                if "UNEXPECTED_FREE_TYPE_PTY_INPUT" in event_log:
+                    raise RuntimeError("free-type editing leaked synthetic input to remote SSH PTY")
                 if event_log.count("AUTH_ACCEPT:native-smoke") < 2:
                     raise RuntimeError("two distinct SSH panes were not authenticated")
                 (destination / "connected-acceptance.txt").write_text(
                     "PASS: two authenticated independent OpenSSH PTYs through production Iced\n"
                     f"Connected split screenshot change: {split_pixels} pixels\n"
                     f"Opened utility dock screenshot change: {files_pixels} pixels\n"
+                    f"Free-type draft edit screenshot change: {free_type_pixels} pixels\n"
+                    "PASS: synthetic free-type text remained local without PTY writes\n"
                     "All keys generated in isolated temporary fixture; no real host or credential.\n",
                     encoding="utf-8",
                 )
-                print("PASS production Iced GUI: connected terminal, split, utility file dock", flush=True)
+                print("PASS production Iced GUI: connected terminal, split, file dock, free-type keyboard focus and PTY isolation", flush=True)
         finally:
             if app is not None and app.poll() is None:
                 app.terminate()
