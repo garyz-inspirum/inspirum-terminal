@@ -60,6 +60,73 @@ class MonitoredServer(fixture.NativeServer):
         return MonitoredSession(self.events)
 
 
+
+async def monitored_shell(
+    stdin: asyncssh.SSHReader[str],
+    stdout: asyncssh.SSHWriter[str],
+    stderr: asyncssh.SSHWriter[str],
+    events: fixture.EventLog,
+) -> None:
+    # AsyncSSH dispatches all sessions through SSHServerStreamSession when
+    # sftp_factory is configured. In that mode SSHServer.session_requested()
+    # is bypassed, so supply an explicit shell stream handler as well.
+    del stderr
+    events.write("SESSION_OPEN")
+    events.write("SESSION_STARTED")
+    stdout.write("NATIVE_SMOKE_READY\r\n")
+    buffer = ""
+    try:
+        while True:
+            try:
+                chunk = await stdin.read(8192)
+            except asyncssh.TerminalSizeChanged:
+                # AsyncSSH injects terminal-size updates into SSHReader as
+                # exceptions. Splitting the Iced pane and opening the Files
+                # dock both resize a genuine PTY: these are not disconnects.
+                events.write("SHELL_PTY_RESIZE")
+                continue
+            if not chunk:
+                events.write("SHELL_STREAM_EOF")
+                return
+            buffer += chunk.replace("\r\n", "\n").replace("\r", "\n")
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                if line == "echo:FREE_TYPE_PROBE":
+                    events.write("UNEXPECTED_FREE_TYPE_PTY_INPUT")
+                elif line == "echo:LOCK_PROBE":
+                    events.write("UNEXPECTED_LOCKED_PTY_INPUT")
+                elif line == "screen-on":
+                    events.write("SCREEN_ON")
+                    stdout.write("\x1b[?1049h\x1b[2J\x1b[H\x1b[44;97mNATIVE_FULLSCREEN_ACTIVE\x1b[0m\r\n")
+                elif line == "screen-off":
+                    events.write("SCREEN_OFF")
+                    stdout.write("\x1b[?1049l")
+                elif line.startswith("echo:"):
+                    stdout.write(f"NATIVE_ECHO:{line[5:]}\r\n")
+                elif line == "exit":
+                    events.write("SESSION_EXIT_REQUEST")
+                    return
+    except Exception as exc:
+        # No private material or server input is included in diagnostics.
+        events.write(f"SHELL_HANDLER_EXCEPTION:{type(exc).__name__}")
+        raise
+    finally:
+        events.write("SHELL_HANDLER_ENDED")
+        events.write("SESSION_CLOSED:clean")
+
+
+
+def isolated_sftp_server(
+    chan: asyncssh.SSHServerChannel,
+    root: Path,
+    events: fixture.EventLog,
+) -> asyncssh.SFTPServer:
+    # This is the *real* SSH subsystem used by the Files dock; it is restricted
+    # to a generated disposable directory and not the runner's home folder.
+    events.write("SFTP_SUBSYSTEM_STARTED")
+    return asyncssh.SFTPServer(chan, chroot=str(root))
+
+
 def command(*args: str, env: dict[str, str], timeout: float = 12) -> str:
     result = subprocess.run(
         args, env=env, capture_output=True, text=True,
@@ -118,9 +185,18 @@ async def main() -> int:
         host = fixture.generate_key(root, "host")
         client = fixture.generate_key(root, "client")
         trusted = asyncssh.read_public_key(str(client) + ".pub")
+        remote_root = root / "remote-sftp"
+        remote_root.mkdir()
+        (remote_root / "CONNECTED_SFTP_FIXTURE.txt").write_text(
+            "Isolated Iced SFTP acceptance marker\\n", encoding="utf-8"
+        )
         server = await asyncssh.create_server(
             lambda: MonitoredServer(trusted, events),
             "127.0.0.1", 0, server_host_keys=[str(host)], encoding="utf-8",
+            sftp_factory=lambda chan: isolated_sftp_server(chan, remote_root, events),
+            session_factory=lambda stdin, stdout, stderr: monitored_shell(
+                stdin, stdout, stderr, events
+            ),
         )
         port = server.get_port()
         key_type, key_data = fixture.public_fields(Path(str(host) + ".pub"))
@@ -183,20 +259,29 @@ async def main() -> int:
                     raise RuntimeError("production connected Iced window never appeared")
 
                 command("xdotool", "windowfocus", window, env=env)
-                await asyncio.sleep(1)
+                # The native graphics stack may still be initializing after
+                # the X11 window first appears, especially on shared runners.
+                await asyncio.sleep(2)
                 screenshot(window, destination / "connected-before-open.png", env)
 
                 # First item appears after the session search and 'Ungrouped'
                 # label. Try bounded points in the *saved session list*, never
                 # the destructive dialogs or global desktop. Authentication,
                 # rather than a screenshot delta alone, proves the click worked.
-                for y in (270, 305, 340, 375):
+                for y in (235, 255, 275, 295, 315, 335, 355, 375):
                     command("xdotool", "mousemove", "--window", window, "110", str(y), "click", "1", env=env)
-                    await asyncio.sleep(1.8)
+                    await asyncio.sleep(1.5)
                     if "SESSION_STARTED" in events.path.read_text(encoding="utf-8"):
                         break
+                    # A CI screenshot coordinate may land on a nonterminal
+                    # affordance; dismiss its dialog before trying next row.
+                    command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
                 if "SESSION_STARTED" not in events.path.read_text(encoding="utf-8"):
-                    raise RuntimeError("clicking the saved profile never started a real SSH session")
+                    raise RuntimeError(
+                        "clicking the saved profile never started a real SSH session. "
+                        "SSH events: " + repr(events.path.read_text(encoding="utf-8")[-800:])
+                        + "; application log tail: " + app_log.read_text(encoding="utf-8")[-1800:]
+                    )
                 await asyncio.sleep(1)
                 screenshot(window, destination / "connected-terminal.png", env)
 
@@ -217,6 +302,10 @@ async def main() -> int:
                     raise RuntimeError(f"split screen changed only {split_pixels} pixels")
 
                 command("xdotool", "windowfocus", window, "key", "--clearmodifiers", "ctrl+shift+f", env=env)
+                await wait_for(
+                    lambda: "SFTP_SUBSYSTEM_STARTED" in events.path.read_text(encoding="utf-8"),
+                    "actual SFTP subsystem opened by Iced Files dock",
+                )
                 await asyncio.sleep(2)
                 screenshot(window, destination / "connected-files-dock.png", env)
                 files_pixels = diff(
@@ -226,15 +315,51 @@ async def main() -> int:
                 if files_pixels < 3000:
                     raise RuntimeError(f"files dock changed only {files_pixels} pixels")
 
+                # The file browser has completed the real SFTP handshake.
+                # End that UI task before testing the independent local-editor
+                # workflow; otherwise its remote listing can keep keyboard
+                # ownership while focus changes. Closing the dock does not
+                # close either underlying authenticated SSH PTY.
+                command(
+                    "xdotool", "windowfocus", window, "key",
+                    "--clearmodifiers", "ctrl+shift+f", env=env,
+                )
+                await asyncio.sleep(.7)
+                screenshot(window, destination / "connected-files-closed.png", env)
+                closed_pixels = diff(
+                    destination / "connected-files-dock.png",
+                    destination / "connected-files-closed.png", env,
+                )
+                if closed_pixels < 3000:
+                    raise RuntimeError(
+                        f"Files dock did not close after authenticated SFTP: "
+                        f"{closed_pixels} pixels changed"
+                    )
+                command(
+                    "xdotool", "windowfocus", window, "mousemove",
+                    "--window", window, "710", "300", "click", "1", env=env,
+                )
+                await asyncio.sleep(.5)
+
                 # Opening Free Type must focus the new pane-local text_editor:
                 # typing goes into the draft, and even Enter is NOT forwarded
                 # to the authenticated OpenSSH PTY until an explicit Send.
+                screenshot(window, destination / "connected-before-free-type.png", env)
                 command(
                     "xdotool", "windowfocus", window, "key", "--clearmodifiers",
                     "ctrl+shift+e", env=env,
                 )
                 await asyncio.sleep(.9)
                 screenshot(window, destination / "connected-free-type-empty.png", env)
+                mode_pixels = diff(
+                    destination / "connected-before-free-type.png",
+                    destination / "connected-free-type-empty.png", env,
+                )
+                if mode_pixels < 300:
+                    raise RuntimeError(
+                        f"free-type shortcut did not visibly open editor: "
+                        f"{mode_pixels} pixels changed"
+                    )
                 command(
                     "xdotool", "type", "--clearmodifiers", "--delay", "30",
                     "echo:FREE_TYPE_PROBE", env=env,
@@ -329,6 +454,13 @@ async def main() -> int:
                     )
 
                 event_log = events.path.read_text(encoding="utf-8")
+                if "SHELL_PTY_RESIZE" not in event_log:
+                    raise RuntimeError("connected SSH fixture never observed a live PTY resize")
+                if "SHELL_HANDLER_ENDED" in event_log or "SHELL_STREAM_EOF" in event_log:
+                    raise RuntimeError(
+                        "SSH terminal unexpectedly exited during split/dock/focus acceptance: "
+                        + repr(event_log[-900:])
+                    )
                 if "UNEXPECTED_LOCKED_PTY_INPUT" in event_log:
                     raise RuntimeError("privacy curtain forwarded synthetic keyboard input to SSH")
                 if "UNEXPECTED_FREE_TYPE_PTY_INPUT" in event_log:
@@ -337,8 +469,11 @@ async def main() -> int:
                     raise RuntimeError("two distinct SSH panes were not authenticated")
                 (destination / "connected-acceptance.txt").write_text(
                     "PASS: two authenticated independent OpenSSH PTYs through production Iced\n"
+                    "PASS: native Files dock established actual isolated SSH SFTP subsystem\n"                    "PASS: PTY resize events preserved both SSH shell sessions through the test\n"
                     f"Connected split screenshot change: {split_pixels} pixels\n"
                     f"Opened utility dock screenshot change: {files_pixels} pixels\n"
+                    f"Closed SFTP utility dock screenshot change: {closed_pixels} pixels\n"
+                    f"Free-type mode screenshot change: {mode_pixels} pixels\n"
                     f"Free-type draft edit screenshot change: {free_type_pixels} pixels\n"
                     f"Focus-mode screenshot change: {focus_pixels} pixels\n"
                     f"Privacy-curtain screenshot change: {privacy_pixels} pixels\n"
@@ -347,7 +482,7 @@ async def main() -> int:
                     "All keys generated in isolated temporary fixture; no real host or credential.\n",
                     encoding="utf-8",
                 )
-                print("PASS production Iced GUI: connected split, file dock, draft, focus/privacy, alternate-screen and PTY isolation", flush=True)
+                print("PASS production Iced GUI: connected split, real SFTP, draft, focus/privacy, alternate-screen and PTY isolation", flush=True)
         finally:
             if app is not None and app.poll() is None:
                 app.terminate()
@@ -364,6 +499,11 @@ async def main() -> int:
                 await asyncio.to_thread(xvfb.wait)
             server.close()
             await server.wait_closed()
+            # Always retain only synthetic lifecycle markers. This is critical
+            # when a PTY appears then unexpectedly exits before GUI assertions.
+            (destination / "ssh-fixture-events.txt").write_text(
+                events.path.read_text(encoding="utf-8"), encoding="utf-8"
+            )
     return 0
 
 
