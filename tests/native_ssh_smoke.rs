@@ -280,6 +280,55 @@ fn native_proxyjump_enforces_hop_trust_and_no_direct_fallback() {
     println!("PASS native ProxyJump, target host trust and no-direct-fallback");
 }
 
+// macOS arm64 and Linux x64 execute this against a real locally spawned
+// ssh-agent and a disposable AsyncSSH server with forwarding enabled.
+// Windows named-pipe agent forwarding requires separate native evidence.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires native Unix agent fixture: scripts/test-native-ssh-smoke.py"]
+fn native_forwarded_agent_identity_is_only_available_when_enabled() {
+    let fixture = fixture();
+    let events = fixture.join("server.log");
+    for (id, enabled, expected) in [
+        (9971, true, "NATIVE_AGENT_FORWARDED"),
+        (9972, false, "NATIVE_AGENT_DISABLED"),
+    ] {
+        let session = Session {
+            name: "Disposable agent forwarding".into(),
+            host: "native-smoke".into(),
+            strict: true,
+            ssh: SshOptions {
+                agent_forwarding: Some(enabled),
+                ..SshOptions::default()
+            },
+            ..Session::default()
+        };
+        let (sender, receiver) = mpsc::channel();
+        let mut terminal = connect(id, sender, &session, Some(&fixture.join("agent-config")))
+            .expect("native agent fixture terminal must start");
+        wait_text(&mut terminal, "NATIVE_SMOKE_READY");
+        write(&mut terminal, "agent-probe\n");
+        wait_text(&mut terminal, expected);
+        let visible = grid(&mut terminal);
+        if enabled {
+            assert!(!visible.contains("NATIVE_AGENT_DISABLED"));
+        } else {
+            assert!(!visible.contains("NATIVE_AGENT_FORWARDED"));
+        }
+        write(&mut terminal, "exit\n");
+        wait_exit(&receiver, id);
+        drop(terminal);
+    }
+    assert!(event_count(&events, "AGENT_FORWARDED") >= 1);
+    assert!(event_count(&events, "AGENT_DISABLED") >= 1);
+    assert_eq!(
+        event_count(&events, "SESSION_OPEN"),
+        event_count(&events, "SESSION_CLOSED:"),
+        "agent fixture left an SSH session open"
+    );
+    println!("PASS native Unix SSH agent forwarding opt-in/opt-out, identity listing and cleanup");
+}
+
 fn fixture_port(fixture: &Path, name: &str) -> u16 {
     fs::read_to_string(fixture.join(name))
         .unwrap()
