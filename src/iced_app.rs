@@ -1350,6 +1350,7 @@ impl TerminalCanvasState {
 
 struct TerminalCanvas<'a> {
     focused: bool,
+    remote_key_mode: bool,
     pane: pane_grid::Pane,
     id: u64,
     generation: u64,
@@ -1449,6 +1450,20 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
             }
         }
         match event {
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                if self.focused && self.remote_key_mode =>
+            {
+                if let Some(action) = remote_vim_key(key, *modifiers) {
+                    // In modal remote-key mode the canvas owns the shortcut.
+                    // Capturing it prevents the general keyboard subscription
+                    // from delivering a second identical SSH cursor command.
+                    return Some(
+                        canvas::Action::publish(Message::RemoteCursorPress(self.id, action))
+                            .and_capture(),
+                    );
+                }
+                None
+            }
             iced::Event::Keyboard(keyboard::Event::KeyPressed { .. })
                 if position.is_some() && self.appearance.hide_pointer_while_typing =>
             {
@@ -5682,6 +5697,7 @@ impl App {
                     focused: self.focused_terminal_id() == Some(pane.id)
                         && self.dialog.is_none()
                         && self.remote_editor.is_none(),
+                    remote_key_mode: self.remote_keys.contains(&pane.id),
                     pane: id,
                     id: pane.id,
                     generation: pane.display_generation,
