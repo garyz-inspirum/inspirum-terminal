@@ -321,6 +321,9 @@ fn native_local_remote_and_dynamic_ssh_forwarding() {
         loop {
             match service.accept() {
                 Ok((mut stream, _)) => {
+                    // macOS can inherit O_NONBLOCK from the polling listener.
+                    // The accepted stream needs blocking I/O for read_exact.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(5)))
                         .unwrap();
