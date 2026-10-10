@@ -40,6 +40,8 @@ class MonitoredSession(fixture.NativeSession):
     def handle_line(self, line: str) -> None:
         if line == "echo:FREE_TYPE_PROBE":
             self.events.write("UNEXPECTED_FREE_TYPE_PTY_INPUT")
+        if line == "echo:LOCK_PROBE":
+            self.events.write("UNEXPECTED_LOCKED_PTY_INPUT")
         super().handle_line(line)
 
 
@@ -239,7 +241,53 @@ async def main() -> int:
                         f"free-type keyboard text did not visibly populate the local editor: "
                         f"{free_type_pixels} pixels changed"
                     )
+                # Free Type's exit shortcut discards its local draft. Validate
+                # Iced focus-mode and privacy-mode keyboard entry/exit in the
+                # same connected split-pane production process.
+                command("xdotool", "windowfocus", window, "key", "--clearmodifiers",
+                        "ctrl+shift+e", env=env)
+                await asyncio.sleep(.5)
+                screenshot(window, destination / "connected-before-focus-mode.png", env)
+                command("xdotool", "windowfocus", window, "key", "--clearmodifiers",
+                        "alt+Return", env=env)
+                await asyncio.sleep(.6)
+                screenshot(window, destination / "connected-focus-mode.png", env)
+                focus_pixels = diff(
+                    destination / "connected-before-focus-mode.png",
+                    destination / "connected-focus-mode.png", env,
+                )
+                if focus_pixels < 3000:
+                    raise RuntimeError(
+                        f"connected focus-mode shortcut changed only {focus_pixels} pixels"
+                    )
+                command("xdotool", "windowfocus", window, "key", "--clearmodifiers",
+                        "alt+Return", env=env)
+                await asyncio.sleep(.5)
+
+                command("xdotool", "windowfocus", window, "key", "--clearmodifiers",
+                        "ctrl+shift+l", env=env)
+                await asyncio.sleep(.6)
+                screenshot(window, destination / "connected-privacy-curtain.png", env)
+                privacy_pixels = diff(
+                    destination / "connected-before-focus-mode.png",
+                    destination / "connected-privacy-curtain.png", env,
+                )
+                if privacy_pixels < 3000:
+                    raise RuntimeError(
+                        f"privacy curtain did not visibly obscure SSH panes: "
+                        f"{privacy_pixels} pixels changed"
+                    )
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:LOCK_PROBE", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await asyncio.sleep(.6)
+                command("xdotool", "windowfocus", window, "key", "--clearmodifiers",
+                        "ctrl+shift+l", env=env)
+                await asyncio.sleep(.4)
+
                 event_log = events.path.read_text(encoding="utf-8")
+                if "UNEXPECTED_LOCKED_PTY_INPUT" in event_log:
+                    raise RuntimeError("privacy curtain forwarded synthetic keyboard input to SSH")
                 if "UNEXPECTED_FREE_TYPE_PTY_INPUT" in event_log:
                     raise RuntimeError("free-type editing leaked synthetic input to remote SSH PTY")
                 if event_log.count("AUTH_ACCEPT:native-smoke") < 2:
