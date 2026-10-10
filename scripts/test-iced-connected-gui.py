@@ -328,12 +328,22 @@ async def main() -> int:
                 # Opening Free Type must focus the new pane-local text_editor:
                 # typing goes into the draft, and even Enter is NOT forwarded
                 # to the authenticated OpenSSH PTY until an explicit Send.
+                screenshot(window, destination / "connected-before-free-type.png", env)
                 command(
                     "xdotool", "windowfocus", window, "key", "--clearmodifiers",
                     "ctrl+shift+e", env=env,
                 )
                 await asyncio.sleep(.9)
                 screenshot(window, destination / "connected-free-type-empty.png", env)
+                mode_pixels = diff(
+                    destination / "connected-before-free-type.png",
+                    destination / "connected-free-type-empty.png", env,
+                )
+                if mode_pixels < 300:
+                    raise RuntimeError(
+                        f"free-type shortcut did not visibly open editor: "
+                        f"{mode_pixels} pixels changed"
+                    )
                 command(
                     "xdotool", "type", "--clearmodifiers", "--delay", "30",
                     "echo:FREE_TYPE_PROBE", env=env,
@@ -440,6 +450,7 @@ async def main() -> int:
                     f"Connected split screenshot change: {split_pixels} pixels\n"
                     f"Opened utility dock screenshot change: {files_pixels} pixels\n"
                     f"Closed SFTP utility dock screenshot change: {closed_pixels} pixels\n"
+                    f"Free-type mode screenshot change: {mode_pixels} pixels\n"
                     f"Free-type draft edit screenshot change: {free_type_pixels} pixels\n"
                     f"Focus-mode screenshot change: {focus_pixels} pixels\n"
                     f"Privacy-curtain screenshot change: {privacy_pixels} pixels\n"
