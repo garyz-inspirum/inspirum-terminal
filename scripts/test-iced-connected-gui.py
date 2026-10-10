@@ -230,8 +230,15 @@ def locate_visible_label(
     for index, (text, x, y, width, height) in enumerate(rows):
         if text != words[0]:
             continue
-        matched = rows[index:index + len(words)]
-        if [item[0] for item in matched] != words:
+        matched = []
+        consumed = 0
+        for item in rows[index:]:
+            matched.append(item)
+            consumed += len(item[0])
+            if consumed >= len(label):
+                break
+        recognized = "".join(item[0] for item in matched)
+        if recognized != label and not label.startswith(recognized):
             continue
         bounds = (
             min(item[1] for item in matched) + 4,
