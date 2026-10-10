@@ -390,10 +390,13 @@ fn native_local_remote_and_dynamic_ssh_forwarding() {
     round_trip(&mut connect_loopback(remote_port), b"REVERSE_ECHO");
     responder.join().unwrap();
 
+    // OpenSSH may keep its transport alive while an active SOCKS channel
+    // exists, even after the remote shell exits. Close the last test channel
+    // first so this check tests actual terminal shutdown, not a live tunnel.
+    drop(socks);
     write(&mut terminal, "exit\n");
     wait_exit(&receiver, 9960);
     drop(terminal);
-    drop(socks);
     // Forward listeners must go away when the SSH session closes.
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
