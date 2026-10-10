@@ -299,11 +299,26 @@ async def main() -> int:
                 if files_pixels < 3000:
                     raise RuntimeError(f"files dock changed only {files_pixels} pixels")
 
-                # The SFTP browser is a distinct Iced dock which may own
-                # keyboard focus while its listing completes. Explicitly
-                # click the SSH canvas before a terminal-specific shortcut.
-                # This validates real focus transfer rather than relying on
-                # the incidental focus left by opening a utility pane.
+                # The file browser has completed the real SFTP handshake.
+                # End that UI task before testing the independent local-editor
+                # workflow; otherwise its remote listing can keep keyboard
+                # ownership while focus changes. Closing the dock does not
+                # close either underlying authenticated SSH PTY.
+                command(
+                    "xdotool", "windowfocus", window, "key",
+                    "--clearmodifiers", "ctrl+shift+f", env=env,
+                )
+                await asyncio.sleep(.7)
+                screenshot(window, destination / "connected-files-closed.png", env)
+                closed_pixels = diff(
+                    destination / "connected-files-dock.png",
+                    destination / "connected-files-closed.png", env,
+                )
+                if closed_pixels < 3000:
+                    raise RuntimeError(
+                        f"Files dock did not close after authenticated SFTP: "
+                        f"{closed_pixels} pixels changed"
+                    )
                 command(
                     "xdotool", "windowfocus", window, "mousemove",
                     "--window", window, "710", "300", "click", "1", env=env,
@@ -424,6 +439,7 @@ async def main() -> int:
                     "PASS: native Files dock established actual isolated SSH SFTP subsystem\n"
                     f"Connected split screenshot change: {split_pixels} pixels\n"
                     f"Opened utility dock screenshot change: {files_pixels} pixels\n"
+                    f"Closed SFTP utility dock screenshot change: {closed_pixels} pixels\n"
                     f"Free-type draft edit screenshot change: {free_type_pixels} pixels\n"
                     f"Focus-mode screenshot change: {focus_pixels} pixels\n"
                     f"Privacy-curtain screenshot change: {privacy_pixels} pixels\n"
