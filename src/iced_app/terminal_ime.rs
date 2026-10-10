@@ -11,6 +11,10 @@ struct State {
     preedit: Option<input_method::Preedit>,
     reset: bool,
     waiting_for_open: bool,
+    // Redraw events report the focused text input/editor via its IME request.
+    // Keep this across key events: a text input can ignore Enter/Escape even
+    // while it owns keyboard focus, and those keys must never reach the PTY.
+    editor_has_focus: bool,
 }
 impl State {
     fn focus(&mut self, target: Option<u64>) {
@@ -50,6 +54,20 @@ impl State {
             _ => {}
         }
         None
+    }
+    fn editor_owns_input(
+        &mut self,
+        redraw: bool,
+        editor_ime_requested: bool,
+        child_captured_text_event: bool,
+    ) -> bool {
+        // A text field requests an input method on redraw, not necessarily
+        // on KeyPressed. Preserve the result until the next redraw so a
+        // noncaptured Enter/Escape cannot escape into an SSH session.
+        if redraw {
+            self.editor_has_focus = editor_ime_requested;
+        }
+        self.editor_has_focus || editor_ime_requested || child_captured_text_event
     }
     fn composing(&self) -> bool {
         self.preedit.as_ref().is_some_and(|p| !p.content.is_empty())
@@ -158,12 +176,23 @@ impl Widget<Message, Theme, Renderer> for TerminalIme<'_> {
             event,
             Event::Window(iced::window::Event::RedrawRequested(_))
         );
-        let editor_owns_input = shell.input_method().is_enabled()
-            || (shell.is_event_captured()
-                && matches!(event, Event::InputMethod(_) | Event::Keyboard(_)));
+        let editor_ime_requested = shell.input_method().is_enabled();
+        let child_captured_text_event = shell.is_event_captured()
+            && matches!(event, Event::InputMethod(_) | Event::Keyboard(_));
         let state = tree.state.downcast_mut::<State>();
+        let editor_owns_input =
+            state.editor_owns_input(redraw, editor_ime_requested, child_captured_text_event);
         state.focus(if editor_owns_input { None } else { self.target });
-        if editor_owns_input || self.target.is_none() {
+        if editor_owns_input {
+            // A focused editor may deliberately ignore a key (notably Enter
+            // without on_submit). Do not let Iced's global ignored-event
+            // subscription reinterpret it as terminal input.
+            if matches!(event, Event::Keyboard(_) | Event::InputMethod(_)) {
+                shell.capture_event();
+            }
+            return;
+        }
+        if self.target.is_none() {
             return;
         }
         match event {
@@ -232,6 +261,22 @@ impl Widget<Message, Theme, Renderer> for TerminalIme<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn focused_text_field_blocks_unhandled_keys_until_blurred() {
+        let mut state = State::default();
+        state.focus(Some(7));
+        assert!(!state.editor_owns_input(true, false, false));
+        // Clicking the session search and drawing it makes the text editor
+        // the IME owner. Enter can then be ignored by the TextInput widget.
+        assert!(state.editor_owns_input(true, true, false));
+        state.focus(None);
+        assert!(state.editor_owns_input(false, false, false));
+        assert!(state.editor_owns_input(false, false, true));
+        // After a click on the terminal, the next redraw restores PTY input.
+        assert!(!state.editor_owns_input(true, false, false));
+        state.focus(Some(7));
+        assert_eq!(state.target, Some(7));
+    }
     #[test]
     fn native_preedit_never_sends_and_commit_uses_its_original_pane() {
         let mut state = State::default();

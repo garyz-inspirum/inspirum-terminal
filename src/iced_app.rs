@@ -4296,6 +4296,8 @@ impl App {
             text_input("Search sessions...", &self.query)
                 .id("session-search")
                 .on_input_maybe(self.dialog.is_none().then_some(Message::Search))
+                // Enter belongs to the search box, never to the active SSH PTY.
+                .on_submit(Message::Search(self.query.clone()))
                 .padding(10),
             space::vertical().height(6),
         ]
