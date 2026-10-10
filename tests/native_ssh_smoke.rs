@@ -273,11 +273,18 @@ fn connect_loopback(port: u16) -> TcpStream {
     let deadline = Instant::now() + Duration::from_secs(9);
     loop {
         if let Ok(stream) = TcpStream::connect(&address) {
-            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
             return stream;
         }
-        assert!(Instant::now() < deadline, "loopback SSH listener {port} did not appear");
+        assert!(
+            Instant::now() < deadline,
+            "loopback SSH listener {port} did not appear"
+        );
         thread::sleep(Duration::from_millis(50));
     }
 }
@@ -314,14 +321,19 @@ fn native_local_remote_and_dynamic_ssh_forwarding() {
         loop {
             match service.accept() {
                 Ok((mut stream, _)) => {
-                    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
                     let mut payload = [0; 12];
                     stream.read_exact(&mut payload).unwrap();
                     stream.write_all(&payload).unwrap();
                     return;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(Instant::now() < deadline, "reverse-forward service never used");
+                    assert!(
+                        Instant::now() < deadline,
+                        "reverse-forward service never used"
+                    );
                     thread::sleep(Duration::from_millis(40));
                 }
                 Err(error) => panic!("reverse-forward accept failed: {error}"),
@@ -355,7 +367,11 @@ fn native_local_remote_and_dynamic_ssh_forwarding() {
     socks.write_all(&[5, 1, 0]).unwrap();
     let mut greeting = [0; 2];
     socks.read_exact(&mut greeting).unwrap();
-    assert_eq!(greeting, [5, 0], "SOCKS authentication was unexpectedly required");
+    assert_eq!(
+        greeting,
+        [5, 0],
+        "SOCKS authentication was unexpectedly required"
+    );
     let [hi, lo] = echo_port.to_be_bytes();
     socks
         .write_all(&[5, 1, 0, 1, 127, 0, 0, 1, hi, lo])
@@ -384,7 +400,10 @@ fn native_local_remote_and_dynamic_ssh_forwarding() {
         if local_closed && socks_closed && remote_closed {
             break;
         }
-        assert!(Instant::now() < deadline, "SSH forwarding listener survived session exit");
+        assert!(
+            Instant::now() < deadline,
+            "SSH forwarding listener survived session exit"
+        );
         thread::sleep(Duration::from_millis(50));
     }
     println!("PASS native SSH -L, -R, -D forwarding and listener cleanup");
