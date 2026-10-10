@@ -200,20 +200,29 @@ async def main() -> int:
                     raise RuntimeError("production connected Iced window never appeared")
 
                 command("xdotool", "windowfocus", window, env=env)
-                await asyncio.sleep(1)
+                # The native graphics stack may still be initializing after
+                # the X11 window first appears, especially on shared runners.
+                await asyncio.sleep(2)
                 screenshot(window, destination / "connected-before-open.png", env)
 
                 # First item appears after the session search and 'Ungrouped'
                 # label. Try bounded points in the *saved session list*, never
                 # the destructive dialogs or global desktop. Authentication,
                 # rather than a screenshot delta alone, proves the click worked.
-                for y in (270, 305, 340, 375):
+                for y in (235, 255, 275, 295, 315, 335, 355, 375):
                     command("xdotool", "mousemove", "--window", window, "110", str(y), "click", "1", env=env)
-                    await asyncio.sleep(1.8)
+                    await asyncio.sleep(1.5)
                     if "SESSION_STARTED" in events.path.read_text(encoding="utf-8"):
                         break
+                    # A CI screenshot coordinate may land on a nonterminal
+                    # affordance; dismiss its dialog before trying next row.
+                    command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
                 if "SESSION_STARTED" not in events.path.read_text(encoding="utf-8"):
-                    raise RuntimeError("clicking the saved profile never started a real SSH session")
+                    raise RuntimeError(
+                        "clicking the saved profile never started a real SSH session. "
+                        "SSH events: " + repr(events.path.read_text(encoding="utf-8")[-800:])
+                        + "; application log tail: " + app_log.read_text(encoding="utf-8")[-1800:]
+                    )
                 await asyncio.sleep(1)
                 screenshot(window, destination / "connected-terminal.png", env)
 
