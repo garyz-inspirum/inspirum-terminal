@@ -117,12 +117,6 @@ fn focus_mode_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool
         )
 }
 
-// Pane IDs are immutable within the workspace. A unique widget ID is needed
-// to focus the correct inline editor even when several terminal panes are open.
-fn free_type_editor_id(id: u64) -> String {
-    format!("free-type-{id}")
-}
-
 fn free_type_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
     modifiers.command()
         && modifiers.shift()
@@ -1035,6 +1029,12 @@ enum Message {
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
     command_palette::palette_items(query, library)
+}
+
+// Pane IDs are immutable within the workspace. A unique widget ID is needed
+// to focus the correct inline editor even when several terminal panes are open.
+fn free_type_editor_id(id: u64) -> String {
+    format!("free-type-{id}")
 }
 
 fn sanitize_terminal_title(title: &str) -> Option<String> {
