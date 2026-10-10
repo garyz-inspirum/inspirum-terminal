@@ -304,13 +304,8 @@ fn native_forwarded_agent_identity_is_only_available_when_enabled() {
             ..Session::default()
         };
         let (sender, receiver) = mpsc::channel();
-        let mut terminal = connect(
-            id,
-            sender,
-            &session,
-            Some(&fixture.join("agent-config")),
-        )
-        .expect("native agent fixture terminal must start");
+        let mut terminal = connect(id, sender, &session, Some(&fixture.join("agent-config")))
+            .expect("native agent fixture terminal must start");
         wait_text(&mut terminal, "NATIVE_SMOKE_READY");
         write(&mut terminal, "agent-probe\n");
         wait_text(&mut terminal, expected);
