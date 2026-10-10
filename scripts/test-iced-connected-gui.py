@@ -636,11 +636,14 @@ async def locate_rendered_label(
     window: str, path: Path, label: str, *, env: dict[str, str], timeout: float = 22,
 ):
     """Screenshot repeatedly until the label is rendered; return its bounds."""
+    # OCR and screenshots block for seconds. The fixture SSH server shares
+    # this event loop, so run them off-loop or the GUI's sftp connections
+    # time out during banner exchange while we are looking at the screen.
     deadline = time.monotonic() + timeout
     while True:
-        screenshot(window, path, env)
+        await asyncio.to_thread(screenshot, window, path, env)
         try:
-            return locate_visible_label(path, label)
+            return await asyncio.to_thread(locate_visible_label, path, label)
         except RuntimeError:
             if time.monotonic() >= deadline:
                 raise
@@ -931,13 +934,16 @@ async def main() -> int:
                 third_name = "111_GUI_THIRD_FIXTURE.bin"
                 third_bytes = b"GUI_THIRD_FIXTURE" + bytes(range(32))
                 (remote_root / third_name).write_bytes(third_bytes)
-                refresh_bounds = locate_visible_label(destination / "connected-files-downloaded.png", "Refresh")
+                refresh_bounds = await asyncio.to_thread(
+                    locate_visible_label, destination / "connected-files-downloaded.png", "Refresh",
+                )
+                listings_before = events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY")
                 command(
                     "xdotool", "mousemove", "--window", window,
                     *map(str, center(refresh_bounds)), "click", "1", env=env,
                 )
                 await wait_for(
-                    lambda: events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY") >= 2,
+                    lambda: events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY") > listings_before,
                     "remote listing refresh after creating distinct fixture",
                 )
                 # The fixture event fires when the server answered the listing;
