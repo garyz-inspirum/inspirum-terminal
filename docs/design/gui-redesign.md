@@ -172,3 +172,9 @@ The Iced workflow builds the production candidate on Linux, Windows and macOS an
 ## 10. Delivery boundary
 
 PR #84 completes the GUI workflow migration and removes the egui fallback and dependencies. This does not close #78: manual native IME/full-screen-terminal usability and measured responsiveness on named hardware remain outstanding. No credential storage, signing/notarisation or trust bypass is introduced.
+
+## Local vi-like scrollback navigation (issue #64)
+
+Use **Shift+Enter** on a focused terminal pane to enter or exit the local navigation mode. The mode is explicitly displayed in the pane header, isolates the selected pane from remote SSH input and disables remote mouse reporting. While enabled, Up/Down or `k`/`j` move one history line; PageUp/PageDown move 16 lines; Ctrl+u/Ctrl+d move eight lines; `g`/Home and Shift+G/End jump toward the oldest/newest buffered history. Escape restores normal remote input. These shortcuts never run in ordinary remote-terminal mode or while a dialog/editor owns input.
+
+This is local scrollback movement, **not** a full vi modal editor: text object navigation, editable free-type input, character cursor movement and search highlighting are not yet implemented. Native interactive acceptance and synchronized-input regression remain tracked by #64 and #78.
