@@ -40,6 +40,40 @@ New connection opens a dedicated, keyboard-accessible dialog. Host, username and
 
 Each session has a clear tab. A workspace can split into resizable panes with independent session identity and lifecycle. A thin accent outline and explicit focus state identify the input destination. Drag headers to rearrange; resize by divider; zoom a pane without disconnecting it. Close/reconnect must not replay input or silently enable broadcast.
 
+### Pane-local remote cursor keys and synchronized-input acceptance (#64)
+
+**Remote keys** in an Iced SSH pane header (or Ctrl/Cmd+Shift+M in the
+focused SSH pane) enters an explicit **REMOTE KEYS** mode. The pane visibly
+shows Left/Up/Down/Right and Home/End/PgUp/PgDn controls. Keyboard
+**h/j/k/l**, **0/$**, **u/d** map to these real remote terminal cursor-key
+sequences; **Escape** or **Exit keys** returns to normal typing. Keys use
+normal or application-cursor encoding according to **each** destination PTY.
+Unrecognised text is discarded while the mode is active. The user must opt in
+per pane; nothing is typed into a local draft or moved inside a copied screen.
+
+**Semantic limit:** SSH terminal input cannot arbitrarily set a remote
+application's cursor position. These are navigation *key presses* delivered to
+the remote PTY; its shell/readline/editor decides how to interpret them.
+Local scrollback navigation remains a separate Shift+Enter mode, and the
+free-type composer remains an isolated local draft. Remote/local navigation
+and free-type are mutually exclusive. No PTY input is delivered if privacy
+lock, a dialog, an unsafe pane focus change or a disconnected source blocks it.
+
+When synchronized input is explicitly armed with at least two selected
+terminal IDs, remote navigation is delivered **source first** to selected
+mirrors. If the focused source write fails, no mirror is written. Each
+destination's cursor-key mode is encoded separately; changes to sync targets
+or split/close disarm input by the existing policy. Live native OpenSSH
+acceptance opens two individually authenticated PTYs with disposable host
+keys, proves opt-in fanout, disarm isolation and cleanup, and tests the same
+source-first dispatch function used by Iced.
+
+The explorer side-dock and auxiliary SSH shell were implemented in #120 and
+#117, respectively. Both use real resizable Iced panes. Physical Apple
+Silicon click-to-caret latency, native macOS/Windows IME/CJK acceptance and
+full WindTerm visual-signoff are **tracked in issue #78**, not implied by
+the #64 interaction-mode/SSH correctness acceptance.
+
 ### Dockable file explorer beside the terminal
 
 When the Files browser is open, **Dock right** moves the same local/remote
