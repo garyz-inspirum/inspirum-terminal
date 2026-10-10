@@ -3034,8 +3034,7 @@ impl App {
                     self.status = "Focus a pane in remote-input mode before composing.".into();
                     return Task::none();
                 }
-                if self.free_type.contains_key(&id) {
-                    self.free_type.remove(&id);
+                if self.free_type.remove(&id).is_some() {
                     self.status = "Free-type draft discarded. Remote input restored.".into();
                 } else {
                     self.free_type.insert(id, text_editor::Content::new());
