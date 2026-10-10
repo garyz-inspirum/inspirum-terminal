@@ -114,12 +114,21 @@ fn retained_history_snapshot_includes_scrollback_and_survives_viewport_navigatio
         "newest generated line retained"
     );
     assert!(backend.scroll_to_history_index(retained_scrollback));
+    // Rendering a visible snapshot must use the *current* scrollback viewport
+    // without mutating the retained grid or requiring a full-history clone.
+    let viewport = backend.display_snapshot(&terminal_core::TerminalTheme::default());
+    let visible: String = viewport.cells.iter().map(|cell| cell.character).collect();
+    assert!(
+        visible.contains("HIST-040"),
+        "viewport snapshot lost selected history line"
+    );
+    assert_eq!(viewport.row_ranges.len(), viewport.rows);
     assert!(
         backend
             .history_lines()
             .iter()
             .any(|line| line.contains("HIST-040")),
-        "scrolling the viewport must not alter retained history"
+        "rendering a viewport must not alter retained history"
     );
 }
 
