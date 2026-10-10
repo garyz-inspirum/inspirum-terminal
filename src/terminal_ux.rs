@@ -1,7 +1,7 @@
 //! Policy helpers for interactive terminal UX.
 //!
 //! This module deliberately keeps paste classification, text search and log-file
-//! lifecycle independent from egui so the security-sensitive behavior is easy to test.
+//! lifecycle independent from the GUI toolkit so the security-sensitive behavior is easy to test.
 use anyhow::{Context, Result, ensure};
 use std::{
     fs::{File, OpenOptions},

@@ -1,15 +1,8 @@
 mod diagnostics;
 
 use anyhow::{Context, Result, bail, ensure};
-use inspirum_terminal::{ProxyAuth, ProxyKind, app::App};
+use inspirum_terminal::{ProxyAuth, ProxyKind};
 use std::{ffi::OsString, path::PathBuf};
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum UiMode {
-    #[default]
-    Legacy,
-    Iced,
-}
 
 fn default_profiles() -> Result<PathBuf> {
     Ok(
@@ -86,21 +79,16 @@ fn main() -> Result<()> {
     let mut diagnostics = false;
     let mut diagnostics_output = None;
     let mut diagnostic_profile = None;
-    let mut ui_mode = if cfg!(feature = "iced-ui") {
-        UiMode::Iced
-    } else {
-        UiMode::Legacy
-    };
     let mut args = raw_args.into_iter();
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--help" | "-h") => {
                 println!(
                     "Inspirum Terminal {}\n\
-                     Usage: inspirum-terminal [--profiles PATH] [--ssh-config PATH] [--ui legacy|iced]\n\
+                     Usage: inspirum-terminal [--profiles PATH] [--ssh-config PATH] [--ui iced]\n\
                      Diagnostics: --diagnostics [--diagnostic-profile NAME] [--diagnostics-output PATH]\n\
                      Native SSH terminal. Requires system OpenSSH and a graphical desktop.\n\
-                     Iced is the default frontend; --ui legacy selects the comparison frontend.\n\
+                     Iced is the only frontend.\n\
                      Diagnostics require no desktop and never connect to a server.",
                     env!("CARGO_PKG_VERSION")
                 );
@@ -123,14 +111,13 @@ fn main() -> Result<()> {
             Some("--ui") => {
                 let value = args
                     .next()
-                    .context("--ui requires legacy or iced")?
+                    .context("--ui requires iced")?
                     .into_string()
                     .map_err(|_| anyhow::anyhow!("--ui value must be valid Unicode"))?;
-                ui_mode = match value.as_str() {
-                    "legacy" => UiMode::Legacy,
-                    "iced" => UiMode::Iced,
-                    _ => bail!("--ui must be legacy or iced"),
-                };
+                ensure!(
+                    value == "iced",
+                    "--ui supports only iced; the legacy frontend has been removed"
+                );
             }
             Some("--diagnostics") => diagnostics = true,
             Some("--diagnostics-output") => {
@@ -181,27 +168,6 @@ fn main() -> Result<()> {
     unsafe {
         std::env::set_var("TERM", "xterm-256color");
     }
-    if ui_mode == UiMode::Iced {
-        #[cfg(feature = "iced-ui")]
-        {
-            inspirum_terminal::iced_app::run(path.clone(), config.clone()).map_err(|error| {
-                anyhow::anyhow!("native Iced window initialization failed: {error}")
-            })?;
-            return Ok(());
-        }
-        #[cfg(not(feature = "iced-ui"))]
-        {
-            bail!("this build does not include the Iced frontend; rebuild with --features iced-ui");
-        }
-    }
-
-    eframe::run_native(
-        "Inspirum Terminal",
-        eframe::NativeOptions {
-            viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1100.0, 720.0]),
-            ..Default::default()
-        },
-        Box::new(move |_cc| Ok(Box::new(App::new(path, config)))),
-    )
-    .map_err(|error| anyhow::anyhow!("native window initialization failed: {error}"))
+    inspirum_terminal::iced_app::run(path, config)
+        .map_err(|error| anyhow::anyhow!("native Iced window initialization failed: {error}"))
 }

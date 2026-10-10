@@ -1,6 +1,6 @@
 # Inspirum terminal: GUI redesign
 
-Status: production Iced migration in progress; legacy egui frontend retained as fallback; not yet promoted as complete.
+Status: all GUI workflows have Iced implementations. Iced is the only frontend; the egui fallback has been removed. Manual native responsiveness/IME acceptance remains open in #78.
 Date: 8 October 2026. Tracking: issue #78; migration PR #83.
 
 ## 1. Design brief
@@ -9,7 +9,7 @@ The user rejected the existing interface as cluttered, difficult to read and dif
 
 The main screen answers three questions immediately: Which session am I using? Which pane receives my input? Where do I go to connect or transfer a file? Configuration must not compete with the task being performed.
 
-The migration now uses Iced 0.14 for the production candidate shell while preserving the existing OpenSSH launch policy, PTY/parser ownership, paste safeguards, profile store and transfer backends. The legacy egui frontend remains available as a fallback until native interaction, visual and performance acceptance is complete.
+The migration now uses Iced 0.14 for the production candidate shell while preserving the existing OpenSSH launch policy, PTY/parser ownership, paste safeguards, profile store and transfer backends. The legacy egui frontend and runtime dependencies have been removed. The reusable PTY/parser backend is extracted into toolkit-neutral terminal_core.
 
 ## 2. Design process and evidence
 
@@ -108,11 +108,11 @@ The full current behaviour is defined by source and tests, not by a stale checke
 
 ## 7. Framework decision: Iced
 
-**Decision: continue the production migration on Iced 0.14 while keeping the legacy frontend available until the native acceptance gates below pass.**
+**Decision: Iced 0.14 is the only production frontend. Native acceptance gates remain independent of frontend removal.**
 
-Iced supplies native application structure, theming, tasks/subscriptions and pane grids that support dynamic splits and resizing. The migration pins Iced 0.14.0 and enables WGPU (Metal-capable on macOS) with tiny-skia retained as a fallback. This renderer choice alone is not proof that the Iced frontend is faster than egui or WindTerm; native measurements are still required.
+Iced supplies native application structure, theming, tasks/subscriptions and pane grids that support dynamic splits and resizing. The migration pins Iced 0.14.0 and uses WGPU on Linux/Windows and native tiny-skia on macOS. This renderer choice alone is not proof that the Iced frontend is faster than egui or WindTerm; native measurements are still required.
 
-The possible terminal widget, iced_term 0.8.0, uses an Alacritty backend but must be audited rather than treated as a drop-in replacement. Current application code uses egui_term's PTY and parser ownership. Preserve and separate reusable profile, SSH launch/trust policy, transfer and remote-editor logic from rendering; review egui-coupled event, selection, clipboard, paste and process-lifecycle code explicitly.
+The possible terminal widget, iced_term 0.8.0, uses an Alacritty backend but must be audited rather than treated as a drop-in replacement. Current application code uses toolkit-neutral terminal_core for PTY/parser ownership. Profiles, SSH launch/trust, transfers and remote editors retain their shared policies. The backend has no egui runtime dependency.
 
 The live Iced path now covers real SSH sessions, safe host-key policy, committed CJK text, scrollback, resize, selection, clipboard guards, multiline paste confirmation, mouse reporting, multiple panes and session shutdown. Display snapshots honor application cursor hide/show (DECTCEM) and suppress the live cursor while viewing scrollback. Disposable local PTY tests exercise hide/show and scrolling back to the live cursor on Unix; these do not establish Windows ConPTY or full-screen GUI acceptance. Remaining acceptance includes native IME composition behaviour, alternate-screen/full-screen application testing, edge-case mouse modes, focus restoration/accessibility, and measured GPU/fallback performance on named hardware.
 
@@ -171,4 +171,4 @@ The Iced workflow builds the production candidate on Linux, Windows and macOS an
 
 ## 10. Delivery boundary
 
-PR #83 is the production Iced migration branch, but it is not closure of #78. It keeps the legacy frontend available and does not add credential storage, signing/notarisation, or an unsafe trust bypass. Promotion requires green native CI plus the visual/usability, real-network, IME/full-screen-terminal and measured responsiveness acceptance still listed above.
+PR #84 completes the GUI workflow migration and removes the egui fallback and dependencies. This does not close #78: manual native IME/full-screen-terminal usability and measured responsiveness on named hardware remain outstanding. No credential storage, signing/notarisation or trust bypass is introduced.

@@ -105,7 +105,7 @@ pub fn action_for(
 
 /// Convert committed text (including IME/dead-key composed Unicode) to PTY bytes.
 ///
-/// Pre-edit/composition UI remains owned by egui/the native platform. Inspirum only sends
+/// Pre-edit/composition UI remains owned by Iced/the native platform. Inspirum only sends
 /// the final committed text event, so partially composed CJK/dead-key text is never written.
 pub fn committed_text_bytes(text: &str) -> Option<Vec<u8>> {
     (!text.is_empty()).then(|| text.as_bytes().to_vec())

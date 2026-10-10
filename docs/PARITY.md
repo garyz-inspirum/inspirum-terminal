@@ -21,7 +21,7 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 
 ## Foundation and release engineering
 
-- [x] Native Rust/egui application shell.
+- [x] Native Rust/Iced application shell.
 - [x] Apache-2.0 repository license metadata and license text.
 - [x] Locked dependency graph.
 - [x] CI definitions and successful native execution for Linux x64, Windows x64, and macOS Apple Silicon, pinned to Rust 1.95.0.
@@ -76,7 +76,7 @@ Legend: `[x]` present or evidenced only as that item states; `[ ]` planned, bloc
 
 ## Terminal experience
 
-- [x] `egui_term` terminal rendering backed by the Alacritty parser.
+- [x] Iced terminal rendering backed by the toolkit-neutral Alacritty terminal core.
 - [x] PTY resize propagation is exercised by native authenticated SSH smoke on Linux, Windows and macOS.
 - [ ] Cross-platform keyboard/IME/focus/accessibility audit (#59).
 - [x] Selection/copy plus guarded paste policy: multiline CR/LF payloads cannot reach the PTY without explicit confirmation (or are blocked), with keyboard confirmation/cancel controls (#21).

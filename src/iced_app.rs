@@ -3,6 +3,7 @@
 //! This module intentionally reuses the existing validated Session/profile model.
 //! The frontend uses the live PTY backend and preserves
 //! host-key, argv, paste, process-lifecycle, or transfer safeguards.
+mod terminal_ime;
 mod tools;
 
 use crate::{
@@ -202,7 +203,7 @@ fn frame_bridge() -> impl Stream<Item = Message> {
     })
 }
 
-type PtyBridgeSender = mpsc::UnboundedSender<(u64, egui_term::PtyEvent)>;
+type PtyBridgeSender = mpsc::UnboundedSender<(u64, terminal_core::PtyEvent)>;
 
 fn pty_bridge() -> impl Stream<Item = Message> {
     iced::stream::channel(100, async |mut output| {
@@ -446,8 +447,8 @@ struct TerminalPane {
     sftp: bool,
     id: u64,
     profile: Session,
-    terminal: Option<egui_term::TerminalBackend>,
-    display: Option<egui_term::DisplaySnapshot>,
+    terminal: Option<terminal_core::TerminalBackend>,
+    display: Option<terminal_core::DisplaySnapshot>,
     display_generation: u64,
     display_dirty: bool,
     terminal_grid_size: Option<(u16, u16)>,
@@ -648,7 +649,7 @@ fn upload_conflicts_with_remote_entries(
 fn remote_parent(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() || trimmed == "." || trimmed == "/" {
-        return if trimmed == "/" {
+        return if path.starts_with('/') {
             "/".into()
         } else {
             ".".into()
@@ -860,7 +861,9 @@ enum Message {
     Submit,
     Scale(f64),
     PtyBridgeReady(PtyBridgeSender),
-    PtyEvent(u64, egui_term::PtyEvent),
+    PtyEvent(u64, terminal_core::PtyEvent),
+    TerminalImeCursor(u64, iced::Rectangle),
+    TerminalImeCommit(u64, String),
     FrameBridgeReady(FrameBridgeSender),
     TerminalFrame,
     TransferBridgeReady(TransferBridgeSender),
@@ -873,8 +876,8 @@ enum Message {
     TerminalMouse(
         pane_grid::Pane,
         u64,
-        egui_term::MouseButton,
-        egui_term::MouseModifiers,
+        terminal_core::MouseButton,
+        terminal_core::MouseModifiers,
         f32,
         f32,
         bool,
@@ -882,7 +885,7 @@ enum Message {
     TerminalMouseWheel(
         pane_grid::Pane,
         u64,
-        egui_term::MouseModifiers,
+        terminal_core::MouseModifiers,
         f32,
         f32,
         i32,
@@ -910,7 +913,7 @@ struct TerminalCanvasState {
     selecting: bool,
     pointer_hidden: bool,
     opacity: Cell<f32>,
-    remote_button: Option<egui_term::MouseButton>,
+    remote_button: Option<terminal_core::MouseButton>,
     modifiers: keyboard::Modifiers,
     last_position: Option<iced::Point>,
     last_report_cell: Option<(i32, i32)>,
@@ -919,6 +922,8 @@ struct TerminalCanvasState {
     row_caches: RefCell<Vec<canvas::Cache>>,
     background_cache: canvas::Cache,
     background_key: Cell<Option<(f32, f32, [u8; 3])>>,
+    ime_cursor: Option<(u64, iced::Rectangle)>,
+    ime_focused: bool,
 }
 
 impl Default for TerminalCanvasState {
@@ -936,6 +941,8 @@ impl Default for TerminalCanvasState {
             row_caches: RefCell::new(Vec::new()),
             background_cache: canvas::Cache::new(),
             background_key: Cell::new(None),
+            ime_cursor: None,
+            ime_focused: false,
         }
     }
 }
@@ -964,44 +971,45 @@ impl TerminalCanvasState {
 }
 
 struct TerminalCanvas<'a> {
+    focused: bool,
     pane: pane_grid::Pane,
     id: u64,
     generation: u64,
-    terminal_mode: egui_term::TerminalMode,
-    snapshot: &'a egui_term::DisplaySnapshot,
+    terminal_mode: terminal_core::TerminalMode,
+    snapshot: &'a terminal_core::DisplaySnapshot,
     appearance: crate::appearance::TerminalAppearance,
 }
 
 impl TerminalCanvas<'_> {
     fn remote_mouse_enabled(&self, modifiers: keyboard::Modifiers) -> bool {
         self.terminal_mode
-            .intersects(egui_term::TerminalMode::MOUSE_MODE)
+            .intersects(terminal_core::TerminalMode::MOUSE_MODE)
             && !modifiers.shift()
     }
 
-    fn mouse_modifiers(modifiers: keyboard::Modifiers) -> egui_term::MouseModifiers {
-        egui_term::MouseModifiers {
+    fn mouse_modifiers(modifiers: keyboard::Modifiers) -> terminal_core::MouseModifiers {
+        terminal_core::MouseModifiers {
             shift: modifiers.shift(),
             alt: modifiers.alt(),
             command: modifiers.command(),
         }
     }
 
-    fn mouse_button(button: mouse::Button) -> Option<egui_term::MouseButton> {
+    fn mouse_button(button: mouse::Button) -> Option<terminal_core::MouseButton> {
         match button {
-            mouse::Button::Left => Some(egui_term::MouseButton::LeftButton),
-            mouse::Button::Middle => Some(egui_term::MouseButton::MiddleButton),
-            mouse::Button::Right => Some(egui_term::MouseButton::RightButton),
+            mouse::Button::Left => Some(terminal_core::MouseButton::LeftButton),
+            mouse::Button::Middle => Some(terminal_core::MouseButton::MiddleButton),
+            mouse::Button::Right => Some(terminal_core::MouseButton::RightButton),
             _ => None,
         }
     }
 
-    fn movement_button(button: egui_term::MouseButton) -> egui_term::MouseButton {
+    fn movement_button(button: terminal_core::MouseButton) -> terminal_core::MouseButton {
         match button {
-            egui_term::MouseButton::LeftButton => egui_term::MouseButton::LeftMove,
-            egui_term::MouseButton::MiddleButton => egui_term::MouseButton::MiddleMove,
-            egui_term::MouseButton::RightButton => egui_term::MouseButton::RightMove,
-            _ => egui_term::MouseButton::NoneMove,
+            terminal_core::MouseButton::LeftButton => terminal_core::MouseButton::LeftMove,
+            terminal_core::MouseButton::MiddleButton => terminal_core::MouseButton::MiddleMove,
+            terminal_core::MouseButton::RightButton => terminal_core::MouseButton::RightMove,
+            _ => terminal_core::MouseButton::NoneMove,
         }
     }
 
@@ -1039,6 +1047,29 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
             state.last_position = Some(position);
         }
 
+        if matches!(
+            event,
+            iced::Event::Window(iced::window::Event::RedrawRequested(_))
+        ) {
+            let was_focused = state.ime_focused;
+            state.ime_focused = self.focused;
+            if self.focused {
+                let (width, height) = terminal_cell_size(&self.appearance);
+                let cell = self.snapshot.cells.iter().find(|cell| cell.cursor);
+                let rectangle = iced::Rectangle {
+                    x: bounds.x + cell.map_or(0.0, |c| c.column as f32 * width),
+                    y: bounds.y + cell.map_or(0.0, |c| c.row as f32 * height),
+                    width,
+                    height,
+                };
+                if !was_focused || state.ime_cursor != Some((self.id, rectangle)) {
+                    state.ime_cursor = Some((self.id, rectangle));
+                    return Some(canvas::Action::publish(Message::TerminalImeCursor(
+                        self.id, rectangle,
+                    )));
+                }
+            }
+        }
         match event {
             iced::Event::Keyboard(keyboard::Event::KeyPressed { .. })
                 if position.is_some() && self.appearance.hide_pointer_while_typing =>
@@ -1097,8 +1128,8 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                 if let Some(button) = state.remote_button {
                     if self.remote_mouse_enabled(state.modifiers)
                         && self.terminal_mode.intersects(
-                            egui_term::TerminalMode::MOUSE_DRAG
-                                | egui_term::TerminalMode::MOUSE_MOTION,
+                            terminal_core::TerminalMode::MOUSE_DRAG
+                                | terminal_core::TerminalMode::MOUSE_MOTION,
                         )
                     {
                         if !state.mark_cell_changed(self.cell_at(position)) {
@@ -1134,7 +1165,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                 } else if self.remote_mouse_enabled(state.modifiers)
                     && self
                         .terminal_mode
-                        .contains(egui_term::TerminalMode::MOUSE_MOTION)
+                        .contains(terminal_core::TerminalMode::MOUSE_MOTION)
                 {
                     if !state.mark_cell_changed(self.cell_at(position)) {
                         return None;
@@ -1143,7 +1174,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                         canvas::Action::publish(Message::TerminalMouse(
                             self.pane,
                             self.id,
-                            egui_term::MouseButton::NoneMove,
+                            terminal_core::MouseButton::NoneMove,
                             Self::mouse_modifiers(state.modifiers),
                             position.x,
                             position.y,
@@ -1432,7 +1463,7 @@ fn terminal_key_bytes(
     key: &keyboard::Key,
     modifiers: keyboard::Modifiers,
     committed_text: Option<&str>,
-    terminal_mode: egui_term::TerminalMode,
+    terminal_mode: terminal_core::TerminalMode,
 ) -> Option<Vec<u8>> {
     use keyboard::key::Named;
 
@@ -1459,7 +1490,7 @@ fn terminal_key_bytes(
         }
     }
 
-    let app_cursor = terminal_mode.contains(egui_term::TerminalMode::APP_CURSOR);
+    let app_cursor = terminal_mode.contains(terminal_core::TerminalMode::APP_CURSOR);
     let cursor = |normal: &'static [u8], application: &'static [u8]| {
         Some(if app_cursor { application } else { normal }.to_vec())
     };
@@ -1756,6 +1787,7 @@ impl ConnectionForm {
 struct App {
     tools: tools::State,
     profiles_path: PathBuf,
+    profiles_writable: bool,
     ssh_config: Option<PathBuf>,
     profiles: Vec<Session>,
     query: String,
@@ -1788,6 +1820,7 @@ struct App {
     paste_policy: PastePolicy,
     pty_bridge: Option<PtyBridgeSender>,
     terminal_frame_scheduled: bool,
+    ime_cursor: Option<(u64, iced::Rectangle)>,
     frame_bridge: Option<FrameBridgeSender>,
     transfer_bridge: Option<TransferBridgeSender>,
     next_terminal_id: u64,
@@ -1800,10 +1833,11 @@ impl App {
     fn boot(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> Self {
         let _slow = SlowIcedScope::start("startup");
         let (dock, terminal_dock) = pane_grid::State::new(Dock::Terminal);
-        let (profiles, mut load_error) = match load_sessions(&profiles_path) {
-            Ok(profiles) => (profiles, None),
+        let (profiles, profiles_writable, mut load_error) = match load_sessions(&profiles_path) {
+            Ok(profiles) => (profiles, true, None),
             Err(error) => (
                 Vec::new(),
+                false,
                 Some(format!("Could not load profiles: {error:#}")),
             ),
         };
@@ -1833,6 +1867,7 @@ impl App {
         Self {
             tools,
             profiles_path,
+            profiles_writable,
             ssh_config,
             profiles,
             query: String::new(),
@@ -1865,6 +1900,7 @@ impl App {
             paste_policy: PastePolicy::ConfirmMultiline,
             pty_bridge: None,
             terminal_frame_scheduled: false,
+            ime_cursor: None,
             frame_bridge: None,
             transfer_bridge: None,
             next_terminal_id: 1,
@@ -1929,9 +1965,9 @@ impl App {
 
         let bridge = Arc::new(Mutex::new(bridge.clone()));
         let refresh_pending = pane.refresh_pending.clone();
-        let event_sink: Arc<dyn Fn(u64, egui_term::PtyEvent) + Send + Sync> =
+        let event_sink: Arc<dyn Fn(u64, terminal_core::PtyEvent) + Send + Sync> =
             Arc::new(move |id, event| {
-                let is_wakeup = matches!(&event, egui_term::PtyEvent::Wakeup);
+                let is_wakeup = matches!(&event, terminal_core::PtyEvent::Wakeup);
                 if is_wakeup && refresh_pending.swap(true, Ordering::AcqRel) {
                     return;
                 }
@@ -1954,12 +1990,12 @@ impl App {
                 // The UI may already have measured this pane while the bridge was
                 // initializing. Apply that size to the newly started PTY.
                 if let Some((columns, rows)) = pane.terminal_grid_size {
-                    terminal.process_command(egui_term::BackendCommand::Resize(
-                        egui_term::Size::new(
+                    terminal.process_command(terminal_core::BackendCommand::Resize(
+                        terminal_core::Size::new(
                             columns as f32 * pane.cell_size.0,
                             rows as f32 * pane.cell_size.1,
                         ),
-                        egui_term::Size::new(pane.cell_size.0, pane.cell_size.1),
+                        terminal_core::Size::new(pane.cell_size.0, pane.cell_size.1),
                     ));
                 }
                 pane.terminal = Some(terminal);
@@ -1983,7 +2019,7 @@ impl App {
         targets.push(id);
         for target in targets {
             if self.active_terminal_matches(target) {
-                self.command_terminal(target, egui_term::BackendCommand::Write(bytes.clone()));
+                self.command_terminal(target, terminal_core::BackendCommand::Write(bytes.clone()));
             }
         }
     }
@@ -2024,13 +2060,13 @@ impl App {
         (!pane.exited && pane.terminal.is_some()).then_some(pane.id)
     }
 
-    fn focused_terminal_mode(&self) -> egui_term::TerminalMode {
+    fn focused_terminal_mode(&self) -> terminal_core::TerminalMode {
         self.tabs
             .get(self.active)
             .and_then(|tab| tab.panes.get(tab.focus))
             .and_then(|pane| pane.terminal.as_ref())
             .map(|terminal| terminal.last_content().terminal_mode)
-            .unwrap_or_else(egui_term::TerminalMode::empty)
+            .unwrap_or_else(terminal_core::TerminalMode::empty)
     }
 
     fn focused_pane_matches(&self, id: u64) -> bool {
@@ -2055,7 +2091,7 @@ impl App {
         let mut sent = false;
         for target in targets {
             let result =
-                self.command_terminal(target, egui_term::BackendCommand::Write(bytes.clone()));
+                self.command_terminal(target, terminal_core::BackendCommand::Write(bytes.clone()));
             if target == id {
                 sent = result;
             }
@@ -2063,7 +2099,7 @@ impl App {
         sent
     }
 
-    fn command_terminal(&mut self, id: u64, command: egui_term::BackendCommand) -> bool {
+    fn command_terminal(&mut self, id: u64, command: terminal_core::BackendCommand) -> bool {
         let mut command = Some(command);
         for tab in &mut self.tabs {
             for (_, pane) in tab.panes.iter_mut() {
@@ -2153,7 +2189,7 @@ impl App {
                         .appearance
                         .effective_for(&session_profile_key(&pane.profile));
                     let snapshot =
-                        terminal.display_snapshot(&crate::app::terminal_theme(&appearance));
+                        terminal.display_snapshot(&crate::appearance::terminal_theme(&appearance));
                     if pane.display.as_ref() != Some(&snapshot) {
                         pane.display = Some(snapshot);
                         pane.display_generation = pane.display_generation.wrapping_add(1);
@@ -2206,9 +2242,9 @@ impl App {
                 pane.terminal_grid_size = Some((columns, lines));
                 pane.cell_size = cell;
                 if let Some(terminal) = pane.terminal.as_mut() {
-                    terminal.process_command(egui_term::BackendCommand::Resize(
-                        egui_term::Size::new(columns as f32 * cell.0, lines as f32 * cell.1),
-                        egui_term::Size::new(cell.0, cell.1),
+                    terminal.process_command(terminal_core::BackendCommand::Resize(
+                        terminal_core::Size::new(columns as f32 * cell.0, lines as f32 * cell.1),
+                        terminal_core::Size::new(cell.0, cell.1),
                     ));
                 }
                 return;
@@ -2625,7 +2661,32 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         let _slow = SlowIcedScope::start("event_update");
+        if !self.profiles_writable
+            && matches!(&message, Message::Submit | Message::ConfirmImportProfiles)
+        {
+            let error =
+                "Profile storage could not be loaded; repair it before saving or importing."
+                    .to_owned();
+            self.form.error = Some(error.clone());
+            self.status = error;
+            return Task::none();
+        }
         match message {
+            Message::TerminalImeCursor(id, cursor)
+                if self.focused_pane_matches(id) && self.dialog.is_none() =>
+            {
+                self.ime_cursor = Some((id, cursor));
+            }
+            Message::TerminalImeCommit(id, text)
+                if self.focused_pane_matches(id)
+                    && self.dialog.is_none()
+                    && self.remote_editor.is_none() =>
+            {
+                if let Some(bytes) = crate::keyboard::committed_text_bytes(&text) {
+                    self.send_to_terminal(id, bytes);
+                }
+            }
+            Message::TerminalImeCursor(..) | Message::TerminalImeCommit(..) => {}
             Message::Tool(action) => return self.tool_update(action),
             Message::Search(value) => {
                 if self.dialog.is_none() || matches!(self.dialog, Some(Dialog::Tools)) {
@@ -3628,7 +3689,11 @@ impl App {
                 }
                 if self.command_terminal(
                     id,
-                    egui_term::BackendCommand::SelectStart(egui_term::SelectionType::Simple, x, y),
+                    terminal_core::BackendCommand::SelectStart(
+                        terminal_core::SelectionType::Simple,
+                        x,
+                        y,
+                    ),
                 ) {
                     return self.defer_terminal_refresh(id);
                 }
@@ -3650,7 +3715,7 @@ impl App {
                 if !self.active_terminal_matches(id) {
                     return Task::none();
                 }
-                if self.command_terminal(id, egui_term::BackendCommand::SelectUpdate(x, y)) {
+                if self.command_terminal(id, terminal_core::BackendCommand::SelectUpdate(x, y)) {
                     return self.defer_terminal_refresh(id);
                 }
             }
@@ -3663,7 +3728,7 @@ impl App {
                 }
                 self.command_terminal(
                     id,
-                    egui_term::BackendCommand::MouseReportAt(button, modifiers, x, y, pressed),
+                    terminal_core::BackendCommand::MouseReportAt(button, modifiers, x, y, pressed),
                 );
             }
             Message::TerminalMouseWheel(pane_id, id, modifiers, x, y, lines) => {
@@ -3674,14 +3739,14 @@ impl App {
                     tab.focus = pane_id;
                 }
                 let button = if lines > 0 {
-                    egui_term::MouseButton::ScrollUp
+                    terminal_core::MouseButton::ScrollUp
                 } else {
-                    egui_term::MouseButton::ScrollDown
+                    terminal_core::MouseButton::ScrollDown
                 };
                 for _ in 0..lines.unsigned_abs().min(8) {
                     self.command_terminal(
                         id,
-                        egui_term::BackendCommand::MouseReportAt(button, modifiers, x, y, true),
+                        terminal_core::BackendCommand::MouseReportAt(button, modifiers, x, y, true),
                     );
                 }
             }
@@ -3689,7 +3754,7 @@ impl App {
                 if !self.active_terminal_matches(id) {
                     return Task::none();
                 }
-                if self.command_terminal(id, egui_term::BackendCommand::Scroll(lines)) {
+                if self.command_terminal(id, terminal_core::BackendCommand::Scroll(lines)) {
                     return self.defer_terminal_refresh(id);
                 }
             }
@@ -3908,24 +3973,24 @@ impl App {
                 if !self.contains_terminal_pane(id) {
                     return Task::none();
                 }
-                let wakeup = matches!(&event, egui_term::PtyEvent::Wakeup);
+                let wakeup = matches!(&event, terminal_core::PtyEvent::Wakeup);
                 let exited = matches!(
                     &event,
-                    egui_term::PtyEvent::Exit | egui_term::PtyEvent::ChildExit(_)
+                    terminal_core::PtyEvent::Exit | terminal_core::PtyEvent::ChildExit(_)
                 );
                 match &event {
-                    egui_term::PtyEvent::Title(title) => {
+                    terminal_core::PtyEvent::Title(title) => {
                         self.update_terminal_title(id, sanitize_terminal_title(title));
                     }
-                    egui_term::PtyEvent::ResetTitle => {
+                    terminal_core::PtyEvent::ResetTitle => {
                         self.update_terminal_title(id, None);
                     }
-                    egui_term::PtyEvent::Bell => {
+                    terminal_core::PtyEvent::Bell => {
                         self.status = format!("Terminal {id} rang the bell.");
                     }
                     // Remote OSC clipboard requests stay isolated from the host clipboard.
-                    egui_term::PtyEvent::ClipboardStore(_, _)
-                    | egui_term::PtyEvent::ClipboardLoad(_, _) => {}
+                    terminal_core::PtyEvent::ClipboardStore(_, _)
+                    | terminal_core::PtyEvent::ClipboardLoad(_, _) => {}
                     _ => {}
                 }
                 if wakeup || exited {
@@ -4071,6 +4136,19 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        let target = if self.dialog.is_none() && self.remote_editor.is_none() {
+            self.focused_terminal_id()
+        } else {
+            None
+        };
+        let cursor = self
+            .ime_cursor
+            .filter(|(id, _)| Some(*id) == target)
+            .map(|(_, cursor)| cursor);
+        terminal_ime::wrap(self.view_content(), target, cursor)
+    }
+
+    fn view_content(&self) -> Element<'_, Message> {
         let _slow = SlowIcedScope::start("view_layout");
         let active_transfers = self
             .files
@@ -4540,8 +4618,11 @@ impl App {
                     .terminal
                     .as_ref()
                     .map(|terminal| terminal.last_content().terminal_mode)
-                    .unwrap_or_else(egui_term::TerminalMode::empty);
+                    .unwrap_or_else(terminal_core::TerminalMode::empty);
                 canvas(TerminalCanvas {
+                    focused: self.focused_terminal_id() == Some(pane.id)
+                        && self.dialog.is_none()
+                        && self.remote_editor.is_none(),
                     pane: id,
                     id: pane.id,
                     generation: pane.display_generation,
@@ -5764,6 +5845,37 @@ fn primary(theme: &Theme, status: button::Status) -> button::Style {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remote_parent_stays_bounded() {
+        assert_eq!(super::remote_parent("/a/b"), "/a");
+        assert_eq!(super::remote_parent("/a"), "/");
+        assert_eq!(super::remote_parent("/"), "/");
+        assert_eq!(super::remote_parent("///"), "/");
+        assert_eq!(super::remote_parent(""), ".");
+        assert_eq!(super::remote_parent("a"), ".");
+        assert_eq!(super::remote_parent("."), ".");
+    }
+
+    #[test]
+    fn corrupt_profile_storage_survives_form_save_and_confirmed_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+        std::fs::write(&path, b"broken").unwrap();
+        let mut app = super::App::boot(path.clone(), None);
+        assert!(!app.profiles_writable);
+        app.form.host = "server.example".into();
+        let _ = app.update(super::Message::Submit);
+        assert!(app.form.error.is_some());
+        let _ = app.tool_update(super::tools::Action::SaveDraft);
+        app.tools.confirm = Some(super::tools::Confirm::ReplaceProfiles(
+            dir.path().join("import.json"),
+        ));
+        let _ = app.tool_update(super::tools::Action::Confirm);
+        let _ = app.view();
+        assert_eq!(std::fs::read(path).unwrap(), b"broken");
+        assert!(!app.tools.busy);
+    }
+
     use super::*;
 
     #[test]
@@ -6377,7 +6489,7 @@ mod tests {
                 &keyboard::Key::Named(Named::ArrowUp),
                 none,
                 None,
-                egui_term::TerminalMode::empty(),
+                terminal_core::TerminalMode::empty(),
             ),
             Some(b"\x1b[A".to_vec())
         );
@@ -6386,7 +6498,7 @@ mod tests {
                 &keyboard::Key::Named(Named::ArrowUp),
                 none,
                 None,
-                egui_term::TerminalMode::APP_CURSOR,
+                terminal_core::TerminalMode::APP_CURSOR,
             ),
             Some(b"\x1bOA".to_vec())
         );
@@ -6397,7 +6509,7 @@ mod tests {
                 &keyboard::Key::Named(Named::Tab),
                 shift,
                 None,
-                egui_term::TerminalMode::empty(),
+                terminal_core::TerminalMode::empty(),
             ),
             Some(b"\x1b[Z".to_vec())
         );
@@ -6408,7 +6520,7 @@ mod tests {
                 &keyboard::Key::Character("x".into()),
                 alt,
                 Some("x"),
-                egui_term::TerminalMode::empty(),
+                terminal_core::TerminalMode::empty(),
             ),
             Some(b"\x1bx".to_vec())
         );
@@ -6423,7 +6535,7 @@ mod tests {
                 &keyboard::Key::Named(Named::ArrowLeft),
                 keyboard::Modifiers::CTRL,
                 None,
-                egui_term::TerminalMode::APP_CURSOR,
+                terminal_core::TerminalMode::APP_CURSOR,
             ),
             Some(b"\x1b[1;5D".to_vec())
         );
@@ -6432,7 +6544,7 @@ mod tests {
                 &keyboard::Key::Named(Named::ArrowRight),
                 keyboard::Modifiers::ALT | keyboard::Modifiers::SHIFT,
                 None,
-                egui_term::TerminalMode::empty(),
+                terminal_core::TerminalMode::empty(),
             ),
             Some(b"\x1b[1;4C".to_vec())
         );
@@ -6441,7 +6553,7 @@ mod tests {
                 &keyboard::Key::Named(Named::Home),
                 keyboard::Modifiers::SHIFT,
                 None,
-                egui_term::TerminalMode::empty(),
+                terminal_core::TerminalMode::empty(),
             ),
             Some(b"\x1b[1;2H".to_vec())
         );
@@ -6453,12 +6565,17 @@ mod tests {
         let key = keyboard::Key::Character("中".into());
 
         assert_eq!(
-            terminal_key_bytes(&key, none, Some("中文"), egui_term::TerminalMode::empty(),),
+            terminal_key_bytes(
+                &key,
+                none,
+                Some("中文"),
+                terminal_core::TerminalMode::empty(),
+            ),
             Some("中文".as_bytes().to_vec())
         );
 
         assert_eq!(
-            terminal_key_bytes(&key, none, None, egui_term::TerminalMode::empty(),),
+            terminal_key_bytes(&key, none, None, terminal_core::TerminalMode::empty(),),
             None
         );
     }
@@ -6488,7 +6605,7 @@ mod tests {
         let _ = app.defer_terminal_refresh(id);
         assert!(app.terminal_frame_scheduled);
 
-        let _ = app.update(Message::PtyEvent(id, egui_term::PtyEvent::Wakeup));
+        let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::Wakeup));
         assert!(app.terminal_frame_scheduled);
 
         let _ = app.update(Message::TerminalFrame);
@@ -6520,15 +6637,18 @@ mod tests {
 
         // Two open sessions wake in the same interval, but only one Iced
         // frame may be scheduled. No network connection is required.
-        let _ = app.update(Message::PtyEvent(first_id, egui_term::PtyEvent::Wakeup));
+        let _ = app.update(Message::PtyEvent(first_id, terminal_core::PtyEvent::Wakeup));
         assert!(app.terminal_frame_scheduled);
-        let _ = app.update(Message::PtyEvent(second_id, egui_term::PtyEvent::Wakeup));
+        let _ = app.update(Message::PtyEvent(
+            second_id,
+            terminal_core::PtyEvent::Wakeup,
+        ));
         assert!(app.terminal_frame_scheduled);
 
         let _ = app.update(Message::TerminalFrame);
         assert!(!app.terminal_frame_scheduled);
 
-        let _ = app.update(Message::PtyEvent(first_id, egui_term::PtyEvent::Wakeup));
+        let _ = app.update(Message::PtyEvent(first_id, terminal_core::PtyEvent::Wakeup));
         assert!(app.terminal_frame_scheduled);
     }
 
@@ -6540,10 +6660,10 @@ mod tests {
         ));
         let mut app = App::boot(profiles_path, None);
         let before = app.status.clone();
-        let _ = app.update(Message::PtyEvent(777, egui_term::PtyEvent::Bell));
+        let _ = app.update(Message::PtyEvent(777, terminal_core::PtyEvent::Bell));
         assert_eq!(app.status, before);
 
-        let _ = app.update(Message::PtyEvent(777, egui_term::PtyEvent::Wakeup));
+        let _ = app.update(Message::PtyEvent(777, terminal_core::PtyEvent::Wakeup));
         assert!(!app.terminal_frame_scheduled);
     }
 

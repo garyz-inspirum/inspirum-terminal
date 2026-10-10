@@ -1,0 +1,16 @@
+[package]
+name = "inspirum-terminal-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Toolkit-neutral Alacritty terminal parser and native PTY backend"
+repository = "https://github.com/garyz-inspirum/inspirum-terminal"
+
+[lib]
+name = "terminal_core"
+path = "src/lib.rs"
+
+[dependencies]
+alacritty_terminal = "0.25.0"
+anyhow = "1.0.96"
+open = "5.3.2"

@@ -1,4 +1,4 @@
-//! Native terminal adapter: egui_term owns the Alacritty parser and platform PTY.
+//! Native terminal adapter: terminal_core owns the Alacritty parser and platform PTY.
 use crate::{ControlMasterMode, ProxyAuth, ProxyKind, Session};
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -555,18 +555,16 @@ pub fn start_tunnels(session: &Session, config: Option<&Path>) -> Result<TunnelP
 
 pub fn connect(
     id: u64,
-    context: eframe::egui::Context,
-    sender: Sender<(u64, egui_term::PtyEvent)>,
+    sender: Sender<(u64, terminal_core::PtyEvent)>,
     session: &Session,
     config: Option<&Path>,
-) -> Result<egui_term::TerminalBackend> {
+) -> Result<terminal_core::TerminalBackend> {
     let args = launch_args(session, config)?;
     check_openssh(Path::new("ssh"))?;
-    egui_term::TerminalBackend::new(
+    terminal_core::TerminalBackend::new(
         id,
-        context,
         sender,
-        egui_term::BackendSettings {
+        terminal_core::BackendSettings {
             shell: "ssh".into(),
             args,
             working_directory: None,
@@ -575,23 +573,23 @@ pub fn connect(
     .context("create native PTY and start OpenSSH")
 }
 
-/// Connect using the same validated OpenSSH/PTY backend without binding wakeups to egui.
+/// Connect using the same validated OpenSSH/PTY backend through a frontend wake callback.
 ///
-/// This is the migration seam used by the Iced frontend. The callback schedules a
+/// The callback is used by the Iced frontend. The callback schedules a
 /// frontend refresh only; terminal bytes and process lifecycle stay in TerminalBackend.
 pub fn connect_with_waker(
     id: u64,
-    sender: Sender<(u64, egui_term::PtyEvent)>,
+    sender: Sender<(u64, terminal_core::PtyEvent)>,
     session: &Session,
     config: Option<&Path>,
     wake: Arc<dyn Fn() + Send + Sync>,
-) -> Result<egui_term::TerminalBackend> {
+) -> Result<terminal_core::TerminalBackend> {
     let args = launch_args(session, config)?;
     check_openssh(Path::new("ssh"))?;
-    egui_term::TerminalBackend::new_with_waker(
+    terminal_core::TerminalBackend::new_with_waker(
         id,
         sender,
-        egui_term::BackendSettings {
+        terminal_core::BackendSettings {
             shell: "ssh".into(),
             args,
             working_directory: None,
@@ -606,13 +604,13 @@ pub fn connect_with_event_sink(
     id: u64,
     session: &Session,
     config: Option<&Path>,
-    event_sink: Arc<dyn Fn(u64, egui_term::PtyEvent) + Send + Sync>,
-) -> Result<egui_term::TerminalBackend> {
+    event_sink: Arc<dyn Fn(u64, terminal_core::PtyEvent) + Send + Sync>,
+) -> Result<terminal_core::TerminalBackend> {
     let args = launch_args(session, config)?;
     check_openssh(Path::new("ssh"))?;
-    egui_term::TerminalBackend::new_with_event_sink(
+    terminal_core::TerminalBackend::new_with_event_sink(
         id,
-        egui_term::BackendSettings {
+        terminal_core::BackendSettings {
             shell: "ssh".into(),
             args,
             working_directory: None,
@@ -627,13 +625,13 @@ pub fn connect_sftp_with_event_sink(
     id: u64,
     session: &Session,
     config: Option<&Path>,
-    event_sink: Arc<dyn Fn(u64, egui_term::PtyEvent) + Send + Sync>,
-) -> Result<egui_term::TerminalBackend> {
+    event_sink: Arc<dyn Fn(u64, terminal_core::PtyEvent) + Send + Sync>,
+) -> Result<terminal_core::TerminalBackend> {
     let args = sftp_launch_args(session, config)?;
     check_sftp(Path::new("sftp"))?;
-    egui_term::TerminalBackend::new_with_event_sink(
+    terminal_core::TerminalBackend::new_with_event_sink(
         id,
-        egui_term::BackendSettings {
+        terminal_core::BackendSettings {
             shell: "sftp".into(),
             args,
             working_directory: None,
@@ -645,18 +643,16 @@ pub fn connect_sftp_with_event_sink(
 
 pub fn connect_sftp(
     id: u64,
-    context: eframe::egui::Context,
-    sender: Sender<(u64, egui_term::PtyEvent)>,
+    sender: Sender<(u64, terminal_core::PtyEvent)>,
     session: &Session,
     config: Option<&Path>,
-) -> Result<egui_term::TerminalBackend> {
+) -> Result<terminal_core::TerminalBackend> {
     let args = sftp_launch_args(session, config)?;
     check_sftp(Path::new("sftp"))?;
-    egui_term::TerminalBackend::new(
+    terminal_core::TerminalBackend::new(
         id,
-        context,
         sender,
-        egui_term::BackendSettings {
+        terminal_core::BackendSettings {
             shell: "sftp".into(),
             args,
             working_directory: None,

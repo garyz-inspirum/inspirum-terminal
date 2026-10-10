@@ -1,17 +1,16 @@
 #![cfg(unix)]
 
-use egui_term::{BackendCommand, BackendSettings, TerminalBackend, TerminalMode};
 use std::{
     sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
+use terminal_core::{BackendCommand, BackendSettings, TerminalBackend, TerminalMode};
 
 fn backend_for(script: &str) -> TerminalBackend {
     let (tx, _rx) = mpsc::channel();
     TerminalBackend::new(
         2300,
-        eframe::egui::Context::default(),
         tx,
         BackendSettings {
             shell: "/bin/sh".into(),
@@ -191,7 +190,7 @@ fn display_snapshot_honors_application_cursor_hide_and_show() {
         "printf '\\033[?25lCURSOR_HIDDEN'; read -r resume; \
          printf '\\033[?25hCURSOR_SHOWN'; read -r done",
     );
-    let theme = egui_term::TerminalTheme::default();
+    let theme = terminal_core::TerminalTheme::default();
     let _ = wait_for_text(&mut backend, "CURSOR_HIDDEN", Duration::from_secs(5));
     let hidden = backend.display_snapshot(&theme);
     assert!(
@@ -213,7 +212,7 @@ fn display_snapshot_does_not_paint_live_cursor_over_scrollback() {
          printf 'history-%03d\\n' \"$i\"; i=$((i + 1)); done; \
          printf 'CURSOR_HISTORY_READY\\033[H'; read -r done",
     );
-    let theme = egui_term::TerminalTheme::default();
+    let theme = terminal_core::TerminalTheme::default();
     let _ = wait_for_text(&mut backend, "CURSOR_HISTORY_READY", Duration::from_secs(5));
     assert_eq!(backend.sync().grid.cursor.point.line.0, 0);
     assert_eq!(

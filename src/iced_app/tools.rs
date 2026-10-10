@@ -419,6 +419,17 @@ impl App {
         Task::none()
     }
     pub(super) fn tool_update(&mut self, action: Action) -> Task<Message> {
+        let writes_profiles = matches!(&action, Action::SaveDraft)
+            || (matches!(&action, Action::Confirm)
+                && matches!(
+                    &self.tools.confirm,
+                    Some(Confirm::DeleteProfile(_) | Confirm::ReplaceProfiles(_))
+                ));
+        if writes_profiles && !self.profiles_writable {
+            self.tools.output =
+                "Profile storage could not be loaded; repair it before saving or importing.".into();
+            return Task::none();
+        }
         match action {
             Action::Open(panel) => {
                 self.tools.panel = panel;
@@ -612,7 +623,9 @@ impl App {
                                 for id in targets {
                                     self.command_terminal(
                                         id,
-                                        egui_term::BackendCommand::Write(text.as_bytes().to_vec()),
+                                        terminal_core::BackendCommand::Write(
+                                            text.as_bytes().to_vec(),
+                                        ),
                                     );
                                 }
                                 self.status =
@@ -919,7 +932,7 @@ impl App {
                     if let Some(s) = &self.tools.target {
                         settings.profiles.insert(
                             session_profile_key(s),
-                            crate::app::full_profile_override(&self.tools.appearance_draft),
+                            crate::appearance::full_profile_override(&self.tools.appearance_draft),
                         );
                     }
                 } else {
@@ -1678,7 +1691,7 @@ fn restore_workspace_tree(
     }
 }
 
-fn snapshot_text(snapshot: &egui_term::DisplaySnapshot) -> String {
+fn snapshot_text(snapshot: &terminal_core::DisplaySnapshot) -> String {
     let mut output = String::new();
     for row in 0..snapshot.rows {
         let mut column = 0;
@@ -1880,7 +1893,7 @@ mod tests {
         assert_eq!(new, (old.0 / 2, old.1 / 2));
         let appearance = app.tools.appearance.global.clone();
         let cell = terminal_cell_size(&appearance);
-        let snapshot = egui_term::DisplaySnapshot {
+        let snapshot = terminal_core::DisplaySnapshot {
             rows: 0,
             columns: 0,
             background: [0; 3],
@@ -1888,10 +1901,11 @@ mod tests {
             cells: vec![],
         };
         let canvas = TerminalCanvas {
+            focused: false,
             pane: app.tabs[0].focus,
             id,
             generation: 0,
-            terminal_mode: egui_term::TerminalMode::empty(),
+            terminal_mode: terminal_core::TerminalMode::empty(),
             snapshot: &snapshot,
             appearance,
         };

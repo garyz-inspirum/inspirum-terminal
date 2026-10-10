@@ -53,7 +53,7 @@ Remote downloads resolve the listed remote filename as exactly one local path co
 
 Local files can be dropped into the active SFTP browser for upload, but drops are ignored until **Accept dropped files for session '<name>'** is explicitly enabled. The armed session name is shown beside the control so a dropped file cannot silently target an unintended SSH session. Dropped files enter the same transfer queue as button-driven uploads and therefore use the same progress, cancel, retry, resume, integrity, and conflict behavior.
 
-The current egui/native-window integration accepts operating-system file drops into Inspirum Terminal. Native drag-out of a remote entry to the desktop is not exposed by the toolkit path used here, so remote-to-local transfer remains an explicit **Download** action into the visible Local pane. Internal transfer safety is unchanged: overwrite is never automatic and resumable downloads remain staged until final verification and atomic commit.
+The current Iced/native-window integration accepts operating-system file drops into Inspirum Terminal. Native drag-out of a remote entry to the desktop is not exposed by the toolkit path used here, so remote-to-local transfer remains an explicit **Download** action into the visible Local pane. Internal transfer safety is unchanged: overwrite is never automatic and resumable downloads remain staged until final verification and atomic commit.
 
 
 ## Safe remote text editor

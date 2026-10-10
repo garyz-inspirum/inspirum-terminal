@@ -308,6 +308,77 @@ fn contrast_ratio(foreground: (u8, u8, u8), background: (u8, u8, u8)) -> f32 {
     (high + 0.05) / (low + 0.05)
 }
 
+pub(crate) fn terminal_theme(appearance: &TerminalAppearance) -> terminal_core::TerminalTheme {
+    let mut palette = terminal_core::ColorPalette::default();
+    match appearance.palette {
+        TerminalPalette::DefaultDark => {}
+        TerminalPalette::Light => {
+            palette.foreground = "#202124".into();
+            palette.background = "#f7f7f7".into();
+            palette.black = "#202124".into();
+            palette.red = "#b3261e".into();
+            palette.green = "#2e7d32".into();
+            palette.yellow = "#8a6d00".into();
+            palette.blue = "#1565c0".into();
+            palette.magenta = "#8e24aa".into();
+            palette.cyan = "#00796b".into();
+            palette.white = "#eceff1".into();
+            palette.bright_black = "#5f6368".into();
+            palette.bright_red = "#d93025".into();
+            palette.bright_green = "#188038".into();
+            palette.bright_yellow = "#a86f00".into();
+            palette.bright_blue = "#1a73e8".into();
+            palette.bright_magenta = "#a142f4".into();
+            palette.bright_cyan = "#00897b".into();
+            palette.bright_white = "#ffffff".into();
+            palette.dim_foreground = "#5f6368".into();
+        }
+        TerminalPalette::HighContrast => {
+            palette.foreground = "#ffffff".into();
+            palette.background = "#000000".into();
+            palette.black = "#000000".into();
+            palette.red = "#ff5555".into();
+            palette.green = "#55ff55".into();
+            palette.yellow = "#ffff55".into();
+            palette.blue = "#5555ff".into();
+            palette.magenta = "#ff55ff".into();
+            palette.cyan = "#55ffff".into();
+            palette.white = "#ffffff".into();
+            palette.bright_black = "#808080".into();
+            palette.bright_red = "#ff8080".into();
+            palette.bright_green = "#80ff80".into();
+            palette.bright_yellow = "#ffff80".into();
+            palette.bright_blue = "#8080ff".into();
+            palette.bright_magenta = "#ff80ff".into();
+            palette.bright_cyan = "#80ffff".into();
+            palette.bright_white = "#ffffff".into();
+            palette.dim_foreground = "#b0b0b0".into();
+        }
+    }
+    if let Some(foreground) = &appearance.foreground {
+        palette.foreground = foreground.clone();
+    }
+    if let Some(background) = &appearance.background {
+        palette.background = background.clone();
+    }
+    terminal_core::TerminalTheme::new(Box::new(palette))
+}
+
+pub(crate) fn full_profile_override(appearance: &TerminalAppearance) -> AppearanceOverride {
+    AppearanceOverride {
+        font_family: Some(appearance.font_family),
+        font_size: Some(appearance.font_size),
+        palette: Some(appearance.palette),
+        foreground: appearance.foreground.clone(),
+        background: appearance.background.clone(),
+        cursor_style: Some(appearance.cursor_style),
+        select_to_copy: Some(appearance.select_to_copy),
+        middle_click_paste: Some(appearance.middle_click_paste),
+        right_click_paste: Some(appearance.right_click_paste),
+        hide_pointer_while_typing: Some(appearance.hide_pointer_while_typing),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

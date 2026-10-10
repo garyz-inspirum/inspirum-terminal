@@ -1,13 +1,18 @@
-use inspirum_terminal::app::App;
+use std::process::Command;
+
 #[test]
-fn connection_form_renders_and_corrupt_storage_cannot_be_overwritten() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("profiles.json");
-    std::fs::write(&path, b"broken").unwrap();
-    let mut app = App::new(path.clone(), None);
-    assert!(!app.storage_writable());
-    let ctx = eframe::egui::Context::default();
-    let output = ctx.run(eframe::egui::RawInput::default(), |ctx| app.ui(ctx));
-    assert!(!output.shapes.is_empty());
-    assert_eq!(std::fs::read(path).unwrap(), b"broken");
+fn launcher_supports_iced_and_rejects_the_removed_legacy_frontend() {
+    let binary = env!("CARGO_BIN_EXE_inspirum-terminal");
+    let iced = Command::new(binary)
+        .args(["--ui", "iced", "--help"])
+        .output()
+        .unwrap();
+    assert!(iced.status.success());
+    assert!(String::from_utf8_lossy(&iced.stdout).contains("Iced is the only frontend"));
+    let legacy = Command::new(binary)
+        .args(["--ui", "legacy"])
+        .output()
+        .unwrap();
+    assert!(!legacy.status.success());
+    assert!(String::from_utf8_lossy(&legacy.stderr).contains("legacy frontend has been removed"));
 }

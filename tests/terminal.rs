@@ -66,63 +66,25 @@ fn native_argv_helper_source_with_spaced_filename_compiles() {
 #[test]
 fn windows_program_serialization_quotes_one_token_and_rejects_unsafe_input() {
     assert_eq!(
-        egui_term::serialize_windows_program(r"C:\Program Files\OpenSSH\ssh.exe").unwrap(),
+        terminal_core::serialize_windows_program(r"C:\Program Files\OpenSSH\ssh.exe").unwrap(),
         r#""C:\Program Files\OpenSSH\ssh.exe""#
     );
     assert_eq!(
-        egui_term::serialize_windows_program("ssh").unwrap(),
+        terminal_core::serialize_windows_program("ssh").unwrap(),
         r#""ssh""#
     );
-    assert!(egui_term::serialize_windows_program("bad\0path").is_err());
-    assert!(egui_term::serialize_windows_program("bad\"path").is_err());
-}
-
-#[cfg(unix)]
-fn wait_for_grid(backend: &mut egui_term::TerminalBackend, needle: &str) -> String {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let text: String = backend
-            .sync()
-            .grid
-            .display_iter()
-            .map(|cell| cell.c)
-            .collect();
-        if text.contains(needle) {
-            return text;
-        }
-        assert!(Instant::now() < deadline, "missing {needle:?} in {text:?}");
-        thread::sleep(Duration::from_millis(20));
-    }
-}
-
-#[cfg(unix)]
-fn line_capture_backend(id: u64) -> egui_term::TerminalBackend {
-    let (tx, _rx) = mpsc::channel();
-    egui_term::TerminalBackend::new(
-        id,
-        eframe::egui::Context::default(),
-        tx,
-        egui_term::BackendSettings {
-            shell: "/bin/sh".into(),
-            args: vec![
-                "-c".into(),
-                "IFS= read -r line; printf '\\nCAPTURE=<%s>\\n' \"$line\"; sleep 1".into(),
-            ],
-            working_directory: None,
-        },
-    )
-    .unwrap()
+    assert!(terminal_core::serialize_windows_program("bad\0path").is_err());
+    assert!(terminal_core::serialize_windows_program("bad\"path").is_err());
 }
 
 #[cfg(unix)]
 #[test]
 fn retained_history_snapshot_includes_scrollback_and_survives_viewport_navigation() {
     let (tx, _rx) = mpsc::channel();
-    let mut backend = egui_term::TerminalBackend::new(
+    let mut backend = terminal_core::TerminalBackend::new(
         91,
-        eframe::egui::Context::default(),
         tx,
-        egui_term::BackendSettings {
+        terminal_core::BackendSettings {
             shell: "/bin/sh".into(),
             args: vec![
                 "-c".into(),
@@ -372,9 +334,8 @@ fn explicit_missing_known_hosts_file_is_an_error() {
 }
 
 #[test]
-fn headless_widget_receives_actual_ssh_exit() {
+fn terminal_core_receives_actual_ssh_exit() {
     let (tx, rx) = mpsc::channel();
-    let context = eframe::egui::Context::default();
     let session = Session {
         host: "127.0.0.1".into(),
         port: Some(1),
@@ -384,284 +345,17 @@ fn headless_widget_receives_actual_ssh_exit() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config");
     std::fs::write(&config, "Host *\n ConnectTimeout 2\n BatchMode yes\n").unwrap();
-    let mut backend = connect(1, context.clone(), tx, &session, Some(&config)).unwrap();
+    let mut backend = connect(1, tx, &session, Some(&config)).unwrap();
     let deadline = Instant::now() + Duration::from_secs(8);
     let mut exited = false;
     while Instant::now() < deadline {
-        if let Ok((_, egui_term::PtyEvent::Exit)) = rx.recv_timeout(Duration::from_millis(50)) {
+        if let Ok((_, terminal_core::PtyEvent::Exit)) = rx.recv_timeout(Duration::from_millis(50)) {
             exited = true;
             break;
         }
     }
     assert!(exited, "OpenSSH child did not exit");
-    let output = context.run(eframe::egui::RawInput::default(), |ctx| {
-        eframe::egui::CentralPanel::default().show(ctx, |ui| {
-            let view = egui_term::TerminalView::new(ui, &mut backend);
-            ui.add(view);
-        });
-    });
-    assert!(!output.shapes.is_empty());
-}
-
-#[cfg(unix)]
-#[test]
-fn focused_terminal_dispatches_keyboard_events_after_pointer_leaves() {
-    use eframe::egui::{Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect, vec2};
-
-    let context = eframe::egui::Context::default();
-    let mut backend = line_capture_backend(81);
-    let screen = Rect::from_min_size(Pos2::ZERO, vec2(640.0, 480.0));
-    let press = RawInput {
-        screen_rect: Some(screen),
-        events: vec![
-            Event::PointerMoved(Pos2::new(50.0, 50.0)),
-            Event::PointerButton {
-                pos: Pos2::new(50.0, 50.0),
-                button: PointerButton::Primary,
-                pressed: true,
-                modifiers: Modifiers::default(),
-            },
-        ],
-        ..RawInput::default()
-    };
-    let _ = context.run(press, |ctx| {
-        eframe::egui::CentralPanel::default().show(ctx, |ui| {
-            let view = egui_term::TerminalView::new(ui, &mut backend)
-                .set_size(vec2(200.0, 100.0))
-                .set_focus(true);
-            ui.add(view);
-        });
-    });
-
-    let release = RawInput {
-        screen_rect: Some(screen),
-        events: vec![
-            Event::PointerMoved(Pos2::new(50.0, 50.0)),
-            Event::PointerButton {
-                pos: Pos2::new(50.0, 50.0),
-                button: PointerButton::Primary,
-                pressed: false,
-                modifiers: Modifiers::default(),
-            },
-        ],
-        ..RawInput::default()
-    };
-    let focused = std::cell::Cell::new(false);
-    let _ = context.run(release, |ctx| {
-        eframe::egui::CentralPanel::default().show(ctx, |ui| {
-            let view = egui_term::TerminalView::new(ui, &mut backend)
-                .set_size(vec2(200.0, 100.0))
-                .set_focus(true);
-            focused.set(ui.add(view).has_focus());
-        });
-    });
-    assert!(
-        focused.get(),
-        "terminal must retain focus after pointer click dispatch"
-    );
-
-    let text_input = RawInput {
-        screen_rect: Some(screen),
-        events: vec![
-            Event::PointerMoved(Pos2::new(500.0, 400.0)),
-            Event::Text("typed".into()),
-        ],
-        ..RawInput::default()
-    };
-    let _ = context.run(text_input, |ctx| {
-        eframe::egui::CentralPanel::default().show(ctx, |ui| {
-            let view = egui_term::TerminalView::new(ui, &mut backend)
-                .set_size(vec2(200.0, 100.0))
-                .set_focus(true);
-            ui.add(view);
-        });
-    });
-    let paste_input = RawInput {
-        screen_rect: Some(screen),
-        modifiers: Modifiers::COMMAND | Modifiers::SHIFT,
-        events: vec![Event::Paste("-pasted".into())],
-        ..RawInput::default()
-    };
-    let _ = context.run(paste_input, |ctx| {
-        eframe::egui::CentralPanel::default().show(ctx, |ui| {
-            let view = egui_term::TerminalView::new(ui, &mut backend)
-                .set_size(vec2(200.0, 100.0))
-                .set_focus(true);
-            ui.add(view);
-        });
-    });
-    let enter_input = RawInput {
-        screen_rect: Some(screen),
-        events: vec![Event::Key {
-            key: Key::Enter,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: Modifiers::default(),
-        }],
-        ..RawInput::default()
-    };
-    let _ = context.run(enter_input, |ctx| {
-        eframe::egui::CentralPanel::default().show(ctx, |ui| {
-            let view = egui_term::TerminalView::new(ui, &mut backend)
-                .set_size(vec2(200.0, 100.0))
-                .set_focus(true);
-            ui.add(view);
-        });
-    });
-    wait_for_grid(&mut backend, "CAPTURE=<typed-pasted>");
-}
-
-#[cfg(unix)]
-#[test]
-fn ime_preedit_is_not_written_and_commit_is_sent_once() {
-    use eframe::egui::{Event, ImeEvent, Key, Modifiers, Pos2, RawInput, Rect, vec2};
-
-    let context = eframe::egui::Context::default();
-    let mut backend = line_capture_backend(83);
-    let screen = Rect::from_min_size(Pos2::ZERO, vec2(640.0, 480.0));
-
-    let _ = context.run(
-        RawInput {
-            screen_rect: Some(screen),
-            events: vec![Event::Ime(ImeEvent::Preedit("ce shi".into()))],
-            ..RawInput::default()
-        },
-        |ctx| {
-            eframe::egui::CentralPanel::default().show(ctx, |ui| {
-                let view = egui_term::TerminalView::new(ui, &mut backend)
-                    .set_size(vec2(200.0, 100.0))
-                    .set_focus(true);
-                ui.add(view);
-            });
-        },
-    );
-
-    let _ = context.run(
-        RawInput {
-            screen_rect: Some(screen),
-            events: vec![Event::Ime(ImeEvent::Commit("测试".into()))],
-            ..RawInput::default()
-        },
-        |ctx| {
-            eframe::egui::CentralPanel::default().show(ctx, |ui| {
-                let view = egui_term::TerminalView::new(ui, &mut backend)
-                    .set_size(vec2(200.0, 100.0))
-                    .set_focus(true);
-                ui.add(view);
-            });
-        },
-    );
-
-    let _ = context.run(
-        RawInput {
-            screen_rect: Some(screen),
-            events: vec![Event::Key {
-                key: Key::Enter,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: Modifiers::default(),
-            }],
-            ..RawInput::default()
-        },
-        |ctx| {
-            eframe::egui::CentralPanel::default().show(ctx, |ui| {
-                let view = egui_term::TerminalView::new(ui, &mut backend)
-                    .set_size(vec2(200.0, 100.0))
-                    .set_focus(true);
-                ui.add(view);
-            });
-        },
-    );
-
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let (text, normalized) = loop {
-        let text: String = backend
-            .sync()
-            .grid
-            .display_iter()
-            .map(|cell| cell.c)
-            .collect();
-        let normalized: String = text.chars().filter(|character| *character != ' ').collect();
-        if normalized.contains("CAPTURE=<测试>") {
-            break (text, normalized);
-        }
-        assert!(
-            Instant::now() < deadline,
-            "missing committed IME capture in {text:?}"
-        );
-        thread::sleep(Duration::from_millis(20));
-    };
-    assert!(
-        !text.contains("ce shi"),
-        "IME preedit leaked to PTY: {text:?}"
-    );
-    assert_eq!(
-        normalized.matches("CAPTURE=<测试>").count(),
-        1,
-        "IME commit must be delivered exactly once: {text:?}"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn focused_form_dispatch_does_not_leak_into_hovered_terminal() {
-    use eframe::egui::{Event, Key, Modifiers, Pos2, RawInput, Rect, vec2};
-
-    let context = eframe::egui::Context::default();
-    let mut backend = line_capture_backend(82);
-    let mut form = String::new();
-    let screen = Rect::from_min_size(Pos2::ZERO, vec2(640.0, 480.0));
-    let _ = context.run(
-        RawInput {
-            screen_rect: Some(screen),
-            ..RawInput::default()
-        },
-        |ctx| {
-            eframe::egui::CentralPanel::default().show(ctx, |ui| {
-                ui.text_edit_singleline(&mut form).request_focus();
-                let view = egui_term::TerminalView::new(ui, &mut backend)
-                    .set_size(vec2(200.0, 100.0))
-                    .set_focus(false);
-                ui.add(view);
-            });
-        },
-    );
-    let _ = context.run(
-        RawInput {
-            screen_rect: Some(screen),
-            events: vec![
-                Event::PointerMoved(Pos2::new(50.0, 60.0)),
-                Event::Text("form-typed".into()),
-                Event::Paste("-pasted".into()),
-                Event::Key {
-                    key: Key::Enter,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: false,
-                    modifiers: Modifiers::default(),
-                },
-            ],
-            ..RawInput::default()
-        },
-        |ctx| {
-            eframe::egui::CentralPanel::default().show(ctx, |ui| {
-                ui.text_edit_singleline(&mut form);
-                let view = egui_term::TerminalView::new(ui, &mut backend)
-                    .set_size(vec2(200.0, 100.0))
-                    .set_focus(false);
-                ui.add(view);
-            });
-        },
-    );
-    assert_eq!(form, "form-typed-pasted");
-    backend.process_command(egui_term::BackendCommand::Write(
-        b"expected-only\n".to_vec(),
-    ));
-    let text = wait_for_grid(&mut backend, "CAPTURE=<expected-only>");
-    assert!(!text.contains("form-typed"), "form input leaked: {text:?}");
-    assert!(!text.contains("pasted"), "form paste leaked: {text:?}");
+    let _ = backend.display_snapshot(&terminal_core::TerminalTheme::default());
 }
 
 #[cfg(target_os = "linux")]
@@ -672,7 +366,7 @@ fn subscription_spawn_failure_rolls_back_started_pty() {
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("spawn-failure.pid");
     let (tx, _rx) = mpsc::channel();
-    let settings = egui_term::BackendSettings {
+    let settings = terminal_core::BackendSettings {
         shell: "/bin/sh".into(),
         args: vec![
             "-c".into(),
@@ -682,20 +376,15 @@ fn subscription_spawn_failure_rolls_back_started_pty() {
         ],
         working_directory: None,
     };
-    let result = egui_term::TerminalBackend::new_with_subscription_spawner(
-        83,
-        eframe::egui::Context::default(),
-        tx,
-        settings,
-        |_, _| {
+    let result =
+        terminal_core::TerminalBackend::new_with_subscription_spawner(83, tx, settings, |_, _| {
             let deadline = Instant::now() + Duration::from_secs(3);
             while !pid_file.is_file() {
                 assert!(Instant::now() < deadline, "PTY child never started");
                 thread::sleep(Duration::from_millis(10));
             }
             Err(io::Error::other("injected subscription spawn failure"))
-        },
-    );
+        });
     assert!(result.is_err());
     let pid: u32 = fs::read_to_string(&pid_file)
         .unwrap()
@@ -730,11 +419,10 @@ fn disconnected_subscriber_stops_forwarding_thread() {
     let baseline = subscription_threads();
     let (tx, rx) = mpsc::channel();
     drop(rx);
-    let backend = egui_term::TerminalBackend::new(
+    let backend = terminal_core::TerminalBackend::new(
         84,
-        eframe::egui::Context::default(),
         tx,
-        egui_term::BackendSettings {
+        terminal_core::BackendSettings {
             shell: "/bin/sh".into(),
             args: vec!["-c".into(), "exit 0".into()],
             working_directory: None,
@@ -777,11 +465,10 @@ fn windows_pty_preserves_actual_child_argument_boundaries() {
     let mut args = vec![output.to_string_lossy().into_owned()];
     args.extend(expected.iter().map(|value| (*value).to_owned()));
     let (tx, rx) = mpsc::channel();
-    let mut backend = egui_term::TerminalBackend::new(
+    let mut backend = terminal_core::TerminalBackend::new(
         88,
-        eframe::egui::Context::default(),
         tx,
-        egui_term::BackendSettings {
+        terminal_core::BackendSettings {
             shell: executable.to_string_lossy().into_owned(),
             args,
             working_directory: None,
@@ -793,7 +480,7 @@ fn windows_pty_preserves_actual_child_argument_boundaries() {
     while Instant::now() < deadline {
         if matches!(
             rx.recv_timeout(Duration::from_millis(50)),
-            Ok((88, egui_term::PtyEvent::Exit))
+            Ok((88, terminal_core::PtyEvent::Exit))
         ) {
             exited = true;
             break;

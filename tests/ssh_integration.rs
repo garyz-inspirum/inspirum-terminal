@@ -1,5 +1,4 @@
 //! Opt-in Linux loopback verification: scripts/test-ssh-integration.sh.
-use egui_term::{BackendCommand, PtyEvent, TerminalBackend};
 use inspirum_terminal::{
     ControlMasterMode, ProxyKind, Session, SshOptions,
     remote_edit::{RemoteEdit, SaveOutcome},
@@ -20,6 +19,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use terminal_core::{BackendCommand, PtyEvent, TerminalBackend};
 fn grid(b: &mut TerminalBackend) -> String {
     b.sync().grid.display_iter().map(|c| c.c).collect()
 }
@@ -257,14 +257,7 @@ fn open_with_ssh(
         ..Session::default()
     };
     (
-        connect(
-            id,
-            eframe::egui::Context::default(),
-            tx,
-            &s,
-            Some(&p.join(cfg)),
-        )
-        .expect("real terminal::connect"),
+        connect(id, tx, &s, Some(&p.join(cfg))).expect("real terminal::connect"),
         rx,
     )
 }
@@ -277,14 +270,8 @@ fn open_sftp(p: &std::path::Path, id: u64) -> (TerminalBackend, mpsc::Receiver<(
         ..Session::default()
     };
     (
-        connect_sftp(
-            id,
-            eframe::egui::Context::default(),
-            tx,
-            &session,
-            Some(&p.join("config")),
-        )
-        .expect("real terminal::connect_sftp"),
+        connect_sftp(id, tx, &session, Some(&p.join("config")))
+            .expect("real terminal::connect_sftp"),
         rx,
     )
 }
@@ -298,8 +285,8 @@ fn authenticated_grid_input_resize_and_exit() {
     write(&mut b, "echo:astra-roundtrip-701\n");
     wait_text(&mut b, "REMOTE_ECHO:astra-roundtrip-701");
     b.process_command(BackendCommand::Resize(
-        eframe::egui::vec2(970.0, 310.0).into(),
-        eframe::egui::vec2(10.0, 10.0).into(),
+        terminal_core::Size::new(970.0, 310.0),
+        terminal_core::Size::new(10.0, 10.0),
     ));
     let end = Instant::now() + Duration::from_secs(8);
     loop {
@@ -571,14 +558,8 @@ fn connect_timeout_terminates_stalled_ssh_handshake() {
         ..Session::default()
     };
     let started = Instant::now();
-    let mut backend = connect(
-        717,
-        eframe::egui::Context::default(),
-        tx,
-        &session,
-        Some(&p.join("config")),
-    )
-    .expect("start stalled OpenSSH client");
+    let mut backend =
+        connect(717, tx, &session, Some(&p.join("config"))).expect("start stalled OpenSSH client");
     wait_exit(&rx, 717);
     assert!(
         started.elapsed() < Duration::from_secs(4),
@@ -1349,14 +1330,8 @@ fn tmux_create_attach_disconnect_and_reconnect_preserve_server_session() {
 
     let create = tmux::create_session(&session, &name).unwrap();
     let (tx, _rx) = mpsc::channel();
-    let mut created = connect(
-        719,
-        eframe::egui::Context::default(),
-        tx,
-        &create,
-        Some(&config),
-    )
-    .expect("create and attach tmux session");
+    let mut created =
+        connect(719, tx, &create, Some(&config)).expect("create and attach tmux session");
     wait_tmux_attached(&session, &config, &name, true);
 
     created.process_command(BackendCommand::Write(
@@ -1376,27 +1351,14 @@ fn tmux_create_attach_disconnect_and_reconnect_preserve_server_session() {
 
     let attach = tmux::attach_session(&session, &name).unwrap();
     let (tx, _rx) = mpsc::channel();
-    let attached = connect(
-        720,
-        eframe::egui::Context::default(),
-        tx,
-        &attach,
-        Some(&config),
-    )
-    .expect("attach existing tmux session");
+    let attached = connect(720, tx, &attach, Some(&config)).expect("attach existing tmux session");
     wait_tmux_attached(&session, &config, &name, true);
     drop(attached);
     wait_tmux_attached(&session, &config, &name, false);
 
     let (tx, _rx) = mpsc::channel();
-    let reattached = connect(
-        721,
-        eframe::egui::Context::default(),
-        tx,
-        &attach,
-        Some(&config),
-    )
-    .expect("reconnect by attaching existing tmux session");
+    let reattached = connect(721, tx, &attach, Some(&config))
+        .expect("reconnect by attaching existing tmux session");
     wait_tmux_attached(&session, &config, &name, true);
     drop(reattached);
     wait_tmux_attached(&session, &config, &name, false);
