@@ -135,25 +135,44 @@ fn native_cursor_key_and_synchronized_input_reach_only_explicit_ssh_panes() {
 
     let left_before = event_count(&events, "REMOTE_CURSOR_LEFT");
     // The very same source-first fanout used by production Iced runs against
-    // two independent authenticated native OpenSSH PTYs.
+    // two independent authenticated native OpenSSH PTYs. Windows ConPTY can
+    // consume ANSI cursor byte sequences as local console-key events instead
+    // of forwarding the bytes unchanged. Its *native sync/focus isolation*
+    // acceptance therefore uses an unambiguous printable sentinel; remote
+    // cursor-byte encoding remains covered by Iced unit tests on Windows.
+    // Unix PTYs additionally prove the raw cursor sequence remotely.
+    let (left_input, left_reply): (&[u8], &str) = if cfg!(windows) {
+        (b"echo:sync-left\n", "NATIVE_ECHO:sync-left")
+    } else {
+        (b"\x1b[D\n", "NATIVE_REMOTE_CURSOR_LEFT")
+    };
     let forwarded = source_first_synced_write(9961, &[9961, 9962], |id| {
         let target = if id == 9961 { &mut source } else { &mut mirror };
-        target.process_command(BackendCommand::Write(b"\x1b[D\n".to_vec()));
+        target.process_command(BackendCommand::Write(left_input.to_vec()));
         true
     });
     assert!(forwarded);
-    wait_text(&mut source, "NATIVE_REMOTE_CURSOR_LEFT");
-    wait_text(&mut mirror, "NATIVE_REMOTE_CURSOR_LEFT");
-    wait_event_count(&events, "REMOTE_CURSOR_LEFT", left_before + 2);
+    wait_text(&mut source, left_reply);
+    wait_text(&mut mirror, left_reply);
+    if !cfg!(windows) {
+        wait_event_count(&events, "REMOTE_CURSOR_LEFT", left_before + 2);
+    }
 
-    // After explicit disarm, the same right-arrow reaches only its owner.
+    // After explicit disarm, one key/send goes only to the focused source.
     let right_before = event_count(&events, "REMOTE_CURSOR_RIGHT");
-    write(&mut source, "\x1b[C\n");
-    wait_text(&mut source, "NATIVE_REMOTE_CURSOR_RIGHT");
-    wait_event_count(&events, "REMOTE_CURSOR_RIGHT", right_before + 1);
+    let (right_input, right_reply) = if cfg!(windows) {
+        ("echo:sync-right\n", "NATIVE_ECHO:sync-right")
+    } else {
+        ("\x1b[C\n", "NATIVE_REMOTE_CURSOR_RIGHT")
+    };
+    write(&mut source, right_input);
+    wait_text(&mut source, right_reply);
+    if !cfg!(windows) {
+        wait_event_count(&events, "REMOTE_CURSOR_RIGHT", right_before + 1);
+    }
     assert!(
-        !grid(&mut mirror).contains("NATIVE_REMOTE_CURSOR_RIGHT"),
-        "disarmed cursor motion leaked to the second SSH PTY"
+        !grid(&mut mirror).contains(right_reply),
+        "disarmed input leaked to the second SSH PTY"
     );
 
     // If the focused source cannot write, fanout must never reach mirrors.
@@ -172,7 +191,7 @@ fn native_cursor_key_and_synchronized_input_reach_only_explicit_ssh_panes() {
     drop(mirror);
     wait_event_count(&events, "SESSION_CLOSED:", 2);
     println!(
-        "PASS native real OpenSSH cursor keys, explicit synchronized fanout, disarm and failed-source isolation"
+        "PASS native real OpenSSH sync/disarm/failed-source isolation (Unix also verifies raw cursor bytes)"
     );
 }
 
