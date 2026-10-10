@@ -66,7 +66,13 @@ destination's cursor-key mode is encoded separately; changes to sync targets
 or split/close disarm input by the existing policy. Live native OpenSSH
 acceptance opens two individually authenticated PTYs with disposable host
 keys, proves opt-in fanout, disarm isolation and cleanup, and tests the same
-source-first dispatch function used by Iced.
+source-first dispatch function used by Iced. Unix PTYs also validate the
+literal Left/Right escape sequences remotely. **Windows ConPTY may translate
+ANSI cursor bytes into console key events**, so its native SSH test verifies
+the same real two-session sync/disarm transport with fixed printable probes;
+cursor-byte encoding is unit tested separately on Windows. A connected
+Windows Iced GUI cursor-application acceptance is still a device/environment
+item in #78, not an asserted raw-escape-equivalence guarantee.
 
 The explorer side-dock and auxiliary SSH shell were implemented in #120 and
 #117, respectively. Both use real resizable Iced panes. Physical Apple
