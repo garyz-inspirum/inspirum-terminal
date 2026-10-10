@@ -238,6 +238,31 @@ fn native_proxyjump_enforces_hop_trust_and_no_direct_fallback() {
         "changed key reached authentication via ProxyJump"
     );
 
+    // The destination trust entry is valid, but the hop's stored host key
+    // is deliberately wrong. OpenSSH must reject before authenticating to
+    // the jump server, and no direct connection to the target is permitted.
+    let hop_auth_before = event_count(&jump_events, "AUTH_ACCEPT:");
+    let (mut bad_hop, bad_hop_events) = open_jump(&fixture, 9904, "jump-wrong-hop-config");
+    wait_exit(&bad_hop_events, 9904);
+    let message = grid(&mut bad_hop).to_ascii_lowercase();
+    assert!(
+        message.contains("host identification has changed")
+            || message.contains("host key verification failed")
+            || message.contains("@@@@@@@@@@"),
+        "changed jump host key did not cause a trust failure: {message}"
+    );
+    drop(bad_hop);
+    assert_eq!(
+        event_count(&jump_events, "AUTH_ACCEPT:"),
+        hop_auth_before,
+        "changed jump key reached jump-host authentication"
+    );
+    assert_eq!(
+        event_count(&target_events, "AUTH_ACCEPT:"),
+        accepted,
+        "changed jump key unexpectedly reached target authentication"
+    );
+
     // The target is still listening, but the specified hop points to a
     // closed port. A direct fallback would authenticate anyway.
     let (mut broken, broken_events) = open_jump(&fixture, 9903, "jump-broken-config");
