@@ -1086,6 +1086,51 @@ fn matched_delimiters(snapshot: &terminal_core::DisplaySnapshot) -> Option<(usiz
     None
 }
 
+/// Return cell-index spans for visible HTTP(S) URLs in a single terminal row.
+/// This is a presentation hint only: it never invokes a URL handler or copies
+/// remote output to the system clipboard. Only recalculated on invalidated rows.
+fn visible_url_ranges(row: &[terminal_core::DisplayCell]) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = row.iter().map(|cell| cell.character).collect();
+    let mut spans = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        // Do not highlight a URL prefix embedded in a larger identifier.
+        if index > 0 && (chars[index - 1].is_alphanumeric() || chars[index - 1] == '_') {
+            index += 1;
+            continue;
+        }
+        let prefix = if chars[index..].starts_with(&['h', 't', 't', 'p', 's', ':', '/', '/']) {
+            8
+        } else if chars[index..].starts_with(&['h', 't', 't', 'p', ':', '/', '/']) {
+            7
+        } else {
+            index += 1;
+            continue;
+        };
+        let host = index + prefix;
+        if host >= chars.len() || !chars[host].is_ascii_alphanumeric() {
+            index += 1;
+            continue;
+        }
+        let mut end = host;
+        while end < chars.len()
+            && chars[end].is_ascii_graphic()
+            && !matches!(chars[end], '<' | '>' | '"' | '\'' | '(' | ')' | '{' | '}')
+        {
+            end += 1;
+        }
+        // Sentence punctuation commonly follows a URL, but is not part of it.
+        while end > host && matches!(chars[end - 1], '.' | ',' | ';' | ':' | '!' | '?') {
+            end -= 1;
+        }
+        if end > host {
+            spans.push((index, end));
+        }
+        index = end.max(index + 1);
+    }
+    spans
+}
+
 struct TerminalCanvasState {
     selecting: bool,
     pointer_hidden: bool,
@@ -1532,6 +1577,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                 continue;
             };
             let geometry = caches[row].draw(renderer, bounds.size(), |frame| {
+                let url_spans = visible_url_ranges(&self.snapshot.cells[start..end]);
                 for (cell_index, cell) in self.snapshot.cells[start..end].iter().enumerate() {
                     let x = cell.column as f32 * cell_width;
                     let y = cell.row as f32 * cell_height;
@@ -1618,6 +1664,20 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                                 iced::Size::new(cell_width, 1.0),
                             ),
                             rgb(cell.foreground),
+                        );
+                    }
+                    // The URL accent is deliberately distinct from SGR underline.
+                    // Cache::draw runs this detection only when the row changes.
+                    if url_spans
+                        .iter()
+                        .any(|&(first, last)| (first..last).contains(&cell_index))
+                    {
+                        frame.fill(
+                            &canvas::Path::rectangle(
+                                iced::Point::new(x, y + cell_height - 4.0),
+                                iced::Size::new(cell_width, 1.0),
+                            ),
+                            BLUE,
                         );
                     }
                     if cell.strikeout {
@@ -6628,6 +6688,37 @@ mod tests {
         let _ = app.update(Message::ToggleFocusMode);
         assert!(!app.focus_mode);
         assert!(app.focused_pane_matches(id));
+    }
+
+    #[test]
+    fn visible_url_highlighting_is_pure_and_trimmed() {
+        let spans = |input: &str| {
+            let cells: Vec<terminal_core::DisplayCell> = input
+                .chars()
+                .enumerate()
+                .map(|(column, character)| terminal_core::DisplayCell {
+                    character,
+                    row: 0,
+                    column,
+                    foreground: [255; 3],
+                    background: [0; 3],
+                    cursor_color: [255; 3],
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    strikeout: false,
+                    wide: false,
+                    cursor: false,
+                })
+                .collect();
+            visible_url_ranges(&cells)
+        };
+        assert_eq!(spans("Visit https://example.org/path?q=1, thanks"), vec![(6, 34)]);
+        assert_eq!(spans("http://localhost:8080"), vec![(0, 21)]);
+        assert_eq!(spans("badhttps://example.org and https://ok.io."), vec![(27, 40)]);
+        assert!(spans("http:// https://").is_empty());
+        assert!(spans("ftp://example.org").is_empty());
+        assert_eq!(spans("(https://site.test)."), vec![(1, 18)]);
     }
 
     #[test]
