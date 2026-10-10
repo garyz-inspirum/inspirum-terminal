@@ -69,10 +69,14 @@ while IFS= read -r line; do
  case "$line" in
  echo:*) printf 'REMOTE_ECHO:%s\\n' "${line#echo:}" ;;
  agent-probe)
-  if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "$SSH_AUTH_SOCK" ] && ssh-add -l >/dev/null 2>&1; then
+  if [ -z "${SSH_AUTH_SOCK:-}" ]; then
+   printf 'AGENT_NO_SOCKET\\n'
+  elif [ ! -S "$SSH_AUTH_SOCK" ]; then
+   printf 'AGENT_SOCKET_UNAVAILABLE\\n'
+  elif ssh-add -l >/dev/null 2>&1; then
    printf 'AGENT_FORWARDED\\n'
   else
-   printf 'AGENT_NOT_FORWARDED\\n'
+   printf 'AGENT_SOCKET_UNUSABLE\\n'
   fi ;;
  size) printf 'REMOTE_SIZE:'; stty size ;;
  exit) exit 0 ;;
