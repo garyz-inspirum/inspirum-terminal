@@ -116,6 +116,10 @@ The possible terminal widget, iced_term 0.8.0, uses an Alacritty backend but mus
 
 The live Iced path now covers real SSH sessions, safe host-key policy, committed CJK text, scrollback, resize, selection, clipboard guards, multiline paste confirmation, mouse reporting, multiple panes and session shutdown. Display snapshots honor application cursor hide/show (DECTCEM) and suppress the live cursor while viewing scrollback. Disposable local PTY tests exercise hide/show and scrolling back to the live cursor on Unix; these do not establish Windows ConPTY or full-screen GUI acceptance. Remaining acceptance includes native IME composition behaviour, alternate-screen/full-screen application testing, edge-case mouse modes, focus restoration/accessibility, and measured GPU/fallback performance on named hardware.
 
+### Local-only terminal navigation (issue #64)
+
+Shift+Enter enters a pane-local scrollback navigation mode and excludes that pane from remote PTY writes, mouse-report forwarding, delayed paste and synchronized command input. Arrow keys and PageUp/PageDown scroll locally. Optional vi-inspired bindings are **j/k** (down/up one row), **Ctrl+d / Ctrl+u** (down/up one page), and **g/G** (top/bottom of available scrollback). These are display navigation gestures, **not** full vi modal editing, horizontal cursor positioning or remote shell commands. Shift+Enter or Escape exits. The active pane explicitly displays LOCAL NAV; other split panes are unaffected.
+
 Primary references checked 7 October 2026:
 
 - https://iced.rs/
