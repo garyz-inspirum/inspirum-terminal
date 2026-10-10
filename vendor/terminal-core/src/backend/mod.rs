@@ -448,9 +448,8 @@ impl TerminalBackend {
             alacritty_terminal::vte::ansi::NamedColor::Background,
         ));
         let [bg_r, bg_g, bg_b, _] = global_bg.to_array();
-        let mut cells = Vec::with_capacity(
-            terminal_size.num_cols as usize * terminal_size.num_lines as usize,
-        );
+        let mut cells =
+            Vec::with_capacity(terminal_size.num_cols as usize * terminal_size.num_lines as usize);
 
         for indexed in grid.display_iter() {
             let flags = indexed.cell.flags;
