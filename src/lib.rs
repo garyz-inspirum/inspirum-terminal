@@ -729,6 +729,7 @@ pub mod tab_management;
 pub mod terminal;
 pub mod terminal_ux;
 pub mod tmux;
+pub mod tunnels;
 pub mod workspace;
 
 pub mod iced_app;

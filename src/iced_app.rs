@@ -11,8 +11,10 @@ use crate::{
     command_palette::{self, PaletteItem, Snippet, SnippetLibrary},
     import_sessions, load_sessions,
     remote_edit::{self, SaveOutcome},
-    save_session_edit, save_sessions, session_matches_query, session_profile_key, sftp, terminal,
+    save_session_edit, save_sessions, session_matches_query, session_profile_key,
+    session_requires_forward_risk_ack, sftp, terminal,
     terminal_ux::{self, PasteDecision, PastePolicy},
+    tunnels,
 };
 use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
 use iced::widget::{
@@ -976,6 +978,7 @@ enum Dialog {
     Tools,
     Connection,
     Commands,
+    Tunnels,
     Close(usize),
     PasteConfirm {
         id: u64,
@@ -1137,6 +1140,14 @@ enum Message {
     ConnectTimeout(String),
     Keepalive(String),
     RemoteCommand(String),
+    LocalForwards(String),
+    RemoteForwards(String),
+    DynamicForwards(String),
+    Tunnels,
+    TunnelStart(String),
+    TunnelStop(String),
+    TunnelAcknowledge(String, bool),
+    TunnelRefresh,
     Advanced,
     Submit,
     Scale(f64),
@@ -2029,6 +2040,9 @@ struct ConnectionForm {
     connect_timeout: String,
     keepalive: String,
     remote_command: String,
+    local_forwards: String,
+    remote_forwards: String,
+    dynamic_forwards: String,
     base: Option<Session>,
     advanced: bool,
     error: Option<String>,
@@ -2066,6 +2080,9 @@ impl Default for ConnectionForm {
             connect_timeout: String::new(),
             keepalive: String::new(),
             remote_command: String::new(),
+            local_forwards: String::new(),
+            remote_forwards: String::new(),
+            dynamic_forwards: String::new(),
             base: None,
             advanced: false,
             error: None,
@@ -2120,6 +2137,9 @@ impl ConnectionForm {
                 .map(|value| value.to_string())
                 .unwrap_or_default(),
             remote_command: session.ssh.remote_command.clone(),
+            local_forwards: session.ssh.local_forwards.join("; "),
+            remote_forwards: session.ssh.remote_forwards.join("; "),
+            dynamic_forwards: session.ssh.dynamic_forwards.join("; "),
             base: Some(session.clone()),
             advanced: session.strict
                 || !session.ssh.identity_file.is_empty()
@@ -2138,7 +2158,10 @@ impl ConnectionForm {
                 || !session.ssh.host_key_algorithms.is_empty()
                 || session.ssh.connect_timeout_seconds.is_some()
                 || session.ssh.server_alive_interval_seconds.is_some()
-                || !session.ssh.remote_command.is_empty(),
+                || !session.ssh.remote_command.is_empty()
+                || !session.ssh.local_forwards.is_empty()
+                || !session.ssh.remote_forwards.is_empty()
+                || !session.ssh.dynamic_forwards.is_empty(),
             error: None,
         }
     }
@@ -2219,6 +2242,9 @@ impl ConnectionForm {
         session.ssh.server_alive_interval_seconds =
             Self::optional_positive_u16("Server alive interval", &self.keepalive)?;
         session.ssh.remote_command = self.remote_command.trim().to_owned();
+        session.ssh.local_forwards = tunnels::parse_forward_lines(&self.local_forwards);
+        session.ssh.remote_forwards = tunnels::parse_forward_lines(&self.remote_forwards);
+        session.ssh.dynamic_forwards = tunnels::parse_forward_lines(&self.dynamic_forwards);
 
         session.ssh_args()?;
         Ok(session)
@@ -2264,6 +2290,9 @@ struct App {
     import_path: String,
     editing_profile: Option<String>,
     dialog: Option<Dialog>,
+    tunnels: tunnels::Manager,
+    tunnel_status: std::collections::BTreeMap<String, tunnels::Status>,
+    tunnel_notice: String,
     scale: f64,
     status: String,
     load_error: Option<String>,
@@ -2411,6 +2440,9 @@ impl App {
             import_path: String::new(),
             editing_profile: None,
             dialog: None,
+            tunnels: tunnels::Manager::default(),
+            tunnel_status: Default::default(),
+            tunnel_notice: String::new(),
             scale: 1.0,
             status: "Ready".into(),
             load_error,
@@ -3743,6 +3775,47 @@ impl App {
                 }
             }
             Message::About => self.dialog = Some(Dialog::About),
+            Message::Tunnels => {
+                self.refresh_tunnel_status();
+                self.dialog = Some(Dialog::Tunnels);
+            }
+            Message::TunnelRefresh => self.refresh_tunnel_status(),
+            Message::TunnelAcknowledge(key, value) => self.tunnels.set_acknowledged(&key, value),
+            Message::TunnelStart(key) => {
+                let Some(session) = self
+                    .profiles
+                    .iter()
+                    .find(|profile| session_profile_key(profile) == key)
+                    .cloned()
+                else {
+                    self.tunnel_notice = "Profile no longer exists.".into();
+                    return Task::none();
+                };
+                match self.tunnels.start(&session, self.ssh_config.as_deref()) {
+                    Ok(tunnels::Status::Running { pid }) => {
+                        self.tunnel_notice = format!(
+                            "{} forward(s) for {} running in ssh {pid}.",
+                            tunnels::rows_for(&session).len(),
+                            session.name
+                        );
+                    }
+                    Ok(tunnels::Status::Failed(error)) => {
+                        self.tunnel_notice = format!("{}: {error}", session.name);
+                    }
+                    Ok(tunnels::Status::Stopped) => {}
+                    Err(error) => self.tunnel_notice = format!("{error:#}"),
+                }
+                self.refresh_tunnel_status();
+            }
+            Message::TunnelStop(key) => {
+                match self.tunnels.stop(&key) {
+                    Ok(_) => {
+                        self.tunnel_notice = format!("Tunnels for {key} stopped; listeners closed.")
+                    }
+                    Err(error) => self.tunnel_notice = format!("{error:#}"),
+                }
+                self.refresh_tunnel_status();
+            }
             Message::CloseDialog => {
                 self.free_type_confirm = None;
                 self.dialog = None;
@@ -4882,6 +4955,9 @@ impl App {
             Message::ConnectTimeout(value) => self.form.connect_timeout = value,
             Message::Keepalive(value) => self.form.keepalive = value,
             Message::RemoteCommand(value) => self.form.remote_command = value,
+            Message::LocalForwards(value) => self.form.local_forwards = value,
+            Message::RemoteForwards(value) => self.form.remote_forwards = value,
+            Message::DynamicForwards(value) => self.form.dynamic_forwards = value,
             Message::Advanced => self.form.advanced = !self.form.advanced,
             Message::Submit => {
                 let selected_profile = self.editing_profile.clone();
@@ -5228,6 +5304,11 @@ impl App {
                 )
             })
             .count();
+        let running_tunnels = self
+            .tunnel_status
+            .values()
+            .filter(|status| status.is_running())
+            .count();
 
         let header = container(
             row![
@@ -5242,6 +5323,7 @@ impl App {
                     Message::Tool(tools::Action::Open(tools::Panel::Profiles))
                 ),
                 action("Commands", Message::Commands),
+                action("Tunnels", Message::Tunnels),
                 action("Lock", Message::TogglePrivacyLock),
                 action("Focus", Message::ToggleFocusMode),
                 action("A-", Message::Scale(-0.1)),
@@ -5270,6 +5352,13 @@ impl App {
                     text(format!("{active_transfers} active transfer(s)"))
                         .size(12)
                         .color(BLUE)
+                } else {
+                    text("").size(12)
+                },
+                if running_tunnels > 0 {
+                    text(format!("{running_tunnels} tunnel session(s)"))
+                        .size(12)
+                        .color(GREEN)
                 } else {
                     text("").size(12)
                 },
@@ -6361,6 +6450,114 @@ impl App {
         .into()
     }
 
+    fn refresh_tunnel_status(&mut self) {
+        self.tunnel_status.clear();
+        for profile in &self.profiles {
+            let key = session_profile_key(profile);
+            let status = self.tunnels.status(&key);
+            self.tunnel_status.insert(key, status);
+        }
+    }
+
+    fn tunnels_view(&self) -> Element<'_, Message> {
+        let rows = tunnels::all_rows(&self.profiles);
+        let mut body = column![
+            text("Tunnels").size(24),
+            text("Every port forward from every saved profile. Start runs a dedicated forwarding-only OpenSSH process for that profile; listeners close on Stop or when the app exits. Edit forwards in the profile's connection dialog.")
+                .size(12)
+                .color(MUTED),
+            row![
+                text(format!("{:<28}", "SESSION")).size(11).color(MUTED).font(Font::MONOSPACE),
+                text(format!("{:<4}", "TYPE")).size(11).color(MUTED).font(Font::MONOSPACE),
+                text(format!("{:<24}", "LISTEN")).size(11).color(MUTED).font(Font::MONOSPACE),
+                text(format!("{:<28}", "TARGET")).size(11).color(MUTED).font(Font::MONOSPACE),
+                text("STATUS").size(11).color(MUTED).font(Font::MONOSPACE),
+            ]
+            .spacing(8),
+        ]
+        .spacing(10);
+        if rows.is_empty() {
+            body = body.push(
+                text("No forwards configured. Add Local (-L), Remote (-R) or Dynamic (-D) forwards in a profile's connection dialog.")
+                    .size(13)
+                    .color(MUTED),
+            );
+        }
+        for profile in &self.profiles {
+            let key = session_profile_key(profile);
+            let profile_rows: Vec<&tunnels::ForwardRow> =
+                rows.iter().filter(|row| row.profile_key == key).collect();
+            if profile_rows.is_empty() {
+                continue;
+            }
+            let status = self
+                .tunnel_status
+                .get(&key)
+                .cloned()
+                .unwrap_or(tunnels::Status::Stopped);
+            let (status_text, status_color) = match &status {
+                tunnels::Status::Running { .. } => (status.label(), GREEN),
+                tunnels::Status::Failed(_) => (status.label(), DANGER),
+                tunnels::Status::Stopped => (status.label(), MUTED),
+            };
+            for row in profile_rows {
+                body = body.push(
+                    row![
+                        text(format!("{:<28}", truncate(&row.profile_name, 27)))
+                            .size(13)
+                            .font(Font::MONOSPACE),
+                        text(format!("{:<4}", row.kind.short()))
+                            .size(13)
+                            .font(Font::MONOSPACE)
+                            .color(BLUE),
+                        text(format!("{:<24}", truncate(&row.listen, 23)))
+                            .size(13)
+                            .font(Font::MONOSPACE),
+                        text(format!("{:<28}", truncate(&row.target, 27)))
+                            .size(13)
+                            .font(Font::MONOSPACE),
+                        text(status_text.clone()).size(13).color(status_color),
+                    ]
+                    .spacing(8),
+                );
+            }
+            let needs_ack = session_requires_forward_risk_ack(profile);
+            let acknowledged = self.tunnels.acknowledged(&key);
+            let mut controls = row![].spacing(8).align_y(iced::Center);
+            if status.is_running() {
+                controls = controls.push(action("Stop", Message::TunnelStop(key.clone())));
+            } else {
+                let start = action("Start", Message::TunnelStart(key.clone()));
+                controls = controls.push(if needs_ack && !acknowledged {
+                    start.style(quiet)
+                } else {
+                    start.style(primary)
+                });
+            }
+            if needs_ack && !status.is_running() {
+                let ack_key = key.clone();
+                controls = controls.push(
+                    iced::widget::checkbox(acknowledged)
+                        .label("I understand one or more listeners bind beyond loopback")
+                        .on_toggle(move |value| Message::TunnelAcknowledge(ack_key.clone(), value)),
+                );
+            }
+            body = body.push(container(controls).padding([4, 0]).width(Fill));
+        }
+        if !self.tunnel_notice.is_empty() {
+            body = body.push(text(&self.tunnel_notice).size(12).color(MUTED));
+        }
+        body = body.push(
+            row![
+                space::horizontal(),
+                action("Refresh", Message::TunnelRefresh),
+                action("Close", Message::CloseDialog).style(primary),
+            ]
+            .spacing(8),
+        );
+        scrollable(body).into()
+    }
+
     fn dialog_view<'a>(&'a self, dialog: &'a Dialog) -> Element<'a, Message> {
         let body: Element<'_, Message> = match dialog {
             Dialog::Tools => self.tools_view(),
@@ -6671,6 +6868,27 @@ impl App {
                                     "Optional command after authentication",
                                     &self.form.remote_command,
                                     Message::RemoteCommand
+                                ),
+                                text("Tunnels · OpenSSH forward specs separated by \";\"; started and stopped from the Tunnels panel")
+                                    .size(11)
+                                    .color(MUTED),
+                                forward_editor(
+                                    "Local forward (-L)",
+                                    "127.0.0.1:8080:internal.example:80",
+                                    &self.form.local_forwards,
+                                    Message::LocalForwards
+                                ),
+                                forward_editor(
+                                    "Remote forward (-R)",
+                                    "127.0.0.1:9000:127.0.0.1:3000",
+                                    &self.form.remote_forwards,
+                                    Message::RemoteForwards
+                                ),
+                                forward_editor(
+                                    "Dynamic forward (-D)",
+                                    "127.0.0.1:1080",
+                                    &self.form.dynamic_forwards,
+                                    Message::DynamicForwards
                                 ),
                                 text("These values write directly into the existing Session::ssh model and use its current validation. Algorithm fields inherit OpenSSH/config defaults when empty; legacy algorithms still require explicit user input and retain the existing warning policy. Other advanced settings not exposed here yet are preserved when editing an existing profile.")
                                     .size(12)
@@ -7004,6 +7222,7 @@ impl App {
             ]
             .spacing(14)
             .into(),
+            Dialog::Tunnels => self.tunnels_view(),
             Dialog::About => column![
                 text("Inspirum Terminal · Iced").size(24),
                 text("Inspirum Terminal uses Iced for the desktop interface and the shared OpenSSH/PTY backend for terminal sessions.\n\nTools includes profiles and startup, tabs and saved split workspaces, synchronized input, history and logging, terminal appearance and pointer preferences, SSH trust and multiplexing, forwarding, tmux, SCP, snippets and sanitized support reports.\n\nThe Files pane provides graphical SFTP transfers and remote editing. Clipboard and command sends retain explicit confirmation and terminal identity checks.")
@@ -7025,6 +7244,33 @@ impl App {
             .style(active_card)
             .into()
     }
+}
+
+fn truncate(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        value.to_owned()
+    } else {
+        let mut out: String = value.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
+fn forward_editor<'a>(
+    label: &'a str,
+    hint: &'a str,
+    value: &'a str,
+    message: fn(String) -> Message,
+) -> Element<'a, Message> {
+    column![
+        text(label).size(13).color(MUTED),
+        text_input(hint, value)
+            .on_input(message)
+            .padding(11)
+            .size(14),
+    ]
+    .spacing(4)
+    .into()
 }
 
 fn field<'a>(
