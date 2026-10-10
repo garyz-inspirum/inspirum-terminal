@@ -186,11 +186,11 @@ async def click_transfer_until(
 
     Iced does not expose widget IDs to xdotool. The connected fixture therefore
     probes a bounded set of points inside the first file row and the requested
-    transfer button on its fixed 1440x1000 window. Failed probes are dismissed;
+    transfer button on the fixed 1280x800 Iced window. Failed probes are dismissed;
     success is accepted only when the isolated filesystem effect is complete.
     """
-    row_ys = (704, 724, 744, 764, 784, 804)
-    action_ys = (824, 844, 864, 884, 904, 924)
+    row_ys = (574, 594, 614)
+    action_ys = (638, 648, 658)
     for row_y in row_ys:
         for action_y in action_ys:
             for action_x in action_xs:
