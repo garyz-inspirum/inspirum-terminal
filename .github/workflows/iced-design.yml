@@ -37,7 +37,7 @@ jobs:
           components: rustfmt, clippy
       - name: Linux desktop dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev xvfb xdotool imagemagick fonts-dejavu-core
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev xvfb xdotool x11-utils imagemagick fonts-dejavu-core
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -183,6 +183,13 @@ jobs:
           tools_diff=$(compare -metric AE preview-artifacts/screenshots/production-tools-1.png preview-artifacts/screenshots/production-tools-4.png null: 2>&1 || true)
           test "$tools_diff" -gt 1000 || { echo "Tools panel navigation did not change the screen"; exit 1; }
           xdotool key Escape
+      - name: Connected production SSH GUI acceptance (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python3 -m pip install --disable-pip-version-check "asyncssh==2.24.0"
+          python3 -B scripts/test-iced-connected-gui.py \
+            target/release/inspirum-terminal preview-artifacts/connected
       - name: Prepare preview artifact
         if: always()
         shell: bash
