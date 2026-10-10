@@ -2701,6 +2701,13 @@ impl App {
                     | Message::ClipboardRead(..)
                     | Message::ConfirmPaste
                     | Message::PanePaste(..)
+                    | Message::TerminalMouse(..)
+                    | Message::TerminalMouseWheel(..)
+                    | Message::TerminalSelectStart(..)
+                    | Message::TerminalSelectUpdate(..)
+                    | Message::SelectionFinished(..)
+                    | Message::TerminalScroll(..)
+                    | Message::CopySelection(..)
                     | Message::CommandSend
             )
         {
