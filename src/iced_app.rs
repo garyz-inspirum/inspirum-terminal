@@ -1452,8 +1452,13 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
             iced::Event::Keyboard(keyboard::Event::KeyPressed { .. })
                 if position.is_some() && self.appearance.hide_pointer_while_typing =>
             {
+                // Keyboard events belong to the PTY input subscription.
+                // Capturing a Canvas redraw here drops h/j/k/l while the
+                // pointer hovers over the terminal, breaking remote keys.
+                // The PTY/frame bridge will repaint after input, so merely
+                // update pointer state without taking ownership of the key.
                 state.pointer_hidden = true;
-                Some(canvas::Action::request_redraw())
+                None
             }
             iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
                 state.modifiers = *modifiers;
