@@ -2,6 +2,8 @@
 use inspirum_terminal::{Session, SshOptions, terminal::connect};
 use std::{
     fs,
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::mpsc,
     thread,
@@ -251,4 +253,133 @@ fn native_proxyjump_enforces_hop_trust_and_no_direct_fallback() {
         "failed jump reached the direct target"
     );
     println!("PASS native ProxyJump, target host trust and no-direct-fallback");
+}
+
+fn fixture_port(fixture: &Path, name: &str) -> u16 {
+    fs::read_to_string(fixture.join(name))
+        .unwrap()
+        .trim()
+        .parse()
+        .expect("fixture port must be numeric")
+}
+
+fn ephemeral_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+fn connect_loopback(port: u16) -> TcpStream {
+    let address = format!("127.0.0.1:{port}");
+    let deadline = Instant::now() + Duration::from_secs(9);
+    loop {
+        if let Ok(stream) = TcpStream::connect(&address) {
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            return stream;
+        }
+        assert!(Instant::now() < deadline, "loopback SSH listener {port} did not appear");
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn round_trip(stream: &mut TcpStream, message: &[u8]) {
+    stream.write_all(message).unwrap();
+    let mut response = vec![0u8; message.len()];
+    stream.read_exact(&mut response).unwrap();
+    assert_eq!(response, message, "forwarded loopback echo changed");
+}
+
+#[test]
+#[ignore = "requires disposable AsyncSSH fixture: scripts/test-native-ssh-smoke.py"]
+fn native_local_remote_and_dynamic_ssh_forwarding() {
+    let fixture = fixture();
+    let echo_port = fixture_port(&fixture, "echo-port");
+    let remote_port = fixture_port(&fixture, "remote-port");
+    let local_port = ephemeral_port();
+    let socks_port = ephemeral_port();
+
+    // The destination for the reverse forward runs in this test, not in a
+    // production service or on an externally reachable interface.
+    let service = TcpListener::bind("127.0.0.1:0").unwrap();
+    let service_port = service.local_addr().unwrap().port();
+    service.set_nonblocking(true).unwrap();
+    let responder = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(9);
+        loop {
+            match service.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    let mut payload = [0; 12];
+                    stream.read_exact(&mut payload).unwrap();
+                    stream.write_all(&payload).unwrap();
+                    return;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "reverse-forward service never used");
+                    thread::sleep(Duration::from_millis(40));
+                }
+                Err(error) => panic!("reverse-forward accept failed: {error}"),
+            }
+        }
+    });
+
+    let session = Session {
+        name: "Disposable forwarding".into(),
+        host: "native-smoke".into(),
+        strict: true,
+        ssh: SshOptions {
+            local_forwards: vec![format!("127.0.0.1:{local_port}:127.0.0.1:{echo_port}")],
+            remote_forwards: vec![format!("127.0.0.1:{remote_port}:127.0.0.1:{service_port}")],
+            dynamic_forwards: vec![format!("127.0.0.1:{socks_port}")],
+            ..SshOptions::default()
+        },
+        ..Session::default()
+    };
+    let (sender, receiver) = mpsc::channel();
+    let mut terminal = connect(9960, sender, &session, Some(&fixture.join("config")))
+        .expect("real Inspirum OpenSSH forwarding terminal must start");
+    wait_text(&mut terminal, "NATIVE_SMOKE_READY");
+
+    // OpenSSH local -L TCP relay through the disposable SSH server.
+    round_trip(&mut connect_loopback(local_port), b"LOCAL_FORWARD");
+    wait_event_count(&fixture.join("server.log"), "LOCAL_FORWARD_ALLOW", 1);
+
+    // SOCKS5 -D relay, including the actual connect handshake and TCP data.
+    let mut socks = connect_loopback(socks_port);
+    socks.write_all(&[5, 1, 0]).unwrap();
+    let mut greeting = [0; 2];
+    socks.read_exact(&mut greeting).unwrap();
+    assert_eq!(greeting, [5, 0], "SOCKS authentication was unexpectedly required");
+    let [hi, lo] = echo_port.to_be_bytes();
+    socks
+        .write_all(&[5, 1, 0, 1, 127, 0, 0, 1, hi, lo])
+        .unwrap();
+    let mut reply = [0; 10];
+    socks.read_exact(&mut reply).unwrap();
+    assert_eq!(&reply[0..2], &[5, 0], "SOCKS connect request failed");
+    round_trip(&mut socks, b"SOCKS_FORWARD");
+
+    // Remote -R listener is server-owned, forwarding back into a local
+    // disposable echo service. The server logs the accepted request.
+    wait_event_count(&fixture.join("server.log"), "REMOTE_FORWARD_ALLOW", 1);
+    round_trip(&mut connect_loopback(remote_port), b"REVERSE_ECHO");
+    responder.join().unwrap();
+
+    write(&mut terminal, "exit\n");
+    wait_exit(&receiver, 9960);
+    drop(terminal);
+    drop(socks);
+    // Forward listeners must go away when the SSH session closes.
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let local_closed = TcpStream::connect(("127.0.0.1", local_port)).is_err();
+        let socks_closed = TcpStream::connect(("127.0.0.1", socks_port)).is_err();
+        let remote_closed = TcpStream::connect(("127.0.0.1", remote_port)).is_err();
+        if local_closed && socks_closed && remote_closed {
+            break;
+        }
+        assert!(Instant::now() < deadline, "SSH forwarding listener survived session exit");
+        thread::sleep(Duration::from_millis(50));
+    }
+    println!("PASS native SSH -L, -R, -D forwarding and listener cleanup");
 }
