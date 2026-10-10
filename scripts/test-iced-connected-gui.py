@@ -40,6 +40,18 @@ class MonitoredSession(fixture.NativeSession):
     def handle_line(self, line: str) -> None:
         if line == "echo:FREE_TYPE_PROBE":
             self.events.write("UNEXPECTED_FREE_TYPE_PTY_INPUT")
+        if line == "echo:LOCK_PROBE":
+            self.events.write("UNEXPECTED_LOCKED_PTY_INPUT")
+        if line == "screen-on":
+            self.events.write("SCREEN_ON")
+            assert self.chan is not None
+            self.chan.write("\x1b[?1049h\x1b[2J\x1b[H\x1b[44;97mNATIVE_FULLSCREEN_ACTIVE\x1b[0m\r\n")
+            return
+        if line == "screen-off":
+            self.events.write("SCREEN_OFF")
+            assert self.chan is not None
+            self.chan.write("\x1b[?1049l")
+            return
         super().handle_line(line)
 
 
@@ -239,7 +251,86 @@ async def main() -> int:
                         f"free-type keyboard text did not visibly populate the local editor: "
                         f"{free_type_pixels} pixels changed"
                     )
+                # Free Type's exit shortcut discards its local draft. Validate
+                # Iced focus-mode and privacy-mode keyboard entry/exit in the
+                # same connected split-pane production process.
+                command("xdotool", "windowfocus", window, "key", "--clearmodifiers",
+                        "ctrl+shift+e", env=env)
+                await asyncio.sleep(.5)
+                screenshot(window, destination / "connected-before-focus-mode.png", env)
+                command("xdotool", "windowfocus", window, "key", "--clearmodifiers",
+                        "alt+Return", env=env)
+                await asyncio.sleep(.6)
+                screenshot(window, destination / "connected-focus-mode.png", env)
+                focus_pixels = diff(
+                    destination / "connected-before-focus-mode.png",
+                    destination / "connected-focus-mode.png", env,
+                )
+                if focus_pixels < 3000:
+                    raise RuntimeError(
+                        f"connected focus-mode shortcut changed only {focus_pixels} pixels"
+                    )
+                command("xdotool", "windowfocus", window, "key", "--clearmodifiers",
+                        "alt+Return", env=env)
+                await asyncio.sleep(.5)
+
+                command("xdotool", "windowfocus", window, "key", "--clearmodifiers",
+                        "ctrl+shift+l", env=env)
+                await asyncio.sleep(.6)
+                screenshot(window, destination / "connected-privacy-curtain.png", env)
+                privacy_pixels = diff(
+                    destination / "connected-before-focus-mode.png",
+                    destination / "connected-privacy-curtain.png", env,
+                )
+                if privacy_pixels < 3000:
+                    raise RuntimeError(
+                        f"privacy curtain did not visibly obscure SSH panes: "
+                        f"{privacy_pixels} pixels changed"
+                    )
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:LOCK_PROBE", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await asyncio.sleep(.6)
+                command("xdotool", "windowfocus", window, "key", "--clearmodifiers",
+                        "ctrl+shift+l", env=env)
+                await asyncio.sleep(.4)
+
+                # The remote end emits the same VT alternate-screen enter/
+                # leave sequences used by full-screen programs. These bytes
+                # travel through a real OpenSSH PTY and production Iced canvas.
+                # This is bounded protocol evidence, not a Vim usability claim.
+                command("xdotool", "mousemove", "--window", window,
+                        "710", "300", "click", "1", env=env)
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "screen-on", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: "SCREEN_ON" in events.path.read_text(encoding="utf-8"),
+                    "live SSH alternate-screen enter",
+                )
+                await asyncio.sleep(.5)
+                screenshot(window, destination / "connected-fullscreen-active.png", env)
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "screen-off", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: "SCREEN_OFF" in events.path.read_text(encoding="utf-8"),
+                    "live SSH alternate-screen leave",
+                )
+                await asyncio.sleep(.5)
+                screenshot(window, destination / "connected-fullscreen-restored.png", env)
+                fullscreen_pixels = diff(
+                    destination / "connected-fullscreen-active.png",
+                    destination / "connected-fullscreen-restored.png", env,
+                )
+                if fullscreen_pixels < 1500:
+                    raise RuntimeError(
+                        f"alternate-screen restore changed only {fullscreen_pixels} pixels"
+                    )
+
                 event_log = events.path.read_text(encoding="utf-8")
+                if "UNEXPECTED_LOCKED_PTY_INPUT" in event_log:
+                    raise RuntimeError("privacy curtain forwarded synthetic keyboard input to SSH")
                 if "UNEXPECTED_FREE_TYPE_PTY_INPUT" in event_log:
                     raise RuntimeError("free-type editing leaked synthetic input to remote SSH PTY")
                 if event_log.count("AUTH_ACCEPT:native-smoke") < 2:
@@ -249,11 +340,14 @@ async def main() -> int:
                     f"Connected split screenshot change: {split_pixels} pixels\n"
                     f"Opened utility dock screenshot change: {files_pixels} pixels\n"
                     f"Free-type draft edit screenshot change: {free_type_pixels} pixels\n"
-                    "PASS: synthetic free-type text remained local without PTY writes\n"
+                    f"Focus-mode screenshot change: {focus_pixels} pixels\n"
+                    f"Privacy-curtain screenshot change: {privacy_pixels} pixels\n"
+                    f"Alternate-screen screenshot change: {fullscreen_pixels} pixels\n"
+                    "PASS: privacy-locked and free-type synthetic text never reached SSH\n"
                     "All keys generated in isolated temporary fixture; no real host or credential.\n",
                     encoding="utf-8",
                 )
-                print("PASS production Iced GUI: connected terminal, split, file dock, free-type keyboard focus and PTY isolation", flush=True)
+                print("PASS production Iced GUI: connected split, file dock, draft, focus/privacy, alternate-screen and PTY isolation", flush=True)
         finally:
             if app is not None and app.poll() is None:
                 app.terminate()
