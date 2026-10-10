@@ -31,6 +31,7 @@ human-approved end-to-end transfer are not interchangeable evidence.
 | E5 | [Current launcher][launcher], [manifest][manifest], [Iced source/tests][icedsource], [source-first dispatch][dispatch], [native two-PTY test][ptytest] | Iced-only entry point, WGPU/tiny-skia dependencies, per-pane modes, destination-specific cursor encoding and failed-source isolation |
 | E6 | [Connected GUI fixture][fixture], [Iced workflow][workflow] | Real authenticated system-OpenSSH client panes against an isolated AsyncSSH server, including its SFTP subsystem, resize, draft/privacy isolation, focus/alternate-screen states and remote Left-key delivery; fixture boundaries are inspectable |
 | E7 | [#78 connected acceptance update][update78], [#78 acceptance contract][issue78], [design/review procedure](design/gui-redesign.md), [keyboard caveats](keyboard-accessibility.md) | Records what is demonstrated and retains device/IME/full-screen/files/latency acceptance, not a human sign-off |
+| E8 | [Connected file-transfer run 38041414853][fileci], head `ced8b1a11bfd2413350f50f4f19547db3f4c9a93`; [Linux job][filejob] | Production Iced on synthetic Linux accepted native pointer selection of the named local/remote rows and Upload/Download controls; retained screenshots show the selected remote filename and completed queue rows, while exact-byte filesystem assertions prove payload integrity at the expected disposable paths |
 
 CI links are historical evidence, not a promise that expiring artifacts remain
 available forever. Preserve the build SHA, run/job URL and relevant original
@@ -46,7 +47,7 @@ Source references E5/E6 are pinned to the snapshot above.
 | Terminal-first shell and sessions | Session library, connection dialog, tabs, focus state, resizable splits, profile/tools access; no egui fallback | E2/E4/E5; production empty/dialog and connected/split states on Linux, separate fixture-only design preview | Human review of empty, connected, split, Files/transfer and connection-dialog states; readable controls, keyboard flow, preserved #55–#62 workflows on native devices |
 | Terminal input and interaction modes | Focus mode, pane-local local navigation, guarded paste, privacy curtain, free-type local draft, remote cursor-key mode | E3–E6; draft/privacy non-delivery assertions, application/normal cursor encoding and source-first failure isolation tests | Native focus restoration, selection/copy/paste, mouse modes, shutdown and real full-screen application interaction; a VT alternate-buffer fixture is not Vim/tmux usability proof |
 | Multi-pane and auxiliary shell | Independent PTYs, explicit sync arming/disarming, auxiliary SSH shell, four-pane limit | E3/E5 two authenticated PTYs and cleanup; E4/E6 connected Linux split and resize continuity | Device-level split/reorder/resize/selection and remote application cursor behavior. Windows ConPTY transport test uses printable probes; raw cursor bytes may become console events |
-| Files and remote editing | Local/remote browser, right/bottom dock, transfer queue and safe remote-editor backends | E5 source plus E2 backend tests. Connected production-Iced upload/download acceptance is pending an exact-head successful run: current Linux artifacts prove the dock and SFTP handshake, but not file-row selection or completed GUI transfers | Native macOS/Windows connected upload/download, SCP, overwrite/conflict/cancel/resume, remote-editor save, and named-device target-identity/usability review while the terminal stays usable; Linux human review also remains distinct from automation |
+| Files and remote editing | Local/remote browser, right/bottom dock, transfer queue and safe remote-editor backends | E5 source plus E2 backend tests. E8 adds bounded synthetic-Linux production-Iced evidence: native pointer row/button actions, visible selected filename and completed transfer queue, plus separate exact-byte assertions at the expected disposable local/chroot paths | Native macOS/Windows connected upload/download, SCP, overwrite/conflict/cancel/resume, remote-editor save, and named-device target-identity/usability review while the terminal stays usable; Linux human review also remains distinct from automation |
 | IME/CJK, typography and scaling | Committed Unicode routing, Iced IME integration, terminal fonts/appearance and cursor rendering | E5 source/regressions; parser/encoding tests are not candidate-window tests | Actual native composition/preedit/candidates/commit/cancel in terminal and editors; CJK/dead keys/emoji; native and 100/125/150/200% scales where supported; contrast, clipping, focus and accessibility review |
 | GPU and responsiveness | WGPU/Metal build with tiny-skia fallback; bounded redraw/cache work and opt-in timing tools | E2/E4 native build/tests; E5; [trace procedure](design/gui-redesign.md#opt-in-slow-stage-tracing) | Affected physical Apple Silicon Mac: external click-to-visible-caret p50/p95 and text-entry latency, actual renderer selection, GPU/software comparison on the same workload; CPU-stage timings cannot prove screen latency |
 | Release packaging | Native archives, dependency notices, architecture/metadata checks and clean extracted executable verification | E2 successful native package/download gates | Named-device operational qualification is still pending. Archives remain unsigned/unnotarized; signing/notarization, installers/app bundles and update policy are separate unresolved release work, not delivered by this docs PR |
@@ -79,13 +80,14 @@ remain provisional targets, not measured results. This change performs no new
 GUI, hardware, physical display or human acceptance testing. It reconciles
 source and already-recorded CI; #78 remains the full acceptance gate.
 
-The connected Linux file-transfer fixture is intended to report two evidence
-layers separately: native pointer actions through production Iced controls and
-exact-byte reads from the expected disposable local/chroot roots. Until an
-exact-head CI run completes both layers, transfer acceptance remains pending;
-a dock screenshot or SFTP handshake alone is not transfer proof. Even a passing
-fixture would not demonstrate physical-device usability, native macOS/Windows
-behavior, IME, SCP, conflict/cancel/resume, or remote-editor acceptance.
+The connected Linux file-transfer fixture reports two evidence layers
+separately: native pointer actions through production Iced controls, including a
+retained screenshot of the selected remote filename, and exact-byte reads from
+the expected disposable local/chroot roots. E8 completed both layers; a dock
+screenshot, SFTP handshake or queue row alone would not prove transfer
+integrity. This passing synthetic fixture does not demonstrate physical-device
+usability, native macOS/Windows behavior, IME, SCP, conflict/cancel/resume, or
+remote-editor acceptance.
 
 ## Proposed roadmap issue corrections (not applied here)
 
@@ -108,6 +110,8 @@ limitations. No issue body, issue state, release or merge is changed here.
 [prci]: https://github.com/garyz-inspirum/inspirum-terminal/actions/runs/38034023790
 [icedci]: https://github.com/garyz-inspirum/inspirum-terminal/actions/runs/38034023898
 [linuxjob]: https://github.com/garyz-inspirum/inspirum-terminal/actions/runs/38034023898/job/114160630821
+[fileci]: https://github.com/garyz-inspirum/inspirum-terminal/actions/runs/38041414853
+[filejob]: https://github.com/garyz-inspirum/inspirum-terminal/actions/runs/38041414853/job/114182251319
 [update78]: https://github.com/garyz-inspirum/inspirum-terminal/issues/78#issuecomment-6094497346
 [launcher]: https://github.com/garyz-inspirum/inspirum-terminal/blob/8b6dbbe74b1c2188e4f0ccb4b33bfa7420aff018/src/main.rs#L171
 [manifest]: https://github.com/garyz-inspirum/inspirum-terminal/blob/8b6dbbe74b1c2188e4f0ccb4b33bfa7420aff018/Cargo.toml
