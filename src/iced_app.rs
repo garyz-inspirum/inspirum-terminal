@@ -963,6 +963,7 @@ enum Message {
     AskClose(usize),
     ConfirmClose(usize),
     ToggleFiles,
+    FilesToggleDockPosition,
     ToggleAuxiliaryShell,
     FilesRefresh,
     FilesLocalUp,
@@ -2146,6 +2147,7 @@ struct App {
     dock: pane_grid::State<Dock>,
     terminal_dock: pane_grid::Pane,
     files_dock: Option<pane_grid::Pane>,
+    files_side_dock: bool,
     files: FilesState,
     remote_editor: Option<RemoteEditorState>,
     snippets_path: PathBuf,
@@ -2233,6 +2235,7 @@ impl App {
             dock,
             terminal_dock,
             files_dock: None,
+            files_side_dock: false,
             files: FilesState::new(),
             remote_editor: None,
             snippets_path,
@@ -2689,12 +2692,19 @@ impl App {
         if let Some(pane) = self.files_dock.take() {
             self.dock.close(pane);
         } else if !self.tabs.is_empty()
-            && let Some((pane, split)) =
-                self.dock
-                    .split(pane_grid::Axis::Horizontal, self.terminal_dock, Dock::Files)
+            && let Some((pane, split)) = self.dock.split(
+                if self.files_side_dock {
+                    pane_grid::Axis::Vertical
+                } else {
+                    pane_grid::Axis::Horizontal
+                },
+                self.terminal_dock,
+                Dock::Files,
+            )
         {
             self.files_dock = Some(pane);
-            self.dock.resize(split, 0.62);
+            self.dock
+                .resize(split, if self.files_side_dock { 0.50 } else { 0.62 });
         }
     }
 
@@ -3571,6 +3581,21 @@ impl App {
                 if opening && self.files_dock.is_some() {
                     return self.reload_files();
                 }
+            }
+            Message::FilesToggleDockPosition => {
+                if self.files_dock.is_none() || self.dialog.is_some() || self.privacy_locked {
+                    return Task::none();
+                }
+                // Only alter pane-grid chrome. The selected remote target,
+                // outstanding transfer jobs and any remote editor stay intact.
+                self.toggle_files();
+                self.files_side_dock = !self.files_side_dock;
+                self.toggle_files();
+                self.status = if self.files_side_dock {
+                    "Files explorer docked on the right.".into()
+                } else {
+                    "Files explorer docked at the bottom.".into()
+                };
             }
             Message::FilesRefresh => return self.reload_files(),
             Message::FilesLocalUp => {
@@ -5821,6 +5846,62 @@ impl App {
                 transfer_list.push(text("No transfers for this session.").size(11).color(MUTED));
         }
 
+        let file_panels: Element<'_, Message> = if self.files_side_dock {
+            column![local_panel, remote_panel]
+                .spacing(8)
+                .height(Fill)
+                .into()
+        } else {
+            row![local_panel, remote_panel].spacing(8).height(Fill).into()
+        };
+        let actions_panel: Element<'_, Message> = if self.files_side_dock {
+            column![
+                row![
+                    action("Upload ->", Message::FilesRequestUpload),
+                    action("<- Download", Message::FilesRequestDownload),
+                ]
+                .spacing(8),
+                row![
+                    action("New local folder", Message::FilesRequestMkdirLocal),
+                    action("New remote folder", Message::FilesRequestMkdirRemote),
+                ]
+                .spacing(8),
+                row![
+                    action("Rename local", Message::FilesRequestRenameLocal),
+                    action("Rename remote", Message::FilesRequestRenameRemote),
+                    action("Edit remote", Message::FilesRequestEditRemote),
+                ]
+                .spacing(8),
+                row![
+                    action("Delete local", Message::FilesRequestDeleteLocal),
+                    action("Delete remote", Message::FilesRequestDeleteRemote),
+                ]
+                .spacing(8),
+            ]
+            .spacing(6)
+            .into()
+        } else {
+            column![
+                row![
+                    action("Upload ->", Message::FilesRequestUpload),
+                    action("<- Download", Message::FilesRequestDownload),
+                    action("New local folder", Message::FilesRequestMkdirLocal),
+                    action("New remote folder", Message::FilesRequestMkdirRemote),
+                ]
+                .spacing(8),
+                row![
+                    action("Rename local", Message::FilesRequestRenameLocal),
+                    action("Rename remote", Message::FilesRequestRenameRemote),
+                    action("Edit remote", Message::FilesRequestEditRemote),
+                    action("Delete local", Message::FilesRequestDeleteLocal),
+                    action("Delete remote", Message::FilesRequestDeleteRemote),
+                ]
+                .spacing(8),
+            ]
+            .spacing(8)
+            .into()
+        };
+
         container(
             column![
                 row![
@@ -5829,31 +5910,18 @@ impl App {
                     text(activity).size(11).color(MUTED),
                     space::horizontal(),
                     action("Refresh", Message::FilesRefresh),
+                    action(
+                        if self.files_side_dock { "Dock bottom" } else { "Dock right" },
+                        Message::FilesToggleDockPosition
+                    ),
                 ]
                 .spacing(12)
                 .align_y(iced::Center),
-                row![local_panel, remote_panel].spacing(8).height(Fill),
-                row![
-                    action("Upload ->", Message::FilesRequestUpload),
-                    action("<- Download", Message::FilesRequestDownload),
-                    action("New local folder", Message::FilesRequestMkdirLocal),
-                    action("New remote folder", Message::FilesRequestMkdirRemote),
-                ]
-                .spacing(8)
-                .align_y(iced::Center),
-                row![
-                    action("Rename local", Message::FilesRequestRenameLocal),
-                    action("Rename remote", Message::FilesRequestRenameRemote),
-                    action("Edit remote", Message::FilesRequestEditRemote),
-                    action("Delete local", Message::FilesRequestDeleteLocal),
-                    action("Delete remote", Message::FilesRequestDeleteRemote),
-                    space::horizontal(),
-                    text("File actions reuse the validated SFTP/local-file policy; destructive actions still require confirmation.")
-                        .size(11)
-                        .color(MUTED),
-                ]
-                .spacing(8)
-                .align_y(iced::Center),
+                file_panels,
+                actions_panel,
+                text("Destructive file operations require confirmation.")
+                    .size(11)
+                    .color(MUTED),
                 if let Some(editor) = self
                     .remote_editor
                     .as_ref()
@@ -7535,6 +7603,38 @@ mod tests {
         app.active = 1;
         assert!(!app.active_session_matches(&first_key));
         assert!(app.active_session_matches(&second_key));
+    }
+
+    #[test]
+    fn files_explorer_can_move_to_side_without_losing_transfer_context() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-files-dock-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session {
+            host: "example.invalid".into(),
+            name: "dock fixture".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        app.tabs.push(Workspace::new(profile, pane));
+        app.files.session_key = Some("preserve-transfer-target".into());
+        app.files.remote_dir = "/work/important".into();
+        app.toggle_files();
+        assert!(app.files_dock.is_some());
+        assert!(!app.files_side_dock);
+        let _ = app.update(Message::FilesToggleDockPosition);
+        assert!(app.files_side_dock);
+        assert!(app.files_dock.is_some());
+        assert_eq!(app.files.remote_dir, "/work/important");
+        assert_eq!(app.files.session_key.as_deref(), Some("preserve-transfer-target"));
+        let _ = app.update(Message::FilesToggleDockPosition);
+        assert!(!app.files_side_dock);
+        assert!(app.files_dock.is_some());
+        let _ = app.update(Message::TogglePrivacyLock);
+        let _ = app.update(Message::FilesToggleDockPosition);
+        assert!(!app.files_side_dock, "privacy lock prevents re-docking");
     }
 
     #[test]
