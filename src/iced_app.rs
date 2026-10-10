@@ -5852,7 +5852,10 @@ impl App {
                 .height(Fill)
                 .into()
         } else {
-            row![local_panel, remote_panel].spacing(8).height(Fill).into()
+            row![local_panel, remote_panel]
+                .spacing(8)
+                .height(Fill)
+                .into()
         };
         let actions_panel: Element<'_, Message> = if self.files_side_dock {
             column![
@@ -7628,7 +7631,10 @@ mod tests {
         assert!(app.files_side_dock);
         assert!(app.files_dock.is_some());
         assert_eq!(app.files.remote_dir, "/work/important");
-        assert_eq!(app.files.session_key.as_deref(), Some("preserve-transfer-target"));
+        assert_eq!(
+            app.files.session_key.as_deref(),
+            Some("preserve-transfer-target")
+        );
         let _ = app.update(Message::FilesToggleDockPosition);
         assert!(!app.files_side_dock);
         assert!(app.files_dock.is_some());
