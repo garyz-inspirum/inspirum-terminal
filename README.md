@@ -5,7 +5,7 @@ Inspirum Terminal is a fully open-source Apache-2.0, cross-platform native SSH c
 Current scope:
 
 - native Iced desktop window (the default build and launcher);
-- Iced GPU rendering on Linux/Windows and native tiny-skia rendering on macOS;
+- Iced GPU rendering on Linux/Windows and Metal/WGPU on macOS Apple Silicon, with a tiny-skia software fallback (runtime renderer choice/performance still require real-device measurement);
 - Iced canvas terminal rendering with the toolkit-neutral `terminal_core` PTY/state backend;
 - SSH sessions, interactive SFTP tabs, a graphical SFTP browser/transfer queue, and explicit SCP upload/download operations launched through the system OpenSSH client tools;
 - saved, non-secret connection profiles with search, rename-on-save, editable duplication, confirmed deletion, and validated JSON import/export;
@@ -18,7 +18,7 @@ Current scope:
 
 ## Verification status
 
-The current `main` release-candidate baseline is merge commit `17d353d3166f8c5a85f44329114530d3338462c9`. Post-merge CI run #214 (`37443065634`) passed the full native matrix on Linux x86_64, Windows x64, and macOS Apple Silicon.
+The historical SSH-first release-candidate baseline was merge commit `17d353d3166f8c5a85f44329114530d3338462c9`; its post-merge CI run #214 (`37443065634`) passed Linux x86_64, Windows x64 and macOS Apple Silicon. Numerous subsequent Iced-only GUI and native SSH acceptance changes are merged; see `docs/PARITY.md` and the latest workflow runs for current evidence. That older commit is **not** the current `main` revision.
 
 Verified evidence:
 
