@@ -116,9 +116,15 @@ class NativeSession(asyncssh.SSHServerSession):
 
 
 class NativeServer(asyncssh.SSHServer):
-    def __init__(self, allowed_key: asyncssh.SSHKey, events: EventLog) -> None:
+    def __init__(
+        self,
+        allowed_key: asyncssh.SSHKey,
+        events: EventLog,
+        jump_target_port: int | None = None,
+    ) -> None:
         self.allowed_key = allowed_key
         self.events = events
+        self.jump_target_port = jump_target_port
 
     def connection_made(self, conn: asyncssh.SSHServerConnection) -> None:
         del conn
@@ -142,6 +148,20 @@ class NativeServer(asyncssh.SSHServer):
 
     def session_requested(self) -> NativeSession:
         return NativeSession(self.events)
+
+    def connection_requested(
+        self, dest_host: str, dest_port: int, orig_host: str, orig_port: int
+    ) -> bool:
+        # Only the explicitly configured fixture target may be accessed
+        # through the disposable jump server. No arbitrary remote forwarding.
+        del orig_host, orig_port
+        allowed = (
+            self.jump_target_port is not None
+            and dest_host in ("127.0.0.1", "localhost")
+            and dest_port == self.jump_target_port
+        )
+        self.events.write(f"JUMP_FORWARD_{'ALLOW' if allowed else 'DENY'}")
+        return allowed
 
 
 def write_config(
@@ -177,6 +197,35 @@ def write_config(
     )
 
 
+def add_jump_host(
+    config: Path,
+    *,
+    jump_port: int,
+    identity: Path,
+    known_hosts: Path,
+    global_known_hosts: Path,
+) -> None:
+    with config.open("a", encoding="utf-8") as stream:
+        stream.write(
+            "\n".join([
+                "Host native-hop",
+                " HostName 127.0.0.1",
+                f" Port {jump_port}",
+                " User native-smoke",
+                f" IdentityFile {identity}",
+                " IdentitiesOnly yes",
+                " IdentityAgent none",
+                f" UserKnownHostsFile {known_hosts}",
+                f" GlobalKnownHostsFile {global_known_hosts}",
+                " StrictHostKeyChecking yes",
+                " BatchMode yes",
+                " ConnectTimeout 3",
+                " ProxyCommand none",
+                "",
+            ])
+        )
+
+
 async def main() -> int:
     root_base = Path(
         os.environ.get("INSPIRUM_TEST_TMPDIR", tempfile.gettempdir())
@@ -190,6 +239,7 @@ async def main() -> int:
 
         host_key = generate_key(root, "host")
         wrong_host_key = generate_key(root, "wrong-host")
+        jump_host_key = generate_key(root, "jump-host")
         client_key = generate_key(root, "client")
         allowed_key = asyncssh.read_public_key(str(client_key) + ".pub")
 
@@ -204,8 +254,22 @@ async def main() -> int:
         if port <= 0:
             raise RuntimeError(f"AsyncSSH did not allocate a TCP port: {port}")
 
+        jump_events = EventLog(root / "jump.log")
+        jump_events.path.write_text("", encoding="utf-8")
+        jump_server = await asyncssh.create_server(
+            lambda: NativeServer(allowed_key, jump_events, jump_target_port=port),
+            "127.0.0.1",
+            0,
+            server_host_keys=[str(jump_host_key)],
+            encoding="utf-8",
+        )
+        jump_port = jump_server.get_port()
+        if jump_port <= 0:
+            raise RuntimeError("AsyncSSH jump server did not bind a loopback port")
+
         host_type, host_data = public_fields(Path(str(host_key) + ".pub"))
         wrong_type, wrong_data = public_fields(Path(str(wrong_host_key) + ".pub"))
+        jump_type, jump_data = public_fields(Path(str(jump_host_key) + ".pub"))
         known_hosts = root / "known_hosts"
         changed_known_hosts = root / "changed_known_hosts"
         global_known_hosts = root / "global_known_hosts"
@@ -216,6 +280,12 @@ async def main() -> int:
         changed_known_hosts.write_text(
             f"[127.0.0.1]:{port} {wrong_type} {wrong_data}\n", encoding="utf-8"
         )
+        # Separate port-scoped trust records for the destination and jump hop.
+        hop_trust = f"[127.0.0.1]:{jump_port} {jump_type} {jump_data}\n"
+        with known_hosts.open("a", encoding="utf-8") as file:
+            file.write(hop_trust)
+        with changed_known_hosts.open("a", encoding="utf-8") as file:
+            file.write(hop_trust)
         write_config(
             root / "config",
             port=port,
@@ -228,6 +298,51 @@ async def main() -> int:
             port=port,
             identity=client_key,
             known_hosts=changed_known_hosts,
+            global_known_hosts=global_known_hosts,
+        )
+
+        write_config(
+            root / "jump-config",
+            port=port,
+            identity=client_key,
+            known_hosts=known_hosts,
+            global_known_hosts=global_known_hosts,
+        )
+        add_jump_host(
+            root / "jump-config",
+            jump_port=jump_port,
+            identity=client_key,
+            known_hosts=known_hosts,
+            global_known_hosts=global_known_hosts,
+        )
+        write_config(
+            root / "jump-changed-config",
+            port=port,
+            identity=client_key,
+            known_hosts=changed_known_hosts,
+            global_known_hosts=global_known_hosts,
+        )
+        add_jump_host(
+            root / "jump-changed-config",
+            jump_port=jump_port,
+            identity=client_key,
+            known_hosts=changed_known_hosts,
+            global_known_hosts=global_known_hosts,
+        )
+        write_config(
+            root / "jump-broken-config",
+            port=port,
+            identity=client_key,
+            known_hosts=known_hosts,
+            global_known_hosts=global_known_hosts,
+        )
+        # A known destination must not silently succeed when its configured
+        # jump is unavailable. TCP port 0 is never a valid connection target.
+        add_jump_host(
+            root / "jump-broken-config",
+            jump_port=1,
+            identity=client_key,
+            known_hosts=known_hosts,
             global_known_hosts=global_known_hosts,
         )
 
@@ -250,7 +365,9 @@ async def main() -> int:
         try:
             await asyncio.to_thread(run, command, env=env)
         finally:
+            jump_server.close()
             server.close()
+            await jump_server.wait_closed()
             await server.wait_closed()
 
         log = events.path.read_text(encoding="utf-8")
@@ -258,6 +375,9 @@ async def main() -> int:
         print(log, end="")
         if "AUTH_ACCEPT:native-smoke" not in log:
             raise RuntimeError("native SSH fixture never authenticated the test key")
+        jump_log = jump_events.path.read_text(encoding="utf-8")
+        if "JUMP_FORWARD_ALLOW" not in jump_log:
+            raise RuntimeError("the native ProxyJump acceptance never opened its hop")
         return 0
     finally:
         shutil.rmtree(root, ignore_errors=True)
