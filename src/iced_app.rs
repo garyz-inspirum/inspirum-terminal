@@ -3054,6 +3054,7 @@ impl App {
                             | tools::Action::TmuxCreate
                             | tools::Action::SftpTerminal
                             | tools::Action::SyncArm(..)
+                            | tools::Action::SyncTarget(..)
                     )
             )
         {
