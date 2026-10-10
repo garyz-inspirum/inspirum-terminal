@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from pathlib import Path
 import socket
 import shutil
@@ -106,10 +107,34 @@ class NativeSession(asyncssh.SSHServerSession):
             self.chan.write(f"NATIVE_ECHO:{line[5:]}\r\n")
         elif line == "size":
             self.chan.write(f"NATIVE_SIZE:{self.height} {self.width}\r\n")
+        elif line == "agent-probe":
+            asyncio.create_task(self.agent_probe())
         elif line == "exit":
             self.events.write("SESSION_EXIT_REQUEST")
             self.chan.exit(0)
             self.chan.close()
+
+    async def agent_probe(self) -> None:
+        assert self.chan is not None
+        path = self.chan.get_agent_path()
+        if not path:
+            self.events.write("AGENT_DISABLED")
+            self.chan.write("NATIVE_AGENT_DISABLED\r\n")
+            return
+        try:
+            agent = await asyncio.wait_for(asyncssh.connect_agent(path), timeout=5)
+            try:
+                keys = await asyncio.wait_for(agent.get_keys(), timeout=5)
+            finally:
+                agent.close()
+            if not keys:
+                raise RuntimeError("forwarded agent returned no identities")
+        except Exception as error:
+            self.events.write(f"AGENT_PROBE_ERROR:{type(error).__name__}")
+            self.chan.write("NATIVE_AGENT_ERROR\r\n")
+        else:
+            self.events.write("AGENT_FORWARDED")
+            self.chan.write("NATIVE_AGENT_FORWARDED\r\n")
 
     def connection_lost(self, exc: Exception | None) -> None:
         state = "clean" if exc is None else type(exc).__name__
@@ -185,6 +210,7 @@ def write_config(
     identity: Path,
     known_hosts: Path,
     global_known_hosts: Path,
+    identity_agent: Path | None = None,
 ) -> None:
     # Keep every file runner-local and avoid platform-specific /dev/null/NUL paths.
     path.write_text(
@@ -196,7 +222,7 @@ def write_config(
                 " User native-smoke",
                 f" IdentityFile {identity}",
                 " IdentitiesOnly yes",
-                " IdentityAgent none",
+                f" IdentityAgent {identity_agent}" if identity_agent else " IdentityAgent none",
                 f" UserKnownHostsFile {known_hosts}",
                 f" GlobalKnownHostsFile {global_known_hosts}",
                 " BatchMode yes",
@@ -288,6 +314,7 @@ async def main() -> int:
             0,
             server_host_keys=[str(host_key)],
             encoding="utf-8",
+            agent_forwarding=True,
         )
         port = server.get_port()
         if port <= 0:
@@ -407,6 +434,35 @@ async def main() -> int:
             global_known_hosts=global_known_hosts,
         )
 
+        # Disposable local UNIX-domain ssh-agent. On Windows, agent forwarding
+        # requires separate named-pipe capability acceptance.
+        agent_process = None
+        agent_dir = None
+        if os.name != "nt":
+            agent_dir = Path(tempfile.mkdtemp(prefix="insp-forward-", dir="/tmp"))
+            agent_socket = agent_dir / "agent.sock"
+            agent_process = subprocess.Popen(
+                ["ssh-agent", "-D", "-a", str(agent_socket)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            deadline = time.monotonic() + 8
+            while not agent_socket.exists() and agent_process.poll() is None:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("isolated ssh-agent socket did not become ready")
+                await asyncio.sleep(.05)
+            if not agent_socket.exists():
+                raise RuntimeError("isolated ssh-agent exited before creating its socket")
+            run(
+                ["ssh-add", str(client_key)],
+                env=dict(os.environ, SSH_AUTH_SOCK=str(agent_socket)),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            write_config(
+                root / "agent-config",
+                port=port, identity=client_key, known_hosts=known_hosts,
+                global_known_hosts=global_known_hosts, identity_agent=agent_socket,
+            )
+
         env = dict(os.environ)
         env["INSPIRUM_NATIVE_SSH_FIXTURE"] = str(root)
         command = [
@@ -426,6 +482,15 @@ async def main() -> int:
         try:
             await asyncio.to_thread(run, command, env=env)
         finally:
+            if agent_process is not None:
+                agent_process.terminate()
+                try:
+                    agent_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    agent_process.kill()
+                    agent_process.wait(timeout=5)
+            if agent_dir is not None:
+                shutil.rmtree(agent_dir, ignore_errors=True)
             jump_server.close()
             server.close()
             echo_server.close()
