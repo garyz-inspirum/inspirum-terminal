@@ -2526,17 +2526,9 @@ impl App {
     fn write_source_then_mirrors(
         source: u64,
         targets: &[u64],
-        mut write: impl FnMut(u64) -> bool,
+        write: impl FnMut(u64) -> bool,
     ) -> bool {
-        if !write(source) {
-            return false;
-        }
-        for &target in targets {
-            if target != source {
-                let _ = write(target);
-            }
-        }
-        true
+        terminal_ux::source_first_synced_write(source, targets, write)
     }
 
     fn remote_terminal_mode(&self, id: u64) -> terminal_core::TerminalMode {
@@ -7327,6 +7319,89 @@ mod tests {
             vec![20, 10, 30],
             "focused source must be written first"
         );
+    }
+
+    #[test]
+    fn remote_keys_are_explicit_opt_in_and_encode_per_pty_cursor_mode() {
+        let shortcut = keyboard::Key::Character("m".into());
+        let cmd = if cfg!(target_os = "macos") {
+            keyboard::Modifiers::LOGO
+        } else {
+            keyboard::Modifiers::CTRL
+        };
+        assert!(remote_keys_chord(&shortcut, cmd | keyboard::Modifiers::SHIFT));
+        assert!(!remote_keys_chord(&shortcut, cmd));
+        assert_eq!(
+            remote_vim_key(&keyboard::Key::Character("h".into()), keyboard::Modifiers::empty()),
+            Some(RemoteCursorKey::Left)
+        );
+        assert_eq!(
+            remote_vim_key(&keyboard::Key::Character("j".into()), keyboard::Modifiers::empty()),
+            Some(RemoteCursorKey::Down)
+        );
+        assert_eq!(
+            remote_vim_key(&keyboard::Key::Character("k".into()), keyboard::Modifiers::empty()),
+            Some(RemoteCursorKey::Up)
+        );
+        assert_eq!(
+            remote_vim_key(&keyboard::Key::Character("l".into()), keyboard::Modifiers::empty()),
+            Some(RemoteCursorKey::Right)
+        );
+        assert_eq!(
+            remote_vim_key(&keyboard::Key::Character("h".into()), keyboard::Modifiers::CTRL),
+            None,
+            "modifier chords must not accidentally navigate an SSH PTY"
+        );
+        assert_eq!(
+            remote_cursor_bytes(RemoteCursorKey::Left, terminal_core::TerminalMode::empty()),
+            b"\x1b[D"
+        );
+        assert_eq!(
+            remote_cursor_bytes(RemoteCursorKey::Left, terminal_core::TerminalMode::APP_CURSOR),
+            b"\x1bOD",
+            "application cursor mode must be encoded per destination"
+        );
+        assert_eq!(
+            remote_cursor_bytes(RemoteCursorKey::Home, terminal_core::TerminalMode::empty()),
+            b"\x1b[H"
+        );
+    }
+
+    #[test]
+    fn remote_keys_block_unfocused_disconnected_locked_and_draft_panes() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-remote-keys-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session {
+            name: "remote keys fixture".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let first = app.new_terminal_pane(profile.clone());
+        let first_id = first.id;
+        app.tabs.push(Workspace::new(profile.clone(), first));
+        let second = app.new_terminal_pane(profile);
+        let second_id = second.id;
+        app.tabs[0].split(pane_grid::Axis::Vertical, second);
+        assert!(!app.send_remote_cursor(first_id, RemoteCursorKey::Left));
+        let _ = app.update(Message::ToggleRemoteKeys(first_id));
+        assert!(!app.remote_keys.contains(&first_id), "unfocused pane cannot enter keys mode");
+        let _ = app.update(Message::ToggleRemoteKeys(second_id));
+        assert!(app.remote_keys.contains(&second_id));
+        assert!(!app.send_remote_cursor(second_id, RemoteCursorKey::Left), "no backend");
+        let _ = app.update(Message::ToggleFreeType(second_id));
+        assert!(!app.free_type.contains_key(&second_id), "remote and draft modes exclude each other");
+        let _ = app.update(Message::ToggleLocalNavigation);
+        assert!(!app.local_navigation.contains(&second_id), "remote/local modes exclude each other");
+        let _ = app.update(Message::TogglePrivacyLock);
+        let _ = app.update(Message::ToggleRemoteKeys(second_id));
+        assert!(app.remote_keys.contains(&second_id), "privacy curtain blocks mode changes");
+        assert!(!app.send_remote_cursor(second_id, RemoteCursorKey::Left));
+        let _ = app.update(Message::TogglePrivacyLock);
+        let _ = app.update(Message::ClosePane(app.tabs[0].focus));
+        assert!(!app.remote_keys.contains(&second_id), "closed pane must not remain a key target");
     }
 
     #[test]
