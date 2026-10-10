@@ -130,6 +130,19 @@ async def monitored_shell(
 
 
 
+class MonitoredSFTPServer(asyncssh.SFTPServer):
+    """Record only bounded fixture lifecycle markers, never paths or contents."""
+
+    def __init__(self, chan, root: Path, events: fixture.EventLog) -> None:
+        super().__init__(chan, chroot=str(root))
+        self.events = events
+
+    async def scandir(self, path: bytes):
+        async for entry in super().scandir(path):
+            yield entry
+        self.events.write("SFTP_LIST_READY")
+
+
 def isolated_sftp_server(
     chan: asyncssh.SSHServerChannel,
     root: Path,
@@ -138,7 +151,7 @@ def isolated_sftp_server(
     # This is the *real* SSH subsystem used by the Files dock; it is restricted
     # to a generated disposable directory and not the runner's home folder.
     events.write("SFTP_SUBSYSTEM_STARTED")
-    return asyncssh.SFTPServer(chan, chroot=str(root))
+    return MonitoredSFTPServer(chan, root, events)
 
 
 def command(*args: str, env: dict[str, str], timeout: float = 12) -> str:
@@ -173,43 +186,26 @@ async def wait_for(predicate, label: str, *, timeout: float = 22) -> None:
         await asyncio.sleep(.2)
 
 
-async def click_transfer_until(
+async def click_transfer(
     *,
     window: str,
     env: dict[str, str],
-    row_x: int,
-    action_xs: tuple[int, ...],
+    row: tuple[int, int],
+    action: tuple[int, int],
     completed,
     label: str,
 ) -> None:
-    """Exercise fixed-size CI file controls without bypassing Iced messages.
-
-    Iced does not expose widget IDs to xdotool. The connected fixture therefore
-    probes a bounded set of points inside the first file row and the requested
-    transfer button on the fixed 1280x800 Iced window. Failed probes are dismissed;
-    success is accepted only when the isolated filesystem effect is complete.
-    """
-    row_ys = (574, 594, 614)
-    action_ys = (638, 648, 658)
-    for row_y in row_ys:
-        for action_y in action_ys:
-            for action_x in action_xs:
-                command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
-                command(
-                    "xdotool", "mousemove", "--window", window,
-                    str(row_x), str(row_y), "click", "1", env=env,
-                )
-                await asyncio.sleep(.18)
-                command(
-                    "xdotool", "mousemove", "--window", window,
-                    str(action_x), str(action_y), "click", "1", env=env,
-                )
-                try:
-                    await wait_for(completed, label, timeout=1.2)
-                    return
-                except RuntimeError:
-                    continue
-    raise RuntimeError(f"bounded native clicks never completed {label}")
+    """Select one visibly rendered row and activate one production Iced button."""
+    command(
+        "xdotool", "mousemove", "--window", window,
+        str(row[0]), str(row[1]), "click", "1", env=env,
+    )
+    await asyncio.sleep(.25)
+    command(
+        "xdotool", "mousemove", "--window", window,
+        str(action[0]), str(action[1]), "click", "1", env=env,
+    )
+    await wait_for(completed, label)
 
 
 def reserved_display() -> str:
@@ -393,7 +389,19 @@ async def main() -> int:
                     "xdotool", "mousemove", "--window", window,
                     "1207", "555", "click", "1", env=env,
                 )
-                await asyncio.sleep(1)
+                await wait_for(
+                    lambda: "SFTP_LIST_READY" in events.path.read_text(encoding="utf-8"),
+                    "completed remote listing before file-row interaction",
+                )
+                await asyncio.sleep(.7)
+                geometry = command(
+                    "xdotool", "getwindowgeometry", "--shell", window, env=env,
+                )
+                if "WIDTH=1280" not in geometry or "HEIGHT=800" not in geometry:
+                    raise RuntimeError(
+                        "connected file coordinates require the production 1280x800 "
+                        f"window captured by this fixture; geometry was {geometry!r}"
+                    )
                 screenshot(window, destination / "connected-files-side-dock.png", env)
                 side_dock_pixels = diff(
                     destination / "connected-files-dock.png",
@@ -409,14 +417,18 @@ async def main() -> int:
                 # integrity oracle; a screenshot delta or SFTP handshake alone
                 # is not accepted as proof of a completed GUI transfer.
                 uploaded = remote_root / upload_name
-                await click_transfer_until(
+                # Exact centers come from the retained 1280x800 side-dock
+                # artifact: the named rows are fully visible in separate cards,
+                # above a non-overlapping action toolbar. These are single native
+                # clicks, not coordinate probes or direct message invocation.
+                await click_transfer(
                     window=window,
                     env=env,
-                    row_x=505,
-                    action_xs=(350, 380, 410),
+                    row=(1040, 295),
+                    action=(835, 497),
                     completed=lambda: uploaded.is_file()
                     and uploaded.read_bytes() == upload_bytes,
-                    label="click-driven SFTP upload into native-smoke isolated root",
+                    label="click-driven SFTP upload into expected remote fixture root",
                 )
                 await asyncio.sleep(.7)
                 screenshot(window, destination / "connected-files-uploaded.png", env)
@@ -426,20 +438,18 @@ async def main() -> int:
                 # through the production button and verify the exact binary
                 # payload landed in the visible local browser directory.
                 downloaded = local_root / download_name
-                await click_transfer_until(
+                await click_transfer(
                     window=window,
                     env=env,
-                    row_x=1040,
-                    action_xs=(455, 490, 525),
+                    row=(1040, 422),
+                    action=(947, 497),
                     completed=lambda: downloaded.is_file()
                     and downloaded.read_bytes() == download_bytes,
-                    label="click-driven SFTP download from native-smoke isolated root",
+                    label="click-driven SFTP download into expected local fixture root",
                 )
                 await asyncio.sleep(.7)
                 screenshot(window, destination / "connected-files-downloaded.png", env)
 
-                if uploaded.parent != remote_root or downloaded.parent != local_root:
-                    raise RuntimeError("GUI transfer escaped its synthetic target roots")
                 if uploaded.read_bytes() != upload_bytes:
                     raise RuntimeError("click-driven GUI upload failed exact-byte integrity")
                 if downloaded.read_bytes() != download_bytes:
@@ -647,7 +657,7 @@ async def main() -> int:
                     "PASS: PTY resize events preserved both SSH shell sessions through the test\n"
                     "PASS: click-driven SFTP upload preserved exact binary bytes in the native-smoke chroot\n"
                     "PASS: click-driven SFTP download preserved exact binary bytes in the visible local directory\n"
-                    "PASS: transfer targets remained bound to native-smoke and the two disposable fixture roots\n"
+                    "PASS: exact payloads appeared at the expected disposable remote and local paths\n"
                     f"Connected split screenshot change: {split_pixels} pixels\n"
                     f"Opened utility dock screenshot change: {files_pixels} pixels\n"
                     f"Closed SFTP utility dock screenshot change: {closed_pixels} pixels\n"
