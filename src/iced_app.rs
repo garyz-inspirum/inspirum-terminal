@@ -2296,8 +2296,8 @@ fn bottom_files_layout_policy() -> FilesLayoutPolicy {
         // the supported minimum window size. The surrounding column uses
         // fixed-height overflow regions so this space cannot be consumed by
         // transfer history.
-        list_min_height: 72.0,
-        queue_viewport_height: 48.0,
+        list_min_height: 104.0,
+        queue_viewport_height: 44.0,
         compact_actions: true,
     }
 }
@@ -6141,6 +6141,9 @@ impl App {
                     action("Delete remote", Message::FilesRequestDeleteRemote),
                 ]
                 .spacing(8),
+                text("Destructive operations require confirmation.")
+                    .size(11)
+                    .color(MUTED),
             ]
             .spacing(6)
             .into()
@@ -6156,6 +6159,9 @@ impl App {
                     action("Edit remote", Message::FilesRequestEditRemote),
                     action("Delete local", Message::FilesRequestDeleteLocal),
                     action("Delete remote", Message::FilesRequestDeleteRemote),
+                    text("Destructive operations require confirmation.")
+                        .size(11)
+                        .color(MUTED),
                 ]
                 .spacing(8),
             )
@@ -6205,9 +6211,6 @@ impl App {
                 .align_y(iced::Center),
                 file_panels,
                 actions_panel,
-                text("Destructive file operations require confirmation.")
-                    .size(11)
-                    .color(MUTED),
                 if let Some(editor) = self
                     .remote_editor
                     .as_ref()
@@ -6300,7 +6303,7 @@ impl App {
             .spacing(content_spacing)
             .height(Fill),
         )
-        .padding(if self.files_side_dock { 10 } else { 8 })
+        .padding(if self.files_side_dock { 10 } else { 6 })
         .height(Fill)
         .width(Fill)
         .style(card)
@@ -7977,7 +7980,7 @@ mod tests {
     fn bottom_files_layout_bounds_queue_and_reserves_a_hit_target_row() {
         let policy = bottom_files_layout_policy();
         assert!(policy.queue_viewport_height <= 56.0);
-        assert!(policy.list_min_height >= 72.0);
+        assert!(policy.list_min_height >= 104.0);
         assert!(policy.compact_actions);
     }
 
