@@ -1,5 +1,5 @@
 //! Cross-platform native SSH acceptance using scripts/test-native-ssh-smoke.py.
-use inspirum_terminal::{Session, terminal::connect};
+use inspirum_terminal::{Session, SshOptions, terminal::connect};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -68,6 +68,27 @@ fn open(
     };
     let backend = connect(id, sender, &session, Some(&fixture.join(config_name)))
         .expect("launch real system OpenSSH through Inspirum");
+    (backend, receiver)
+}
+
+fn open_jump(
+    fixture: &Path,
+    id: u64,
+    config_name: &str,
+) -> (TerminalBackend, mpsc::Receiver<(u64, PtyEvent)>) {
+    let (sender, receiver) = mpsc::channel();
+    let session = Session {
+        name: "Disposable ProxyJump".into(),
+        host: "native-smoke".into(),
+        strict: true,
+        ssh: SshOptions {
+            proxy_jump: "native-hop".into(),
+            ..SshOptions::default()
+        },
+        ..Session::default()
+    };
+    let backend = connect(id, sender, &session, Some(&fixture.join(config_name)))
+        .expect("launch real system OpenSSH through Inspirum with ProxyJump");
     (backend, receiver)
 }
 
@@ -176,4 +197,58 @@ fn native_authenticated_terminal_trust_resize_reconnect_and_cleanup() {
     println!(
         "PASS native OpenSSH authentication, terminal I/O, PTY resize, reconnect, changed-host-key rejection and cleanup"
     );
+}
+
+#[test]
+#[ignore = "requires disposable AsyncSSH fixture: scripts/test-native-ssh-smoke.py"]
+fn native_proxyjump_enforces_hop_trust_and_no_direct_fallback() {
+    let fixture = fixture();
+    let target_events = fixture.join("server.log");
+    let jump_events = fixture.join("jump.log");
+
+    let (mut connected, receiver) = open_jump(&fixture, 9901, "jump-config");
+    wait_text(&mut connected, "NATIVE_SMOKE_READY");
+    wait_event_count(&jump_events, "JUMP_FORWARD_ALLOW", 1);
+    write(&mut connected, "echo:through-jump\n");
+    wait_text(&mut connected, "NATIVE_ECHO:through-jump");
+    write(&mut connected, "exit\n");
+    wait_exit(&receiver, 9901);
+    drop(connected);
+    wait_event_count(&jump_events, "CONNECTION_CLOSED:", 1);
+
+    let accepted = event_count(&target_events, "AUTH_ACCEPT:");
+
+    // Target's trusted host key is intentionally wrong. The jump itself
+    // succeeds, but target user authentication must never be attempted.
+    let (mut rejected, rejected_events) = open_jump(&fixture, 9902, "jump-changed-config");
+    wait_exit(&rejected_events, 9902);
+    let message = grid(&mut rejected).to_ascii_lowercase();
+    assert!(
+        message.contains("host identification has changed")
+            || message.contains("host key verification failed")
+            || message.contains("@@@@@@@@@@"),
+        "changed destination key did not cause a trust failure: {message}"
+    );
+    drop(rejected);
+    assert_eq!(
+        event_count(&target_events, "AUTH_ACCEPT:"),
+        accepted,
+        "changed key reached authentication via ProxyJump"
+    );
+
+    // The target is still listening, but the specified hop points to a
+    // closed port. A direct fallback would authenticate anyway.
+    let (mut broken, broken_events) = open_jump(&fixture, 9903, "jump-broken-config");
+    wait_exit(&broken_events, 9903);
+    assert!(
+        !grid(&mut broken).contains("NATIVE_SMOKE_READY"),
+        "configured ProxyJump failure silently connected directly"
+    );
+    drop(broken);
+    assert_eq!(
+        event_count(&target_events, "AUTH_ACCEPT:"),
+        accepted,
+        "failed jump reached the direct target"
+    );
+    println!("PASS native ProxyJump, target host trust and no-direct-fallback");
 }
