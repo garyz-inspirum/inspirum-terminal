@@ -1,5 +1,4 @@
 //! Cross-platform native SSH acceptance using scripts/test-native-ssh-smoke.py.
-use egui_term::{BackendCommand, PtyEvent, TerminalBackend};
 use inspirum_terminal::{Session, terminal::connect};
 use std::{
     fs,
@@ -8,6 +7,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use terminal_core::{BackendCommand, PtyEvent, TerminalBackend};
 
 fn fixture() -> PathBuf {
     let path = PathBuf::from(
@@ -66,14 +66,8 @@ fn open(
         strict: true,
         ..Session::default()
     };
-    let backend = connect(
-        id,
-        eframe::egui::Context::default(),
-        sender,
-        &session,
-        Some(&fixture.join(config_name)),
-    )
-    .expect("launch real system OpenSSH through Inspirum");
+    let backend = connect(id, sender, &session, Some(&fixture.join(config_name)))
+        .expect("launch real system OpenSSH through Inspirum");
     (backend, receiver)
 }
 
@@ -116,8 +110,8 @@ fn native_authenticated_terminal_trust_resize_reconnect_and_cleanup() {
     wait_text(&mut backend, "NATIVE_ECHO:native-roundtrip");
 
     backend.process_command(BackendCommand::Resize(
-        eframe::egui::vec2(970.0, 310.0).into(),
-        eframe::egui::vec2(10.0, 10.0).into(),
+        terminal_core::Size::new(970.0, 310.0),
+        terminal_core::Size::new(10.0, 10.0),
     ));
     let resize_deadline = Instant::now() + Duration::from_secs(8);
     loop {

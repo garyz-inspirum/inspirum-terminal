@@ -15,7 +15,6 @@ use alacritty_terminal::term::{
     self, cell::Cell, test::TermSize, viewport_to_point, Term, TermMode,
 };
 use alacritty_terminal::{tty, Grid};
-use egui::Modifiers;
 use settings::BackendSettings;
 use std::borrow::Cow;
 use std::cmp::min;
@@ -64,7 +63,6 @@ pub enum BackendCommand {
     SelectStart(SelectionType, f32, f32),
     SelectUpdate(f32, f32),
     ProcessLink(LinkAction, Point),
-    MouseReport(MouseButton, Modifiers, Point, bool),
     MouseReportAt(MouseButton, MouseModifiers, f32, f32, bool),
 }
 
@@ -195,12 +193,10 @@ pub struct TerminalBackend {
 impl TerminalBackend {
     pub fn new(
         id: u64,
-        app_context: egui::Context,
         pty_event_proxy_sender: Sender<(u64, PtyEvent)>,
         settings: BackendSettings,
     ) -> Result<Self> {
-        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || app_context.request_repaint());
-        Self::new_with_waker(id, pty_event_proxy_sender, settings, wake)
+        Self::new_with_waker(id, pty_event_proxy_sender, settings, Arc::new(|| {}))
     }
 
     /// Construct the PTY/parser backend without coupling it to a particular GUI toolkit.
@@ -227,7 +223,7 @@ impl TerminalBackend {
 
     /// Construct the PTY/parser backend with a toolkit-neutral event sink.
     ///
-    /// This is used by non-egui frontends to receive PTY lifecycle/output events
+    /// This is used by the Iced frontend to receive PTY lifecycle/output events
     /// without adding a polling loop or changing terminal/process ownership.
     pub fn new_with_event_sink(
         id: u64,
@@ -246,7 +242,6 @@ impl TerminalBackend {
     #[doc(hidden)]
     pub fn new_with_subscription_spawner<F>(
         id: u64,
-        app_context: egui::Context,
         pty_event_proxy_sender: Sender<(u64, PtyEvent)>,
         settings: BackendSettings,
         spawn_subscription: F,
@@ -254,7 +249,7 @@ impl TerminalBackend {
     where
         F: FnOnce(thread::Builder, Box<dyn FnOnce() + Send + 'static>) -> Result<JoinHandle<()>>,
     {
-        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || app_context.request_repaint());
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
         let event_sink: Arc<dyn Fn(u64, PtyEvent) + Send + Sync> = Arc::new(move |id, event| {
             let _ = pty_event_proxy_sender.send((id, event));
         });
@@ -306,7 +301,8 @@ impl TerminalBackend {
             hovered_hyperlink: None,
         };
         let term = Arc::new(FairMutex::new(term));
-        let pty_event_loop = EventLoop::new(term.clone(), event_proxy, pty, false, false)?;
+        // Preserve final diagnostics even when a short-lived child exits before the read event.
+        let pty_event_loop = EventLoop::new(term.clone(), event_proxy, pty, true, false)?;
         let event_loop_rollback = PtyEventLoopRollback::new(Notifier(pty_event_loop.channel()));
         let url_regex = RegexSearch::new(r#"(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file://|git://|ssh:|ftp://)[^\u{0000}-\u{001F}\u{007F}-\u{009F}<>"\s{-}\^⟨⟩`]+"#).unwrap();
         let _pty_event_loop_thread = pty_event_loop.spawn();
@@ -367,9 +363,6 @@ impl TerminalBackend {
             }
             BackendCommand::ProcessLink(link_action, point) => {
                 self.process_link_action(&term, link_action, point);
-            }
-            BackendCommand::MouseReport(button, modifiers, point, pressed) => {
-                self.process_mouse_report(button, modifiers, point, pressed);
             }
             BackendCommand::MouseReportAt(button, modifiers, x, y, pressed) => {
                 let point = Self::selection_point(x, y, &self.size, term.grid().display_offset());
@@ -596,23 +589,6 @@ impl TerminalBackend {
                 panic!("link opening is failed");
             })
         }
-    }
-
-    fn process_mouse_report(
-        &self,
-        button: MouseButton,
-        modifiers: Modifiers,
-        point: Point,
-        pressed: bool,
-    ) {
-        self.process_mouse_report_flags(
-            button,
-            modifiers.contains(Modifiers::SHIFT),
-            modifiers.contains(Modifiers::ALT),
-            modifiers.contains(Modifiers::COMMAND),
-            point,
-            pressed,
-        );
     }
 
     fn process_mouse_report_flags(

@@ -6,12 +6,12 @@ license = "Apache-2.0"
 description = "An early native SSH terminal using system OpenSSH"
 repository = "https://github.com/garyz-inspirum/inspirum-terminal"
 readme = "README.md"
-keywords = ["ssh", "terminal", "egui", "openssh"]
+keywords = ["ssh", "terminal", "iced", "openssh"]
 categories = ["command-line-utilities", "network-programming"]
 
 [features]
-default = []
-iced-ui = ["dep:iced"]
+default = ["iced-ui"]
+iced-ui = []
 
 [dependencies]
 anyhow = "1"
@@ -19,9 +19,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 directories = "6"
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
-egui_term = { path = "vendor/egui_term" }
-iced = { version = "=0.14.0", optional = true, default-features = false, features = ["wgpu", "tiny-skia", "x11", "thread-pool", "crisp", "canvas", "advanced-shaping"] }
+terminal_core = { package = "inspirum-terminal-core", path = "vendor/terminal-core" }
+# Iced's macOS GPU backend currently pulls historical crates without verified
+# license text. Use its native tiny-skia renderer on macOS until that is resolved.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+iced = { version = "=0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "x11", "wayland", "thread-pool", "crisp", "canvas", "advanced-shaping", "advanced"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+iced = { version = "=0.14.0", default-features = false, features = ["tiny-skia", "thread-pool", "crisp", "canvas", "advanced-shaping", "advanced"] }
 
 [profile.dev]
 debug = 0

@@ -5,10 +5,14 @@ on:
     paths:
       - 'prototypes/iced-shell/**'
       - 'src/iced_app.rs'
+      - 'src/iced_app/**'
+      - 'src/appearance.rs'
+      - 'src/history.rs'
+      - 'src/workspace.rs'
       - 'src/main.rs'
       - 'src/lib.rs'
       - 'src/terminal.rs'
-      - 'vendor/egui_term/**'
+      - 'vendor/terminal-core/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/iced-design.yml'
@@ -143,6 +147,18 @@ jobs:
           workspace_diff=$(compare -metric AE preview-artifacts/screenshots/production-after-escape.png preview-artifacts/screenshots/production-search-typed.png null: 2>&1 || true)
           echo "Search interaction differs from empty workspace by $workspace_diff pixels"
           test "$workspace_diff" -lt 50000 || { echo "Clicking sidebar search unexpectedly opened an overlay"; exit 1; }
+          # Visit every production tool panel with native keyboard input.
+          xdotool windowfocus "$window" key ctrl+comma
+          sleep 1
+          for panel in $(seq 1 8); do
+            xdotool windowfocus "$window" key "ctrl+$panel"
+            sleep 1
+            kill -0 "$app_pid" || { cat preview-artifacts/production.log; exit 1; }
+            import -window "$window" "preview-artifacts/screenshots/production-tools-$panel.png"
+          done
+          tools_diff=$(compare -metric AE preview-artifacts/screenshots/production-tools-1.png preview-artifacts/screenshots/production-tools-4.png null: 2>&1 || true)
+          test "$tools_diff" -gt 1000 || { echo "Tools panel navigation did not change the screen"; exit 1; }
+          xdotool key Escape
       - name: Prepare preview artifact
         if: always()
         shell: bash

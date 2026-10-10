@@ -1,11 +1,11 @@
-//! Persisted two-pane SSH workspace policy and synchronized-input targeting.
+//! Persisted SSH workspace policy and synchronized-input targeting.
 use crate::Session;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fs, io::Read, path::Path};
 
 const MAX_WORKSPACE_BYTES: usize = 1_048_576;
-pub const MAX_WORKSPACE_PANES: usize = 2;
+pub const MAX_WORKSPACE_PANES: usize = 4;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -13,6 +13,46 @@ pub enum SplitAxis {
     #[default]
     Horizontal,
     Vertical,
+}
+
+/// Optional exact split topology. Older version-1 layouts use `axis` instead.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkspaceNode {
+    Pane {
+        index: usize,
+    },
+    Split {
+        axis: SplitAxis,
+        ratio: f32,
+        a: Box<Self>,
+        b: Box<Self>,
+    },
+}
+impl WorkspaceNode {
+    fn validate(&self, count: usize, depth: usize, seen: &mut BTreeSet<usize>) -> Result<()> {
+        ensure!(
+            depth <= MAX_WORKSPACE_PANES,
+            "workspace split tree is too deep"
+        );
+        match self {
+            Self::Pane { index } => {
+                ensure!(
+                    *index < count && seen.insert(*index),
+                    "invalid or repeated workspace pane"
+                );
+            }
+            Self::Split { ratio, a, b, .. } => {
+                ensure!(
+                    ratio.is_finite() && (0.05..=0.95).contains(ratio),
+                    "invalid workspace split ratio"
+                );
+                a.validate(count, depth + 1, seen)?;
+                b.validate(count, depth + 1, seen)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -24,6 +64,8 @@ pub struct WorkspaceLayout {
     #[serde(default)]
     pub reconnect_on_restore: bool,
     pub panes: Vec<Session>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<WorkspaceNode>,
 }
 
 impl Default for WorkspaceLayout {
@@ -33,6 +75,7 @@ impl Default for WorkspaceLayout {
             axis: SplitAxis::Horizontal,
             reconnect_on_restore: false,
             panes: Vec::new(),
+            tree: None,
         }
     }
 }
@@ -42,8 +85,16 @@ impl WorkspaceLayout {
         ensure!(self.version == 1, "unsupported workspace layout version");
         ensure!(
             !self.panes.is_empty() && self.panes.len() <= MAX_WORKSPACE_PANES,
-            "workspace must contain one or two SSH panes"
+            "workspace must contain one to four SSH panes"
         );
+        if let Some(tree) = &self.tree {
+            let mut seen = BTreeSet::new();
+            tree.validate(self.panes.len(), 0, &mut seen)?;
+            ensure!(
+                seen.len() == self.panes.len(),
+                "workspace split tree omits panes"
+            );
+        }
         for pane in &self.panes {
             pane.ssh_args().context("invalid SSH pane in workspace")?;
         }
@@ -142,6 +193,14 @@ impl SyncInputState {
             .collect()
     }
 
+    pub fn retain_panes(&mut self, live: &BTreeSet<u64>) {
+        let old = self.targets.len();
+        self.targets.retain(|id| live.contains(id));
+        if self.targets.len() != old {
+            self.armed = false;
+        }
+    }
+
     pub fn selected_count(&self) -> usize {
         self.targets.len()
     }
@@ -221,12 +280,14 @@ mod tests {
     }
 
     #[test]
-    fn layout_rejects_more_than_two_panes() {
+    fn layout_rejects_more_than_four_panes() {
         let layout = WorkspaceLayout {
             panes: vec![
                 session("one", "host-one"),
                 session("two", "host-two"),
                 session("three", "host-three"),
+                session("four", "host-four"),
+                session("five", "host-five"),
             ],
             ..WorkspaceLayout::default()
         };

@@ -154,6 +154,86 @@
       "source_url": "https://raw.githubusercontent.com/zakarumych/gpu-descriptor/bb28b4e55b742e0ea3e7a0968e7ee6287ba0e06a/license/MIT"
     },
     {
+      "id": "iced-0ecf6066/LICENSE",
+      "path": "files/iced-0ecf6066/LICENSE",
+      "repository": "https://github.com/iced-rs/iced",
+      "revision": "0ecf60664df7b8ac7d7aef5f7279d5323027f693",
+      "sha256": "fc9086ba4eba4b77e4c603906362742bc3715ffa2c7810c6074fe7780d3a0398",
+      "source_url": "https://raw.githubusercontent.com/iced-rs/iced/0ecf60664df7b8ac7d7aef5f7279d5323027f693/LICENSE"
+    },
+    {
+      "id": "iced-38237dd2/LICENSE",
+      "path": "files/iced-38237dd2/LICENSE",
+      "repository": "https://github.com/iced-rs/iced",
+      "revision": "38237dd294da3256c2ac4d3f8288fc73956c91e0",
+      "sha256": "fc9086ba4eba4b77e4c603906362742bc3715ffa2c7810c6074fe7780d3a0398",
+      "source_url": "https://raw.githubusercontent.com/iced-rs/iced/38237dd294da3256c2ac4d3f8288fc73956c91e0/LICENSE"
+    },
+    {
+      "id": "iced-3997291f/LICENSE",
+      "path": "files/iced-3997291f/LICENSE",
+      "repository": "https://github.com/iced-rs/iced",
+      "revision": "3997291f318a8bc06fa522f5579836fb3feb94df",
+      "sha256": "fc9086ba4eba4b77e4c603906362742bc3715ffa2c7810c6074fe7780d3a0398",
+      "source_url": "https://raw.githubusercontent.com/iced-rs/iced/3997291f318a8bc06fa522f5579836fb3feb94df/LICENSE"
+    },
+    {
+      "id": "iced-54abf81d/LICENSE",
+      "path": "files/iced-54abf81d/LICENSE",
+      "repository": "https://github.com/iced-rs/iced",
+      "revision": "54abf81d13fec06d4d9ac754b03ce2c3313e8a1f",
+      "sha256": "fc9086ba4eba4b77e4c603906362742bc3715ffa2c7810c6074fe7780d3a0398",
+      "source_url": "https://raw.githubusercontent.com/iced-rs/iced/54abf81d13fec06d4d9ac754b03ce2c3313e8a1f/LICENSE"
+    },
+    {
+      "id": "lyon-56219c95/LICENSE-APACHE",
+      "path": "files/lyon-56219c95/LICENSE-APACHE",
+      "repository": "https://github.com/nical/lyon",
+      "revision": "56219c95c658d4f39de7b190d98e57d5773ba241",
+      "sha256": "216486f29671a4262efe32af6d84a75bef398127f8c5f369b5c8305983887a06",
+      "source_url": "https://raw.githubusercontent.com/nical/lyon/56219c95c658d4f39de7b190d98e57d5773ba241/LICENSE-APACHE"
+    },
+    {
+      "id": "lyon-56219c95/LICENSE-MIT",
+      "path": "files/lyon-56219c95/LICENSE-MIT",
+      "repository": "https://github.com/nical/lyon",
+      "revision": "56219c95c658d4f39de7b190d98e57d5773ba241",
+      "sha256": "80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e",
+      "source_url": "https://raw.githubusercontent.com/nical/lyon/56219c95c658d4f39de7b190d98e57d5773ba241/LICENSE-MIT"
+    },
+    {
+      "id": "lyon-994526f2/LICENSE-APACHE",
+      "path": "files/lyon-994526f2/LICENSE-APACHE",
+      "repository": "https://github.com/nical/lyon",
+      "revision": "994526f2766c7e9bc5bb16687232fd7e8999dbdf",
+      "sha256": "216486f29671a4262efe32af6d84a75bef398127f8c5f369b5c8305983887a06",
+      "source_url": "https://raw.githubusercontent.com/nical/lyon/994526f2766c7e9bc5bb16687232fd7e8999dbdf/LICENSE-APACHE"
+    },
+    {
+      "id": "lyon-994526f2/LICENSE-MIT",
+      "path": "files/lyon-994526f2/LICENSE-MIT",
+      "repository": "https://github.com/nical/lyon",
+      "revision": "994526f2766c7e9bc5bb16687232fd7e8999dbdf",
+      "sha256": "80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e",
+      "source_url": "https://raw.githubusercontent.com/nical/lyon/994526f2766c7e9bc5bb16687232fd7e8999dbdf/LICENSE-MIT"
+    },
+    {
+      "id": "lyon-b456b143/LICENSE-APACHE",
+      "path": "files/lyon-b456b143/LICENSE-APACHE",
+      "repository": "https://github.com/nical/lyon",
+      "revision": "b456b143215a1942a617c4672776b68b9a30feee",
+      "sha256": "216486f29671a4262efe32af6d84a75bef398127f8c5f369b5c8305983887a06",
+      "source_url": "https://raw.githubusercontent.com/nical/lyon/b456b143215a1942a617c4672776b68b9a30feee/LICENSE-APACHE"
+    },
+    {
+      "id": "lyon-b456b143/LICENSE-MIT",
+      "path": "files/lyon-b456b143/LICENSE-MIT",
+      "repository": "https://github.com/nical/lyon",
+      "revision": "b456b143215a1942a617c4672776b68b9a30feee",
+      "sha256": "80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e",
+      "source_url": "https://raw.githubusercontent.com/nical/lyon/b456b143215a1942a617c4672776b68b9a30feee/LICENSE-MIT"
+    },
+    {
       "id": "objc2-4fc083f1/LICENSE.txt",
       "path": "files/objc2-4fc083f1/LICENSE.txt",
       "repository": "https://github.com/madsmtm/objc2",
@@ -216,6 +296,14 @@
       "revision": "e91a5debc10c395b36db7721dfff6326d697a1e2",
       "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
       "source_url": "https://raw.githubusercontent.com/gfx-rs/rspirv/e91a5debc10c395b36db7721dfff6326d697a1e2/LICENSE"
+    },
+    {
+      "id": "rust_debug-93f414cd/LICENSE",
+      "path": "files/rust_debug-93f414cd/LICENSE",
+      "repository": "https://github.com/nical/rust_debug",
+      "revision": "93f414cd572b5c2781df93dbdc068ed13443d05a",
+      "sha256": "7e98bed7f100747aaae7d82ab94fbe6b76fd6b84b09a3aaa413bff8196d0fbb1",
+      "source_url": "https://raw.githubusercontent.com/nical/rust_debug/93f414cd572b5c2781df93dbdc068ed13443d05a/LICENSE"
     },
     {
       "id": "wgpu-dc1e50e0/LICENSE.APACHE",
@@ -437,6 +525,116 @@
       "version": "0.2.1"
     },
     {
+      "name": "iced_core",
+      "version": "0.14.0",
+      "metadata_repository": "https://github.com/iced-rs/iced",
+      "revision": "3997291f318a8bc06fa522f5579836fb3feb94df",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "files": [
+        "iced-3997291f/LICENSE"
+      ]
+    },
+    {
+      "name": "iced_debug",
+      "version": "0.14.0",
+      "metadata_repository": "https://github.com/iced-rs/iced",
+      "revision": "3997291f318a8bc06fa522f5579836fb3feb94df",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "files": [
+        "iced-3997291f/LICENSE"
+      ]
+    },
+    {
+      "name": "iced_futures",
+      "version": "0.14.0",
+      "metadata_repository": "https://github.com/iced-rs/iced",
+      "revision": "3997291f318a8bc06fa522f5579836fb3feb94df",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "files": [
+        "iced-3997291f/LICENSE"
+      ]
+    },
+    {
+      "name": "iced_graphics",
+      "version": "0.14.0",
+      "metadata_repository": "https://github.com/iced-rs/iced",
+      "revision": "3997291f318a8bc06fa522f5579836fb3feb94df",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "files": [
+        "iced-3997291f/LICENSE"
+      ]
+    },
+    {
+      "name": "iced_program",
+      "version": "0.14.0",
+      "metadata_repository": "https://github.com/iced-rs/iced",
+      "revision": "3997291f318a8bc06fa522f5579836fb3feb94df",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "files": [
+        "iced-3997291f/LICENSE"
+      ]
+    },
+    {
+      "name": "iced_renderer",
+      "version": "0.14.0",
+      "metadata_repository": "https://github.com/iced-rs/iced",
+      "revision": "3997291f318a8bc06fa522f5579836fb3feb94df",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "files": [
+        "iced-3997291f/LICENSE"
+      ]
+    },
+    {
+      "name": "iced_runtime",
+      "version": "0.14.0",
+      "metadata_repository": "https://github.com/iced-rs/iced",
+      "revision": "3997291f318a8bc06fa522f5579836fb3feb94df",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "files": [
+        "iced-3997291f/LICENSE"
+      ]
+    },
+    {
+      "name": "iced_tiny_skia",
+      "version": "0.14.1",
+      "metadata_repository": "https://github.com/iced-rs/iced",
+      "revision": "0ecf60664df7b8ac7d7aef5f7279d5323027f693",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "files": [
+        "iced-0ecf6066/LICENSE"
+      ]
+    },
+    {
+      "name": "iced_wgpu",
+      "version": "0.14.0",
+      "metadata_repository": "https://github.com/iced-rs/iced",
+      "revision": "3997291f318a8bc06fa522f5579836fb3feb94df",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "files": [
+        "iced-3997291f/LICENSE"
+      ]
+    },
+    {
+      "name": "iced_widget",
+      "version": "0.14.2",
+      "metadata_repository": "https://github.com/iced-rs/iced",
+      "revision": "54abf81d13fec06d4d9ac754b03ce2c3313e8a1f",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "files": [
+        "iced-54abf81d/LICENSE"
+      ]
+    },
+    {
+      "name": "iced_winit",
+      "version": "0.14.1",
+      "metadata_repository": "https://github.com/iced-rs/iced",
+      "revision": "38237dd294da3256c2ac4d3f8288fc73956c91e0",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "files": [
+        "iced-38237dd2/LICENSE"
+      ]
+    },
+    {
       "files": [
         "gl-rs-f150967b/LICENSE"
       ],
@@ -445,6 +643,61 @@
       "revision": "f150967b1c44ae888e6676f93f639ebc82771bdc",
       "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
       "version": "3.1.0"
+    },
+    {
+      "name": "lyon",
+      "version": "1.0.19",
+      "metadata_repository": "https://github.com/nical/lyon",
+      "revision": "56219c95c658d4f39de7b190d98e57d5773ba241",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "files": [
+        "lyon-56219c95/LICENSE-MIT",
+        "lyon-56219c95/LICENSE-APACHE"
+      ]
+    },
+    {
+      "name": "lyon_algorithms",
+      "version": "1.0.21",
+      "metadata_repository": "https://github.com/nical/lyon",
+      "revision": "994526f2766c7e9bc5bb16687232fd7e8999dbdf",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "files": [
+        "lyon-994526f2/LICENSE-MIT",
+        "lyon-994526f2/LICENSE-APACHE"
+      ]
+    },
+    {
+      "name": "lyon_geom",
+      "version": "1.0.19",
+      "metadata_repository": "https://github.com/nical/lyon",
+      "revision": "56219c95c658d4f39de7b190d98e57d5773ba241",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "files": [
+        "lyon-56219c95/LICENSE-MIT",
+        "lyon-56219c95/LICENSE-APACHE"
+      ]
+    },
+    {
+      "name": "lyon_path",
+      "version": "1.0.19",
+      "metadata_repository": "https://github.com/nical/lyon",
+      "revision": "56219c95c658d4f39de7b190d98e57d5773ba241",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "files": [
+        "lyon-56219c95/LICENSE-MIT",
+        "lyon-56219c95/LICENSE-APACHE"
+      ]
+    },
+    {
+      "name": "lyon_tessellation",
+      "version": "1.0.22",
+      "metadata_repository": "https://github.com/nical/lyon",
+      "revision": "b456b143215a1942a617c4672776b68b9a30feee",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "files": [
+        "lyon-b456b143/LICENSE-MIT",
+        "lyon-b456b143/LICENSE-APACHE"
+      ]
     },
     {
       "files": [
@@ -588,6 +841,16 @@
       "version": "0.2.2"
     },
     {
+      "name": "objc2-quartz-core",
+      "version": "0.3.2",
+      "metadata_repository": "https://github.com/madsmtm/objc2",
+      "revision": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "files": [
+        "objc2-7b1abfd7/LICENSE.md"
+      ]
+    },
+    {
       "files": [
         "profiling-82715511/LICENSE-APACHE",
         "profiling-82715511/LICENSE-MIT"
@@ -607,6 +870,16 @@
       "revision": "e91a5debc10c395b36db7721dfff6326d697a1e2",
       "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
       "version": "0.3.0+sdk-1.3.268.0"
+    },
+    {
+      "name": "svg_fmt",
+      "version": "0.4.5",
+      "metadata_repository": "https://github.com/nical/rust_debug",
+      "revision": "93f414cd572b5c2781df93dbdc068ed13443d05a",
+      "revision_provenance": "registry .cargo_vcs_info.json git.sha1",
+      "files": [
+        "rust_debug-93f414cd/LICENSE"
+      ]
     }
   ],
   "unresolved": [

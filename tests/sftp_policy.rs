@@ -140,7 +140,6 @@ fn auth_overrides_preserve_paths_trust_and_terminal_only_exclusions() {
 #[cfg(target_os = "linux")]
 mod fixture {
     use super::*;
-    use egui_term::{BackendCommand, PtyEvent, TerminalBackend};
     use inspirum_terminal::terminal::connect_sftp;
     use std::{
         fs,
@@ -149,6 +148,7 @@ mod fixture {
         thread,
         time::{Duration, Instant},
     };
+    use terminal_core::{BackendCommand, PtyEvent, TerminalBackend};
 
     fn fixture_dir() -> PathBuf {
         let path = PathBuf::from(
@@ -167,14 +167,7 @@ mod fixture {
             ssh,
             ..Session::default()
         };
-        let backend = connect_sftp(
-            931,
-            eframe::egui::Context::default(),
-            tx,
-            &session,
-            Some(config),
-        )
-        .unwrap();
+        let backend = connect_sftp(931, tx, &session, Some(config)).unwrap();
         (backend, rx)
     }
 

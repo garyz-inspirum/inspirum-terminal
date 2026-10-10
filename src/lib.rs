@@ -722,9 +722,7 @@ pub mod keyboard;
 pub mod proxy;
 pub mod remote_edit;
 pub mod scp;
-pub mod scp_panel;
 pub mod sftp;
-pub mod sftp_browser;
 pub mod startup;
 pub mod support;
 pub mod tab_management;
@@ -733,7 +731,4 @@ pub mod terminal_ux;
 pub mod tmux;
 pub mod workspace;
 
-#[cfg(feature = "iced-ui")]
 pub mod iced_app;
-
-pub mod app;

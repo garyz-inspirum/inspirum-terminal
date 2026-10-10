@@ -101,10 +101,7 @@ keyboard paste, so mouse shortcuts cannot bypass guarded paste.
 **Hide pointer while typing** hides the native cursor after terminal text/key input and
 shows it again on pointer movement.
 
-The opacity preference is persisted and validated, but the current portable eframe
-window stack used by this application does not expose runtime native-window opacity.
-The settings UI states this explicitly and does not pretend to apply unsupported
-opacity.
+The opacity preference is persisted, validated and applied to the Iced terminal surface. It does not set operating-system window opacity.
 
 Appearance settings are JSON schema version 1, limited to 64 KiB, validated before use,
 and replaced atomically. Missing fields migrate to defaults; unknown fields and unknown

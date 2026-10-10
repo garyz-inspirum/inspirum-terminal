@@ -1,5 +1,33 @@
 use alacritty_terminal::vte::ansi::{self, NamedColor};
-use egui::Color32;
+/// Opaque sRGB terminal color, independent of any GUI toolkit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RgbColor([u8; 3]);
+
+impl RgbColor {
+    pub const fn from_rgb(r: u8, g: u8, b: u8) -> Self {
+        Self([r, g, b])
+    }
+    pub const fn to_array(self) -> [u8; 4] {
+        [self.0[0], self.0[1], self.0[2], 255]
+    }
+    pub fn linear_multiply(self, factor: f32) -> Self {
+        Self(self.0.map(|channel| {
+            let srgb = channel as f32 / 255.0;
+            let linear = if srgb <= 0.04045 {
+                srgb / 12.92
+            } else {
+                ((srgb + 0.055) / 1.055).powf(2.4)
+            };
+            let dimmed = (linear * factor).clamp(0.0, 1.0);
+            let gamma = if dimmed <= 0.0031308 {
+                dimmed * 12.92
+            } else {
+                1.055 * dimmed.powf(1.0 / 2.4) - 0.055
+            };
+            (gamma * 255.0).round() as u8
+        }))
+    }
+}
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -72,7 +100,7 @@ impl Default for ColorPalette {
 #[derive(Debug, Clone)]
 pub struct TerminalTheme {
     palette: Box<ColorPalette>,
-    ansi256_colors: HashMap<u8, Color32>,
+    ansi256_colors: HashMap<u8, RgbColor>,
 }
 
 impl Default for TerminalTheme {
@@ -92,7 +120,7 @@ impl TerminalTheme {
         }
     }
 
-    fn get_ansi256_colors() -> HashMap<u8, Color32> {
+    fn get_ansi256_colors() -> HashMap<u8, RgbColor> {
         let mut ansi256_colors = HashMap::new();
 
         for r in 0..6 {
@@ -100,7 +128,7 @@ impl TerminalTheme {
                 for b in 0..6 {
                     // Reserve the first 16 colors for config.
                     let index = 16 + r * 36 + g * 6 + b;
-                    let color = Color32::from_rgb(
+                    let color = RgbColor::from_rgb(
                         if r == 0 { 0 } else { r * 40 + 55 },
                         if g == 0 { 0 } else { g * 40 + 55 },
                         if b == 0 { 0 } else { b * 40 + 55 },
@@ -113,15 +141,15 @@ impl TerminalTheme {
         let index: u8 = 232;
         for i in 0..24 {
             let value = i * 10 + 8;
-            ansi256_colors.insert(index + i, Color32::from_rgb(value, value, value));
+            ansi256_colors.insert(index + i, RgbColor::from_rgb(value, value, value));
         }
 
         ansi256_colors
     }
 
-    pub fn get_color(&self, c: ansi::Color) -> Color32 {
+    pub fn get_color(&self, c: ansi::Color) -> RgbColor {
         match c {
-            ansi::Color::Spec(rgb) => Color32::from_rgb(rgb.r, rgb.g, rgb.b),
+            ansi::Color::Spec(rgb) => RgbColor::from_rgb(rgb.r, rgb.g, rgb.b),
             ansi::Color::Indexed(index) => {
                 if index <= 15 {
                     let color = match index {
@@ -153,7 +181,7 @@ impl TerminalTheme {
                 // Other colors
                 match self.ansi256_colors.get(&index) {
                     Some(color) => *color,
-                    None => Color32::from_rgb(0, 0, 0),
+                    None => RgbColor::from_rgb(0, 0, 0),
                 }
             }
             ansi::Color::Named(c) => {
@@ -201,7 +229,7 @@ impl TerminalTheme {
     }
 }
 
-fn hex_to_color(hex: &str) -> anyhow::Result<Color32> {
+fn hex_to_color(hex: &str) -> anyhow::Result<RgbColor> {
     if hex.len() != 7 {
         return Err(anyhow::format_err!("input string is in non valid format"));
     }
@@ -210,5 +238,5 @@ fn hex_to_color(hex: &str) -> anyhow::Result<Color32> {
     let g = u8::from_str_radix(&hex[3..5], 16)?;
     let b = u8::from_str_radix(&hex[5..7], 16)?;
 
-    Ok(Color32::from_rgb(r, g, b))
+    Ok(RgbColor::from_rgb(r, g, b))
 }

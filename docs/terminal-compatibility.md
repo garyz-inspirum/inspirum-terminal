@@ -1,6 +1,6 @@
 # Terminal compatibility and performance suite
 
-Issue #23 tracks bounded compatibility evidence for the existing `egui_term` / Alacritty-backed PTY path. This suite is not a claim of complete xterm, VT, Unicode or WindTerm parity.
+Issue #23 tracks bounded compatibility evidence for the existing toolkit-neutral `terminal_core` / Alacritty-backed PTY path. This suite is not a claim of complete xterm, VT, Unicode or WindTerm parity.
 
 ## Automated coverage
 

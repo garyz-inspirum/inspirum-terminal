@@ -52,3 +52,9 @@ This note records provenance research for supplemental release notices. It is no
 ## Remaining historical unresolved MIT packages
 
 `block 0.1.6` and `malloc_buf 0.0.6` remain documented for provenance but are not selected by the active production tree. If either becomes active in a future release graph, publication must fail closed until version-specific license/attribution evidence is resolved.
+
+## Iced default release dependencies
+
+Iced is enabled in the default release graph. The published Iced subcrates, Lyon crates, and svg_fmt omit package-local license text. Each new supplemental package entry is pinned to its published `.cargo_vcs_info.json` revision and repository. The checked-in license texts are fetched byte-for-byte from that revision of the upstream repository; `manifest.json` records the exact URL and SHA-256 for each file. No attribution text is synthesized. The strict collector validates these supplements against the locked package metadata for Linux, Windows, and macOS.
+
+The macOS production dependency tree uses Iced tiny-skia. The WGPU Metal backend would reactivate the historically unresolved `block 0.1.6` and `malloc_buf 0.0.6` packages documented above, so WGPU is enabled only on Linux and Windows. `objc2-quartz-core 0.3.2` uses the existing hash-verified upstream license supplement at its registry revision.

@@ -10,3 +10,7 @@ focused changes for retained-focus input dispatch, Windows argument escaping
 and executable-token serialization, and PTY event-loop/subscription shutdown.
 The vendored code remains MIT-licensed and is not relicensed under the
 surrounding project's Apache-2.0 license.
+
+The toolkit-neutral backend is now maintained as `inspirum-terminal-core`.
+The egui widgets, font and input bindings were removed. Color and geometry types
+are plain Rust data; PTY callbacks have no GUI context dependency.
