@@ -193,6 +193,63 @@ fn free_type_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool 
         && matches!(key.as_ref(), keyboard::Key::Character("e" | "E"))
 }
 
+fn remote_keys_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
+    modifiers.command()
+        && modifiers.shift()
+        && matches!(key.as_ref(), keyboard::Key::Character("m" | "M"))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteCursorKey {
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+}
+
+// This is explicitly remote key input, not an attempt to reposition the
+// remote application's cursor from a locally inferred screen coordinate.
+// The remote shell or full-screen program decides what each key does.
+fn remote_vim_key(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<RemoteCursorKey> {
+    if modifiers.command() || modifiers.control() || modifiers.alt() {
+        return None;
+    }
+    match key.as_ref() {
+        keyboard::Key::Character("h") if !modifiers.shift() => Some(RemoteCursorKey::Left),
+        keyboard::Key::Character("j") if !modifiers.shift() => Some(RemoteCursorKey::Down),
+        keyboard::Key::Character("k") if !modifiers.shift() => Some(RemoteCursorKey::Up),
+        keyboard::Key::Character("l") if !modifiers.shift() => Some(RemoteCursorKey::Right),
+        keyboard::Key::Character("0") if !modifiers.shift() => Some(RemoteCursorKey::Home),
+        keyboard::Key::Character("$") => Some(RemoteCursorKey::End),
+        keyboard::Key::Character("u") if !modifiers.shift() => Some(RemoteCursorKey::PageUp),
+        keyboard::Key::Character("d") if !modifiers.shift() => Some(RemoteCursorKey::PageDown),
+        _ => None,
+    }
+}
+
+fn remote_cursor_bytes(
+    action: RemoteCursorKey,
+    mode: terminal_core::TerminalMode,
+) -> Vec<u8> {
+    use keyboard::key::Named;
+    let key = match action {
+        RemoteCursorKey::Left => Named::ArrowLeft,
+        RemoteCursorKey::Right => Named::ArrowRight,
+        RemoteCursorKey::Up => Named::ArrowUp,
+        RemoteCursorKey::Down => Named::ArrowDown,
+        RemoteCursorKey::Home => Named::Home,
+        RemoteCursorKey::End => Named::End,
+        RemoteCursorKey::PageUp => Named::PageUp,
+        RemoteCursorKey::PageDown => Named::PageDown,
+    };
+    terminal_key_bytes(&keyboard::Key::Named(key), keyboard::Modifiers::empty(), None, mode)
+        .expect("cursor keys always encode to remote PTY input")
+}
+
 fn local_navigation_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
     modifiers.shift()
         && !modifiers.control()
@@ -276,6 +333,11 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                     if free_type_chord(key, *modifiers) =>
                 {
                     Some(Message::ToggleFocusedFreeType)
+                }
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                    if remote_keys_chord(key, *modifiers) =>
+                {
+                    Some(Message::ToggleFocusedRemoteKeys)
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if status == event::Status::Ignored
@@ -1024,6 +1086,9 @@ enum Message {
     TogglePrivacyLock,
     ToggleFocusMode,
     ToggleLocalNavigation,
+    ToggleRemoteKeys(u64),
+    ToggleFocusedRemoteKeys,
+    RemoteCursorPress(u64, RemoteCursorKey),
     ToggleFreeType(u64),
     ToggleFocusedFreeType,
     FreeTypeEdit(u64, text_editor::Action),
@@ -2163,6 +2228,7 @@ struct App {
     privacy_locked: bool,
     focus_mode: bool,
     local_navigation: HashSet<u64>,
+    remote_keys: HashSet<u64>,
     // Pane-local editable drafts. Content is in memory only and is never
     // forwarded to the remote PTY until an explicit Send action.
     free_type: HashMap<u64, text_editor::Content>,
@@ -2251,6 +2317,7 @@ impl App {
             privacy_locked: false,
             focus_mode: false,
             local_navigation: HashSet::new(),
+            remote_keys: HashSet::new(),
             free_type: HashMap::new(),
             free_type_confirm: None,
             profile_visible: PROFILE_PAGE_SIZE,
@@ -2472,6 +2539,36 @@ impl App {
         true
     }
 
+    fn remote_terminal_mode(&self, id: u64) -> terminal_core::TerminalMode {
+        self.tabs
+            .iter()
+            .flat_map(|tab| tab.panes.iter())
+            .find(|(_, pane)| pane.id == id)
+            .and_then(|(_, pane)| pane.terminal.as_ref())
+            .map(|terminal| terminal.last_content().terminal_mode)
+            .unwrap_or_else(terminal_core::TerminalMode::empty)
+    }
+
+    fn send_remote_cursor(&mut self, id: u64, action: RemoteCursorKey) -> bool {
+        if self.privacy_locked
+            || self.dialog.is_some()
+            || self.remote_editor.is_some()
+            || !self.remote_keys.contains(&id)
+            || !self.focused_pane_matches(id)
+            || self.local_navigation.contains(&id)
+            || self.free_type.contains_key(&id)
+        {
+            return false;
+        }
+        let targets = self.paste_targets(id);
+        // Source first. Synchronized destinations get their *own* terminal
+        // cursor mode (normal vs application), never a source-mode escape.
+        Self::write_source_then_mirrors(id, &targets, |target| {
+            let bytes = remote_cursor_bytes(action, self.remote_terminal_mode(target));
+            self.command_terminal(target, terminal_core::BackendCommand::Write(bytes))
+        })
+    }
+
     fn send_to_terminal(&mut self, id: u64, bytes: Vec<u8>) -> bool {
         if !self.focused_pane_matches(id)
             || self.local_navigation.contains(&id)
@@ -2521,6 +2618,7 @@ impl App {
             .collect();
         self.free_type.retain(|id, _| present.contains(id));
         self.local_navigation.retain(|id| present.contains(id));
+        self.remote_keys.retain(|id| present.contains(id));
         if self
             .free_type_confirm
             .is_some_and(|id| !present.contains(&id))
@@ -3117,6 +3215,9 @@ impl App {
                     | Message::ToggleFocusMode
                     | Message::ToggleAuxiliaryShell
                     | Message::ToggleLocalNavigation
+                    | Message::ToggleRemoteKeys(..)
+                    | Message::ToggleFocusedRemoteKeys
+                    | Message::RemoteCursorPress(..)
                     | Message::ToggleFreeType(..)
                     | Message::ToggleFocusedFreeType
                     | Message::FreeTypeEdit(..)
@@ -3146,6 +3247,10 @@ impl App {
                     .map(|pane| pane.id)
             });
             if let Some(id) = id {
+                if self.remote_keys.contains(&id) {
+                    self.status = "Exit remote-key navigation before local navigation.".into();
+                    return Task::none();
+                }
                 if self.free_type.contains_key(&id) {
                     self.status = "Finish or discard the pane's free-type draft first.".into();
                     return Task::none();
@@ -3197,7 +3302,8 @@ impl App {
                 if self.focused_pane_matches(id)
                     && self.dialog.is_none()
                     && self.remote_editor.is_none()
-                    && !self.free_type.contains_key(&id) =>
+                    && !self.free_type.contains_key(&id)
+                    && !self.remote_keys.contains(&id) =>
             {
                 if let Some(bytes) = crate::keyboard::committed_text_bytes(&text) {
                     self.send_to_terminal(id, bytes);
@@ -3208,6 +3314,39 @@ impl App {
             Message::ToggleFocusMode => unreachable!("focus mode handled before match"),
             Message::ToggleLocalNavigation => {
                 unreachable!("local navigation handled before match")
+            }
+            Message::ToggleFocusedRemoteKeys => {
+                if let Some(id) = self
+                    .tabs
+                    .get(self.active)
+                    .and_then(|tab| tab.panes.get(tab.focus))
+                    .map(|pane| pane.id)
+                {
+                    return self.update(Message::ToggleRemoteKeys(id));
+                }
+            }
+            Message::ToggleRemoteKeys(id) => {
+                if self.dialog.is_some()
+                    || self.remote_editor.is_some()
+                    || !self.focused_pane_matches(id)
+                    || self.local_navigation.contains(&id)
+                    || self.free_type.contains_key(&id)
+                {
+                    self.status = "Focus a connected SSH pane with no local editor to enable remote keys.".into();
+                    return Task::none();
+                }
+                if !self.remote_keys.insert(id) {
+                    self.remote_keys.remove(&id);
+                    self.status = "Normal remote typing restored.".into();
+                } else {
+                    self.ime_cursor = None;
+                    self.status = "REMOTE KEYS: h/j/k/l move the remote application; 0/$ Home/End; u/d PageUp/Down; Escape exits.".into();
+                }
+            }
+            Message::RemoteCursorPress(id, action) => {
+                if !self.send_remote_cursor(id, action) {
+                    self.status = "Remote key cancelled: focus, mode or SSH target changed.".into();
+                }
             }
             Message::ToggleFocusedFreeType => {
                 if let Some(id) = self
@@ -3224,6 +3363,7 @@ impl App {
                     || self.remote_editor.is_some()
                     || !self.focused_pane_matches(id)
                     || self.local_navigation.contains(&id)
+                    || self.remote_keys.contains(&id)
                 {
                     self.status = "Focus a pane in remote-input mode before composing.".into();
                     return Task::none();
@@ -4862,6 +5002,18 @@ impl App {
                 }
 
                 if let Some(id) = self.focused_terminal_id()
+                    && self.remote_keys.contains(&id)
+                {
+                    if key.as_ref() == keyboard::Key::Named(Named::Escape) {
+                        self.remote_keys.remove(&id);
+                        self.status = "Normal remote typing restored.".into();
+                    } else if let Some(action) = remote_vim_key(&key, modifiers) {
+                        return self.update(Message::RemoteCursorPress(id, action));
+                    }
+                    // No arbitrary text/IME passes through modal remote keys.
+                    return Task::none();
+                }
+                if let Some(id) = self.focused_terminal_id()
                     && self.local_navigation.contains(&id)
                 {
                     if key.as_ref() == keyboard::Key::Named(Named::Escape) {
@@ -4915,7 +5067,9 @@ impl App {
         }
         let target = if self.dialog.is_none() && self.remote_editor.is_none() {
             self.focused_terminal_id().filter(|id| {
-                !self.local_navigation.contains(id) && !self.free_type.contains_key(id)
+                !self.local_navigation.contains(id)
+                    && !self.free_type.contains_key(id)
+                    && !self.remote_keys.contains(id)
             })
         } else {
             None
@@ -5340,6 +5494,11 @@ impl App {
                     .is_some_and(|id| self.local_navigation.contains(&id))
                 {
                     "LOCAL NAV"
+                } else if self
+                    .focused_terminal_id()
+                    .is_some_and(|id| self.remote_keys.contains(&id))
+                {
+                    "REMOTE KEYS"
                 } else {
                     "REMOTE INPUT"
                 },
@@ -5439,6 +5598,8 @@ impl App {
                         "FREE TYPE"
                     } else if self.local_navigation.contains(&pane.id) {
                         "LOCAL NAV"
+                    } else if self.remote_keys.contains(&pane.id) {
+                        "REMOTE KEYS"
                     } else if focused {
                         "FOCUSED"
                     } else {
@@ -5477,6 +5638,14 @@ impl App {
                     } else {
                         action("Free type", Message::ToggleFreeType(pane.id))
                     },
+                    action(
+                        if self.remote_keys.contains(&pane.id) {
+                            "Exit keys"
+                        } else {
+                            "Remote keys"
+                        },
+                        Message::ToggleRemoteKeys(pane.id),
+                    ),
                     if pane.exited || pane.error.is_some() {
                         action("Reconnect", Message::Reconnect(id))
                     } else {
@@ -5581,6 +5750,31 @@ impl App {
                     )
                     .padding(8)
                     .style(surface),
+                ]
+                .spacing(4)
+                .height(Fill)
+                .into()
+            } else if self.remote_keys.contains(&pane.id) {
+                column![
+                    terminal_view,
+                    text("REMOTE KEYS · real SSH key input · h/j/k/l · 0/$ · u/d · Esc exits")
+                        .size(11)
+                        .color(BLUE),
+                    row![
+                        action("Left", Message::RemoteCursorPress(pane.id, RemoteCursorKey::Left)),
+                        action("Up", Message::RemoteCursorPress(pane.id, RemoteCursorKey::Up)),
+                        action("Down", Message::RemoteCursorPress(pane.id, RemoteCursorKey::Down)),
+                        action("Right", Message::RemoteCursorPress(pane.id, RemoteCursorKey::Right)),
+                        action("Exit", Message::ToggleRemoteKeys(pane.id)),
+                    ]
+                    .spacing(5),
+                    row![
+                        action("Home", Message::RemoteCursorPress(pane.id, RemoteCursorKey::Home)),
+                        action("End", Message::RemoteCursorPress(pane.id, RemoteCursorKey::End)),
+                        action("PgUp", Message::RemoteCursorPress(pane.id, RemoteCursorKey::PageUp)),
+                        action("PgDn", Message::RemoteCursorPress(pane.id, RemoteCursorKey::PageDown)),
+                    ]
+                    .spacing(5),
                 ]
                 .spacing(4)
                 .height(Fill)
