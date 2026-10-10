@@ -2709,6 +2709,14 @@ impl App {
                     | Message::TerminalScroll(..)
                     | Message::CopySelection(..)
                     | Message::CommandSend
+                    | Message::Tool(
+                        tools::Action::SendCommand
+                            | tools::Action::Confirm
+                            | tools::Action::TmuxAttach(..)
+                            | tools::Action::TmuxCreate
+                            | tools::Action::SftpTerminal
+                            | tools::Action::SyncArm(..)
+                    )
             )
         {
             return Task::none();
@@ -6011,6 +6019,8 @@ mod tests {
         let locked_status = app.status.clone();
         let _ = app.update(Message::RequestPaste);
         let _ = app.update(Message::CommandSend);
+        let _ = app.update(Message::Tool(tools::Action::SendCommand));
+        let _ = app.update(Message::Tool(tools::Action::Confirm));
         assert_eq!(app.status, locked_status);
         assert_eq!(app.tabs.len(), 1);
 
