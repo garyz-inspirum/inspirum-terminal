@@ -42,13 +42,7 @@ fn native_gssapi_only_authentication_and_delegation() {
     );
     let mode = std::env::var("INSPIRUM_GSSAPI_MODE").expect("GSSAPI fixture mode missing");
     assert!(
-        [
-            "no-delegation",
-            "delegation",
-            "no-ticket",
-            "expired-ticket",
-        ]
-        .contains(&mode.as_str())
+        ["no-delegation", "delegation", "no-ticket", "expired-ticket",].contains(&mode.as_str())
     );
 
     let remote_command = match mode.as_str() {
