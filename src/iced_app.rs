@@ -16,8 +16,8 @@ use crate::{
 };
 use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
 use iced::widget::{
-    button, canvas, center, column, container, mouse_area, opaque, operation, pane_grid, row,
-    scrollable, sensor, space, stack, text, text_editor, text_input,
+    button, canvas, center, column, container, mouse_area, opaque, operation, pane_grid,
+    responsive, row, scrollable, sensor, space, stack, text, text_editor, text_input,
 };
 use iced::{
     Border, Color, Element, Fill, Font, Subscription, Task, Theme, event, font, keyboard, mouse,
@@ -5860,14 +5860,7 @@ impl App {
         .into()
     }
 
-    fn files(&self) -> Element<'_, Message> {
-        let profile = &self.tabs[self.active].profile;
-        let target = if profile.user.is_empty() {
-            profile.host.clone()
-        } else {
-            format!("{}@{}", profile.user, profile.host)
-        };
-
+    fn file_listing_panels(&self) -> (Element<'_, Message>, Element<'_, Message>) {
         let mut local_list = column![].spacing(3);
         if self.files.local_loading {
             local_list = local_list.push(text("Loading local directory...").size(12).color(MUTED));
@@ -6018,6 +6011,37 @@ impl App {
         .width(Fill)
         .height(Fill)
         .style(card);
+        (local_panel.into(), remote_panel.into())
+    }
+
+    fn files(&self) -> Element<'_, Message> {
+        let profile = &self.tabs[self.active].profile;
+        let target = if profile.user.is_empty() {
+            profile.host.clone()
+        } else {
+            format!("{}@{}", profile.user, profile.host)
+        };
+
+        let bottom_layout = bottom_files_layout_policy();
+        let file_panels: Element<'_, Message> = if self.files_side_dock {
+            let (local_panel, remote_panel) = self.file_listing_panels();
+            column![local_panel, remote_panel]
+                .spacing(8)
+                .height(Fill)
+                .into()
+        } else {
+            // Fill whatever the dock gives us, never less than one complete
+            // row. The actions bar and transfer queue below have fixed
+            // heights, so completed transfers cannot consume this space.
+            responsive(move |size| {
+                let (local_panel, remote_panel) = self.file_listing_panels();
+                row![local_panel, remote_panel]
+                    .spacing(8)
+                    .height(size.height.max(bottom_layout.list_min_height))
+                    .into()
+            })
+            .into()
+        };
 
         let activity = if self.files.local_loading || self.files.remote_loading {
             "Loading"
@@ -6106,18 +6130,6 @@ impl App {
                 transfer_list.push(text("No transfers for this session.").size(11).color(MUTED));
         }
 
-        let bottom_layout = bottom_files_layout_policy();
-        let file_panels: Element<'_, Message> = if self.files_side_dock {
-            column![local_panel, remote_panel]
-                .spacing(8)
-                .height(Fill)
-                .into()
-        } else {
-            row![local_panel, remote_panel]
-                .spacing(8)
-                .height(bottom_layout.list_min_height)
-                .into()
-        };
         let actions_panel: Element<'_, Message> = if self.files_side_dock {
             column![
                 row![
