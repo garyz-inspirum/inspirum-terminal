@@ -9,6 +9,7 @@ The existing `scripts/test-native-ssh-smoke.py` fixture launches two independent
 The test suite checks:
 - ProxyJump success with actual SSH terminal roundtrip; jump server records the forwarded channel
 - Changed destination host key rejected through a working jump before user authentication
+- Changed **jump-host** key rejected before hop authentication; destination never receives a fallback connection
 - Failed jump returns an SSH error, **without direct connection fallback** to a reachable target
 - Local SSH forwarding (`-L`) carrying TCP bytes
 - Dynamic SOCKS5 forwarding (`-D`) with handshake, connect and payload roundtrip
