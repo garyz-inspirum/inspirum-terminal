@@ -18,6 +18,8 @@ Current scope:
 
 ## Verification status
 
+The [UI acceptance reconciliation](docs/ui-acceptance.md) records the 10 October 2026 snapshot at merged PR #121 (`8b6dbbe74b1c2188e4f0ccb4b33bfa7420aff018`): native main CI is green, bounded interaction issue #64 and advanced SSH issue #66 are closed, and #78/#1 remain open. It separates implemented Iced workflows, automated connected Linux GUI evidence, and outstanding physical-device acceptance; it is not a usability sign-off.
+
 The historical SSH-first release-candidate baseline was merge commit `17d353d3166f8c5a85f44329114530d3338462c9`; its post-merge CI run #214 (`37443065634`) passed Linux x86_64, Windows x64 and macOS Apple Silicon. Numerous subsequent Iced-only GUI and native SSH acceptance changes are merged; see `docs/PARITY.md` and the latest workflow runs for current evidence. That older commit is **not** the current `main` revision.
 
 Verified evidence:
@@ -34,7 +36,7 @@ Known limits:
 - release archives are intentionally unsigned and unnotarized until credential-backed signing is enabled and verified;
 - macOS packaging is currently a bare executable in a `.tar.gz`, not an `.app`/DMG;
 - GSSAPI controls delegate to the installed OpenSSH build and real Kerberos-environment compatibility is not claimed universally;
-- keyboard/IME/accessibility, richer terminal/workspace polish, local file management and remote editing are Phase 3 work;
+- Iced interaction modes, local file management and remote editing are implemented; physical-device IME/CJK, display-scale, full-screen/split/file-workflow usability and measured latency remain acceptance work under #78; accessibility is not fully verified;
 - full WindTerm parity is not claimed.
 
 The CI and release workflows pin Rust 1.95.0. Native CI proves the exercised paths above; it does not imply support for every OpenSSH build, desktop environment, locale, or future WindTerm-class feature.
