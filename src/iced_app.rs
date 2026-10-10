@@ -6331,7 +6331,11 @@ mod tests {
             id,
             terminal_core::BackendCommand::MouseReportAt(
                 terminal_core::MouseButton::LeftButton,
-                terminal_core::MouseModifiers::default(),
+                terminal_core::MouseModifiers {
+                    shift: false,
+                    alt: false,
+                    command: false,
+                },
                 0.0,
                 0.0,
                 true,
