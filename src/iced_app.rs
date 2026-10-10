@@ -24,6 +24,7 @@ use iced::{
 };
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock,
@@ -116,6 +117,28 @@ fn focus_mode_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool
         )
 }
 
+fn local_navigation_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
+    modifiers.shift()
+        && !modifiers.control()
+        && !modifiers.alt()
+        && !modifiers.command()
+        && matches!(
+            key.as_ref(),
+            keyboard::Key::Named(keyboard::key::Named::Enter)
+        )
+}
+
+fn local_navigation_scroll(key: &keyboard::Key) -> Option<i32> {
+    use keyboard::key::Named;
+    match key.as_ref() {
+        keyboard::Key::Named(Named::ArrowUp) => Some(1),
+        keyboard::Key::Named(Named::ArrowDown) => Some(-1),
+        keyboard::Key::Named(Named::PageUp) => Some(16),
+        keyboard::Key::Named(Named::PageDown) => Some(-16),
+        _ => None,
+    }
+}
+
 pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result {
     iced::application(
         move || App::boot(profiles_path.clone(), ssh_config.clone()),
@@ -158,6 +181,12 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                     if focus_mode_chord(key, *modifiers) =>
                 {
                     Some(Message::ToggleFocusMode)
+                }
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                    if status == event::Status::Ignored
+                        && local_navigation_chord(key, *modifiers) =>
+                {
+                    Some(Message::ToggleLocalNavigation)
                 }
                 // A focused text field can consume Escape. Route only this
                 // captured key to dialog dismissal; never leak it to SSH.
@@ -870,6 +899,7 @@ enum Message {
     ToggleSidebar,
     TogglePrivacyLock,
     ToggleFocusMode,
+    ToggleLocalNavigation,
     RequestPaste,
     ClipboardRead(u64, Vec<u64>, Option<String>),
     ConfirmPaste,
@@ -1864,6 +1894,7 @@ struct App {
     sidebar_collapsed: bool,
     privacy_locked: bool,
     focus_mode: bool,
+    local_navigation: HashSet<u64>,
     profile_visible: usize,
     profile_matches: Vec<usize>,
     form: ConnectionForm,
@@ -1946,6 +1977,7 @@ impl App {
             sidebar_collapsed: false,
             privacy_locked: false,
             focus_mode: false,
+            local_navigation: HashSet::new(),
             profile_visible: PROFILE_PAGE_SIZE,
             profile_matches,
             form: ConnectionForm::default(),
@@ -2073,6 +2105,9 @@ impl App {
         else {
             return;
         };
+        if self.local_navigation.contains(&id) {
+            return;
+        }
         let mut targets = self.tools.sync.destinations(id);
         targets.push(id);
         for target in targets {
@@ -2142,7 +2177,7 @@ impl App {
         targets
     }
     fn send_to_terminal(&mut self, id: u64, bytes: Vec<u8>) -> bool {
-        if !self.focused_pane_matches(id) {
+        if !self.focused_pane_matches(id) || self.local_navigation.contains(&id) {
             return false;
         }
         let targets = self.paste_targets(id);
@@ -2158,6 +2193,17 @@ impl App {
     }
 
     fn command_terminal(&mut self, id: u64, command: terminal_core::BackendCommand) -> bool {
+        // Enforce the mode at the single PTY write boundary, including
+        // synchronized input, delayed clipboard callbacks and tool commands.
+        if self.local_navigation.contains(&id)
+            && matches!(
+                &command,
+                terminal_core::BackendCommand::Write(_)
+                    | terminal_core::BackendCommand::MouseReportAt(..)
+            )
+        {
+            return false;
+        }
         let mut command = Some(command);
         for tab in &mut self.tabs {
             for (_, pane) in tab.panes.iter_mut() {
@@ -2753,6 +2799,7 @@ impl App {
                     | Message::CopySelection(..)
                     | Message::CommandSend
                     | Message::ToggleFocusMode
+                    | Message::ToggleLocalNavigation
                     | Message::Tool(
                         tools::Action::SendCommand
                             | tools::Action::Confirm
@@ -2763,6 +2810,31 @@ impl App {
                     )
             )
         {
+            return Task::none();
+        }
+        if matches!(&message, Message::ToggleLocalNavigation) {
+            if self.dialog.is_some() || self.remote_editor.is_some() {
+                return Task::none();
+            }
+            let id = self.tabs.get(self.active).and_then(|tab| {
+                tab.panes
+                    .get(tab.focus)
+                    .filter(|pane| !pane.exited)
+                    .map(|pane| pane.id)
+            });
+            if let Some(id) = id {
+                if !self.local_navigation.insert(id) {
+                    self.local_navigation.remove(&id);
+                    self.status = "Remote input restored for focused pane.".into();
+                } else {
+                    self.ime_cursor = None;
+                    self.status =
+                        "Local navigation: arrows/PageUp/PageDown scroll only. Shift+Enter exits."
+                            .into();
+                }
+            } else {
+                self.status = "Focus an SSH pane before changing navigation mode.".into();
+            }
             return Task::none();
         }
         if matches!(&message, Message::ToggleFocusMode) {
@@ -2808,6 +2880,9 @@ impl App {
             Message::TerminalImeCursor(..) | Message::TerminalImeCommit(..) => {}
             Message::TogglePrivacyLock => unreachable!("privacy lock handled before match"),
             Message::ToggleFocusMode => unreachable!("focus mode handled before match"),
+            Message::ToggleLocalNavigation => {
+                unreachable!("local navigation handled before match")
+            }
             Message::Tool(action) => return self.tool_update(action),
             Message::Search(value) => {
                 if self.dialog.is_none() || matches!(self.dialog, Some(Dialog::Tools)) {
@@ -3737,6 +3812,15 @@ impl App {
                 self.sidebar_collapsed = !self.sidebar_collapsed;
             }
             Message::RequestPaste => {
+                if self
+                    .tabs
+                    .get(self.active)
+                    .and_then(|tab| tab.panes.get(tab.focus))
+                    .is_some_and(|pane| self.local_navigation.contains(&pane.id))
+                {
+                    self.status = "Switch to remote input before pasting.".into();
+                    return Task::none();
+                }
                 let Some(id) = self.focused_terminal_id() else {
                     self.status = "Focus a connected terminal before pasting.".into();
                     return Task::none();
@@ -3865,7 +3949,7 @@ impl App {
                 }
             }
             Message::TerminalMouse(pane_id, id, button, modifiers, x, y, pressed) => {
-                if !self.active_pane_matches(pane_id, id) {
+                if self.local_navigation.contains(&id) || !self.active_pane_matches(pane_id, id) {
                     return Task::none();
                 }
                 if let Some(tab) = self.tabs.get_mut(self.active) {
@@ -3882,6 +3966,11 @@ impl App {
                 }
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.focus = pane_id;
+                }
+                // While navigating locally, wheel movements must scroll
+                // the local buffer even if the remote app has mouse mode on.
+                if self.local_navigation.contains(&id) {
+                    return self.update(Message::TerminalScroll(id, lines));
                 }
                 let button = if lines > 0 {
                     terminal_core::MouseButton::ScrollUp
@@ -4269,6 +4358,18 @@ impl App {
                     _ => {}
                 }
 
+                if let Some(id) = self.focused_terminal_id()
+                    && self.local_navigation.contains(&id)
+                {
+                    if key.as_ref() == keyboard::Key::Named(Named::Escape) {
+                        self.local_navigation.remove(&id);
+                        self.status = "Remote input restored for focused pane.".into();
+                    } else if let Some(lines) = local_navigation_scroll(&key) {
+                        return self.update(Message::TerminalScroll(id, lines));
+                    }
+                    // Never forward arbitrary keys in local-navigation mode.
+                    return Task::none();
+                }
                 let terminal_mode = self.focused_terminal_mode();
                 if let Some(bytes) = terminal_key_bytes(
                     &key,
@@ -4311,6 +4412,7 @@ impl App {
         }
         let target = if self.dialog.is_none() && self.remote_editor.is_none() {
             self.focused_terminal_id()
+                .filter(|id| !self.local_navigation.contains(id))
         } else {
             None
         };
@@ -4728,6 +4830,17 @@ impl App {
         let toolbar = row![
             text("LIVE SSH").size(12).color(GREEN),
             space::horizontal(),
+            action(
+                if self
+                    .focused_terminal_id()
+                    .is_some_and(|id| self.local_navigation.contains(&id))
+                {
+                    "LOCAL NAV"
+                } else {
+                    "REMOTE INPUT"
+                },
+                Message::ToggleLocalNavigation
+            ),
             action("Paste", Message::RequestPaste),
             action("Split right", Message::Split(pane_grid::Axis::Vertical)),
             action("Split down", Message::Split(pane_grid::Axis::Horizontal)),
@@ -4784,9 +4897,15 @@ impl App {
             };
             let title = pane_grid::TitleBar::new(
                 row![
-                    text(if focused { "FOCUSED" } else { "SSH" })
-                        .size(11)
-                        .color(if focused { BLUE } else { MUTED }),
+                    text(if self.local_navigation.contains(&pane.id) {
+                        "LOCAL NAV"
+                    } else if focused {
+                        "FOCUSED"
+                    } else {
+                        "SSH"
+                    })
+                    .size(11)
+                    .color(if focused { BLUE } else { MUTED }),
                     text(
                         pane.terminal_title
                             .as_deref()
@@ -6192,6 +6311,73 @@ mod tests {
         let _ = app.update(Message::ToggleFocusMode);
         assert!(!app.focus_mode);
         assert!(app.focused_pane_matches(id));
+    }
+
+    #[test]
+    fn local_navigation_is_isolated_per_pane_and_blocks_terminal_writes() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-local-navigation-{}-missing.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session {
+            name: "navigation test".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        let id = pane.id;
+        app.tabs.push(Workspace::new(profile, pane));
+        let _ = app.update(Message::ToggleLocalNavigation);
+        assert!(app.local_navigation.contains(&id));
+        assert!(
+            !app.command_terminal(id, terminal_core::BackendCommand::Write(b"danger".to_vec()))
+        );
+        assert!(!app.command_terminal(
+            id,
+            terminal_core::BackendCommand::MouseReportAt(
+                terminal_core::MouseButton::LeftButton,
+                terminal_core::MouseModifiers {
+                    shift: false,
+                    alt: false,
+                    command: false,
+                },
+                0.0,
+                0.0,
+                true,
+            )
+        ));
+        let _ = app.update(Message::RequestPaste);
+        assert!(app.status.contains("Switch to remote"));
+        let _ = app.update(Message::TogglePrivacyLock);
+        let _ = app.update(Message::ToggleLocalNavigation);
+        assert!(app.local_navigation.contains(&id));
+        let _ = app.update(Message::TogglePrivacyLock);
+        let _ = app.update(Message::ToggleLocalNavigation);
+        assert!(!app.local_navigation.contains(&id));
+    }
+
+    #[test]
+    fn shift_enter_is_local_navigation_only() {
+        use keyboard::key::Named;
+        let enter = keyboard::Key::Named(Named::Enter);
+        assert!(local_navigation_chord(&enter, keyboard::Modifiers::SHIFT));
+        assert!(!local_navigation_chord(
+            &enter,
+            keyboard::Modifiers::default()
+        ));
+        assert!(!local_navigation_chord(
+            &enter,
+            keyboard::Modifiers::SHIFT | keyboard::Modifiers::CTRL
+        ));
+        assert_eq!(
+            local_navigation_scroll(&keyboard::Key::Named(Named::ArrowUp)),
+            Some(1)
+        );
+        assert_eq!(
+            local_navigation_scroll(&keyboard::Key::Named(Named::PageDown)),
+            Some(-16)
+        );
     }
 
     #[test]
