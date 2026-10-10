@@ -2336,7 +2336,10 @@ impl App {
             .collect();
         self.free_type.retain(|id, _| present.contains(id));
         self.local_navigation.retain(|id| present.contains(id));
-        if self.free_type_confirm.is_some_and(|id| !present.contains(&id)) {
+        if self
+            .free_type_confirm
+            .is_some_and(|id| !present.contains(&id))
+        {
             self.free_type_confirm = None;
         }
     }
@@ -3013,7 +3016,9 @@ impl App {
                 unreachable!("local navigation handled before match")
             }
             Message::ToggleFocusedFreeType => {
-                if let Some(id) = self.tabs.get(self.active)
+                if let Some(id) = self
+                    .tabs
+                    .get(self.active)
                     .and_then(|tab| tab.panes.get(tab.focus))
                     .map(|pane| pane.id)
                 {
@@ -3021,7 +3026,8 @@ impl App {
                 }
             }
             Message::ToggleFreeType(id) => {
-                if self.dialog.is_some() || self.remote_editor.is_some()
+                if self.dialog.is_some()
+                    || self.remote_editor.is_some()
                     || !self.focused_pane_matches(id)
                     || self.local_navigation.contains(&id)
                 {
@@ -3038,14 +3044,16 @@ impl App {
                 }
             }
             Message::FreeTypeEdit(id, action) => {
-                if self.dialog.is_none() && self.focused_pane_matches(id)
+                if self.dialog.is_none()
+                    && self.focused_pane_matches(id)
                     && let Some(draft) = self.free_type.get_mut(&id)
                 {
                     draft.perform(action);
                 }
             }
             Message::FreeTypeSend(id) => {
-                if self.dialog.is_some() || !self.focused_pane_matches(id)
+                if self.dialog.is_some()
+                    || !self.focused_pane_matches(id)
                     || self.local_navigation.contains(&id)
                 {
                     return Task::none();
@@ -3069,7 +3077,8 @@ impl App {
                             normalize_line_endings: false,
                         });
                         self.free_type_confirm = Some(id);
-                        self.status = "Multiline free-type text awaits explicit confirmation.".into();
+                        self.status =
+                            "Multiline free-type text awaits explicit confirmation.".into();
                     }
                     PasteDecision::Send => {
                         let draft = self.free_type.remove(&id).expect("free-type draft");
@@ -3083,7 +3092,8 @@ impl App {
                 }
             }
             Message::FreeTypeDiscard(id) => {
-                if self.dialog.is_none() && self.focused_pane_matches(id)
+                if self.dialog.is_none()
+                    && self.focused_pane_matches(id)
                     && self.free_type.remove(&id).is_some()
                 {
                     self.status = "Free-type draft discarded. Remote input restored.".into();
@@ -4108,14 +4118,18 @@ impl App {
                     // A delayed confirmation must match the original draft and
                     // the original focused/synchronized target set.
                     let draft_matches = free_type_id != Some(id)
-                        || self.free_type.get(&id).is_some_and(|draft| draft.text() == text);
+                        || self
+                            .free_type
+                            .get(&id)
+                            .is_some_and(|draft| draft.text() == text);
                     let eligible = draft_matches
                         && targets == self.paste_targets(id)
                         && self.focused_pane_matches(id)
                         && terminal_ux::classify_paste(self.paste_policy, &prepared)
                             != PasteDecision::Block;
                     if !eligible {
-                        self.status = "Paste cancelled because the draft, targets or policy changed.".into();
+                        self.status =
+                            "Paste cancelled because the draft, targets or policy changed.".into();
                     } else {
                         let draft = if free_type_id == Some(id) {
                             self.free_type.remove(&id)
@@ -4236,7 +4250,9 @@ impl App {
 
                 if let Some((profile, sftp)) = profile {
                     let replacement = self.new_terminal_pane_kind(profile, sftp);
-                    if let Some(previous_id) = self.tabs.get(self.active)
+                    if let Some(previous_id) = self
+                        .tabs
+                        .get(self.active)
                         .and_then(|tab| tab.panes.get(pane_id))
                         .map(|pane| pane.id)
                     {
@@ -4643,8 +4659,9 @@ impl App {
             .into();
         }
         let target = if self.dialog.is_none() && self.remote_editor.is_none() {
-            self.focused_terminal_id()
-                .filter(|id| !self.local_navigation.contains(id) && !self.free_type.contains_key(id))
+            self.focused_terminal_id().filter(|id| {
+                !self.local_navigation.contains(id) && !self.free_type.contains_key(id)
+            })
         } else {
             None
         };
@@ -6656,7 +6673,10 @@ mod tests {
             vec![id],
             Some("unapproved paste".into()),
         ));
-        assert!(app.dialog.is_none(), "clipboard cannot bypass local editing");
+        assert!(
+            app.dialog.is_none(),
+            "clipboard cannot bypass local editing"
+        );
         let _ = app.update(Message::ToggleLocalNavigation);
         assert!(!app.local_navigation.contains(&id));
 
