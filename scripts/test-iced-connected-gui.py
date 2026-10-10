@@ -77,7 +77,14 @@ async def monitored_shell(
     buffer = ""
     try:
         while True:
-            chunk = await stdin.read(8192)
+            try:
+                chunk = await stdin.read(8192)
+            except asyncssh.TerminalSizeChanged:
+                # AsyncSSH injects terminal-size updates into SSHReader as
+                # exceptions. Splitting the Iced pane and opening the Files
+                # dock both resize a genuine PTY: these are not disconnects.
+                events.write("SHELL_PTY_RESIZE")
+                continue
             if not chunk:
                 events.write("SHELL_STREAM_EOF")
                 return
@@ -447,6 +454,13 @@ async def main() -> int:
                     )
 
                 event_log = events.path.read_text(encoding="utf-8")
+                if "SHELL_PTY_RESIZE" not in event_log:
+                    raise RuntimeError("connected SSH fixture never observed a live PTY resize")
+                if "SHELL_HANDLER_ENDED" in event_log or "SHELL_STREAM_EOF" in event_log:
+                    raise RuntimeError(
+                        "SSH terminal unexpectedly exited during split/dock/focus acceptance: "
+                        + repr(event_log[-900:])
+                    )
                 if "UNEXPECTED_LOCKED_PTY_INPUT" in event_log:
                     raise RuntimeError("privacy curtain forwarded synthetic keyboard input to SSH")
                 if "UNEXPECTED_FREE_TYPE_PTY_INPUT" in event_log:
@@ -455,7 +469,7 @@ async def main() -> int:
                     raise RuntimeError("two distinct SSH panes were not authenticated")
                 (destination / "connected-acceptance.txt").write_text(
                     "PASS: two authenticated independent OpenSSH PTYs through production Iced\n"
-                    "PASS: native Files dock established actual isolated SSH SFTP subsystem\n"
+                    "PASS: native Files dock established actual isolated SSH SFTP subsystem\n"                    "PASS: PTY resize events preserved both SSH shell sessions through the test\n"
                     f"Connected split screenshot change: {split_pixels} pixels\n"
                     f"Opened utility dock screenshot change: {files_pixels} pixels\n"
                     f"Closed SFTP utility dock screenshot change: {closed_pixels} pixels\n"
