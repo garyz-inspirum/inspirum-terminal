@@ -1051,6 +1051,12 @@ fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem>
     command_palette::palette_items(query, library)
 }
 
+// Pane IDs are immutable within the workspace. A unique widget ID is needed
+// to focus the correct inline editor even when several terminal panes are open.
+fn free_type_editor_id(id: u64) -> String {
+    format!("free-type-{id}")
+}
+
 fn sanitize_terminal_title(title: &str) -> Option<String> {
     let value: String = title
         .chars()
@@ -3152,6 +3158,7 @@ impl App {
                     self.free_type.insert(id, text_editor::Content::new());
                     self.ime_cursor = None;
                     self.status = "FREE TYPE: edit locally; nothing is sent until Send.".into();
+                    return operation::focus(free_type_editor_id(id));
                 }
             }
             Message::FreeTypeEdit(id, action) => {
@@ -5373,6 +5380,7 @@ impl App {
                                 .size(11)
                                 .color(BLUE),
                             text_editor(draft)
+                                .id(free_type_editor_id(pane_terminal_id))
                                 .placeholder("Compose here; Send is always explicit")
                                 .on_action(move |action| Message::FreeTypeEdit(pane_terminal_id, action))
                                 .height(96)
@@ -6864,6 +6872,13 @@ mod tests {
         let _ = app.update(Message::FreeTypeDiscard(id));
         assert!(!app.free_type.contains_key(&id));
         assert_eq!(app.free_type_confirm, None);
+    }
+
+    #[test]
+    fn free_type_editors_have_distinct_stable_keyboard_focus_ids() {
+        assert_eq!(free_type_editor_id(1), "free-type-1");
+        assert_eq!(free_type_editor_id(123), "free-type-123");
+        assert_ne!(free_type_editor_id(1), free_type_editor_id(2));
     }
 
     #[test]
