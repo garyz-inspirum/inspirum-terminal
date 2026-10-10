@@ -297,11 +297,13 @@ async def main() -> int:
                     f"Connected split screenshot change: {split_pixels} pixels\n"
                     f"Opened utility dock screenshot change: {files_pixels} pixels\n"
                     f"Free-type draft edit screenshot change: {free_type_pixels} pixels\n"
-                    "PASS: synthetic free-type text remained local without PTY writes\n"
+                    f"Focus-mode screenshot change: {focus_pixels} pixels\n"
+                    f"Privacy-curtain screenshot change: {privacy_pixels} pixels\n"
+                    "PASS: privacy-locked and free-type synthetic text never reached SSH\n"
                     "All keys generated in isolated temporary fixture; no real host or credential.\n",
                     encoding="utf-8",
                 )
-                print("PASS production Iced GUI: connected terminal, split, file dock, free-type keyboard focus and PTY isolation", flush=True)
+                print("PASS production Iced GUI: connected split, files dock, draft input, focus/privacy modes, and PTY keyboard isolation", flush=True)
         finally:
             if app is not None and app.poll() is None:
                 app.terminate()
