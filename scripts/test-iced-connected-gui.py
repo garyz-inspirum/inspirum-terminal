@@ -383,6 +383,27 @@ async def main() -> int:
                 if files_pixels < 3000:
                     raise RuntimeError(f"files dock changed only {files_pixels} pixels")
 
+                # At the production 1280x800 default, the bottom dock allocates
+                # all of its remaining height to the action/footer rows and the
+                # two file lists are clipped. Activate the visibly rendered
+                # "Dock right" control (bounds established from the retained
+                # connected-files-dock screenshot), then capture the resulting
+                # full-height explorer before attempting any file-row click.
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    "1207", "555", "click", "1", env=env,
+                )
+                await asyncio.sleep(1)
+                screenshot(window, destination / "connected-files-side-dock.png", env)
+                side_dock_pixels = diff(
+                    destination / "connected-files-dock.png",
+                    destination / "connected-files-side-dock.png", env,
+                )
+                if side_dock_pixels < 3000:
+                    raise RuntimeError(
+                        f"visible Dock right action changed only {side_dock_pixels} pixels"
+                    )
+
                 # Select the only local fixture row and activate Upload through
                 # native Iced pointer events. Filesystem bytes are the transfer
                 # integrity oracle; a screenshot delta or SFTP handshake alone

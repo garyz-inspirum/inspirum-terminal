@@ -46,7 +46,7 @@ Source references E5/E6 are pinned to the snapshot above.
 | Terminal-first shell and sessions | Session library, connection dialog, tabs, focus state, resizable splits, profile/tools access; no egui fallback | E2/E4/E5; production empty/dialog and connected/split states on Linux, separate fixture-only design preview | Human review of empty, connected, split, Files/transfer and connection-dialog states; readable controls, keyboard flow, preserved #55–#62 workflows on native devices |
 | Terminal input and interaction modes | Focus mode, pane-local local navigation, guarded paste, privacy curtain, free-type local draft, remote cursor-key mode | E3–E6; draft/privacy non-delivery assertions, application/normal cursor encoding and source-first failure isolation tests | Native focus restoration, selection/copy/paste, mouse modes, shutdown and real full-screen application interaction; a VT alternate-buffer fixture is not Vim/tmux usability proof |
 | Multi-pane and auxiliary shell | Independent PTYs, explicit sync arming/disarming, auxiliary SSH shell, four-pane limit | E3/E5 two authenticated PTYs and cleanup; E4/E6 connected Linux split and resize continuity | Device-level split/reorder/resize/selection and remote application cursor behavior. Windows ConPTY transport test uses printable probes; raw cursor bytes may become console events |
-| Files and remote editing | Local/remote browser, right/bottom dock, transfer queue and safe remote-editor backends | E5 source plus E2 backend tests; the post-E6 Linux fixture drives production Iced file-row/button clicks for one upload and one download, then proves exact bytes and the disposable `native-smoke` target roots outside the GUI. This is stronger than a handshake, but is Linux synthetic-fixture evidence, not human/device acceptance | Native macOS/Windows connected upload/download, SCP, overwrite/conflict/cancel/resume, remote-editor save, and named-device target-identity/usability review while the terminal stays usable; Linux human review also remains distinct from automation |
+| Files and remote editing | Local/remote browser, right/bottom dock, transfer queue and safe remote-editor backends | E5 source plus E2 backend tests. Connected production-Iced upload/download acceptance is pending an exact-head successful run: current Linux artifacts prove the dock and SFTP handshake, but not file-row selection or completed GUI transfers | Native macOS/Windows connected upload/download, SCP, overwrite/conflict/cancel/resume, remote-editor save, and named-device target-identity/usability review while the terminal stays usable; Linux human review also remains distinct from automation |
 | IME/CJK, typography and scaling | Committed Unicode routing, Iced IME integration, terminal fonts/appearance and cursor rendering | E5 source/regressions; parser/encoding tests are not candidate-window tests | Actual native composition/preedit/candidates/commit/cancel in terminal and editors; CJK/dead keys/emoji; native and 100/125/150/200% scales where supported; contrast, clipping, focus and accessibility review |
 | GPU and responsiveness | WGPU/Metal build with tiny-skia fallback; bounded redraw/cache work and opt-in timing tools | E2/E4 native build/tests; E5; [trace procedure](design/gui-redesign.md#opt-in-slow-stage-tracing) | Affected physical Apple Silicon Mac: external click-to-visible-caret p50/p95 and text-entry latency, actual renderer selection, GPU/software comparison on the same workload; CPU-stage timings cannot prove screen latency |
 | Release packaging | Native archives, dependency notices, architecture/metadata checks and clean extracted executable verification | E2 successful native package/download gates | Named-device operational qualification is still pending. Archives remain unsigned/unnotarized; signing/notarization, installers/app bundles and update policy are separate unresolved release work, not delivered by this docs PR |
@@ -79,12 +79,13 @@ remain provisional targets, not measured results. This change performs no new
 GUI, hardware, physical display or human acceptance testing. It reconciles
 source and already-recorded CI; #78 remains the full acceptance gate.
 
-The connected Linux file-transfer fixture deliberately reports two evidence
-layers separately: xdotool pointer actions prove the production Iced controls
-were used, while exact-byte reads from disposable local/chroot paths prove
-transfer integrity and destination. Neither layer demonstrates physical-device
-usability, native macOS/Windows behavior, IME, SCP, conflict/cancel/resume, or
-remote-editor acceptance.
+The connected Linux file-transfer fixture is intended to report two evidence
+layers separately: native pointer actions through production Iced controls and
+exact-byte reads from the expected disposable local/chroot roots. Until an
+exact-head CI run completes both layers, transfer acceptance remains pending;
+a dock screenshot or SFTP handshake alone is not transfer proof. Even a passing
+fixture would not demonstrate physical-device usability, native macOS/Windows
+behavior, IME, SCP, conflict/cancel/resume, or remote-editor acceptance.
 
 ## Proposed roadmap issue corrections (not applied here)
 
