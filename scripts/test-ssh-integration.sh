@@ -422,6 +422,22 @@ Host *
     INSPIRUM_PRIV_AUTH_FIXTURE='1' if privileged_auth else '0',
     INSPIRUM_FIXTURE_PASSWORD=fixture_password,
    )
+   # Independent OpenSSH control with the same synthetic agent and sshd.
+   # If it fails, the fixture is broken; do not blame the application adapter.
+   baseline=subprocess.run(
+    ['ssh','-A','-F',str(d/'config'),'-tt','127.0.0.1'],
+    env=env,
+    input='agent-probe\\nexit\\n'.replace('\\n','\n'),
+    capture_output=True,
+    text=True,
+    timeout=20,
+    check=False,
+   )
+   if baseline.returncode != 0 or 'AGENT_FORWARDED' not in baseline.stdout:
+    marker=next((key for key in ('AGENT_NO_SOCKET','AGENT_SOCKET_UNAVAILABLE','AGENT_SOCKET_UNUSABLE')
+                 if key in baseline.stdout), 'NO_MARKER')
+    raise RuntimeError(f'isolated system OpenSSH -A baseline failed: {marker}')
+   print('PASS isolated system OpenSSH -A forwarding baseline',flush=True)
    cmd=['cargo','test','--locked','--test','ssh_integration','--test','sftp_policy','--','--ignored','--nocapture','--test-threads=1']
    print('RUN:',' '.join(cmd),flush=True)
    auth_summary=(f'; password sshd: 127.0.0.1:{password_port}; MFA sshd: 127.0.0.1:{mfa_port}' if privileged_auth else '; password/MFA fixture skipped (passwordless sudo unavailable)')
