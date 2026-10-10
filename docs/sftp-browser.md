@@ -52,6 +52,17 @@ Neither screenshots nor the SFTP handshake alone are integrity proof. This
 synthetic Linux result does not replace the broader backend matrix above or
 human/native-device acceptance on Linux, macOS, or Windows.
 
+Issue #78 remains open. Exact-head Linux evidence for PR #126 at
+`e398ec0df6a808bb59668105b1572ab0229352b9` did **not** establish bottom-dock
+usability: at 1280x800 one completed transfer clipped the file rows and two
+completed transfers collapsed both listings because the natural-height queue
+consumed their `Fill` space. At 960x640 the listing panels disappeared. That
+artifact remains failure evidence only; it supports no minimum-window,
+hardware, IME, cross-platform, or universal-usability claim. A replacement
+layout and connected run must retain hit-testable listings after queue growth,
+minimum-size resize, and bottom/right re-docking before this limitation can be
+marked fixed. Roadmap issue #1 is unchanged.
+
 
 ## Local file manager and drag/drop transfers
 

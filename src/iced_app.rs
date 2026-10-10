@@ -16,8 +16,8 @@ use crate::{
 };
 use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
 use iced::widget::{
-    button, canvas, center, column, container, mouse_area, opaque, operation, pane_grid, row,
-    scrollable, sensor, space, stack, text, text_editor, text_input,
+    button, canvas, center, column, container, mouse_area, opaque, operation, pane_grid,
+    responsive, row, scrollable, sensor, space, stack, text, text_editor, text_input,
 };
 use iced::{
     Border, Color, Element, Fill, Font, Subscription, Task, Theme, event, font, keyboard, mouse,
@@ -2279,6 +2279,66 @@ struct App {
     remote_editor_open_generation: u64,
 }
 
+fn bottom_files_split_ratio() -> f32 {
+    0.38
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FilesLayoutPolicy {
+    list_min_height: f32,
+    queue_viewport_height: f32,
+    compact_actions: bool,
+}
+
+/// Fixed vertical space in the bottom Files dock outside the listings and the
+/// transfer queue viewport, measured on the 1280x800 Linux acceptance
+/// screenshots: panel padding, header row, actions bar with its scrollbar,
+/// column spacing, and the queue's own label and padding.
+const BOTTOM_FILES_CHROME: f32 = 154.0;
+const BOTTOM_QUEUE_MIN_VIEWPORT: f32 = 24.0;
+
+/// Extra chrome in the side dock: a second header line for the target and
+/// wider spacing, plus the second stacked listing.
+const SIDE_FILES_EXTRA_CHROME: f32 = 30.0;
+const SIDE_QUEUE_MAX_VIEWPORT: f32 = 144.0;
+
+/// Transfer-queue viewport for a dock of `dock_height` pixels, or `None`
+/// when the queue must collapse to a single summary line so the listings
+/// keep at least `list_min_height` each.
+fn files_queue_viewport_height(
+    dock_height: f32,
+    side_dock: bool,
+    policy: FilesLayoutPolicy,
+) -> Option<f32> {
+    let (chrome, listings, max_viewport) = if side_dock {
+        (
+            BOTTOM_FILES_CHROME + SIDE_FILES_EXTRA_CHROME,
+            2.0 * policy.list_min_height + 8.0,
+            SIDE_QUEUE_MAX_VIEWPORT,
+        )
+    } else {
+        (
+            BOTTOM_FILES_CHROME,
+            policy.list_min_height,
+            policy.queue_viewport_height,
+        )
+    };
+    let spare = dock_height - chrome - listings;
+    (spare >= BOTTOM_QUEUE_MIN_VIEWPORT).then(|| spare.min(max_viewport))
+}
+
+fn bottom_files_layout_policy() -> FilesLayoutPolicy {
+    FilesLayoutPolicy {
+        // Enough for the pane header and one complete file-row hit target at
+        // the supported minimum window size. The surrounding column uses
+        // fixed-height overflow regions so this space cannot be consumed by
+        // transfer history.
+        list_min_height: 110.0,
+        queue_viewport_height: 44.0,
+        compact_actions: true,
+    }
+}
+
 impl App {
     fn boot(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> Self {
         let _slow = SlowIcedScope::start("startup");
@@ -2832,8 +2892,14 @@ impl App {
             )
         {
             self.files_dock = Some(pane);
-            self.dock
-                .resize(split, if self.files_side_dock { 0.50 } else { 0.62 });
+            self.dock.resize(
+                split,
+                if self.files_side_dock {
+                    0.50
+                } else {
+                    bottom_files_split_ratio()
+                },
+            );
         }
     }
 
@@ -5831,14 +5897,7 @@ impl App {
         .into()
     }
 
-    fn files(&self) -> Element<'_, Message> {
-        let profile = &self.tabs[self.active].profile;
-        let target = if profile.user.is_empty() {
-            profile.host.clone()
-        } else {
-            format!("{}@{}", profile.user, profile.host)
-        };
-
+    fn file_listing_panels(&self) -> (Element<'_, Message>, Element<'_, Message>) {
         let mut local_list = column![].spacing(3);
         if self.files.local_loading {
             local_list = local_list.push(text("Loading local directory...").size(12).color(MUTED));
@@ -5989,6 +6048,39 @@ impl App {
         .width(Fill)
         .height(Fill)
         .style(card);
+        (local_panel.into(), remote_panel.into())
+    }
+
+    fn files(&self) -> Element<'_, Message> {
+        // Either dock is a fixed share of the window. Lay the panel out from
+        // its real height so the transfer queue, not the file listings, is
+        // what gives way at the minimum window size.
+        responsive(move |size| self.files_layout(size.height)).into()
+    }
+
+    fn files_layout(&self, dock_height: f32) -> Element<'_, Message> {
+        let profile = &self.tabs[self.active].profile;
+        let target = if profile.user.is_empty() {
+            profile.host.clone()
+        } else {
+            format!("{}@{}", profile.user, profile.host)
+        };
+
+        let bottom_layout = bottom_files_layout_policy();
+        let (local_panel, remote_panel) = self.file_listing_panels();
+        // The listings take every pixel the header, actions bar and bounded
+        // transfer queue leave, so completed transfers cannot consume them.
+        let file_panels: Element<'_, Message> = if self.files_side_dock {
+            column![local_panel, remote_panel]
+                .spacing(8)
+                .height(Fill)
+                .into()
+        } else {
+            row![local_panel, remote_panel]
+                .spacing(8)
+                .height(Fill)
+                .into()
+        };
 
         let activity = if self.files.local_loading || self.files.remote_loading {
             "Loading"
@@ -6077,85 +6169,99 @@ impl App {
                 transfer_list.push(text("No transfers for this session.").size(11).color(MUTED));
         }
 
-        let file_panels: Element<'_, Message> = if self.files_side_dock {
-            column![local_panel, remote_panel]
-                .spacing(8)
-                .height(Fill)
-                .into()
+        let actions_panel: Element<'_, Message> = scrollable(
+            row![
+                action("Upload ->", Message::FilesRequestUpload),
+                action("<- Download", Message::FilesRequestDownload),
+                action("New local folder", Message::FilesRequestMkdirLocal),
+                action("New remote folder", Message::FilesRequestMkdirRemote),
+                action("Rename local", Message::FilesRequestRenameLocal),
+                action("Rename remote", Message::FilesRequestRenameRemote),
+                action("Edit remote", Message::FilesRequestEditRemote),
+                action("Delete local", Message::FilesRequestDeleteLocal),
+                action("Delete remote", Message::FilesRequestDeleteRemote),
+                text("Destructive operations require confirmation.")
+                    .size(11)
+                    .color(MUTED),
+            ]
+            .spacing(8),
+        )
+        .direction(scrollable::Direction::Horizontal(
+            scrollable::Scrollbar::default(),
+        ))
+        .height(if bottom_layout.compact_actions {
+            34
         } else {
-            row![local_panel, remote_panel]
-                .spacing(8)
-                .height(Fill)
-                .into()
+            68
+        })
+        .into();
+
+        let queue_viewport_height =
+            files_queue_viewport_height(dock_height, self.files_side_dock, bottom_layout);
+        let transfer_queue = match queue_viewport_height {
+            Some(viewport) => container(
+                column![
+                    text("TRANSFER QUEUE").size(11).color(MUTED),
+                    scrollable(transfer_list).height(viewport),
+                ]
+                .spacing(6),
+            )
+            .padding(8)
+            .width(Fill)
+            .style(surface),
+            // Too short for a queue viewport: keep the listings usable and
+            // summarise the queue on one line instead of eating their row.
+            None => container(
+                text(format!(
+                    "TRANSFER QUEUE · {visible_transfers} for this session · enlarge the window to review"
+                ))
+                .size(11)
+                .color(MUTED),
+            )
+            .padding([4, 8])
+            .width(Fill)
+            .style(surface),
         };
-        let actions_panel: Element<'_, Message> = if self.files_side_dock {
+
+        let content_spacing = if self.files_side_dock { 8 } else { 4 };
+
+        let target_label = text(format!("Target: {target}")).size(12).color(BLUE);
+        let header: Element<'_, Message> = if self.files_side_dock {
+            // The narrow side dock cannot fit the target beside the controls
+            // without wrapping the Dock button label; give it its own line.
             column![
                 row![
-                    action("Upload ->", Message::FilesRequestUpload),
-                    action("<- Download", Message::FilesRequestDownload),
+                    text("Files").size(16),
+                    text(activity).size(11).color(MUTED),
+                    space::horizontal(),
+                    action("Refresh", Message::FilesRefresh),
+                    action("Dock bottom", Message::FilesToggleDockPosition),
                 ]
-                .spacing(8),
-                row![
-                    action("New local folder", Message::FilesRequestMkdirLocal),
-                    action("New remote folder", Message::FilesRequestMkdirRemote),
-                ]
-                .spacing(8),
-                row![
-                    action("Rename local", Message::FilesRequestRenameLocal),
-                    action("Rename remote", Message::FilesRequestRenameRemote),
-                    action("Edit remote", Message::FilesRequestEditRemote),
-                ]
-                .spacing(8),
-                row![
-                    action("Delete local", Message::FilesRequestDeleteLocal),
-                    action("Delete remote", Message::FilesRequestDeleteRemote),
-                ]
-                .spacing(8),
+                .spacing(12)
+                .align_y(iced::Center),
+                target_label,
             ]
-            .spacing(6)
+            .spacing(2)
             .into()
         } else {
-            column![
-                row![
-                    action("Upload ->", Message::FilesRequestUpload),
-                    action("<- Download", Message::FilesRequestDownload),
-                    action("New local folder", Message::FilesRequestMkdirLocal),
-                    action("New remote folder", Message::FilesRequestMkdirRemote),
-                ]
-                .spacing(8),
-                row![
-                    action("Rename local", Message::FilesRequestRenameLocal),
-                    action("Rename remote", Message::FilesRequestRenameRemote),
-                    action("Edit remote", Message::FilesRequestEditRemote),
-                    action("Delete local", Message::FilesRequestDeleteLocal),
-                    action("Delete remote", Message::FilesRequestDeleteRemote),
-                ]
-                .spacing(8),
+            row![
+                text("Files").size(16),
+                target_label,
+                text(activity).size(11).color(MUTED),
+                space::horizontal(),
+                action("Refresh", Message::FilesRefresh),
+                action("Dock right", Message::FilesToggleDockPosition),
             ]
-            .spacing(8)
+            .spacing(12)
+            .align_y(iced::Center)
             .into()
         };
 
         container(
             column![
-                row![
-                    text("Files").size(16),
-                    text(format!("Target: {target}")).size(12).color(BLUE),
-                    text(activity).size(11).color(MUTED),
-                    space::horizontal(),
-                    action("Refresh", Message::FilesRefresh),
-                    action(
-                        if self.files_side_dock { "Dock bottom" } else { "Dock right" },
-                        Message::FilesToggleDockPosition
-                    ),
-                ]
-                .spacing(12)
-                .align_y(iced::Center),
+                header,
                 file_panels,
                 actions_panel,
-                text("Destructive file operations require confirmation.")
-                    .size(11)
-                    .color(MUTED),
                 if let Some(editor) = self
                     .remote_editor
                     .as_ref()
@@ -6241,22 +6347,14 @@ impl App {
                     .padding(8)
                     .style(active_card)
                 } else {
-                    container(text(""))
+                    container(column![]).height(0).padding(0)
                 },
-                container(
-                    column![
-                        text("TRANSFER QUEUE").size(11).color(MUTED),
-                        transfer_list,
-                    ]
-                    .spacing(6)
-                )
-                .padding(8)
-                .style(surface),
+                transfer_queue,
             ]
-            .spacing(8)
+            .spacing(content_spacing)
             .height(Fill),
         )
-        .padding(10)
+        .padding(if self.files_side_dock { 10 } else { 6 })
         .height(Fill)
         .width(Fill)
         .style(card)
@@ -7927,6 +8025,31 @@ mod tests {
         assert_eq!(next_file_page(FILES_PAGE_SIZE, 10_000), FILES_PAGE_SIZE * 2);
         assert_eq!(next_file_page(400, 450), 450);
         assert_eq!(next_file_page(usize::MAX, 1_000), 1_000);
+    }
+
+    #[test]
+    fn bottom_files_layout_bounds_queue_and_reserves_a_hit_target_row() {
+        let policy = bottom_files_layout_policy();
+        assert!(policy.queue_viewport_height <= 56.0);
+        assert!(policy.list_min_height >= 104.0);
+        assert!(policy.compact_actions);
+        // 1280x800 bottom dock keeps the full queue viewport.
+        assert_eq!(
+            files_queue_viewport_height(366.0, false, policy),
+            Some(policy.queue_viewport_height)
+        );
+        // 960x640 bottom dock (~254px) collapses the queue to a summary line
+        // so the listings keep two full rows.
+        assert_eq!(files_queue_viewport_height(254.0, false, policy), None);
+        // Just enough spare space keeps a small viewport rather than collapsing.
+        let tight = BOTTOM_FILES_CHROME + policy.list_min_height + BOTTOM_QUEUE_MIN_VIEWPORT;
+        assert_eq!(
+            files_queue_viewport_height(tight, false, policy),
+            Some(BOTTOM_QUEUE_MIN_VIEWPORT)
+        );
+        // 1280x800 side dock (~600px) keeps two listings and a bounded queue.
+        let side = files_queue_viewport_height(600.0, true, policy).expect("side queue");
+        assert!((BOTTOM_QUEUE_MIN_VIEWPORT..=SIDE_QUEUE_MAX_VIEWPORT).contains(&side));
     }
 
     #[test]
