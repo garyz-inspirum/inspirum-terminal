@@ -3107,6 +3107,7 @@ impl App {
                             | tools::Action::TmuxCreate
                             | tools::Action::SftpTerminal
                             | tools::Action::SyncArm(..)
+                            | tools::Action::SyncTarget(..)
                     )
             )
         {
@@ -5268,6 +5269,25 @@ impl App {
                 },
                 Message::ToggleLocalNavigation
             ),
+            action(
+                if self.tools.sync.armed() {
+                    "SYNC ARMED · Disarm"
+                } else if self.tools.sync.selected_count() >= 2 {
+                    "Arm sync"
+                } else {
+                    "Select sync targets"
+                },
+                if self.tools.sync.selected_count() >= 2 {
+                    Message::Tool(tools::Action::SyncArm(!self.tools.sync.armed()))
+                } else {
+                    Message::Tool(tools::Action::Open(tools::Panel::Workspace))
+                },
+            )
+            .style(if self.tools.sync.armed() {
+                button::danger
+            } else {
+                quiet
+            }),
             action("Paste", Message::RequestPaste),
             action("Split right", Message::Split(pane_grid::Axis::Vertical)),
             action("Split down", Message::Split(pane_grid::Axis::Horizontal)),
@@ -5345,6 +5365,22 @@ impl App {
                     text(state.0).size(10).color(state.1),
                     space::horizontal(),
                     action("Copy", Message::CopySelection(pane.id)),
+                    action(
+                        if self.tools.sync.is_target(pane.id) {
+                            "SYNC"
+                        } else {
+                            "Sync +"
+                        },
+                        Message::Tool(tools::Action::SyncTarget(
+                            pane.id,
+                            !self.tools.sync.is_target(pane.id),
+                        )),
+                    )
+                    .style(if self.tools.sync.is_target(pane.id) {
+                        selected_button
+                    } else {
+                        quiet
+                    }),
                     if self.free_type.contains_key(&pane.id) {
                         action("Discard draft", Message::FreeTypeDiscard(pane.id))
                     } else {
@@ -6973,6 +7009,38 @@ mod tests {
         assert!(free_type_chord(&key, command | keyboard::Modifiers::SHIFT));
         assert!(!free_type_chord(&key, command));
         assert!(!free_type_chord(&key, keyboard::Modifiers::SHIFT));
+    }
+
+    #[test]
+    fn direct_pane_sync_selection_requires_two_targets_and_disarms_on_target_change() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-sync-ui-{}-missing.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session {
+            name: "fake-disconnected-sync".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let first = app.new_terminal_pane(profile.clone());
+        let first_id = first.id;
+        app.tabs.push(Workspace::new(profile.clone(), first));
+        let second = app.new_terminal_pane(profile);
+        let second_id = second.id;
+        app.tabs[0].split(pane_grid::Axis::Vertical, second);
+
+        let _ = app.update(Message::Tool(tools::Action::SyncTarget(first_id, true)));
+        let _ = app.update(Message::Tool(tools::Action::SyncArm(true)));
+        assert!(!app.tools.sync.armed());
+        let _ = app.update(Message::Tool(tools::Action::SyncTarget(second_id, true)));
+        let _ = app.update(Message::Tool(tools::Action::SyncArm(true)));
+        assert!(app.tools.sync.armed());
+        assert_eq!(app.tools.sync.destinations(first_id), vec![second_id]);
+
+        let _ = app.update(Message::Tool(tools::Action::SyncTarget(second_id, false)));
+        assert!(!app.tools.sync.armed());
+        assert!(app.tools.sync.destinations(first_id).is_empty());
     }
 
     #[test]
