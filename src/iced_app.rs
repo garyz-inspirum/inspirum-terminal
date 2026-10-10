@@ -117,6 +117,12 @@ fn focus_mode_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool
         )
 }
 
+fn free_type_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
+    modifiers.command()
+        && modifiers.shift()
+        && matches!(key.as_ref(), keyboard::Key::Character("e" | "E"))
+}
+
 fn local_navigation_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
     modifiers.shift()
         && !modifiers.control()
@@ -195,6 +201,11 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                     if focus_mode_chord(key, *modifiers) =>
                 {
                     Some(Message::ToggleFocusMode)
+                }
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                    if free_type_chord(key, *modifiers) =>
+                {
+                    Some(Message::ToggleFocusedFreeType)
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if status == event::Status::Ignored
@@ -915,6 +926,7 @@ enum Message {
     ToggleFocusMode,
     ToggleLocalNavigation,
     ToggleFreeType(u64),
+    ToggleFocusedFreeType,
     FreeTypeEdit(u64, text_editor::Action),
     FreeTypeSend(u64),
     FreeTypeDiscard(u64),
@@ -2316,6 +2328,19 @@ impl App {
         false
     }
 
+    fn prune_free_type(&mut self) {
+        let present: HashSet<u64> = self
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.iter().map(|(_, pane)| pane.id))
+            .collect();
+        self.free_type.retain(|id, _| present.contains(id));
+        self.local_navigation.retain(|id| present.contains(id));
+        if self.free_type_confirm.is_some_and(|id| !present.contains(&id)) {
+            self.free_type_confirm = None;
+        }
+    }
+
     fn selected_terminal_text(&mut self, id: u64) -> Option<String> {
         for tab in &mut self.tabs {
             for (_, pane) in tab.panes.iter_mut() {
@@ -2897,6 +2922,7 @@ impl App {
                     | Message::ToggleFocusMode
                     | Message::ToggleLocalNavigation
                     | Message::ToggleFreeType(..)
+                    | Message::ToggleFocusedFreeType
                     | Message::FreeTypeEdit(..)
                     | Message::FreeTypeSend(..)
                     | Message::FreeTypeDiscard(..)
@@ -2985,6 +3011,14 @@ impl App {
             Message::ToggleFocusMode => unreachable!("focus mode handled before match"),
             Message::ToggleLocalNavigation => {
                 unreachable!("local navigation handled before match")
+            }
+            Message::ToggleFocusedFreeType => {
+                if let Some(id) = self.tabs.get(self.active)
+                    .and_then(|tab| tab.panes.get(tab.focus))
+                    .map(|pane| pane.id)
+                {
+                    return self.update(Message::ToggleFreeType(id));
+                }
             }
             Message::ToggleFreeType(id) => {
                 if self.dialog.is_some() || self.remote_editor.is_some()
@@ -3316,6 +3350,7 @@ impl App {
                     }
                     self.tabs.remove(index);
                     self.prune_tool_panes();
+                    self.prune_free_type();
                     if index < self.active {
                         self.active -= 1;
                     }
@@ -4201,6 +4236,13 @@ impl App {
 
                 if let Some((profile, sftp)) = profile {
                     let replacement = self.new_terminal_pane_kind(profile, sftp);
+                    if let Some(previous_id) = self.tabs.get(self.active)
+                        .and_then(|tab| tab.panes.get(pane_id))
+                        .map(|pane| pane.id)
+                    {
+                        self.free_type.remove(&previous_id);
+                        self.local_navigation.remove(&previous_id);
+                    }
                     let connected = replacement.terminal.is_some();
                     let failed = replacement.error.is_some();
                     if let Some(tab) = self.tabs.get_mut(self.active)
@@ -4267,6 +4309,7 @@ impl App {
                     }
                 }
                 self.prune_tool_panes();
+                self.prune_free_type();
             }
             Message::DockResize(event) => {
                 self.dock.resize(event.split, event.ratio.clamp(0.30, 0.75));
@@ -5191,7 +5234,7 @@ impl App {
                     terminal_view,
                     container(
                         column![
-                            text("FREE TYPE · local editable draft · remote input suspended")
+                            text("FREE TYPE · local editable draft · remote input suspended · Ctrl/Cmd+Shift+E")
                                 .size(11)
                                 .color(BLUE),
                             text_editor(draft)
