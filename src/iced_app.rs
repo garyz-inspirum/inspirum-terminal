@@ -5313,7 +5313,7 @@ impl App {
                     action("Copy", Message::CopySelection(pane.id)),
                     action(
                         if self.tools.sync.is_target(pane.id) {
-                            "SYNC TARGET"
+                            "SYNC"
                         } else {
                             "Sync +"
                         },
