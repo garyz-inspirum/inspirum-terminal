@@ -194,6 +194,7 @@ async def click_transfer(
     action: tuple[int, int],
     completed,
     label: str,
+    selected_screenshot: Path | None = None,
 ) -> None:
     """Select one visibly rendered row and activate one production Iced button."""
     command(
@@ -201,6 +202,8 @@ async def click_transfer(
         str(row[0]), str(row[1]), "click", "1", env=env,
     )
     await asyncio.sleep(.25)
+    if selected_screenshot is not None:
+        screenshot(window, selected_screenshot, env)
     command(
         "xdotool", "mousemove", "--window", window,
         str(action[0]), str(action[1]), "click", "1", env=env,
@@ -438,14 +441,27 @@ async def main() -> int:
                 # through the production button and verify the exact binary
                 # payload landed in the visible local browser directory.
                 downloaded = local_root / download_name
+                if downloaded.exists():
+                    raise RuntimeError(
+                        "download destination unexpectedly exists before native click"
+                    )
+                # The completed upload adds a transfer-queue card, shrinking the
+                # file panels and moving the action toolbar upward. Run 38040889866
+                # retained that exact post-upload state: the named remote row is
+                # centered near y=408 and Download is centered near y=467. Capture
+                # the row selection before activating Download so the evidence
+                # proves which remote filename the native click selected.
                 await click_transfer(
                     window=window,
                     env=env,
-                    row=(1040, 422),
-                    action=(947, 497),
+                    row=(1040, 408),
+                    action=(947, 467),
                     completed=lambda: downloaded.is_file()
                     and downloaded.read_bytes() == download_bytes,
                     label="click-driven SFTP download into expected local fixture root",
+                    selected_screenshot=(
+                        destination / "connected-files-download-selected.png"
+                    ),
                 )
                 await asyncio.sleep(.7)
                 screenshot(window, destination / "connected-files-downloaded.png", env)
