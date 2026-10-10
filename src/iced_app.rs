@@ -2317,7 +2317,11 @@ fn files_queue_viewport_height(
             SIDE_QUEUE_MAX_VIEWPORT,
         )
     } else {
-        (BOTTOM_FILES_CHROME, policy.list_min_height, policy.queue_viewport_height)
+        (
+            BOTTOM_FILES_CHROME,
+            policy.list_min_height,
+            policy.queue_viewport_height,
+        )
     };
     let spare = dock_height - chrome - listings;
     (spare >= BOTTOM_QUEUE_MIN_VIEWPORT).then(|| spare.min(max_viewport))
@@ -8039,7 +8043,10 @@ mod tests {
         assert_eq!(files_queue_viewport_height(254.0, false, policy), None);
         // Just enough spare space keeps a small viewport rather than collapsing.
         let tight = BOTTOM_FILES_CHROME + policy.list_min_height + BOTTOM_QUEUE_MIN_VIEWPORT;
-        assert_eq!(files_queue_viewport_height(tight, false, policy), Some(BOTTOM_QUEUE_MIN_VIEWPORT));
+        assert_eq!(
+            files_queue_viewport_height(tight, false, policy),
+            Some(BOTTOM_QUEUE_MIN_VIEWPORT)
+        );
         // 1280x800 side dock (~600px) keeps two listings and a bounded queue.
         let side = files_queue_viewport_height(600.0, true, policy).expect("side queue");
         assert!((BOTTOM_QUEUE_MIN_VIEWPORT..=SIDE_QUEUE_MAX_VIEWPORT).contains(&side));
