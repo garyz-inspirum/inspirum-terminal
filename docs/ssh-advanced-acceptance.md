@@ -27,7 +27,9 @@ The Linux `scripts/test-ssh-integration.sh` fixture starts an isolated synthetic
 | ProxyJump (success, changed key, jump failure) | Linux x64, Windows x64, macOS arm64 only if CI native fixture passes |
 | Local, remote and dynamic TCP forwarding | Linux x64, Windows x64, macOS arm64 only if CI native fixture passes |
 | Agent forwarding | Linux x64 isolated ssh-agent + OpenSSH sshd runtime opt-in/opt-out via actual Inspirum terminal adapter, **only after PR CI passes**; native Windows/macOS runtime forwarding not yet exercised |
-| X11 forwarding | Requires a working local X server and server-side X11 tools; not claimed from headless native CI |
+| X11 forwarding | Linux isolated Xvfb/xauth, genuine OpenSSH -X control and Inspirum client opt-in/opt-out via PTY, **only if CI passes**; Windows/macOS runtime remains unverified |
 | Reconnect and split workspace GUI behavior | Separately tracked under GUI issue #78 |
 
-Keep the issue open for agent-forwarding, X11 support limitations and fully documented per-platform test results. In particular, never conflate a green compile with successful runtime forwarding. Default listener addresses must remain bound to loopback; agent or X11 forwarding should display explicit risk context.
+An isolated Linux X11 fixture starts Xvfb with its own temporary xauth cookie, permits X11Forwarding only on a loopback test sshd, validates a system OpenSSH `-X` control, and then verifies Inspirum `Some(true)` can query the forwarded display while `Some(false)` does not expose `DISPLAY`. This is a Linux-only runtime claim and does not prove native macOS XQuartz or Windows X server compatibility. X11 access gives a trusted remote host access to the local display; enable only when necessary.
+
+Keep the issue open for native Windows/macOS runtime X11 limitations and any remaining negative/reconnect checks. In particular, never conflate a green compile with successful runtime forwarding. Default listener addresses must remain bound to loopback; agent or X11 forwarding should display explicit risk context.
