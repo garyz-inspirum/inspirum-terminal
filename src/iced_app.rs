@@ -997,10 +997,9 @@ fn sanitize_terminal_title(title: &str) -> Option<String> {
 /// searched or retained, and the pair is recalculated only when PTY content
 /// generation changes. Nested pairs and reversed (closing) traversal work.
 fn matched_delimiters(snapshot: &terminal_core::DisplaySnapshot) -> Option<(usize, usize)> {
-    let cursor = snapshot
-        .cells
-        .iter()
-        .position(|cell| cell.cursor && matches!(cell.character, '(' | ')' | '[' | ']' | '{' | '}'))?;
+    let cursor = snapshot.cells.iter().position(|cell| {
+        cell.cursor && matches!(cell.character, '(' | ')' | '[' | ']' | '{' | '}')
+    })?;
     let (opening, closing, forward) = match snapshot.cells[cursor].character {
         '(' => ('(', ')', true),
         ')' => ('(', ')', false),
@@ -1582,9 +1581,11 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                             rgb(cell.foreground),
                         );
                     }
-                    if state.highlighted_delimiters.get().is_some_and(|(a, b)| {
-                        a == start + cell_index || b == start + cell_index
-                    }) {
+                    if state
+                        .highlighted_delimiters
+                        .get()
+                        .is_some_and(|(a, b)| a == start + cell_index || b == start + cell_index)
+                    {
                         // Thin accent below both matching delimiters. Do not
                         // repaint glyphs or change the remote terminal buffer.
                         frame.fill(
