@@ -225,7 +225,12 @@ async def main() -> int:
 
         runtime = root / "xdg-runtime"
         runtime.mkdir(mode=0o700)
-        env = dict(os.environ, DISPLAY=reserved_display(), XDG_RUNTIME_DIR=str(runtime))
+        env = dict(
+            os.environ,
+            DISPLAY=reserved_display(),
+            XDG_RUNTIME_DIR=str(runtime),
+            INSPIRUM_CI_REMOTE_KEY_TRACE="1",
+        )
         xvfb = subprocess.Popen(
             ["Xvfb", env["DISPLAY"], "-screen", "0", "1440x1000x24", "-nolisten", "tcp"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
@@ -476,14 +481,29 @@ async def main() -> int:
                         f"{remote_keys_pixels} pixels changed"
                     )
                 command("xdotool", "key", "--clearmodifiers", "h", env=env)
+                await asyncio.sleep(.7)
                 command(
                     "xdotool", "key", "--clearmodifiers", "ctrl+shift+m", env=env,
                 )
+                await asyncio.sleep(.5)
                 command("xdotool", "key", "--clearmodifiers", "Return", env=env)
-                await wait_for(
-                    lambda: "REMOTE_CURSOR_LEFT" in events.path.read_text(encoding="utf-8"),
-                    "native OpenSSH remote cursor Left after Iced modal h key",
-                )
+                try:
+                    await wait_for(
+                        lambda: "REMOTE_CURSOR_LEFT" in events.path.read_text(encoding="utf-8"),
+                        "native OpenSSH remote cursor Left after Iced modal h key",
+                    )
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        f"{exc}. Synthetic SSH lifecycle: "
+                        + repr(events.path.read_text(encoding="utf-8")[-1300:])
+                        + "; opt-in key dispatch: "
+                        + repr(
+                            "\n".join(
+                                line for line in app_log.read_text(encoding="utf-8").splitlines()
+                                if line.startswith("ci_remote_key:")
+                            )[-1200:]
+                        )
+                    ) from exc
 
                 event_log = events.path.read_text(encoding="utf-8")
                 if "SHELL_PTY_RESIZE" not in event_log:
