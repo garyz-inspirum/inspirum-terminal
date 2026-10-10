@@ -465,5 +465,7 @@ fn native_local_remote_and_dynamic_ssh_forwarding() {
         );
         thread::sleep(Duration::from_millis(50));
     }
-    println!("PASS native SSH -L, -R, -D forwarding, reconnect with same ports, and listener cleanup");
+    println!(
+        "PASS native SSH -L, -R, -D forwarding, reconnect with same ports, and listener cleanup"
+    );
 }
