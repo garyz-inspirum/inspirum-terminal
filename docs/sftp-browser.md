@@ -42,6 +42,13 @@ Closing the Files view drops its queue; any running transfer is terminated by th
 
 Portable tests cover SFTP path/list parsing and browser navigation helpers. The isolated Linux sshd fixture covers graphical binary upload/download, remote browse/mkdir/rename/delete, a negative delete, local no-clobber behavior, failed integrity verification preserving an existing file, confirmed overwrite, cancellation with a preserved private partial, and upload/download continuation through `reput`/`reget`.
 
+The production connected-Iced Linux fixture separately uses native pointer
+events to select one local and one remote row and press Upload/Download against
+an AsyncSSH chroot. It checks the resulting binary bytes and disposable target
+roots directly. This proves those GUI actions reach the existing transfer path;
+it does not replace the broader backend matrix above or human/native-device
+acceptance on Linux, macOS, or Windows.
+
 
 ## Local file manager and drag/drop transfers
 
