@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+import socket
 import shutil
 import subprocess
 import tempfile
@@ -121,10 +122,14 @@ class NativeServer(asyncssh.SSHServer):
         allowed_key: asyncssh.SSHKey,
         events: EventLog,
         jump_target_port: int | None = None,
+        echo_port: int | None = None,
+        reverse_port: int | None = None,
     ) -> None:
         self.allowed_key = allowed_key
         self.events = events
         self.jump_target_port = jump_target_port
+        self.echo_port = echo_port
+        self.reverse_port = reverse_port
 
     def connection_made(self, conn: asyncssh.SSHServerConnection) -> None:
         del conn
@@ -155,12 +160,21 @@ class NativeServer(asyncssh.SSHServer):
         # Only the explicitly configured fixture target may be accessed
         # through the disposable jump server. No arbitrary remote forwarding.
         del orig_host, orig_port
+        loopback = dest_host in ("127.0.0.1", "localhost")
+        jump = self.jump_target_port is not None and dest_port == self.jump_target_port
+        echo = self.echo_port is not None and dest_port == self.echo_port
+        allowed = loopback and (jump or echo)
+        label = "JUMP" if self.jump_target_port is not None else "LOCAL"
+        self.events.write(f"{label}_FORWARD_{'ALLOW' if allowed else 'DENY'}")
+        return allowed
+
+    def server_requested(self, listen_host: str, listen_port: int) -> bool:
         allowed = (
-            self.jump_target_port is not None
-            and dest_host in ("127.0.0.1", "localhost")
-            and dest_port == self.jump_target_port
+            listen_host in ("127.0.0.1", "localhost")
+            and self.reverse_port is not None
+            and listen_port == self.reverse_port
         )
-        self.events.write(f"JUMP_FORWARD_{'ALLOW' if allowed else 'DENY'}")
+        self.events.write(f"REMOTE_FORWARD_{'ALLOW' if allowed else 'DENY'}")
         return allowed
 
 
@@ -226,6 +240,24 @@ def add_jump_host(
         )
 
 
+async def echo_service(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    try:
+        while chunk := await reader.read(8192):
+            writer.write(chunk)
+            await writer.drain()
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+def available_local_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 async def main() -> int:
     root_base = Path(
         os.environ.get("INSPIRUM_TEST_TMPDIR", tempfile.gettempdir())
@@ -242,9 +274,16 @@ async def main() -> int:
         jump_host_key = generate_key(root, "jump-host")
         client_key = generate_key(root, "client")
         allowed_key = asyncssh.read_public_key(str(client_key) + ".pub")
+        echo_server = await asyncio.start_server(echo_service, "127.0.0.1", 0)
+        echo_port = int(echo_server.sockets[0].getsockname()[1])
+        remote_port = available_local_port()
+        (root / "echo-port").write_text(str(echo_port), encoding="utf-8")
+        (root / "remote-port").write_text(str(remote_port), encoding="utf-8")
 
         server = await asyncssh.create_server(
-            lambda: NativeServer(allowed_key, events),
+            lambda: NativeServer(
+                allowed_key, events, echo_port=echo_port, reverse_port=remote_port
+            ),
             "127.0.0.1",
             0,
             server_host_keys=[str(host_key)],
@@ -367,8 +406,10 @@ async def main() -> int:
         finally:
             jump_server.close()
             server.close()
+            echo_server.close()
             await jump_server.wait_closed()
             await server.wait_closed()
+            await echo_server.wait_closed()
 
         log = events.path.read_text(encoding="utf-8")
         print("--- disposable native SSH server events ---")
