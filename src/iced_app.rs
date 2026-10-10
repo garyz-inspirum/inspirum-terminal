@@ -130,7 +130,9 @@ fn forwarding_preflight_hint(
         notes.push("Agent preflight: SSH_AUTH_SOCK is unset. Check ssh-agent/IdentityAgent if forwarding fails.");
     }
     if x11 == Some(true) && !display_present {
-        notes.push("X11 preflight: DISPLAY is unset. Start/configure a local X server before connecting.");
+        notes.push(
+            "X11 preflight: DISPLAY is unset. Start/configure a local X server before connecting.",
+        );
     }
     notes.join(" ")
 }
@@ -6471,7 +6473,10 @@ mod tests {
         if cfg!(unix) {
             assert!(no_agent.contains("SSH_AUTH_SOCK is unset"));
         } else {
-            assert!(no_agent.is_empty(), "Windows OpenSSH agent service may not set SSH_AUTH_SOCK");
+            assert!(
+                no_agent.is_empty(),
+                "Windows OpenSSH agent service may not set SSH_AUTH_SOCK"
+            );
         }
     }
 
