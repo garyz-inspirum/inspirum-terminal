@@ -154,6 +154,16 @@ Start with 14 logical-pixel UI text, 15-16 pixel terminal text, 12-13 pixel seco
 
 Selected, hovered, focused, disabled, pending and error states need separate treatment. Colour alone is insufficient. Production acceptance includes visible keyboard focus, contrast measurement, 100/125/150/200 percent scaling and a light/high-contrast alternative without changing interaction placement.
 
+### Clickable versus label
+
+Users could not tell a button, tab or link from a plain label because resting buttons had no fill or outline. The rule is now explicit and enforced by a unit test (`clickable_controls_are_distinct_from_labels_at_rest`):
+
+- **Every clickable control** (buttons, tabs, sidebar session rows, file rows, close/add controls) has a resting fill `#1A2330` and a 1 px outline `#485A73` with 5 px radius. Hover brightens the fill to `#263244` with an accent outline; pressed darkens; disabled uses the panel colour with the divider outline and secondary text.
+- **Selected** controls (active tab, selected file row, enabled toggles) use the elevated fill with accent text *and* accent outline.
+- **Primary** action keeps the accent fill with dark text.
+- **Labels, headers, metadata and status text** never have a fill or outline. Section headers (`LOCAL`, `REMOTE`, `TRANSFER QUEUE`) stay small muted caps.
+- Links only occur inside terminal content, where URL highlighting already uses the accent colour.
+
 The native preview deliberately uses simple text controls while the hierarchy is evaluated. A consistent original line-icon set and compact icon-with-tooltip controls are a later visual pass, not a prerequisite for understanding the first layout.
 
 ## 6. Feature placement and preservation

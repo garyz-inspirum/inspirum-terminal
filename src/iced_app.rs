@@ -7132,44 +7132,85 @@ fn active_card(theme: &Theme) -> container::Style {
     }
 }
 
+/// Resting fill and outline for every clickable control. A control must read
+/// as clickable before the pointer reaches it, so plain labels (no fill, no
+/// outline) and buttons (filled, outlined) never share the same look.
+const CONTROL_FILL: Color = Color::from_rgb8(26, 35, 48);
+const CONTROL_HOVER: Color = Color::from_rgb8(38, 50, 68);
+const CONTROL_PRESSED: Color = Color::from_rgb8(20, 27, 38);
+const CONTROL_BORDER: Color = Color::from_rgb8(72, 90, 115);
+
 fn quiet(_: &Theme, status: button::Status) -> button::Style {
+    let (background, border_color, text_color) = match status {
+        button::Status::Hovered => (CONTROL_HOVER, BLUE, FG),
+        button::Status::Pressed => (CONTROL_PRESSED, BLUE, FG),
+        button::Status::Disabled => (PANEL, LINE, MUTED),
+        button::Status::Active => (CONTROL_FILL, CONTROL_BORDER, FG),
+    };
     button::Style {
-        background: if matches!(status, button::Status::Hovered | button::Status::Pressed) {
-            Some(ELEVATED.into())
-        } else {
-            None
-        },
-        text_color: if status == button::Status::Disabled {
-            MUTED
-        } else {
-            FG
-        },
+        background: Some(background.into()),
+        text_color,
         border: Border {
+            color: border_color,
+            width: 1.0,
             radius: 5.0.into(),
-            ..Default::default()
         },
         ..Default::default()
     }
 }
 
 fn selected_button(theme: &Theme, status: button::Status) -> button::Style {
+    let base = quiet(theme, status);
     button::Style {
         background: Some(ELEVATED.into()),
         text_color: BLUE,
-        ..quiet(theme, status)
+        border: Border {
+            color: BLUE,
+            ..base.border
+        },
+        ..base
     }
 }
 
 fn primary(theme: &Theme, status: button::Status) -> button::Style {
+    let base = quiet(theme, status);
     button::Style {
         background: Some(BLUE.into()),
         text_color: BG,
-        ..quiet(theme, status)
+        border: Border {
+            color: BLUE,
+            ..base.border
+        },
+        ..base
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clickable_controls_are_distinct_from_labels_at_rest() {
+        use iced::widget::button::Status;
+        let theme = iced::Theme::Dark;
+        for status in [
+            Status::Active,
+            Status::Hovered,
+            Status::Pressed,
+            Status::Disabled,
+        ] {
+            let style = super::quiet(&theme, status);
+            assert!(style.background.is_some(), "{status:?} needs a fill");
+            assert!(style.border.width >= 1.0, "{status:?} needs an outline");
+        }
+        let rest = super::quiet(&theme, Status::Active);
+        let hover = super::quiet(&theme, Status::Hovered);
+        assert_ne!(rest.border.color, hover.border.color);
+        assert_eq!(
+            super::selected_button(&theme, Status::Active).border.color,
+            super::BLUE
+        );
+        assert_eq!(super::primary(&theme, Status::Active).text_color, super::BG);
+    }
+
     #[test]
     fn remote_parent_stays_bounded() {
         assert_eq!(super::remote_parent("/a/b"), "/a");
