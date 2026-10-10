@@ -106,6 +106,16 @@ fn privacy_lock_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bo
         && matches!(key.as_ref(), keyboard::Key::Character("l" | "L"))
 }
 
+fn focus_mode_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
+    modifiers.alt()
+        && !modifiers.control()
+        && !modifiers.command()
+        && matches!(
+            key.as_ref(),
+            keyboard::Key::Named(keyboard::key::Named::Enter)
+        )
+}
+
 pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result {
     iced::application(
         move || App::boot(profiles_path.clone(), ssh_config.clone()),
@@ -143,6 +153,11 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                     if privacy_lock_chord(key, *modifiers) =>
                 {
                     Some(Message::TogglePrivacyLock)
+                }
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                    if focus_mode_chord(key, *modifiers) =>
+                {
+                    Some(Message::ToggleFocusMode)
                 }
                 // A focused text field can consume Escape. Route only this
                 // captured key to dialog dismissal; never leak it to SSH.
@@ -854,6 +869,7 @@ enum Message {
     FilesRemoteLoaded(u64, Result<Vec<sftp::RemoteEntry>, String>),
     ToggleSidebar,
     TogglePrivacyLock,
+    ToggleFocusMode,
     RequestPaste,
     ClipboardRead(u64, Vec<u64>, Option<String>),
     ConfirmPaste,
@@ -1847,6 +1863,7 @@ struct App {
     editing_snippet: Option<String>,
     sidebar_collapsed: bool,
     privacy_locked: bool,
+    focus_mode: bool,
     profile_visible: usize,
     profile_matches: Vec<usize>,
     form: ConnectionForm,
@@ -1928,6 +1945,7 @@ impl App {
             editing_snippet: None,
             sidebar_collapsed: false,
             privacy_locked: false,
+            focus_mode: false,
             profile_visible: PROFILE_PAGE_SIZE,
             profile_matches,
             form: ConnectionForm::default(),
@@ -2734,6 +2752,7 @@ impl App {
                     | Message::TerminalScroll(..)
                     | Message::CopySelection(..)
                     | Message::CommandSend
+                    | Message::ToggleFocusMode
                     | Message::Tool(
                         tools::Action::SendCommand
                             | tools::Action::Confirm
@@ -2744,6 +2763,21 @@ impl App {
                     )
             )
         {
+            return Task::none();
+        }
+        if matches!(&message, Message::ToggleFocusMode) {
+            if self.tabs.is_empty() {
+                self.status = "Open an SSH session before entering focus mode.".into();
+            } else {
+                // The existing tab, split panes and files dock remain intact.
+                // Focus mode affects presentation only; it never retargets SSH.
+                self.focus_mode = !self.focus_mode;
+                self.status = if self.focus_mode {
+                    "Focus mode: terminal panes only (Alt+Enter to exit).".into()
+                } else {
+                    "Full workspace restored.".into()
+                };
+            }
             return Task::none();
         }
         if !self.profiles_writable
@@ -2773,6 +2807,7 @@ impl App {
             }
             Message::TerminalImeCursor(..) | Message::TerminalImeCommit(..) => {}
             Message::TogglePrivacyLock => unreachable!("privacy lock handled before match"),
+            Message::ToggleFocusMode => unreachable!("focus mode handled before match"),
             Message::Tool(action) => return self.tool_update(action),
             Message::Search(value) => {
                 if self.dialog.is_none() || matches!(self.dialog, Some(Dialog::Tools)) {
@@ -4141,7 +4176,11 @@ impl App {
             }
             Message::TerminalResized(id, size) => self.resize_terminal(id, size),
             Message::Event(iced::Event::Window(iced::window::Event::FileDropped(path))) => {
-                if self.dialog.is_none() && self.files_dock.is_some() && !self.tabs.is_empty() {
+                if self.dialog.is_none()
+                    && !self.focus_mode
+                    && self.files_dock.is_some()
+                    && !self.tabs.is_empty()
+                {
                     self.files.selected_local = Some(path);
                     return self.request_upload();
                 }
@@ -4284,6 +4323,38 @@ impl App {
 
     fn view_content(&self) -> Element<'_, Message> {
         let _slow = SlowIcedScope::start("view_layout");
+        if self.focus_mode && !self.tabs.is_empty() {
+            // Do not mutate the underlying dock/grid state. In focus mode the
+            // workspace is reduced to the live terminal split panes, with an
+            // always-visible exit action and synchronized-input warning.
+            return container(
+                column![
+                    row![
+                        text("FOCUS MODE · Alt+Enter to exit").size(12).color(BLUE),
+                        text(&self.tabs[self.active].profile.name)
+                            .size(12)
+                            .color(MUTED),
+                        space::horizontal(),
+                        if self.tools.sync.armed() {
+                            text("SYNC INPUT ARMED").size(12).color(DANGER)
+                        } else {
+                            text("").size(12)
+                        },
+                        action("Exit focus", Message::ToggleFocusMode),
+                    ]
+                    .spacing(12)
+                    .align_y(iced::Center),
+                    self.terminals(),
+                ]
+                .spacing(8)
+                .height(Fill),
+            )
+            .padding(10)
+            .width(Fill)
+            .height(Fill)
+            .style(surface)
+            .into();
+        }
         let active_transfers = self
             .files
             .transfers
@@ -4310,6 +4381,7 @@ impl App {
                 ),
                 action("Commands", Message::Commands),
                 action("Lock", Message::TogglePrivacyLock),
+                action("Focus", Message::ToggleFocusMode),
                 action("A-", Message::Scale(-0.1)),
                 action("A+", Message::Scale(0.1)),
                 action("About", Message::About),
@@ -6083,6 +6155,49 @@ mod tests {
         let _ = app.update(Message::TogglePrivacyLock);
         assert!(!app.privacy_locked);
         assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn focus_mode_is_presentation_only_and_privacy_lock_wins() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-focus-mode-{}-missing.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let _ = app.update(Message::ToggleFocusMode);
+        assert!(!app.focus_mode);
+        let profile = Session {
+            name: "focus test".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        let id = pane.id;
+        app.tabs.push(Workspace::new(profile, pane));
+        let _ = app.update(Message::ToggleFocusMode);
+        assert!(app.focus_mode);
+        assert!(app.focused_pane_matches(id));
+        assert_eq!(app.tabs.len(), 1);
+        let _ = app.update(Message::TogglePrivacyLock);
+        assert!(app.privacy_locked);
+        let _ = app.update(Message::ToggleFocusMode);
+        assert!(app.focus_mode, "a hidden workspace must not change mode");
+        let _ = app.update(Message::TogglePrivacyLock);
+        let _ = app.update(Message::ToggleFocusMode);
+        assert!(!app.focus_mode);
+        assert!(app.focused_pane_matches(id));
+    }
+
+    #[test]
+    fn alt_enter_toggles_focus_mode_without_stealing_plain_enter() {
+        use keyboard::key::Named;
+        let enter = keyboard::Key::Named(Named::Enter);
+        assert!(focus_mode_chord(&enter, keyboard::Modifiers::ALT));
+        assert!(!focus_mode_chord(&enter, keyboard::Modifiers::default()));
+        assert!(!focus_mode_chord(
+            &enter,
+            keyboard::Modifiers::ALT | keyboard::Modifiers::CTRL
+        ));
     }
 
     #[test]
