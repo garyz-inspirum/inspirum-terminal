@@ -328,6 +328,35 @@ async def main() -> int:
                         f"alternate-screen restore changed only {fullscreen_pixels} pixels"
                     )
 
+                # #64: production Iced keyboard shortcut actually toggles a
+                # dedicated remote PTY navigation mode, and h sends a real
+                # Left cursor sequence to the authenticated synthetic shell.
+                # Exit the modal mode before Return completes the test line.
+                command(
+                    "xdotool", "windowfocus", window, "key",
+                    "--clearmodifiers", "ctrl+shift+m", env=env,
+                )
+                await asyncio.sleep(.5)
+                screenshot(window, destination / "connected-remote-keys.png", env)
+                remote_keys_pixels = diff(
+                    destination / "connected-fullscreen-restored.png",
+                    destination / "connected-remote-keys.png", env,
+                )
+                if remote_keys_pixels < 300:
+                    raise RuntimeError(
+                        f"remote PTY navigation mode was not visibly activated: "
+                        f"{remote_keys_pixels} pixels changed"
+                    )
+                command("xdotool", "key", "--clearmodifiers", "h", env=env)
+                command(
+                    "xdotool", "key", "--clearmodifiers", "ctrl+shift+m", env=env,
+                )
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: "REMOTE_CURSOR_LEFT" in events.path.read_text(encoding="utf-8"),
+                    "native OpenSSH remote cursor Left after Iced modal h key",
+                )
+
                 event_log = events.path.read_text(encoding="utf-8")
                 if "UNEXPECTED_LOCKED_PTY_INPUT" in event_log:
                     raise RuntimeError("privacy curtain forwarded synthetic keyboard input to SSH")
@@ -342,7 +371,8 @@ async def main() -> int:
                     f"Free-type draft edit screenshot change: {free_type_pixels} pixels\n"
                     f"Focus-mode screenshot change: {focus_pixels} pixels\n"
                     f"Privacy-curtain screenshot change: {privacy_pixels} pixels\n"
-                    f"Alternate-screen screenshot change: {fullscreen_pixels} pixels\n"
+                    f"Alternate-screen screenshot change: {fullscreen_pixels} pixels\n"                    f"Remote-key mode screenshot change: {remote_keys_pixels} pixels\n"
+                    "PASS: remote h navigation reached isolated live SSH PTY as Left arrow\n"
                     "PASS: privacy-locked and free-type synthetic text never reached SSH\n"
                     "All keys generated in isolated temporary fixture; no real host or credential.\n",
                     encoding="utf-8",
