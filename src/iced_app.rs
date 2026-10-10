@@ -219,6 +219,24 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                 {
                     Some(Message::Event(event))
                 }
+                // Keyboard-only viewport and explorer operations stay behind
+                // widget capture: text editors own their own keys.
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                    if status == event::Status::Ignored
+                        && modifiers.command()
+                        && modifiers.shift()
+                        && matches!(key.as_ref(), keyboard::Key::Character("r" | "R")) =>
+                {
+                    Some(Message::Split(pane_grid::Axis::Vertical))
+                }
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                    if status == event::Status::Ignored
+                        && modifiers.command()
+                        && modifiers.shift()
+                        && matches!(key.as_ref(), keyboard::Key::Character("f" | "F")) =>
+                {
+                    Some(Message::ToggleFiles)
+                }
                 iced::Event::Window(iced::window::Event::FileDropped(_)) => {
                     Some(Message::Event(event))
                 }
@@ -3241,6 +3259,9 @@ impl App {
                 }
             }
             Message::ToggleFiles => {
+                if self.dialog.is_some() || self.remote_editor.is_some() {
+                    return Task::none();
+                }
                 self.dialog = None;
                 let opening = self.files_dock.is_none() && !self.tabs.is_empty();
                 self.toggle_files();
@@ -4112,6 +4133,9 @@ impl App {
                 self.prune_tool_panes();
             }
             Message::Split(axis) => {
+                if self.dialog.is_some() || self.remote_editor.is_some() {
+                    return Task::none();
+                }
                 if self
                     .tabs
                     .get(self.active)
