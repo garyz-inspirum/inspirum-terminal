@@ -42,6 +42,16 @@ Closing the Files view drops its queue; any running transfer is terminated by th
 
 Portable tests cover SFTP path/list parsing and browser navigation helpers. The isolated Linux sshd fixture covers graphical binary upload/download, remote browse/mkdir/rename/delete, a negative delete, local no-clobber behavior, failed integrity verification preserving an existing file, confirmed overwrite, cancellation with a preserved private partial, and upload/download continuation through `reput`/`reget`.
 
+The production connected-Iced Linux fixture uses native pointer events for
+local/remote row selection and Upload/Download against an AsyncSSH chroot.
+[Run 38041414853](https://github.com/garyz-inspirum/inspirum-terminal/actions/runs/38041414853)
+at `ced8b1a11bfd2413350f50f4f19547db3f4c9a93` retained the selected remote
+filename and completed queue states as GUI-action evidence, then separately
+checked exact binary bytes in the expected disposable local and remote roots.
+Neither screenshots nor the SFTP handshake alone are integrity proof. This
+synthetic Linux result does not replace the broader backend matrix above or
+human/native-device acceptance on Linux, macOS, or Windows.
+
 
 ## Local file manager and drag/drop transfers
 

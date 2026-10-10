@@ -4,6 +4,8 @@
 Uses the existing AsyncSSH fixture's synthetic identity and real OpenSSH PTYs.
 Launches the PRODUCTION Iced binary inside a private Xvfb display, clicks a
 saved session, keyboard-splits a second connected pane, and opens the file dock.
+The native file controls then drive one upload and one download; exact fixture
+bytes and the isolated target root are checked outside the GUI after each click.
 Only generated fixture keys and synthetic hostnames are used. Screenshots and
 the non-secret event summary are kept as preview artifacts; credentials are not.
 This is NOT a replacement for real macOS Windows visual/IME acceptance.
@@ -128,6 +130,19 @@ async def monitored_shell(
 
 
 
+class MonitoredSFTPServer(asyncssh.SFTPServer):
+    """Record only bounded fixture lifecycle markers, never paths or contents."""
+
+    def __init__(self, chan, root: Path, events: fixture.EventLog) -> None:
+        super().__init__(chan, chroot=str(root))
+        self.events = events
+
+    async def scandir(self, path: bytes):
+        async for entry in super().scandir(path):
+            yield entry
+        self.events.write("SFTP_LIST_READY")
+
+
 def isolated_sftp_server(
     chan: asyncssh.SSHServerChannel,
     root: Path,
@@ -136,7 +151,7 @@ def isolated_sftp_server(
     # This is the *real* SSH subsystem used by the Files dock; it is restricted
     # to a generated disposable directory and not the runner's home folder.
     events.write("SFTP_SUBSYSTEM_STARTED")
-    return asyncssh.SFTPServer(chan, chroot=str(root))
+    return MonitoredSFTPServer(chan, root, events)
 
 
 def command(*args: str, env: dict[str, str], timeout: float = 12) -> str:
@@ -171,6 +186,31 @@ async def wait_for(predicate, label: str, *, timeout: float = 22) -> None:
         await asyncio.sleep(.2)
 
 
+async def click_transfer(
+    *,
+    window: str,
+    env: dict[str, str],
+    row: tuple[int, int],
+    action: tuple[int, int],
+    completed,
+    label: str,
+    selected_screenshot: Path | None = None,
+) -> None:
+    """Select one visibly rendered row and activate one production Iced button."""
+    command(
+        "xdotool", "mousemove", "--window", window,
+        str(row[0]), str(row[1]), "click", "1", env=env,
+    )
+    await asyncio.sleep(.25)
+    if selected_screenshot is not None:
+        screenshot(window, selected_screenshot, env)
+    command(
+        "xdotool", "mousemove", "--window", window,
+        str(action[0]), str(action[1]), "click", "1", env=env,
+    )
+    await wait_for(completed, label)
+
+
 def reserved_display() -> str:
     for value in range(160, 230):
         if not Path(f"/tmp/.X11-unix/X{value}").exists() and not Path(f"/tmp/.X{value}-lock").exists():
@@ -199,9 +239,14 @@ async def main() -> int:
         trusted = asyncssh.read_public_key(str(client) + ".pub")
         remote_root = root / "remote-sftp"
         remote_root.mkdir()
-        (remote_root / "CONNECTED_SFTP_FIXTURE.txt").write_text(
-            "Isolated Iced SFTP acceptance marker\\n", encoding="utf-8"
-        )
+        download_name = "000_GUI_DOWNLOAD_FIXTURE.bin"
+        download_bytes = b"GUI_DOWNLOAD_FIXTURE\x00\xff\r\n" + bytes(range(256)) * 8
+        (remote_root / download_name).write_bytes(download_bytes)
+        local_root = root / "local-files"
+        local_root.mkdir()
+        upload_name = "999_GUI_UPLOAD_FIXTURE.bin"
+        upload_bytes = b"GUI_UPLOAD_FIXTURE\x00\xfe\n" + bytes(reversed(range(256))) * 8
+        (local_root / upload_name).write_bytes(upload_bytes)
         server = await asyncssh.create_server(
             lambda: MonitoredServer(trusted, events),
             "127.0.0.1", 0, server_host_keys=[str(host)], encoding="utf-8",
@@ -260,7 +305,7 @@ async def main() -> int:
                 app = subprocess.Popen(
                     [str(binary), "--ui", "iced",
                      "--profiles", str(profiles), "--ssh-config", str(ssh_config)],
-                    stdout=output, stderr=subprocess.STDOUT, env=env,
+                    stdout=output, stderr=subprocess.STDOUT, env=env, cwd=local_root,
                 )
                 window = ""
                 for _ in range(100):
@@ -336,6 +381,95 @@ async def main() -> int:
                 )
                 if files_pixels < 3000:
                     raise RuntimeError(f"files dock changed only {files_pixels} pixels")
+
+                # At the production 1280x800 default, the bottom dock allocates
+                # all of its remaining height to the action/footer rows and the
+                # two file lists are clipped. Activate the visibly rendered
+                # "Dock right" control (bounds established from the retained
+                # connected-files-dock screenshot), then capture the resulting
+                # full-height explorer before attempting any file-row click.
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    "1207", "555", "click", "1", env=env,
+                )
+                await wait_for(
+                    lambda: "SFTP_LIST_READY" in events.path.read_text(encoding="utf-8"),
+                    "completed remote listing before file-row interaction",
+                )
+                await asyncio.sleep(.7)
+                geometry = command(
+                    "xdotool", "getwindowgeometry", "--shell", window, env=env,
+                )
+                if "WIDTH=1280" not in geometry or "HEIGHT=800" not in geometry:
+                    raise RuntimeError(
+                        "connected file coordinates require the production 1280x800 "
+                        f"window captured by this fixture; geometry was {geometry!r}"
+                    )
+                screenshot(window, destination / "connected-files-side-dock.png", env)
+                side_dock_pixels = diff(
+                    destination / "connected-files-dock.png",
+                    destination / "connected-files-side-dock.png", env,
+                )
+                if side_dock_pixels < 3000:
+                    raise RuntimeError(
+                        f"visible Dock right action changed only {side_dock_pixels} pixels"
+                    )
+
+                # Select the only local fixture row and activate Upload through
+                # native Iced pointer events. Filesystem bytes are the transfer
+                # integrity oracle; a screenshot delta or SFTP handshake alone
+                # is not accepted as proof of a completed GUI transfer.
+                uploaded = remote_root / upload_name
+                # Exact centers come from the retained 1280x800 side-dock
+                # artifact: the named rows are fully visible in separate cards,
+                # above a non-overlapping action toolbar. These are single native
+                # clicks, not coordinate probes or direct message invocation.
+                await click_transfer(
+                    window=window,
+                    env=env,
+                    row=(1040, 295),
+                    action=(835, 497),
+                    completed=lambda: uploaded.is_file()
+                    and uploaded.read_bytes() == upload_bytes,
+                    label="click-driven SFTP upload into expected remote fixture root",
+                )
+                await asyncio.sleep(.7)
+                screenshot(window, destination / "connected-files-uploaded.png", env)
+
+                # The remote fixture name sorts first, so the first REMOTE row
+                # is deterministic even after upload refresh. Activate Download
+                # through the production button and verify the exact binary
+                # payload landed in the visible local browser directory.
+                downloaded = local_root / download_name
+                if downloaded.exists():
+                    raise RuntimeError(
+                        "download destination unexpectedly exists before native click"
+                    )
+                # The completed upload adds a transfer-queue card, shrinking the
+                # file panels and moving the action toolbar upward. Run 38040889866
+                # retained that exact post-upload state: the named remote row is
+                # centered near y=408 and Download is centered near y=467. Capture
+                # the row selection before activating Download so the evidence
+                # proves which remote filename the native click selected.
+                await click_transfer(
+                    window=window,
+                    env=env,
+                    row=(1040, 408),
+                    action=(947, 467),
+                    completed=lambda: downloaded.is_file()
+                    and downloaded.read_bytes() == download_bytes,
+                    label="click-driven SFTP download into expected local fixture root",
+                    selected_screenshot=(
+                        destination / "connected-files-download-selected.png"
+                    ),
+                )
+                await asyncio.sleep(.7)
+                screenshot(window, destination / "connected-files-downloaded.png", env)
+
+                if uploaded.read_bytes() != upload_bytes:
+                    raise RuntimeError("click-driven GUI upload failed exact-byte integrity")
+                if downloaded.read_bytes() != download_bytes:
+                    raise RuntimeError("click-driven GUI download failed exact-byte integrity")
 
                 # The file browser has completed the real SFTP handshake.
                 # End that UI task before testing the independent local-editor
@@ -535,7 +669,11 @@ async def main() -> int:
                     raise RuntimeError("two distinct SSH panes were not authenticated")
                 (destination / "connected-acceptance.txt").write_text(
                     "PASS: two authenticated independent OpenSSH PTYs through production Iced\n"
-                    "PASS: native Files dock established actual isolated SSH SFTP subsystem\n"                    "PASS: PTY resize events preserved both SSH shell sessions through the test\n"
+                    "PASS: native Files dock established actual isolated SSH SFTP subsystem\n"
+                    "PASS: PTY resize events preserved both SSH shell sessions through the test\n"
+                    "PASS: click-driven SFTP upload preserved exact binary bytes in the native-smoke chroot\n"
+                    "PASS: click-driven SFTP download preserved exact binary bytes in the visible local directory\n"
+                    "PASS: exact payloads appeared at the expected disposable remote and local paths\n"
                     f"Connected split screenshot change: {split_pixels} pixels\n"
                     f"Opened utility dock screenshot change: {files_pixels} pixels\n"
                     f"Closed SFTP utility dock screenshot change: {closed_pixels} pixels\n"
@@ -550,7 +688,7 @@ async def main() -> int:
                     "All keys generated in isolated temporary fixture; no real host or credential.\n",
                     encoding="utf-8",
                 )
-                print("PASS production Iced GUI: connected split, real SFTP, draft, focus/privacy, alternate-screen and PTY isolation", flush=True)
+                print("PASS production Iced GUI: connected split, click-driven SFTP upload/download, draft, focus/privacy, alternate-screen and PTY isolation", flush=True)
         finally:
             if app is not None and app.poll() is None:
                 app.terminate()
