@@ -495,6 +495,9 @@ def _band_clusters(width, rows, channels, thresh, y1, y2, gap: int):
     return clusters
 
 
+_PIXEL_CACHE: dict[tuple, list] = {}
+
+
 def visible_pixel_rows(path: Path, tesseract: str, *, clusters: bool = False):
     """OCR each light text row, optionally each narrow glyph cluster.
 
