@@ -2732,6 +2732,7 @@ impl App {
                 }
             }
             Message::TerminalImeCursor(..) | Message::TerminalImeCommit(..) => {}
+            Message::TogglePrivacyLock => unreachable!("privacy lock handled before match"),
             Message::Tool(action) => return self.tool_update(action),
             Message::Search(value) => {
                 if self.dialog.is_none() || matches!(self.dialog, Some(Dialog::Tools)) {
