@@ -2,6 +2,14 @@
 
 Inspirum can run the local (`-L`), remote (`-R`) and dynamic SOCKS (`-D`) forwards from the current profile as a dedicated forwarding-only OpenSSH process.
 
+## Where it lives in the Iced GUI
+
+- **Tunnels** in the top toolbar opens the centralised manager. It lists every forward from every saved profile in one table: session, type (`L`/`R`/`D`), listen (`bind:port`), target (`host:port`) and status (Stopped / Running · ssh *pid* / Failed · *OpenSSH error*).
+- Each profile has its own **Start** / **Stop** control; one forwarding-only `ssh -N -T` process serves all forwards of that profile. The footer shows the number of running tunnel sessions.
+- Forwards are edited in the profile's connection dialog under *Advanced* → *Tunnels*: OpenSSH specs for Local, Remote and Dynamic, separated by `;`. They are saved with the profile and validated by the same rules as the CLI.
+
+The manager UI was dropped when the egui frontend was removed (PR #84); the backend remained. This section documents the restored Iced UI.
+
 ## Lifecycle and status
 
 **Start tunnels** launches `ssh -N -T` with the profile's forwarding options and `ExitOnForwardFailure=yes`. Inspirum waits briefly for OpenSSH startup: if a requested listener cannot be created, the OpenSSH error is shown instead of reporting the tunnel as running. While the manager process is alive, configured forwards are shown as managed. **Stop tunnels** terminates and waits for that process; dropping the manager also performs best-effort process cleanup.
