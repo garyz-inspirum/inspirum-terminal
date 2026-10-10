@@ -128,13 +128,31 @@ fn local_navigation_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -
         )
 }
 
-fn local_navigation_scroll(key: &keyboard::Key) -> Option<i32> {
+// These optional vi-like shortcuts are active ONLY with local navigation
+// explicitly enabled. Never interpret them while normal remote input is on.
+fn local_navigation_scroll(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<i32> {
     use keyboard::key::Named;
     match key.as_ref() {
         keyboard::Key::Named(Named::ArrowUp) => Some(1),
         keyboard::Key::Named(Named::ArrowDown) => Some(-1),
         keyboard::Key::Named(Named::PageUp) => Some(16),
         keyboard::Key::Named(Named::PageDown) => Some(-16),
+        keyboard::Key::Named(Named::Home) => Some(100_000),
+        keyboard::Key::Named(Named::End) => Some(-100_000),
+        keyboard::Key::Character("u")
+            if modifiers.control() && !modifiers.alt() && !modifiers.shift() =>
+        {
+            Some(8)
+        }
+        keyboard::Key::Character("d")
+            if modifiers.control() && !modifiers.alt() && !modifiers.shift() =>
+        {
+            Some(-8)
+        }
+        keyboard::Key::Character("k") if modifiers.is_empty() => Some(1),
+        keyboard::Key::Character("j") if modifiers.is_empty() => Some(-1),
+        keyboard::Key::Character("g") if modifiers.is_empty() => Some(100_000),
+        keyboard::Key::Character("g" | "G") if modifiers.shift() => Some(-100_000),
         _ => None,
     }
 }
@@ -2829,7 +2847,7 @@ impl App {
                 } else {
                     self.ime_cursor = None;
                     self.status =
-                        "Local navigation: arrows/PageUp/PageDown scroll only. Shift+Enter exits."
+                        "Local navigation: arrows, PgUp/PgDn, j/k/g/G, Ctrl+u/d scroll. Shift+Enter exits."
                             .into();
                 }
             } else {
@@ -4364,7 +4382,7 @@ impl App {
                     if key.as_ref() == keyboard::Key::Named(Named::Escape) {
                         self.local_navigation.remove(&id);
                         self.status = "Remote input restored for focused pane.".into();
-                    } else if let Some(lines) = local_navigation_scroll(&key) {
+                    } else if let Some(lines) = local_navigation_scroll(&key, modifiers) {
                         return self.update(Message::TerminalScroll(id, lines));
                     }
                     // Never forward arbitrary keys in local-navigation mode.
@@ -6371,13 +6389,41 @@ mod tests {
             keyboard::Modifiers::SHIFT | keyboard::Modifiers::CTRL
         ));
         assert_eq!(
-            local_navigation_scroll(&keyboard::Key::Named(Named::ArrowUp)),
+            local_navigation_scroll(
+                &keyboard::Key::Named(Named::ArrowUp),
+                keyboard::Modifiers::default(),
+            ),
             Some(1)
         );
         assert_eq!(
-            local_navigation_scroll(&keyboard::Key::Named(Named::PageDown)),
+            local_navigation_scroll(
+                &keyboard::Key::Named(Named::PageDown),
+                keyboard::Modifiers::default(),
+            ),
             Some(-16)
         );
+    }
+
+    #[test]
+    fn vi_like_keys_scroll_only_in_local_navigation() {
+        let plain = keyboard::Modifiers::default();
+        let ctrl = keyboard::Modifiers::CTRL;
+        for (key, mods, expected) in [
+            (keyboard::Key::Character("j".into()), plain, Some(-1)),
+            (keyboard::Key::Character("k".into()), plain, Some(1)),
+            (keyboard::Key::Character("g".into()), plain, Some(100_000)),
+            (
+                keyboard::Key::Character("G".into()),
+                keyboard::Modifiers::SHIFT,
+                Some(-100_000),
+            ),
+            (keyboard::Key::Character("d".into()), ctrl, Some(-8)),
+            (keyboard::Key::Character("u".into()), ctrl, Some(8)),
+            (keyboard::Key::Character("j".into()), ctrl, None),
+            (keyboard::Key::Character("z".into()), plain, None),
+        ] {
+            assert_eq!(local_navigation_scroll(&key, mods), expected);
+        }
     }
 
     #[test]
