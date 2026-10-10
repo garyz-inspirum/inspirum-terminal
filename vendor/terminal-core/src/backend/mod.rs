@@ -432,7 +432,10 @@ impl TerminalBackend {
         // Consumers needing the full retained grid must explicitly call sync().
         let term = self.term.clone();
         let mut terminal = term.lock();
-        let selectable_range = terminal.selection.as_ref().and_then(|s| s.to_range(&terminal));
+        let selectable_range = terminal
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(&terminal));
         let mode = *terminal.mode();
         let cursor_cell = terminal.grid_mut().cursor_cell().clone();
         self.last_content.terminal_mode = mode;
