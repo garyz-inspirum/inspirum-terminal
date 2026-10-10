@@ -163,9 +163,89 @@ def command(*args: str, env: dict[str, str], timeout: float = 12) -> str:
 
 
 def screenshot(window: str, path: Path, env: dict[str, str]) -> None:
-    command("import", "-window", window, str(path), env=env, timeout=15)
+    result = subprocess.run(
+        ["import", "-window", window, f"png:{path}"],
+        env=env, capture_output=True, text=True, timeout=15,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ImageMagick screenshot failed: {result.stderr[:300]}")
     if not path.is_file() or path.stat().st_size < 1000:
         raise RuntimeError(f"empty GUI screenshot: {path.name}")
+
+
+def locate_visible_label(
+    path: Path,
+    label: str,
+    *,
+    region=None,
+):
+    """Return conservative interior bounds for one visibly rendered label.
+
+    Iced does not expose these production controls through AT-SPI. The point is
+    therefore derived from the actual screenshot immediately before the click.
+    A crop is used only when the full-window OCR cannot resolve a small label;
+    returned coordinates are always mapped back to the source image.
+    """
+    tesseract = shutil.which("tesseract")
+    if tesseract is None:
+        raise RuntimeError("visible label targeting requires tesseract")
+    source = path
+    offset = (0, 0)
+    temporary = None
+    if region is not None:
+        temporary = path.with_suffix(".crop.png")
+        x1, y1, x2, y2 = region
+        result = subprocess.run(
+            ["convert", str(path), "-crop", f"{x2-x1}x{y2-y1}+{x1}+{y1}",
+             "+repage", "-resize", "300%", "-colorspace", "Gray",
+             "-contrast-stretch", "5%x5%", str(temporary)],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"visible label crop failed: {result.stderr[:200]}")
+        source = temporary
+        offset = (x1, y1)
+    try:
+        result = subprocess.run(
+            [tesseract, str(source), "stdout", "--psm", "11" if region is None else "6", "tsv"],
+            capture_output=True, text=True, timeout=20, check=True,
+        )
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    words = label.split()
+    rows = []
+    scale = 3 if region is not None else 1
+    for line in result.stdout.splitlines()[1:]:
+        parts = line.split("\t")
+        if len(parts) < 12 or int(float(parts[10])) < 40:
+            continue
+        rows.append((
+            parts[11],
+            offset[0] + int(parts[6]) // scale,
+            offset[1] + int(parts[7]) // scale,
+            max(1, int(parts[8]) // scale),
+            max(1, int(parts[9]) // scale),
+        ))
+    for index, (text, x, y, width, height) in enumerate(rows):
+        if text != words[0]:
+            continue
+        matched = rows[index:index + len(words)]
+        if [item[0] for item in matched] != words:
+            continue
+        bounds = (
+            min(item[1] for item in matched) + 4,
+            min(item[2] for item in matched) + 3,
+            max(item[1] + item[3] for item in matched) - 4,
+            max(item[2] + item[4] for item in matched) - 3,
+        )
+        if bounds[2] > bounds[0] and bounds[3] > bounds[1]:
+            return bounds
+    raise RuntimeError(f"visible label not found in screenshot: {label}")
+
+
+def center(bounds):
+    return ((bounds[0] + bounds[2]) // 2, (bounds[1] + bounds[3]) // 2)
 
 
 def diff(first: Path, second: Path, env: dict[str, str]) -> int:
@@ -175,7 +255,7 @@ def diff(first: Path, second: Path, env: dict[str, str]) -> int:
     )
     if result.returncode not in (0, 1):
         raise RuntimeError(f"ImageMagick screenshot comparison failed: {result.stderr[:200]}")
-    return int(result.stderr.strip())
+    return int(result.stderr.strip().split()[0])
 
 
 async def wait_for(predicate, label: str, *, timeout: float = 22) -> None:
@@ -398,20 +478,28 @@ async def main() -> int:
                     )
                 screenshot(window, destination / "connected-files-bottom-dock.png", env)
 
+                bottom = destination / "connected-files-bottom-dock.png"
+                local_row = locate_visible_label(bottom, upload_name)
+                remote_row = locate_visible_label(bottom, download_name)
+                upload_action = locate_visible_label(
+                    bottom, "Upload", region=(280, 520, 470, 585),
+                )
+                download_action = locate_visible_label(
+                    bottom, "Download", region=(380, 520, 700, 585),
+                )
+                if local_row[3] <= local_row[1] or remote_row[3] <= remote_row[1]:
+                    raise RuntimeError("bottom-dock file rows are not visibly targetable")
+
                 # Select the only local fixture row and activate Upload through
                 # native Iced pointer events. Filesystem bytes are the transfer
                 # integrity oracle; a screenshot delta or SFTP handshake alone
                 # is not accepted as proof of a completed GUI transfer.
                 uploaded = remote_root / upload_name
-                # Conservative interior points measured from the exact-head
-                # connected-files-bottom-dock.png artifact from run 38042645630:
-                # the local row occupies x=304..770, y=489..537, and Upload
-                # occupies x=304..386, y=562..588 in the 1280x800 window.
                 await click_transfer(
                     window=window,
                     env=env,
-                    row=(537, 507),
-                    action=(345, 575),
+                    row=center(local_row),
+                    action=center(upload_action),
                     completed=lambda: uploaded.is_file()
                     and uploaded.read_bytes() == upload_bytes,
                     label="click-driven SFTP upload into expected remote fixture root",
@@ -428,15 +516,11 @@ async def main() -> int:
                     raise RuntimeError(
                         "download destination unexpectedly exists before native click"
                     )
-                # The exact-head post-upload image from run 38043616299 places
-                # the remote row inside x=789..1246, y=489..520 and Download
-                # inside x=407..503, y=534..560. These conservative interior
-                # points do not overlap the card header or adjacent actions.
                 await click_transfer(
                     window=window,
                     env=env,
-                    row=(1017, 507),
-                    action=(455, 547),
+                    row=center(remote_row),
+                    action=center(download_action),
                     completed=lambda: downloaded.is_file()
                     and downloaded.read_bytes() == download_bytes,
                     label="click-driven SFTP download into expected local fixture root",
@@ -452,8 +536,52 @@ async def main() -> int:
                 if downloaded.read_bytes() != download_bytes:
                     raise RuntimeError("click-driven GUI download failed exact-byte integrity")
 
-                # Retain evidence at the supported minimum window size, without
-                # using that resized state for coordinate-driven acceptance.
+                # Two completed transfers must not consume the listings. Select
+                # another visibly rendered, distinct remote file through the
+                # production row control; its selection styling is the oracle.
+                third_name = "111_GUI_THIRD_FIXTURE.bin"
+                third_bytes = b"GUI_THIRD_FIXTURE" + bytes(range(32))
+                (remote_root / third_name).write_bytes(third_bytes)
+                refresh_bounds = locate_visible_label(destination / "connected-files-downloaded.png", "Refresh")
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    *map(str, center(refresh_bounds)), "click", "1", env=env,
+                )
+                await wait_for(
+                    lambda: events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY") >= 2,
+                    "remote listing refresh after creating distinct fixture",
+                )
+                screenshot(window, destination / "connected-files-third-visible.png", env)
+                third_row = locate_visible_label(
+                    destination / "connected-files-third-visible.png", third_name,
+                )
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    *map(str, center(third_row)), "click", "1", env=env,
+                )
+                await asyncio.sleep(.4)
+                screenshot(window, destination / "connected-files-third-selected.png", env)
+                if diff(
+                    destination / "connected-files-third-visible.png",
+                    destination / "connected-files-third-selected.png", env,
+                ) < 20:
+                    raise RuntimeError("distinct post-transfer file row was not visibly selected")
+
+                # The populated queue is a bounded viewport. Scroll its visible
+                # interior and retain the resulting production screenshot.
+                queue_bounds = locate_visible_label(
+                    destination / "connected-files-third-selected.png", "TRANSFER QUEUE",
+                )
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    str(queue_bounds[0] + 40), str(queue_bounds[3] + 24),
+                    "click", "4", env=env,
+                )
+                await asyncio.sleep(.4)
+                screenshot(window, destination / "connected-files-queue-scrolled.png", env)
+
+                # Minimum-size acceptance is interaction, not a screenshot-only
+                # artifact. The same distinct row must remain visibly targetable.
                 command("xdotool", "windowsize", window, "960", "640", env=env)
                 await asyncio.sleep(.7)
                 minimum_geometry = command(
@@ -465,8 +593,54 @@ async def main() -> int:
                         f"geometry was {minimum_geometry!r}"
                     )
                 screenshot(window, destination / "connected-files-min-window.png", env)
+                minimum_row = locate_visible_label(
+                    destination / "connected-files-min-window.png", third_name,
+                )
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    *map(str, center(minimum_row)), "click", "1", env=env,
+                )
+                await asyncio.sleep(.4)
+                screenshot(window, destination / "connected-files-min-selected.png", env)
                 command("xdotool", "windowsize", window, "1280", "800", env=env)
                 await asyncio.sleep(.7)
+                screenshot(window, destination / "connected-files-restored.png", env)
+
+                # Exercise the actual bottom -> right -> bottom controls and
+                # prove a listing remains targetable after returning.
+                dock_right = locate_visible_label(
+                    destination / "connected-files-restored.png", "Dock right",
+                    region=(1050, 380, 1270, 450),
+                )
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    *map(str, center(dock_right)), "click", "1", env=env,
+                )
+                await asyncio.sleep(.7)
+                screenshot(window, destination / "connected-files-side-dock.png", env)
+                if diff(
+                    destination / "connected-files-restored.png",
+                    destination / "connected-files-side-dock.png", env,
+                ) < 3000:
+                    raise RuntimeError("Dock right did not visibly re-dock Files")
+                dock_bottom = locate_visible_label(
+                    destination / "connected-files-side-dock.png", "Dock bottom",
+                )
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    *map(str, center(dock_bottom)), "click", "1", env=env,
+                )
+                await asyncio.sleep(.7)
+                screenshot(window, destination / "connected-files-redocked-bottom.png", env)
+                redocked_row = locate_visible_label(
+                    destination / "connected-files-redocked-bottom.png", third_name,
+                )
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    *map(str, center(redocked_row)), "click", "1", env=env,
+                )
+                await asyncio.sleep(.4)
+                screenshot(window, destination / "connected-files-redocked-selected.png", env)
 
                 # The file browser has completed the real SFTP handshake.
                 # End that UI task before testing the independent local-editor
