@@ -435,10 +435,10 @@ impl TerminalBackend {
         let selectable_range = terminal.selection.as_ref().and_then(|s| s.to_range(&terminal));
         let mode = *terminal.mode();
         let cursor_cell = terminal.grid_mut().cursor_cell().clone();
-        self.last_mode = mode;
-        self.last_terminal_size = self.size;
-        self.last_cursor_cell = cursor_cell.clone();
-        self.last_selectable_range = selectable_range;
+        self.last_content.terminal_mode = mode;
+        self.last_content.terminal_size = self.size;
+        self.last_content.cursor = cursor_cell.clone();
+        self.last_content.selectable_range = selectable_range;
         let grid = terminal.grid();
         let terminal_size = self.size;
         let global_bg = theme.get_color(alacritty_terminal::vte::ansi::Color::Named(
@@ -460,9 +460,7 @@ impl TerminalBackend {
                 continue;
             }
 
-            let selected = content
-                .selectable_range
-                .is_some_and(|range| range.contains(indexed.point));
+            let selected = selectable_range.is_some_and(|range| range.contains(indexed.point));
             let inverse = flags.contains(term::cell::Flags::INVERSE);
             let dim = flags.intersects(term::cell::Flags::DIM | term::cell::Flags::DIM_BOLD);
 
