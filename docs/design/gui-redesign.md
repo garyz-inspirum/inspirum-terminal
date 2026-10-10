@@ -40,6 +40,21 @@ New connection opens a dedicated, keyboard-accessible dialog. Host, username and
 
 Each session has a clear tab. A workspace can split into resizable panes with independent session identity and lifecycle. A thin accent outline and explicit focus state identify the input destination. Drag headers to rearrange; resize by divider; zoom a pane without disconnecting it. Close/reconnect must not replay input or silently enable broadcast.
 
+### Dockable file explorer beside the terminal
+
+When the Files browser is open, **Dock right** moves the same local/remote
+SFTP browser to a right-hand explorer pane, beside the SSH terminal. The
+side mode stacks the local and remote directory lists and groups file actions
+in shorter rows to avoid a clipped narrow toolbar. **Dock bottom** restores
+the original horizontal transfer dock. Both layouts remain resizable with the
+Iced pane-grid divider.
+
+Re-docking only changes layout: it does **not** reconnect, restart transfers,
+change the selected remote host, discard remote edits or bypass existing
+overwrite/delete confirmation. Opening the Files dock through its normal
+toolbar/shortcut returns to the last selected orientation. The privacy
+curtain blocks re-docking.
+
 ### Auxiliary SSH shell beside the main terminal
 
 The workspace's **Shell** toolbar action (Ctrl/Cmd+Shift+J while no text
