@@ -632,6 +632,21 @@ def diff(first: Path, second: Path, env: dict[str, str]) -> int:
     return int(result.stderr.strip().split()[0])
 
 
+async def locate_rendered_label(
+    window: str, path: Path, label: str, *, env: dict[str, str], timeout: float = 22,
+):
+    """Screenshot repeatedly until the label is rendered; return its bounds."""
+    deadline = time.monotonic() + timeout
+    while True:
+        screenshot(window, path, env)
+        try:
+            return locate_visible_label(path, label)
+        except RuntimeError:
+            if time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(.5)
+
+
 async def wait_for(predicate, label: str, *, timeout: float = 22) -> None:
     deadline = time.monotonic() + timeout
     while not predicate():
@@ -925,9 +940,12 @@ async def main() -> int:
                     lambda: events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY") >= 2,
                     "remote listing refresh after creating distinct fixture",
                 )
-                screenshot(window, destination / "connected-files-third-visible.png", env)
-                third_row = locate_visible_label(
-                    destination / "connected-files-third-visible.png", third_name,
+                # The fixture event fires when the server answered the listing;
+                # the Iced view repaints afterwards. Poll the rendered window
+                # until the distinct filename is actually visible.
+                third_row = await locate_rendered_label(
+                    window, destination / "connected-files-third-visible.png",
+                    third_name, env=env,
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
