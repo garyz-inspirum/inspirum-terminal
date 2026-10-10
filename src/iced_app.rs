@@ -134,6 +134,19 @@ fn forwarding_preflight_hint(
             "X11 preflight: DISPLAY is unset. Start/configure a local X server before connecting.",
         );
     }
+    // An environment variable does not prove that agent/X11 transport works.
+    // Keep native-unverified workflows visible without blocking OpenSSH or
+    // declaring every third-party agent/X server unsupported.
+    if agent == Some(true) && cfg!(windows) {
+        notes.push(
+            "Windows agent forwarding is not native-runtime verified; check the OpenSSH agent service and remote server.",
+        );
+    }
+    if x11 == Some(true) && (cfg!(target_os = "macos") || cfg!(windows)) {
+        notes.push(
+            "X11 forwarding on this platform is not native-runtime verified; a working local X server is required.",
+        );
+    }
     notes.join(" ")
 }
 
@@ -6925,7 +6938,15 @@ mod tests {
     fn forwarding_preflight_is_advisory_and_does_not_claim_platform_support() {
         assert!(forwarding_preflight_hint(None, None, false, false).is_empty());
         assert!(forwarding_preflight_hint(Some(false), Some(false), false, false).is_empty());
-        assert!(forwarding_preflight_hint(Some(true), Some(true), true, true).is_empty());
+        let configured = forwarding_preflight_hint(Some(true), Some(true), true, true);
+        if cfg!(windows) {
+            assert!(configured.contains("agent forwarding is not native-runtime verified"));
+        }
+        if cfg!(windows) || cfg!(target_os = "macos") {
+            assert!(configured.contains("X11 forwarding on this platform"));
+        } else {
+            assert!(configured.is_empty());
+        }
         let no_display = forwarding_preflight_hint(None, Some(true), true, false);
         assert!(no_display.contains("DISPLAY is unset"));
         assert!(!no_display.contains("unsupported"));
@@ -6934,8 +6955,8 @@ mod tests {
             assert!(no_agent.contains("SSH_AUTH_SOCK is unset"));
         } else {
             assert!(
-                no_agent.is_empty(),
-                "Windows OpenSSH agent service may not set SSH_AUTH_SOCK"
+                no_agent.contains("not native-runtime verified"),
+                "Windows agent service capability must be explicit without using SSH_AUTH_SOCK"
             );
         }
     }
