@@ -24,7 +24,7 @@ use iced::{
 };
 use std::{
     cell::{Cell, RefCell},
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock,
@@ -914,6 +914,10 @@ enum Message {
     TogglePrivacyLock,
     ToggleFocusMode,
     ToggleLocalNavigation,
+    ToggleFreeType(u64),
+    FreeTypeEdit(u64, text_editor::Action),
+    FreeTypeSend(u64),
+    FreeTypeDiscard(u64),
     RequestPaste,
     ClipboardRead(u64, Vec<u64>, Option<String>),
     ConfirmPaste,
@@ -1978,6 +1982,10 @@ struct App {
     privacy_locked: bool,
     focus_mode: bool,
     local_navigation: HashSet<u64>,
+    // Pane-local editable drafts. Content is in memory only and is never
+    // forwarded to the remote PTY until an explicit Send action.
+    free_type: HashMap<u64, text_editor::Content>,
+    free_type_confirm: Option<u64>,
     profile_visible: usize,
     profile_matches: Vec<usize>,
     form: ConnectionForm,
@@ -2061,6 +2069,8 @@ impl App {
             privacy_locked: false,
             focus_mode: false,
             local_navigation: HashSet::new(),
+            free_type: HashMap::new(),
+            free_type_confirm: None,
             profile_visible: PROFILE_PAGE_SIZE,
             profile_matches,
             form: ConnectionForm::default(),
@@ -2260,7 +2270,10 @@ impl App {
         targets
     }
     fn send_to_terminal(&mut self, id: u64, bytes: Vec<u8>) -> bool {
-        if !self.focused_pane_matches(id) || self.local_navigation.contains(&id) {
+        if !self.focused_pane_matches(id)
+            || self.local_navigation.contains(&id)
+            || self.free_type.contains_key(&id)
+        {
             return false;
         }
         let targets = self.paste_targets(id);
@@ -2278,7 +2291,7 @@ impl App {
     fn command_terminal(&mut self, id: u64, command: terminal_core::BackendCommand) -> bool {
         // Enforce the mode at the single PTY write boundary, including
         // synchronized input, delayed clipboard callbacks and tool commands.
-        if self.local_navigation.contains(&id)
+        if (self.local_navigation.contains(&id) || self.free_type.contains_key(&id))
             && matches!(
                 &command,
                 terminal_core::BackendCommand::Write(_)
@@ -2883,6 +2896,10 @@ impl App {
                     | Message::CommandSend
                     | Message::ToggleFocusMode
                     | Message::ToggleLocalNavigation
+                    | Message::ToggleFreeType(..)
+                    | Message::FreeTypeEdit(..)
+                    | Message::FreeTypeSend(..)
+                    | Message::FreeTypeDiscard(..)
                     | Message::Tool(
                         tools::Action::SendCommand
                             | tools::Action::Confirm
@@ -2906,6 +2923,10 @@ impl App {
                     .map(|pane| pane.id)
             });
             if let Some(id) = id {
+                if self.free_type.contains_key(&id) {
+                    self.status = "Finish or discard the pane's free-type draft first.".into();
+                    return Task::none();
+                }
                 if !self.local_navigation.insert(id) {
                     self.local_navigation.remove(&id);
                     self.status = "Remote input restored for focused pane.".into();
@@ -2952,7 +2973,8 @@ impl App {
             Message::TerminalImeCommit(id, text)
                 if self.focused_pane_matches(id)
                     && self.dialog.is_none()
-                    && self.remote_editor.is_none() =>
+                    && self.remote_editor.is_none()
+                    && !self.free_type.contains_key(&id) =>
             {
                 if let Some(bytes) = crate::keyboard::committed_text_bytes(&text) {
                     self.send_to_terminal(id, bytes);
@@ -2963,6 +2985,75 @@ impl App {
             Message::ToggleFocusMode => unreachable!("focus mode handled before match"),
             Message::ToggleLocalNavigation => {
                 unreachable!("local navigation handled before match")
+            }
+            Message::ToggleFreeType(id) => {
+                if self.dialog.is_some() || self.remote_editor.is_some()
+                    || !self.focused_pane_matches(id)
+                    || self.local_navigation.contains(&id)
+                {
+                    self.status = "Focus a pane in remote-input mode before composing.".into();
+                    return Task::none();
+                }
+                if self.free_type.contains_key(&id) {
+                    self.free_type.remove(&id);
+                    self.status = "Free-type draft discarded. Remote input restored.".into();
+                } else {
+                    self.free_type.insert(id, text_editor::Content::new());
+                    self.ime_cursor = None;
+                    self.status = "FREE TYPE: edit locally; nothing is sent until Send.".into();
+                }
+            }
+            Message::FreeTypeEdit(id, action) => {
+                if self.dialog.is_none() && self.focused_pane_matches(id)
+                    && let Some(draft) = self.free_type.get_mut(&id)
+                {
+                    draft.perform(action);
+                }
+            }
+            Message::FreeTypeSend(id) => {
+                if self.dialog.is_some() || !self.focused_pane_matches(id)
+                    || self.local_navigation.contains(&id)
+                {
+                    return Task::none();
+                }
+                let Some(payload) = self.free_type.get(&id).map(|draft| draft.text()) else {
+                    return Task::none();
+                };
+                if payload.is_empty() {
+                    self.status = "The free-type draft is empty.".into();
+                    return Task::none();
+                }
+                match terminal_ux::classify_paste(self.paste_policy, &payload) {
+                    PasteDecision::Block => {
+                        self.status = "Free-type send blocked by paste policy.".into();
+                    }
+                    PasteDecision::Confirm => {
+                        self.dialog = Some(Dialog::PasteConfirm {
+                            id,
+                            targets: self.paste_targets(id),
+                            text: payload,
+                            normalize_line_endings: false,
+                        });
+                        self.free_type_confirm = Some(id);
+                        self.status = "Multiline free-type text awaits explicit confirmation.".into();
+                    }
+                    PasteDecision::Send => {
+                        let draft = self.free_type.remove(&id).expect("free-type draft");
+                        if self.send_to_terminal(id, payload.into_bytes()) {
+                            self.status = "Free-type text sent to the focused terminal.".into();
+                        } else {
+                            self.free_type.insert(id, draft);
+                            self.status = "Free-type send cancelled; draft preserved.".into();
+                        }
+                    }
+                }
+            }
+            Message::FreeTypeDiscard(id) => {
+                if self.dialog.is_none() && self.focused_pane_matches(id)
+                    && self.free_type.remove(&id).is_some()
+                {
+                    self.status = "Free-type draft discarded. Remote input restored.".into();
+                }
             }
             Message::Tool(action) => return self.tool_update(action),
             Message::Search(value) => {
@@ -3173,6 +3264,7 @@ impl App {
             }
             Message::About => self.dialog = Some(Dialog::About),
             Message::CloseDialog => {
+                self.free_type_confirm = None;
                 self.dialog = None;
                 self.editing_profile = None;
                 self.form = ConnectionForm::default();
@@ -3897,9 +3989,12 @@ impl App {
                     .tabs
                     .get(self.active)
                     .and_then(|tab| tab.panes.get(tab.focus))
-                    .is_some_and(|pane| self.local_navigation.contains(&pane.id))
+                    .is_some_and(|pane| {
+                        self.local_navigation.contains(&pane.id)
+                            || self.free_type.contains_key(&pane.id)
+                    })
                 {
-                    self.status = "Switch to remote input before pasting.".into();
+                    self.status = "Leave local navigation or free-type mode before pasting.".into();
                     return Task::none();
                 }
                 let Some(id) = self.focused_terminal_id() else {
@@ -3916,6 +4011,7 @@ impl App {
                 if !self.focused_pane_matches(id)
                     || targets != self.paste_targets(id)
                     || self.dialog.is_some()
+                    || self.free_type.contains_key(&id)
                 {
                     self.status =
                         "Paste cancelled because terminal focus or the active dialog changed."
@@ -3965,6 +4061,7 @@ impl App {
                 }
             }
             Message::ConfirmPaste => {
+                let free_type_id = self.free_type_confirm.take();
                 if let Some(Dialog::PasteConfirm {
                     id,
                     targets,
@@ -3973,20 +4070,31 @@ impl App {
                 }) = self.dialog.take()
                 {
                     let prepared = normalized_paste_text(&text, normalize_line_endings);
-                    // Never downgrade safety when normalization is selected.
-                    // Content was originally classified for confirmation, and
-                    // the prepared bytes must also remain valid under policy.
-                    if terminal_ux::classify_paste(self.paste_policy, &prepared)
-                        == PasteDecision::Block
-                    {
-                        self.status = "Paste blocked by safety policy.".into();
-                    } else if targets == self.paste_targets(id)
-                        && self.send_to_terminal(id, prepared.into_bytes())
-                    {
-                        self.status = "Paste sent after explicit confirmation.".into();
+                    // A delayed confirmation must match the original draft and
+                    // the original focused/synchronized target set.
+                    let draft_matches = free_type_id != Some(id)
+                        || self.free_type.get(&id).is_some_and(|draft| draft.text() == text);
+                    let eligible = draft_matches
+                        && targets == self.paste_targets(id)
+                        && self.focused_pane_matches(id)
+                        && terminal_ux::classify_paste(self.paste_policy, &prepared)
+                            != PasteDecision::Block;
+                    if !eligible {
+                        self.status = "Paste cancelled because the draft, targets or policy changed.".into();
                     } else {
-                        self.status =
-                            "Paste cancelled because that terminal is no longer active.".into();
+                        let draft = if free_type_id == Some(id) {
+                            self.free_type.remove(&id)
+                        } else {
+                            None
+                        };
+                        if self.send_to_terminal(id, prepared.into_bytes()) {
+                            self.status = "Paste sent after explicit confirmation.".into();
+                        } else {
+                            if let Some(draft) = draft {
+                                self.free_type.insert(id, draft);
+                            }
+                            self.status = "Paste cancelled; local draft preserved.".into();
+                        }
                     }
                 }
             }
@@ -4493,7 +4601,7 @@ impl App {
         }
         let target = if self.dialog.is_none() && self.remote_editor.is_none() {
             self.focused_terminal_id()
-                .filter(|id| !self.local_navigation.contains(id))
+                .filter(|id| !self.local_navigation.contains(id) && !self.free_type.contains_key(id))
         } else {
             None
         };
@@ -4978,7 +5086,9 @@ impl App {
             };
             let title = pane_grid::TitleBar::new(
                 row![
-                    text(if self.local_navigation.contains(&pane.id) {
+                    text(if self.free_type.contains_key(&pane.id) {
+                        "FREE TYPE"
+                    } else if self.local_navigation.contains(&pane.id) {
                         "LOCAL NAV"
                     } else if focused {
                         "FOCUSED"
@@ -4997,6 +5107,11 @@ impl App {
                     text(state.0).size(10).color(state.1),
                     space::horizontal(),
                     action("Copy", Message::CopySelection(pane.id)),
+                    if self.free_type.contains_key(&pane.id) {
+                        action("Discard draft", Message::FreeTypeDiscard(pane.id))
+                    } else {
+                        action("Free type", Message::ToggleFreeType(pane.id))
+                    },
                     if pane.exited || pane.error.is_some() {
                         action("Reconnect", Message::Reconnect(id))
                     } else {
@@ -5060,16 +5175,53 @@ impl App {
                     .into()
             };
 
-            pane_grid::Content::new(
-                sensor(
-                    container(terminal_body)
-                        .padding(14)
-                        .width(Fill)
-                        .height(Fill),
-                )
-                .key(pane.id)
-                .on_resize(move |size| Message::TerminalResized(pane.id, size)),
+            // Keep the resize sensor attached ONLY to the terminal viewport,
+            // not the separate local draft editor below it.
+            let terminal_view: Element<'_, Message> = sensor(
+                container(terminal_body)
+                    .padding(14)
+                    .width(Fill)
+                    .height(Fill),
             )
+            .key(pane.id)
+            .on_resize(move |size| Message::TerminalResized(pane.id, size))
+            .into();
+            let body: Element<'_, Message> = if let Some(draft) = self.free_type.get(&pane.id) {
+                column![
+                    terminal_view,
+                    container(
+                        column![
+                            text("FREE TYPE · local editable draft · remote input suspended")
+                                .size(11)
+                                .color(BLUE),
+                            text_editor(draft)
+                                .placeholder("Compose here; Send is always explicit")
+                                .on_action(move |action| Message::FreeTypeEdit(pane.id, action))
+                                .height(96)
+                                .padding(8),
+                            row![
+                                action("Send explicitly", Message::FreeTypeSend(pane.id))
+                                    .style(primary),
+                                action("Discard", Message::FreeTypeDiscard(pane.id)),
+                                text("Multiline still requires paste confirmation.")
+                                    .size(11)
+                                    .color(MUTED),
+                            ]
+                            .spacing(8)
+                            .align_y(iced::Center),
+                        ]
+                        .spacing(5),
+                    )
+                    .padding(8)
+                    .style(surface),
+                ]
+                .spacing(4)
+                .height(Fill)
+                .into()
+            } else {
+                terminal_view
+            };
+            pane_grid::Content::new(body)
             .title_bar(title)
             .style(if focused { active_card } else { card })
         })
