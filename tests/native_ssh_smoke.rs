@@ -1,5 +1,9 @@
 //! Cross-platform native SSH acceptance using scripts/test-native-ssh-smoke.py.
-use inspirum_terminal::{Session, SshOptions, terminal::connect};
+use inspirum_terminal::{
+    Session, SshOptions,
+    terminal::connect,
+    terminal_ux::source_first_synced_write,
+};
 use std::{
     fs,
     io::{Read, Write},
@@ -119,6 +123,59 @@ fn wait_event_count(path: &Path, prefix: &str, expected_at_least: usize) {
         );
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+#[test]
+#[ignore = "requires disposable AsyncSSH fixture: scripts/test-native-ssh-smoke.py"]
+fn native_cursor_key_and_synchronized_input_reach_only_explicit_ssh_panes() {
+    let fixture = fixture();
+    let events = fixture.join("server.log");
+    let (mut source, source_receiver) = open(&fixture, 9961, "config");
+    let (mut mirror, mirror_receiver) = open(&fixture, 9962, "config");
+    wait_text(&mut source, "NATIVE_SMOKE_READY");
+    wait_text(&mut mirror, "NATIVE_SMOKE_READY");
+
+    let left_before = event_count(&events, "REMOTE_CURSOR_LEFT");
+    // The very same source-first fanout used by production Iced runs against
+    // two independent authenticated native OpenSSH PTYs.
+    let forwarded = source_first_synced_write(9961, &[9961, 9962], |id| {
+        let target = if id == 9961 { &mut source } else { &mut mirror };
+        target.process_command(BackendCommand::Write(b"\x1b[D\n".to_vec()));
+        true
+    });
+    assert!(forwarded);
+    wait_text(&mut source, "NATIVE_REMOTE_CURSOR_LEFT");
+    wait_text(&mut mirror, "NATIVE_REMOTE_CURSOR_LEFT");
+    wait_event_count(&events, "REMOTE_CURSOR_LEFT", left_before + 2);
+
+    // After explicit disarm, the same right-arrow reaches only its owner.
+    let right_before = event_count(&events, "REMOTE_CURSOR_RIGHT");
+    write(&mut source, "\x1b[C\n");
+    wait_text(&mut source, "NATIVE_REMOTE_CURSOR_RIGHT");
+    wait_event_count(&events, "REMOTE_CURSOR_RIGHT", right_before + 1);
+    assert!(
+        !grid(&mut mirror).contains("NATIVE_REMOTE_CURSOR_RIGHT"),
+        "disarmed cursor motion leaked to the second SSH PTY"
+    );
+
+    // If the focused source cannot write, fanout must never reach mirrors.
+    let mut observed = Vec::new();
+    assert!(!source_first_synced_write(9961, &[9961, 9962], |id| {
+        observed.push(id);
+        false
+    }));
+    assert_eq!(observed, vec![9961]);
+
+    write(&mut source, "exit\n");
+    write(&mut mirror, "exit\n");
+    wait_exit(&source_receiver, 9961);
+    wait_exit(&mirror_receiver, 9962);
+    drop(source);
+    drop(mirror);
+    wait_event_count(&events, "SESSION_CLOSED:", 2);
+    println!(
+        "PASS native real OpenSSH cursor keys, explicit synchronized fanout, disarm and failed-source isolation"
+    );
 }
 
 #[test]
