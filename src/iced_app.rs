@@ -6751,7 +6751,7 @@ mod tests {
             )
         ));
         let _ = app.update(Message::RequestPaste);
-        assert!(app.status.contains("Switch to remote"));
+        assert!(app.status.contains("Leave local navigation or free-type"));
         let _ = app.update(Message::TogglePrivacyLock);
         let _ = app.update(Message::ToggleLocalNavigation);
         assert!(app.local_navigation.contains(&id));
