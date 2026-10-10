@@ -206,6 +206,32 @@ def _key(text: str) -> str:
     return "".join(ch for ch in text if ch.isalnum() or ch == ".")
 
 
+def _near_key(text: str, label: str) -> bool:
+    """Whole-line match tolerating a few single-glyph OCR confusions.
+
+    Only used for long labels (filenames), where two substitutions such as
+    ``GUI`` read as ``GUL`` or ``bin`` as ``bir`` cannot turn one fixture name
+    into another; the digit prefix and length must still match exactly.
+    """
+    got, want = _key(text), _key(label)
+    if len(want) < 12 or len(got) != len(want):
+        return False
+    if got[:3] != want[:3]:
+        return False
+    return sum(a != b for a, b in zip(got, want)) <= 2
+
+
+def match_visible_segment(segments, label: str):
+    """Match a label against each OCR'd segment as a whole, with tolerance."""
+    for words in segments:
+        if not words:
+            continue
+        joined = "".join(word[0] for word in words)
+        if _near_key(joined, label):
+            return _bounds(words)
+    return None
+
+
 def _same_line(left, right) -> bool:
     overlap = min(left[2] + left[4], right[2] + right[4]) - max(left[2], right[2])
     if overlap <= 0:
@@ -498,6 +524,72 @@ def _band_clusters(width, rows, channels, thresh, y1, y2, gap: int):
 _PIXEL_CACHE: dict[tuple, list] = {}
 
 
+def _band_segments(width, rows, channels, thresh, y1, y2, gap: int):
+    """Split one light band into wide segments separated by dark columns.
+
+    Outlined controls put a bright vertical border at both ends of every row,
+    which full-width OCR reads as glyphs. Segments wider than a short control
+    are OCR'd on their own so one row never carries its neighbours' borders.
+    """
+    columns = []
+    for x in range(width):
+        base = x * channels
+        for y in range(y1, y2 + 1):
+            pixel = rows[y]
+            if (pixel[base] + pixel[base + 1] + pixel[base + 2]) // 3 >= thresh:
+                columns.append(x)
+                break
+    if not columns:
+        return []
+    segments = []
+    start = previous = columns[0]
+    for x in columns[1:]:
+        if x - previous > gap:
+            segments.append((start, previous))
+            start = x
+        previous = x
+    segments.append((start, previous))
+    return [(x1, x2) for x1, x2 in segments if x2 - x1 >= 40]
+
+
+def visible_segment_rows(path: Path, tesseract: str):
+    """OCR each light band segment by segment; coordinates in source pixels.
+
+    Returns a list of per-segment word lists so a caller can match one
+    segment as a whole without neighbouring controls on the same line.
+    """
+    stat = path.stat()
+    key = (str(path), stat.st_mtime_ns, stat.st_size, "segments")
+    cached = _PIXEL_CACHE.get(key)
+    if cached is not None:
+        return cached
+    width, height, channels, rows = _read_png(path)
+    thresh = _text_threshold(width, height, channels, rows)
+    segments = []
+    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    try:
+        for y1, y2 in _visible_bands(width, height, channels, rows, thresh):
+            for x1, x2 in _band_segments(width, rows, channels, thresh, y1, y2, 24):
+                # Trim one-pixel outlines at either end, then pad with the
+                # row's own background so tesseract sees a clean line.
+                box = (
+                    min(width - 1, x1 + 3),
+                    max(0, y1 - 4),
+                    max(0, x2 - 3),
+                    min(height - 1, y2 + 4),
+                )
+                if box[2] - box[0] < 24:
+                    continue
+                _upscaled_crop(rows, channels, box, 4, temporary)
+                segments.append(_scaled_words(
+                    _ocr_tsv(tesseract, temporary, "7"), (box[0], box[1]), 4,
+                ))
+    finally:
+        temporary.unlink(missing_ok=True)
+    _PIXEL_CACHE[key] = segments
+    return segments
+
+
 def visible_pixel_rows(path: Path, tesseract: str, *, clusters: bool = False):
     """OCR each light text row, optionally each narrow glyph cluster.
 
@@ -613,6 +705,12 @@ def locate_visible_label(
         bounds = match_visible_label(
             visible_pixel_rows(path, tesseract, clusters=True), label,
         )
+    if bounds is None:
+        segments = visible_segment_rows(path, tesseract)
+        flat = [word for words in segments for word in words]
+        bounds = match_visible_label(flat, label)
+        if bounds is None:
+            bounds = match_visible_segment(segments, label)
     if bounds is None:
         raise RuntimeError(f"visible label not found in screenshot: {label}")
     return bounds
