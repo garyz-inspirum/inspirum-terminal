@@ -228,7 +228,7 @@ impl Manager {
 /// single-line input), blanks ignored.
 pub fn parse_forward_lines(value: &str) -> Vec<String> {
     value
-        .split(|c| c == '\n' || c == ';')
+        .split(['\n', ';'])
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(ToOwned::to_owned)
@@ -261,15 +261,25 @@ mod tests {
 
     #[test]
     fn rows_cover_every_profile_in_order() {
-        let mut a = Session::default();
-        a.name = "a".into();
-        a.host = "a.example".into();
-        a.ssh.local_forwards = vec!["127.0.0.1:8080:web:80".into()];
-        a.ssh.dynamic_forwards = vec!["127.0.0.1:1080".into()];
-        let mut b = Session::default();
-        b.name = "b".into();
-        b.host = "b.example".into();
-        b.ssh.remote_forwards = vec!["127.0.0.1:9000:127.0.0.1:3000".into()];
+        let a = Session {
+            name: "a".into(),
+            host: "a.example".into(),
+            ssh: crate::SshOptions {
+                local_forwards: vec!["127.0.0.1:8080:web:80".into()],
+                dynamic_forwards: vec!["127.0.0.1:1080".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let b = Session {
+            name: "b".into(),
+            host: "b.example".into(),
+            ssh: crate::SshOptions {
+                remote_forwards: vec!["127.0.0.1:9000:127.0.0.1:3000".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let rows = all_rows(&[a, b]);
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].kind, ForwardKind::Local);
@@ -280,10 +290,15 @@ mod tests {
 
     #[test]
     fn non_loopback_bind_fails_closed_without_acknowledgement() {
-        let mut session = Session::default();
-        session.name = "exposed".into();
-        session.host = "h.example".into();
-        session.ssh.local_forwards = vec!["0.0.0.0:8080:web:80".into()];
+        let session = Session {
+            name: "exposed".into(),
+            host: "h.example".into(),
+            ssh: crate::SshOptions {
+                local_forwards: vec!["0.0.0.0:8080:web:80".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut manager = Manager::default();
         let error = manager.start(&session, None).unwrap_err();
         assert!(error.to_string().contains("acknowledgement"));
