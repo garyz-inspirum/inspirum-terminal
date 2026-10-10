@@ -425,23 +425,38 @@ impl TerminalBackend {
     /// This keeps toolkit-specific rendering outside the PTY/parser backend while preserving the
     /// exact Alacritty cell model. The supplied theme controls ANSI/named-color resolution.
     pub fn display_snapshot(&mut self, theme: &TerminalTheme) -> DisplaySnapshot {
-        let content = self.sync();
+        // The Iced renderer needs only the viewport, not a clone of all
+        // historical scrollback. sync() materializes the entire Alacritty
+        // Grid (potentially hundreds of thousands of cells) on every frame.
+        // Hold the parser lock only while extracting bounded visible cells.
+        // Consumers needing the full retained grid must explicitly call sync().
+        let term = self.term.clone();
+        let mut terminal = term.lock();
+        let selectable_range = terminal.selection.as_ref().and_then(|s| s.to_range(&terminal));
+        let mode = *terminal.mode();
+        let cursor_cell = terminal.grid_mut().cursor_cell().clone();
+        self.last_mode = mode;
+        self.last_terminal_size = self.size;
+        self.last_cursor_cell = cursor_cell.clone();
+        self.last_selectable_range = selectable_range;
+        let grid = terminal.grid();
+        let terminal_size = self.size;
         let global_bg = theme.get_color(alacritty_terminal::vte::ansi::Color::Named(
             alacritty_terminal::vte::ansi::NamedColor::Background,
         ));
         let [bg_r, bg_g, bg_b, _] = global_bg.to_array();
         let mut cells = Vec::with_capacity(
-            content.terminal_size.num_cols as usize * content.terminal_size.num_lines as usize,
+            terminal_size.num_cols as usize * terminal_size.num_lines as usize,
         );
 
-        for indexed in content.grid.display_iter() {
+        for indexed in grid.display_iter() {
             let flags = indexed.cell.flags;
             if flags.contains(term::cell::Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
 
-            let line = indexed.point.line.0 + content.grid.display_offset() as i32;
-            if line < 0 || line >= content.terminal_size.num_lines as i32 {
+            let line = indexed.point.line.0 + grid.display_offset() as i32;
+            if line < 0 || line >= terminal_size.num_lines as i32 {
                 continue;
             }
 
@@ -462,10 +477,10 @@ impl TerminalBackend {
 
             // Full-screen applications use DECTCEM to hide the cursor. The
             // live input cursor also must not be painted over scrollback.
-            let cursor = content.terminal_mode.contains(TermMode::SHOW_CURSOR)
-                && content.grid.display_offset() == 0
-                && content.grid.cursor.point == indexed.point;
-            let cursor_color = theme.get_color(content.cursor.fg);
+            let cursor = mode.contains(TermMode::SHOW_CURSOR)
+                && grid.display_offset() == 0
+                && grid.cursor.point == indexed.point;
+            let cursor_color = theme.get_color(cursor_cell.fg);
             let [fg_r, fg_g, fg_b, _] = foreground.to_array();
             let [cell_bg_r, cell_bg_g, cell_bg_b, _] = background.to_array();
             let [cursor_r, cursor_g, cursor_b, _] = cursor_color.to_array();
@@ -491,12 +506,12 @@ impl TerminalBackend {
             });
         }
 
-        let rows = content.terminal_size.num_lines as usize;
+        let rows = terminal_size.num_lines as usize;
         let row_ranges = display_row_ranges(rows, &cells);
 
         DisplaySnapshot {
             rows,
-            columns: content.terminal_size.num_cols as usize,
+            columns: terminal_size.num_cols as usize,
             background: [bg_r, bg_g, bg_b],
             row_ranges,
             cells,
