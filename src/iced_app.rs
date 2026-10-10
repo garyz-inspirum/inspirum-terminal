@@ -3809,8 +3809,10 @@ impl App {
             }
             Message::RequestPaste => {
                 if self
-                    .focused_terminal_id()
-                    .is_some_and(|id| self.local_navigation.contains(&id))
+                    .tabs
+                    .get(self.active)
+                    .and_then(|tab| tab.panes.get(tab.focus))
+                    .is_some_and(|pane| self.local_navigation.contains(&pane.id))
                 {
                     self.status = "Switch to remote input before pasting.".into();
                     return Task::none();
@@ -4893,8 +4895,8 @@ impl App {
                     } else {
                         "SSH"
                     })
-                        .size(11)
-                        .color(if focused { BLUE } else { MUTED }),
+                    .size(11)
+                    .color(if focused { BLUE } else { MUTED }),
                     text(
                         pane.terminal_title
                             .as_deref()
@@ -6313,10 +6315,9 @@ mod tests {
         app.tabs.push(Workspace::new(profile, pane));
         let _ = app.update(Message::ToggleLocalNavigation);
         assert!(app.local_navigation.contains(&id));
-        assert!(!app.command_terminal(
-            id,
-            terminal_core::BackendCommand::Write(b"danger".to_vec())
-        ));
+        assert!(
+            !app.command_terminal(id, terminal_core::BackendCommand::Write(b"danger".to_vec()))
+        );
         let _ = app.update(Message::RequestPaste);
         assert!(app.status.contains("Switch to remote"));
         let _ = app.update(Message::TogglePrivacyLock);
@@ -6332,7 +6333,10 @@ mod tests {
         use keyboard::key::Named;
         let enter = keyboard::Key::Named(Named::Enter);
         assert!(local_navigation_chord(&enter, keyboard::Modifiers::SHIFT));
-        assert!(!local_navigation_chord(&enter, keyboard::Modifiers::default()));
+        assert!(!local_navigation_chord(
+            &enter,
+            keyboard::Modifiers::default()
+        ));
         assert!(!local_navigation_chord(
             &enter,
             keyboard::Modifiers::SHIFT | keyboard::Modifiers::CTRL
