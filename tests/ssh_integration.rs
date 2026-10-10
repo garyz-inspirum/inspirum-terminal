@@ -428,7 +428,7 @@ fn agent_forwarding_respects_explicit_profile_consent() {
     );
     wait_text(&mut disabled, "FIXTURE_AUTHENTICATED");
     write(&mut disabled, "agent-probe\n");
-    wait_text(&mut disabled, "AGENT_NOT_FORWARDED");
+    wait_text(&mut disabled, "AGENT_NO_SOCKET");
     assert!(!grid(&mut disabled).contains("AGENT_FORWARDED"));
     write(&mut disabled, "exit\n");
     wait_exit(&disabled_events, 718);
