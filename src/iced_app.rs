@@ -6713,9 +6713,15 @@ mod tests {
                 .collect();
             visible_url_ranges(&cells)
         };
-        assert_eq!(spans("Visit https://example.org/path?q=1, thanks"), vec![(6, 34)]);
+        assert_eq!(
+            spans("Visit https://example.org/path?q=1, thanks"),
+            vec![(6, 34)]
+        );
         assert_eq!(spans("http://localhost:8080"), vec![(0, 21)]);
-        assert_eq!(spans("badhttps://example.org and https://ok.io."), vec![(27, 40)]);
+        assert_eq!(
+            spans("badhttps://example.org and https://ok.io."),
+            vec![(27, 40)]
+        );
         assert!(spans("http:// https://").is_empty());
         assert!(spans("ftp://example.org").is_empty());
         assert_eq!(spans("(https://site.test)."), vec![(1, 18)]);
