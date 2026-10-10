@@ -23,7 +23,12 @@ def run(args: list[str], env: dict[str, str], *, timeout: int = 45) -> str:
         args, env=env, capture_output=True, text=True, timeout=timeout
     )
     if process.returncode != 0:
-        # Never print KDC keys, passwords, ccache contents or kadmin output.
+        # Never print KDC passwords, keytabs, caches or kadmin output.
+        # Only the isolated Rust acceptance test may expose a bounded
+        # failure summary, so misconfigured delegation is diagnosable.
+        if args[0] == "cargo":
+            print(process.stdout[-2500:], flush=True)
+            print(process.stderr[-600:], flush=True)
         raise RuntimeError(f"disposable fixture command failed: {args[0]} (status {process.returncode})")
     return process.stdout
 
@@ -156,6 +161,10 @@ def main() -> int:
         run(["kdb5_util", "-r", REALM, "create", "-s", "-P", "disposable-fixture-only"], env)
         for principal in (f"{username}@{REALM}", f"host/localhost@{REALM}"):
             run(["kadmin.local", "-r", REALM, "-q", f"addprinc -randkey {principal}"], env)
+        # Kerberos clients delegate tickets only to a service explicitly
+        # trusted for delegation by the disposable KDC policy.
+        run(["kadmin.local", "-r", REALM, "-q",
+             f"modprinc +ok_as_delegate host/localhost@{REALM}"], env)
         run(["kadmin.local", "-r", REALM, "-q",
              f"ktadd -k {root / 'client.keytab'} {username}@{REALM}"], env)
         run(["kadmin.local", "-r", REALM, "-q",
