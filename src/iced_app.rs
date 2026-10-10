@@ -6874,7 +6874,11 @@ mod tests {
             id != 20
         });
         assert!(!sent);
-        assert_eq!(attempts, vec![20], "no mirrored PTY may receive failed source input");
+        assert_eq!(
+            attempts,
+            vec![20],
+            "no mirrored PTY may receive failed source input"
+        );
 
         attempts.clear();
         let sent = App::write_source_then_mirrors(20, &[10, 20, 30], |id| {
@@ -6882,7 +6886,11 @@ mod tests {
             true
         });
         assert!(sent);
-        assert_eq!(attempts, vec![20, 10, 30], "focused source must be written first");
+        assert_eq!(
+            attempts,
+            vec![20, 10, 30],
+            "focused source must be written first"
+        );
     }
 
     #[test]
