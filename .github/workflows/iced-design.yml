@@ -6,6 +6,9 @@ on:
       - 'prototypes/iced-shell/**'
       - 'src/iced_app.rs'
       - 'src/iced_app/**'
+      # Keep the production connected-SSH GUI test in the preview gate.
+      - 'scripts/test-iced-connected-gui.py'
+      - 'scripts/test-native-ssh-smoke.py'
       - 'src/appearance.rs'
       - 'src/history.rs'
       - 'src/workspace.rs'
