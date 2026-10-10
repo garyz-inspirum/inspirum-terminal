@@ -89,6 +89,15 @@ async def monitored_shell(
                 events.write("SHELL_STREAM_EOF")
                 return
             buffer += chunk.replace("\r\n", "\n").replace("\r", "\n")
+            # Cursor-key escape sequences are unbuffered PTY input, not
+            # newline-terminated shell commands. Detect them as bytes arrive;
+            # retain incomplete fragments across SSHReader.read() boundaries.
+            # Only record a fixed synthetic marker, never actual user input.
+            for sequence in ("\x1b[D", "\x1bOD"):
+                while sequence in buffer:
+                    buffer = buffer.replace(sequence, "", 1)
+                    events.write("REMOTE_CURSOR_LEFT")
+                    stdout.write("NATIVE_REMOTE_CURSOR_LEFT\r\n")
             while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
                 if line == "echo:FREE_TYPE_PROBE":
@@ -101,6 +110,9 @@ async def monitored_shell(
                 elif line == "screen-off":
                     events.write("SCREEN_OFF")
                     stdout.write("\x1b[?1049l")
+                elif line in ("\x1b[D", "\x1bOD"):
+                    events.write("REMOTE_CURSOR_LEFT")
+                    stdout.write("NATIVE_REMOTE_CURSOR_LEFT\r\n")
                 elif line.startswith("echo:"):
                     stdout.write(f"NATIVE_ECHO:{line[5:]}\r\n")
                 elif line == "exit":
@@ -193,6 +205,11 @@ async def main() -> int:
         server = await asyncssh.create_server(
             lambda: MonitoredServer(trusted, events),
             "127.0.0.1", 0, server_host_keys=[str(host)], encoding="utf-8",
+            # A real remote program receives cursor-key escape sequences from
+            # its PTY. AsyncSSH's server-side line editor consumes those keys
+            # itself, so disable it in this transport fixture and observe the
+            # exact bytes delivered by the production Iced terminal backend.
+            line_editor=False,
             sftp_factory=lambda chan: isolated_sftp_server(chan, remote_root, events),
             session_factory=lambda stdin, stdout, stderr: monitored_shell(
                 stdin, stdout, stderr, events
@@ -222,7 +239,12 @@ async def main() -> int:
 
         runtime = root / "xdg-runtime"
         runtime.mkdir(mode=0o700)
-        env = dict(os.environ, DISPLAY=reserved_display(), XDG_RUNTIME_DIR=str(runtime))
+        env = dict(
+            os.environ,
+            DISPLAY=reserved_display(),
+            XDG_RUNTIME_DIR=str(runtime),
+            INSPIRUM_CI_REMOTE_KEY_TRACE="1",
+        )
         xvfb = subprocess.Popen(
             ["Xvfb", env["DISPLAY"], "-screen", "0", "1440x1000x24", "-nolisten", "tcp"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
@@ -453,6 +475,50 @@ async def main() -> int:
                         f"alternate-screen restore changed only {fullscreen_pixels} pixels"
                     )
 
+                # #64: production Iced keyboard shortcut actually toggles a
+                # dedicated remote PTY navigation mode, and h sends a real
+                # Left cursor sequence to the authenticated synthetic shell.
+                # Exit the modal mode before Return completes the test line.
+                command(
+                    "xdotool", "windowfocus", window, "key",
+                    "--clearmodifiers", "ctrl+shift+m", env=env,
+                )
+                await asyncio.sleep(.5)
+                screenshot(window, destination / "connected-remote-keys.png", env)
+                remote_keys_pixels = diff(
+                    destination / "connected-fullscreen-restored.png",
+                    destination / "connected-remote-keys.png", env,
+                )
+                if remote_keys_pixels < 300:
+                    raise RuntimeError(
+                        f"remote PTY navigation mode was not visibly activated: "
+                        f"{remote_keys_pixels} pixels changed"
+                    )
+                command("xdotool", "key", "--clearmodifiers", "h", env=env)
+                await asyncio.sleep(.7)
+                command(
+                    "xdotool", "key", "--clearmodifiers", "ctrl+shift+m", env=env,
+                )
+                await asyncio.sleep(.5)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                try:
+                    await wait_for(
+                        lambda: "REMOTE_CURSOR_LEFT" in events.path.read_text(encoding="utf-8"),
+                        "native OpenSSH remote cursor Left after Iced modal h key",
+                    )
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        f"{exc}. Synthetic SSH lifecycle: "
+                        + repr(events.path.read_text(encoding="utf-8")[-1300:])
+                        + "; opt-in key dispatch: "
+                        + repr(
+                            "\n".join(
+                                line for line in app_log.read_text(encoding="utf-8").splitlines()
+                                if line.startswith("ci_remote_key:")
+                            )[-1200:]
+                        )
+                    ) from exc
+
                 event_log = events.path.read_text(encoding="utf-8")
                 if "SHELL_PTY_RESIZE" not in event_log:
                     raise RuntimeError("connected SSH fixture never observed a live PTY resize")
@@ -478,6 +544,8 @@ async def main() -> int:
                     f"Focus-mode screenshot change: {focus_pixels} pixels\n"
                     f"Privacy-curtain screenshot change: {privacy_pixels} pixels\n"
                     f"Alternate-screen screenshot change: {fullscreen_pixels} pixels\n"
+                    f"Remote-key mode screenshot change: {remote_keys_pixels} pixels\n"
+                    "PASS: real remote-key Left arrow reached the isolated SFTP-capable SSH shell\n"
                     "PASS: privacy-locked and free-type synthetic text never reached SSH\n"
                     "All keys generated in isolated temporary fixture; no real host or credential.\n",
                     encoding="utf-8",

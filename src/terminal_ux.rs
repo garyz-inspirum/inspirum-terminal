@@ -47,6 +47,27 @@ pub fn classify_paste(policy: PastePolicy, text: &str) -> PasteDecision {
     }
 }
 
+/// Deliver input to its original focused PTY *before* any opted-in mirrors.
+///
+/// If the source fails (exited/locked/changed focus), no destination receives
+/// the input. Targets contain stable pane IDs, never tab indices. This helper
+/// is used by the Iced GUI and by real OpenSSH native smoke acceptance.
+pub fn source_first_synced_write(
+    source: u64,
+    targets: &[u64],
+    mut write: impl FnMut(u64) -> bool,
+) -> bool {
+    if !write(source) {
+        return false;
+    }
+    for &target in targets {
+        if target != source {
+            let _ = write(target);
+        }
+    }
+    true
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SearchHit {
     pub line: usize,
@@ -131,6 +152,22 @@ pub fn log_exists(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synchronized_input_never_writes_a_mirror_if_source_fails() {
+        let mut observed = Vec::new();
+        assert!(!source_first_synced_write(30, &[10, 20, 30], |id| {
+            observed.push(id);
+            false
+        }));
+        assert_eq!(observed, vec![30]);
+        observed.clear();
+        assert!(source_first_synced_write(30, &[10, 20, 30], |id| {
+            observed.push(id);
+            true
+        }));
+        assert_eq!(observed, vec![30, 10, 20]);
+    }
 
     #[test]
     fn multiline_detection_covers_lf_cr_and_crlf() {

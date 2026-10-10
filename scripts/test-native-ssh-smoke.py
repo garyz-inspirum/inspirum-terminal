@@ -103,7 +103,11 @@ class NativeSession(asyncssh.SSHServerSession):
 
     def handle_line(self, line: str) -> None:
         assert self.chan is not None
-        if line.startswith("echo:"):
+        if line in ("\x1b[D", "\x1bOD", "\x1b[C", "\x1bOC"):
+            direction = "LEFT" if line.endswith("D") else "RIGHT"
+            self.events.write(f"REMOTE_CURSOR_{direction}")
+            self.chan.write(f"NATIVE_REMOTE_CURSOR_{direction}\r\n")
+        elif line.startswith("echo:"):
             self.chan.write(f"NATIVE_ECHO:{line[5:]}\r\n")
         elif line == "size":
             self.chan.write(f"NATIVE_SIZE:{self.height} {self.width}\r\n")

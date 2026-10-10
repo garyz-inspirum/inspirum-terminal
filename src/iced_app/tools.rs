@@ -1902,6 +1902,7 @@ mod tests {
         };
         let canvas = TerminalCanvas {
             focused: false,
+            remote_key_mode: false,
             pane: app.tabs[0].focus,
             id,
             generation: 0,
