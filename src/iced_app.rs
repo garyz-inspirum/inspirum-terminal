@@ -231,10 +231,7 @@ fn remote_vim_key(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option
     }
 }
 
-fn remote_cursor_bytes(
-    action: RemoteCursorKey,
-    mode: terminal_core::TerminalMode,
-) -> Vec<u8> {
+fn remote_cursor_bytes(action: RemoteCursorKey, mode: terminal_core::TerminalMode) -> Vec<u8> {
     use keyboard::key::Named;
     let key = match action {
         RemoteCursorKey::Left => Named::ArrowLeft,
@@ -246,8 +243,13 @@ fn remote_cursor_bytes(
         RemoteCursorKey::PageUp => Named::PageUp,
         RemoteCursorKey::PageDown => Named::PageDown,
     };
-    terminal_key_bytes(&keyboard::Key::Named(key), keyboard::Modifiers::empty(), None, mode)
-        .expect("cursor keys always encode to remote PTY input")
+    terminal_key_bytes(
+        &keyboard::Key::Named(key),
+        keyboard::Modifiers::empty(),
+        None,
+        mode,
+    )
+    .expect("cursor keys always encode to remote PTY input")
 }
 
 fn local_navigation_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
@@ -3324,7 +3326,9 @@ impl App {
                     || self.local_navigation.contains(&id)
                     || self.free_type.contains_key(&id)
                 {
-                    self.status = "Focus a connected SSH pane with no local editor to enable remote keys.".into();
+                    self.status =
+                        "Focus a connected SSH pane with no local editor to enable remote keys."
+                            .into();
                     return Task::none();
                 }
                 if !self.remote_keys.insert(id) {
@@ -7329,26 +7333,44 @@ mod tests {
         } else {
             keyboard::Modifiers::CTRL
         };
-        assert!(remote_keys_chord(&shortcut, cmd | keyboard::Modifiers::SHIFT));
+        assert!(remote_keys_chord(
+            &shortcut,
+            cmd | keyboard::Modifiers::SHIFT
+        ));
         assert!(!remote_keys_chord(&shortcut, cmd));
         assert_eq!(
-            remote_vim_key(&keyboard::Key::Character("h".into()), keyboard::Modifiers::empty()),
+            remote_vim_key(
+                &keyboard::Key::Character("h".into()),
+                keyboard::Modifiers::empty()
+            ),
             Some(RemoteCursorKey::Left)
         );
         assert_eq!(
-            remote_vim_key(&keyboard::Key::Character("j".into()), keyboard::Modifiers::empty()),
+            remote_vim_key(
+                &keyboard::Key::Character("j".into()),
+                keyboard::Modifiers::empty()
+            ),
             Some(RemoteCursorKey::Down)
         );
         assert_eq!(
-            remote_vim_key(&keyboard::Key::Character("k".into()), keyboard::Modifiers::empty()),
+            remote_vim_key(
+                &keyboard::Key::Character("k".into()),
+                keyboard::Modifiers::empty()
+            ),
             Some(RemoteCursorKey::Up)
         );
         assert_eq!(
-            remote_vim_key(&keyboard::Key::Character("l".into()), keyboard::Modifiers::empty()),
+            remote_vim_key(
+                &keyboard::Key::Character("l".into()),
+                keyboard::Modifiers::empty()
+            ),
             Some(RemoteCursorKey::Right)
         );
         assert_eq!(
-            remote_vim_key(&keyboard::Key::Character("h".into()), keyboard::Modifiers::CTRL),
+            remote_vim_key(
+                &keyboard::Key::Character("h".into()),
+                keyboard::Modifiers::CTRL
+            ),
             None,
             "modifier chords must not accidentally navigate an SSH PTY"
         );
@@ -7357,7 +7379,10 @@ mod tests {
             b"\x1b[D"
         );
         assert_eq!(
-            remote_cursor_bytes(RemoteCursorKey::Left, terminal_core::TerminalMode::APP_CURSOR),
+            remote_cursor_bytes(
+                RemoteCursorKey::Left,
+                terminal_core::TerminalMode::APP_CURSOR
+            ),
             b"\x1bOD",
             "application cursor mode must be encoded per destination"
         );
@@ -7387,21 +7412,39 @@ mod tests {
         app.tabs[0].split(pane_grid::Axis::Vertical, second);
         assert!(!app.send_remote_cursor(first_id, RemoteCursorKey::Left));
         let _ = app.update(Message::ToggleRemoteKeys(first_id));
-        assert!(!app.remote_keys.contains(&first_id), "unfocused pane cannot enter keys mode");
+        assert!(
+            !app.remote_keys.contains(&first_id),
+            "unfocused pane cannot enter keys mode"
+        );
         let _ = app.update(Message::ToggleRemoteKeys(second_id));
         assert!(app.remote_keys.contains(&second_id));
-        assert!(!app.send_remote_cursor(second_id, RemoteCursorKey::Left), "no backend");
+        assert!(
+            !app.send_remote_cursor(second_id, RemoteCursorKey::Left),
+            "no backend"
+        );
         let _ = app.update(Message::ToggleFreeType(second_id));
-        assert!(!app.free_type.contains_key(&second_id), "remote and draft modes exclude each other");
+        assert!(
+            !app.free_type.contains_key(&second_id),
+            "remote and draft modes exclude each other"
+        );
         let _ = app.update(Message::ToggleLocalNavigation);
-        assert!(!app.local_navigation.contains(&second_id), "remote/local modes exclude each other");
+        assert!(
+            !app.local_navigation.contains(&second_id),
+            "remote/local modes exclude each other"
+        );
         let _ = app.update(Message::TogglePrivacyLock);
         let _ = app.update(Message::ToggleRemoteKeys(second_id));
-        assert!(app.remote_keys.contains(&second_id), "privacy curtain blocks mode changes");
+        assert!(
+            app.remote_keys.contains(&second_id),
+            "privacy curtain blocks mode changes"
+        );
         assert!(!app.send_remote_cursor(second_id, RemoteCursorKey::Left));
         let _ = app.update(Message::TogglePrivacyLock);
         let _ = app.update(Message::ClosePane(app.tabs[0].focus));
-        assert!(!app.remote_keys.contains(&second_id), "closed pane must not remain a key target");
+        assert!(
+            !app.remote_keys.contains(&second_id),
+            "closed pane must not remain a key target"
+        );
     }
 
     #[test]
