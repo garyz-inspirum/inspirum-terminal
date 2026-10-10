@@ -40,6 +40,25 @@ New connection opens a dedicated, keyboard-accessible dialog. Host, username and
 
 Each session has a clear tab. A workspace can split into resizable panes with independent session identity and lifecycle. A thin accent outline and explicit focus state identify the input destination. Drag headers to rearrange; resize by divider; zoom a pane without disconnecting it. Close/reconnect must not replay input or silently enable broadcast.
 
+### Auxiliary SSH shell beside the main terminal
+
+The workspace's **Shell** toolbar action (Ctrl/Cmd+Shift+J while no text
+editor has captured the keys) opens an independent authenticated SSH PTY for
+the active session in a right-hand split. It is identified as **AUX SHELL**
+and receives input only when explicitly focused. The main terminal remains
+connected; the shell may run different commands without sharing its PTY or
+scrollback. The shell uses the current session's existing host-key and
+authentication policies; opening it does not change sync-input targets.
+
+**Close shell** disconnects that auxiliary PTY without closing the original
+terminal. If it is the last pane, the tab's existing close confirmation
+continues to apply. Reconnect preserves the auxiliary-shell role. The
+four-pane workspace limit applies, and the privacy curtain prevents shell
+creation/teardown. The Files dock remains separate. This is a practical
+auxiliary shell workflow in the existing draggable split grid, **not** a
+second independently dockable file-explorer tree. Native Mac click latency
+and keyboard/IME acceptance remain tracked in #78.
+
 ### Transfer files without losing the terminal
 
 Files opens a resizable lower drawer. Local and Remote have unambiguous headings; the remote side shows the exact session and path. Queued transfers retain their original session ID even when the active tab changes. Progress and errors are real, not decorative status values. Upload/download, conflict/resume, destructive operations and editor save retain existing confirmation and integrity logic.

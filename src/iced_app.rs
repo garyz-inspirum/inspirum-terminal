@@ -318,6 +318,14 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                 {
                     Some(Message::ToggleFiles)
                 }
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                    if status == event::Status::Ignored
+                        && modifiers.command()
+                        && modifiers.shift()
+                        && matches!(key.as_ref(), keyboard::Key::Character("j" | "J")) =>
+                {
+                    Some(Message::ToggleAuxiliaryShell)
+                }
                 iced::Event::Window(iced::window::Event::FileDropped(_)) => {
                     Some(Message::Event(event))
                 }
@@ -614,6 +622,7 @@ fn run_transfer_worker(worker: TransferWorker) {
 
 struct TerminalPane {
     sftp: bool,
+    auxiliary_shell: bool,
     id: u64,
     profile: Session,
     terminal: Option<terminal_core::TerminalBackend>,
@@ -954,6 +963,7 @@ enum Message {
     AskClose(usize),
     ConfirmClose(usize),
     ToggleFiles,
+    ToggleAuxiliaryShell,
     FilesRefresh,
     FilesLocalUp,
     FilesRemoteUp,
@@ -2283,6 +2293,7 @@ impl App {
 
         let mut pane = TerminalPane {
             sftp,
+            auxiliary_shell: false,
             id,
             profile,
             terminal: None,
@@ -3094,6 +3105,7 @@ impl App {
                     | Message::CopySelection(..)
                     | Message::CommandSend
                     | Message::ToggleFocusMode
+                    | Message::ToggleAuxiliaryShell
                     | Message::ToggleLocalNavigation
                     | Message::ToggleFreeType(..)
                     | Message::ToggleFocusedFreeType
@@ -4422,10 +4434,11 @@ impl App {
                     .tabs
                     .get(self.active)
                     .and_then(|tab| tab.panes.get(pane_id))
-                    .map(|pane| (pane.profile.clone(), pane.sftp));
+                    .map(|pane| (pane.profile.clone(), pane.sftp, pane.auxiliary_shell));
 
-                if let Some((profile, sftp)) = profile {
-                    let replacement = self.new_terminal_pane_kind(profile, sftp);
+                if let Some((profile, sftp, auxiliary_shell)) = profile {
+                    let mut replacement = self.new_terminal_pane_kind(profile, sftp);
+                    replacement.auxiliary_shell = auxiliary_shell;
                     if let Some(previous_id) = self
                         .tabs
                         .get(self.active)
@@ -4477,6 +4490,44 @@ impl App {
                         tab.split(axis, terminal);
                     }
                 }
+            }
+            Message::ToggleAuxiliaryShell => {
+                if self.dialog.is_some() || self.remote_editor.is_some() {
+                    return Task::none();
+                }
+                let Some(tab) = self.tabs.get(self.active) else {
+                    self.status = "Open an SSH session to use the auxiliary shell.".into();
+                    return Task::none();
+                };
+                let shell = tab
+                    .panes
+                    .iter()
+                    .find(|(_, pane)| pane.auxiliary_shell)
+                    .map(|(id, _)| *id);
+                if let Some(pane) = shell {
+                    if tab.panes.len() == 1 {
+                        self.status =
+                            "This is the last SSH pane. Close the tab to disconnect it.".into();
+                        return Task::none();
+                    }
+                    let result = self.update(Message::ClosePane(pane));
+                    self.status = "Auxiliary SSH shell disconnected; main panes preserved.".into();
+                    return result;
+                }
+                if tab.panes.len() >= 4 {
+                    self.status = "At most four SSH panes may be open per tab.".into();
+                    return Task::none();
+                }
+                // Open an independent authenticated PTY for the same profile.
+                // Never reuse the original pane's terminal backend or input.
+                let profile = tab.profile.clone();
+                self.tools.sync.set_armed(false);
+                let mut shell = self.new_terminal_pane_kind(profile, false);
+                shell.auxiliary_shell = true;
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.split(pane_grid::Axis::Vertical, shell);
+                }
+                self.status = "Independent auxiliary SSH shell opened in a right-hand pane (Ctrl/Cmd+Shift+J).".into();
             }
             Message::Focus(pane) => {
                 if let Some(tab) = self.tabs.get_mut(self.active) {
@@ -5292,6 +5343,18 @@ impl App {
             action("Split right", Message::Split(pane_grid::Axis::Vertical)),
             action("Split down", Message::Split(pane_grid::Axis::Horizontal)),
             action(
+                if self.tabs[self.active]
+                    .panes
+                    .iter()
+                    .any(|(_, pane)| pane.auxiliary_shell)
+                {
+                    "Close shell"
+                } else {
+                    "Shell"
+                },
+                Message::ToggleAuxiliaryShell
+            ),
+            action(
                 if self.files_dock.is_some() {
                     "Hide files"
                 } else {
@@ -5344,6 +5407,9 @@ impl App {
             };
             let title = pane_grid::TitleBar::new(
                 row![
+                    text(if pane.auxiliary_shell { "AUX SHELL" } else { "PTY" })
+                        .size(10)
+                        .color(if pane.auxiliary_shell { BLUE } else { MUTED }),
                     text(if self.free_type.contains_key(&pane.id) {
                         "FREE TYPE"
                     } else if self.local_navigation.contains(&pane.id) {
@@ -7469,6 +7535,57 @@ mod tests {
         app.active = 1;
         assert!(!app.active_session_matches(&first_key));
         assert!(app.active_session_matches(&second_key));
+    }
+
+    #[test]
+    fn auxiliary_shell_is_a_separate_ssh_pane_with_safe_teardown_and_reconnect() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-aux-shell-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session {
+            name: "aux-shell fixture".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let original = app.new_terminal_pane(profile.clone());
+        let original_id = original.id;
+        app.tabs.push(Workspace::new(profile, original));
+
+        let _ = app.update(Message::ToggleAuxiliaryShell);
+        let tab = &app.tabs[0];
+        assert_eq!(tab.panes.len(), 2);
+        let (shell_id, shell_pane) = tab
+            .panes
+            .iter()
+            .find(|(_, pane)| pane.auxiliary_shell)
+            .expect("auxiliary SSH pane created");
+        assert_ne!(shell_pane.id, original_id);
+        assert!(!shell_pane.sftp, "auxiliary shell must be a PTY, not SFTP");
+        let shell_id = *shell_id;
+        let _ = app.update(Message::Reconnect(shell_id));
+        assert!(
+            app.tabs[0].panes.get(shell_id).unwrap().auxiliary_shell,
+            "reconnect must keep the shell role"
+        );
+
+        let _ = app.update(Message::ToggleAuxiliaryShell);
+        assert_eq!(app.tabs[0].panes.len(), 1);
+        assert_eq!(
+            app.tabs[0].panes.iter().next().unwrap().1.id,
+            original_id,
+            "closing auxiliary shell must preserve main terminal"
+        );
+        let _ = app.update(Message::ToggleAuxiliaryShell);
+        assert_eq!(app.tabs[0].panes.len(), 2);
+        let _ = app.update(Message::TogglePrivacyLock);
+        let _ = app.update(Message::ToggleAuxiliaryShell);
+        assert_eq!(
+            app.tabs[0].panes.len(),
+            2,
+            "privacy lock blocks shell changes"
+        );
     }
 
     #[test]
