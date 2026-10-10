@@ -674,6 +674,29 @@ fn remote_parent(path: &str) -> String {
     }
 }
 
+fn normalized_paste_text(source: &str, normalize: bool) -> String {
+    if normalize {
+        source.replace("\r\n", "\n").replace('\r', "\n")
+    } else {
+        source.to_owned()
+    }
+}
+
+fn paste_preview_text(text: &str, max_chars: usize) -> String {
+    let mut preview = String::new();
+    for ch in text.chars().take(max_chars) {
+        match ch {
+            '\n' | '\t' => preview.push(ch),
+            ch if ch.is_control() => preview.push_str(&format!("\\u{{{:04x}}}", ch as u32)),
+            ch => preview.push(ch),
+        }
+    }
+    if text.chars().count() > max_chars {
+        preview.push_str("\n... preview truncated ...");
+    }
+    preview
+}
+
 fn display_leaf(value: &str) -> String {
     value
         .chars()
@@ -728,6 +751,7 @@ enum Dialog {
         id: u64,
         text: String,
         targets: Vec<u64>,
+        normalize_line_endings: bool,
     },
     FileOverwrite(PendingTransfer),
     FileDeleteLocal(PathBuf),
@@ -833,6 +857,7 @@ enum Message {
     RequestPaste,
     ClipboardRead(u64, Vec<u64>, Option<String>),
     ConfirmPaste,
+    TogglePasteNormalization,
     Reconnect(pane_grid::Pane),
     Split(pane_grid::Axis),
     Focus(pane_grid::Pane),
@@ -3719,6 +3744,7 @@ impl App {
                             id,
                             targets: self.paste_targets(id),
                             text,
+                            normalize_line_endings: false,
                         });
                         self.status =
                             "Multiline paste is waiting for explicit confirmation.".into();
@@ -3729,10 +3755,33 @@ impl App {
                     }
                 }
             }
+            Message::TogglePasteNormalization => {
+                if let Some(Dialog::PasteConfirm {
+                    normalize_line_endings,
+                    ..
+                }) = &mut self.dialog
+                {
+                    *normalize_line_endings = !*normalize_line_endings;
+                }
+            }
             Message::ConfirmPaste => {
-                if let Some(Dialog::PasteConfirm { id, targets, text }) = self.dialog.take() {
-                    if targets == self.paste_targets(id)
-                        && self.send_to_terminal(id, text.into_bytes())
+                if let Some(Dialog::PasteConfirm {
+                    id,
+                    targets,
+                    text,
+                    normalize_line_endings,
+                }) = self.dialog.take()
+                {
+                    let prepared = normalized_paste_text(&text, normalize_line_endings);
+                    // Never downgrade safety when normalization is selected.
+                    // Content was originally classified for confirmation, and
+                    // the prepared bytes must also remain valid under policy.
+                    if terminal_ux::classify_paste(self.paste_policy, &prepared)
+                        == PasteDecision::Block
+                    {
+                        self.status = "Paste blocked by safety policy.".into();
+                    } else if targets == self.paste_targets(id)
+                        && self.send_to_terminal(id, prepared.into_bytes())
                     {
                         self.status = "Paste sent after explicit confirmation.".into();
                     } else {
@@ -5587,27 +5636,34 @@ impl App {
             ]
             .spacing(20)
             .into(),
-            Dialog::PasteConfirm { text: paste, .. } => {
-                let line_count = paste
-                    .as_bytes()
-                    .iter()
-                    .filter(|&&byte| matches!(byte, b'\r' | b'\n'))
-                    .count()
-                    + 1;
-                let truncated = paste.chars().count() > 4000;
-                let mut preview = paste.chars().take(4000).collect::<String>();
-                if truncated {
-                    preview.push_str("\n… preview truncated …");
-                }
+            Dialog::PasteConfirm {
+                text: paste,
+                normalize_line_endings,
+                ..
+            } => {
+                let prepared = normalized_paste_text(paste, *normalize_line_endings);
+                let preview = paste_preview_text(&prepared, 4000);
+                let line_count = prepared.lines().count().max(1);
                 column![
                     text("Confirm terminal paste").size(24),
                     text(format!(
                         "Paste {} bytes across approximately {} line(s)?",
-                        paste.len(),
+                        prepared.len(),
                         line_count
                     )),
                     text("Review carefully. Multiline terminal pastes can execute several commands immediately.")
                         .size(13)
+                        .color(MUTED),
+                    action(
+                        if *normalize_line_endings {
+                            "Line endings: normalize CRLF / CR to LF (enabled)"
+                        } else {
+                            "Line endings: preserve original bytes (default)"
+                        },
+                        Message::TogglePasteNormalization
+                    ),
+                    text("The preview below shows the exact prepared text; nonprinting controls are escaped for review.")
+                        .size(12)
                         .color(MUTED),
                     container(
                         scrollable(text(preview).font(Font::MONOSPACE).size(13))
@@ -6182,6 +6238,7 @@ mod tests {
             id: original_id,
             targets: vec![original_id],
             text: "line one\nline two".into(),
+            normalize_line_endings: false,
         });
         let _ = app.update(Message::ConfirmPaste);
         assert!(app.dialog.is_none());
@@ -6593,6 +6650,36 @@ mod tests {
             ..Default::default()
         };
         assert!(form.session().is_err());
+    }
+
+    #[test]
+    fn enhanced_paste_requires_explicit_normalization_and_escapes_controls() {
+        let input = "first\r\nsecond\rthird\u{001b}[31m";
+        assert_eq!(normalized_paste_text(input, false), input);
+        assert_eq!(
+            normalized_paste_text(input, true),
+            "first\nsecond\nthird\u{001b}[31m"
+        );
+        assert_eq!(
+            paste_preview_text(&normalized_paste_text(input, true), 4000),
+            "first\nsecond\nthird\\u{001b}[31m"
+        );
+        assert_eq!(
+            paste_preview_text("abcde", 3),
+            "abc\n... preview truncated ..."
+        );
+        // A normalized multiline payload still requires confirmation.
+        assert_eq!(
+            terminal_ux::classify_paste(
+                PastePolicy::ConfirmMultiline,
+                &normalized_paste_text("one\r\ntwo", true),
+            ),
+            PasteDecision::Confirm
+        );
+        assert_eq!(
+            terminal_ux::classify_paste(PastePolicy::ConfirmMultiline, "bad\0data"),
+            PasteDecision::Block
+        );
     }
 
     #[test]

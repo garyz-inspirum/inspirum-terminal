@@ -1932,6 +1932,7 @@ mod tests {
             id: source,
             text: "one\ntwo".into(),
             targets,
+            normalize_line_endings: false,
         });
         app.tools.sync.set_armed(false);
         let _ = app.update(Message::ConfirmPaste);
