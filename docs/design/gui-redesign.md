@@ -170,6 +170,8 @@ INSPIRUM_ICED_TRACE_MS=25 ./inspirum-terminal --ui iced 2> iced-timings.log
 
 This prints a line **only when** one of these synchronous stages takes at least 25 ms: `startup`, `event_update`, `view_layout`, `terminal_snapshot`, or `terminal_canvas_draw`. Set a different positive millisecond threshold if needed. Tracing is disabled unless explicitly requested, and trace records contain only static stage names and elapsed times, not SSH hosts, commands, passwords, clipboard text, terminal output or file paths. If sharing results, extract only lines beginning `iced slow` from the log; unrelated process diagnostics may include sensitive data.
 
+With this option enabled, clicks on the **terminal canvas** also report `iced slow click_to_canvas_draw` when the interval from the delivered selection event to the next focused canvas drawing exceeds the selected threshold. This lets an affected Mac distinguish a delayed application redraw from a slower GPU-present or OS event-delivery path. It does not instrument ordinary Iced text inputs; for median/p95 diagnosis lower the threshold (for example to 1 ms), test at least 30 clicks, and use only that stage's static timing lines. Tracing stores only pane IDs and monotonic instants in a bounded in-memory map; neither hostnames nor terminal text are logged.
+
 These timings measure **CPU-stage durations, not input-to-screen latency**. A slow-GPU presentation or OS event delivery issue may need native macOS Instruments tracing. For acceptance, measure on the affected Mac and record its model, macOS version, display scale, renderer and connected-tab count. Never claim the p95 budget is met from these logs alone.
 
 ## 9. Native review script
