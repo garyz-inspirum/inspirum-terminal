@@ -41,7 +41,9 @@ fn native_gssapi_only_authentication_and_delegation() {
             .expect("GSSAPI fixture path is required; never use ambient realm"),
     );
     let mode = std::env::var("INSPIRUM_GSSAPI_MODE").expect("GSSAPI fixture mode missing");
-    assert!(["no-delegation", "delegation", "no-ticket"].contains(&mode.as_str()));
+    assert!(
+        ["no-delegation", "delegation", "no-ticket", "expired-ticket",].contains(&mode.as_str())
+    );
 
     let remote_command = match mode.as_str() {
         "no-delegation" => {
@@ -71,7 +73,7 @@ fn native_gssapi_only_authentication_and_delegation() {
     let (sender, receiver) = mpsc::channel();
     let mut terminal = connect(9950, sender, &session, Some(&fixture.join("ssh_config")))
         .expect("the GSSAPI-only process must start through Inspirum");
-    if mode == "no-ticket" {
+    if matches!(mode.as_str(), "no-ticket" | "expired-ticket") {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             if let Ok((_, PtyEvent::Exit)) = receiver.recv_timeout(Duration::from_millis(50)) {

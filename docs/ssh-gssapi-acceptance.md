@@ -14,7 +14,7 @@ GSSAPI authentication is delegated to the **system OpenSSH** executable; Inspiru
 
 `scripts/test-native-gssapi.py` creates a fresh synthetic `INSPIRUM.TEST` realm inside a mode-0700 temporary directory. It creates an isolated KDC on a dynamic loopback port, one local test user principal, one `host/localhost` service principal, a throwaway OpenSSH host key, an unprivileged sshd loopback listener, a temporary ticket cache, and a fresh known-hosts file. The independent system OpenSSH control must authenticate to the same sshd before the Inspirum native PTY acceptance is exercised.
 
-The adapter test runs with only `gssapi-with-mic` permitted; other SSH authentication mechanisms are disabled. It checks that non-delegated sessions cannot use remote Kerberos credentials, delegated sessions can, and destroyed tickets cannot log in. Neither passwords, tickets, nor keytab material are printed; the fixture kills child daemons and deletes its root directory in `finally`.
+The adapter test runs with only `gssapi-with-mic` permitted; other SSH authentication mechanisms are disabled. It checks that non-delegated sessions cannot use remote Kerberos credentials, delegated sessions can, and missing or deliberately expired tickets cannot log in. The expiry test requests a disposable three-second ticket, verifies it becomes invalid, then checks authentication fails without fallback. Neither passwords, tickets, nor keytab material are printed; the fixture kills child daemons and deletes its root directory in `finally`.
 
 ### Usage and security constraints
 
