@@ -68,6 +68,16 @@ fi
 while IFS= read -r line; do
  case "$line" in
  echo:*) printf 'REMOTE_ECHO:%s\\n' "${line#echo:}" ;;
+ agent-probe)
+  if [ -z "${SSH_AUTH_SOCK:-}" ]; then
+   printf 'AGENT_NO_SOCKET\\n'
+  elif [ ! -S "$SSH_AUTH_SOCK" ]; then
+   printf 'AGENT_SOCKET_UNAVAILABLE\\n'
+  elif ssh-add -l >/dev/null 2>&1; then
+   printf 'AGENT_FORWARDED\\n'
+  else
+   printf 'AGENT_SOCKET_UNUSABLE\\n'
+  fi ;;
  size) printf 'REMOTE_SIZE:'; stty size ;;
  exit) exit 0 ;;
  esac
@@ -96,7 +106,8 @@ AuthenticationMethods publickey
 Ciphers aes256-ctr
 AllowUsers {getpass.getuser()}
 AllowTcpForwarding yes
-AllowAgentForwarding no
+# Disposable loopback fixture only. Client profile opt-in is verified below.
+AllowAgentForwarding yes
 X11Forwarding no
 PermitTunnel no
 PermitTTY yes
@@ -272,6 +283,12 @@ Host *
  ControlPath none
  ProxyCommand none
 ''')
+ # Default fixtures explicitly disable IdentityAgent to keep authentication
+ # deterministic. Agent-forwarding acceptance uses an independent fixture
+ # config which permits the synthetic, local SSH_AUTH_SOCK for forwarding.
+ (d/'agent-forward-config').write_text(
+  (d/'config').read_text().replace(' IdentityAgent none\n','')
+ )
  (d/'encrypted-config').write_text(f'''Host *
  HostName 127.0.0.1
  Port {port}
@@ -411,6 +428,22 @@ Host *
     INSPIRUM_PRIV_AUTH_FIXTURE='1' if privileged_auth else '0',
     INSPIRUM_FIXTURE_PASSWORD=fixture_password,
    )
+   # Independent OpenSSH control with the same synthetic agent and sshd.
+   # If it fails, the fixture is broken; do not blame the application adapter.
+   baseline=subprocess.run(
+    ['ssh','-A','-F',str(d/'agent-forward-config'),'-tt','127.0.0.1'],
+    env=env,
+    input='agent-probe\\nexit\\n'.replace('\\n','\n'),
+    capture_output=True,
+    text=True,
+    timeout=20,
+    check=False,
+   )
+   if baseline.returncode != 0 or 'AGENT_FORWARDED' not in baseline.stdout:
+    marker=next((key for key in ('AGENT_NO_SOCKET','AGENT_SOCKET_UNAVAILABLE','AGENT_SOCKET_UNUSABLE')
+                 if key in baseline.stdout), 'NO_MARKER')
+    raise RuntimeError(f'isolated system OpenSSH -A baseline failed: {marker}')
+   print('PASS isolated system OpenSSH -A forwarding baseline',flush=True)
    cmd=['cargo','test','--locked','--test','ssh_integration','--test','sftp_policy','--','--ignored','--nocapture','--test-threads=1']
    print('RUN:',' '.join(cmd),flush=True)
    auth_summary=(f'; password sshd: 127.0.0.1:{password_port}; MFA sshd: 127.0.0.1:{mfa_port}' if privileged_auth else '; password/MFA fixture skipped (passwordless sudo unavailable)')

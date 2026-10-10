@@ -17,13 +17,16 @@ The test suite checks:
 
 The fixture uses temporary generated keys and known_hosts records, a file-scoped session profile, loopback-only targets, and deletes itself when finished. It never uses a production SSH server or private credential.
 
+
+The Linux `scripts/test-ssh-integration.sh` fixture starts an isolated synthetic `ssh-agent` socket with a generated public-key identity, permits forwarding only on its loopback test sshd, and tests both explicit `ForwardAgent=yes` and `ForwardAgent=no` through `tests/ssh_integration.rs`. Only presence/access to the forwarded agent is tested; keys and agent contents are never printed. Agent forwarding gives a remote host the ability to request signing operations with the local agent and should be enabled only for trusted hosts.
+
 ## Supported versus unverified
 
 | Workflow | Native CI evidence |
 | --- | --- |
 | ProxyJump (success, changed key, jump failure) | Linux x64, Windows x64, macOS arm64 only if CI native fixture passes |
 | Local, remote and dynamic TCP forwarding | Linux x64, Windows x64, macOS arm64 only if CI native fixture passes |
-| Agent forwarding | OpenSSH option supported, but isolated credential-forwarding evidence still required |
+| Agent forwarding | Linux x64 isolated ssh-agent + OpenSSH sshd runtime opt-in/opt-out via actual Inspirum terminal adapter, **only after PR CI passes**; native Windows/macOS runtime forwarding not yet exercised |
 | X11 forwarding | Requires a working local X server and server-side X11 tools; not claimed from headless native CI |
 | Reconnect and split workspace GUI behavior | Separately tracked under GUI issue #78 |
 

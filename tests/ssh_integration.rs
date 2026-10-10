@@ -396,6 +396,47 @@ fn ssh_agent_authenticates_without_identity_file_secret_storage() {
 
 #[test]
 #[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
+fn agent_forwarding_respects_explicit_profile_consent() {
+    let fixture = fixture();
+    let (mut enabled, enabled_events) = open_with_ssh(
+        &fixture,
+        717,
+        true,
+        "agent-forward-config",
+        SshOptions {
+            agent_forwarding: Some(true),
+            ..SshOptions::default()
+        },
+    );
+    wait_text(&mut enabled, "FIXTURE_AUTHENTICATED");
+    write(&mut enabled, "agent-probe\n");
+    wait_text(&mut enabled, "AGENT_FORWARDED");
+    write(&mut enabled, "exit\n");
+    wait_exit(&enabled_events, 717);
+
+    // The server is still agent-forwarding capable. The application's
+    // explicit disable must prevent exposing the local agent socket there.
+    let (mut disabled, disabled_events) = open_with_ssh(
+        &fixture,
+        718,
+        true,
+        "agent-forward-config",
+        SshOptions {
+            agent_forwarding: Some(false),
+            ..SshOptions::default()
+        },
+    );
+    wait_text(&mut disabled, "FIXTURE_AUTHENTICATED");
+    write(&mut disabled, "agent-probe\n");
+    wait_text(&mut disabled, "AGENT_NO_SOCKET");
+    assert!(!grid(&mut disabled).contains("AGENT_FORWARDED"));
+    write(&mut disabled, "exit\n");
+    wait_exit(&disabled_events, 718);
+    println!("PASS agent socket forwarding requires explicit per-session consent");
+}
+
+#[test]
+#[ignore = "requires disposable sshd: scripts/test-ssh-integration.sh"]
 fn password_authenticates_through_pty_prompt_without_echo_or_log_disclosure() {
     if !privileged_auth_fixture_available() {
         eprintln!("SKIP password acceptance: passwordless sudo fixture unavailable");
