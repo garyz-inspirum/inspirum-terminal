@@ -53,6 +53,15 @@ jobs:
             echo "expected native host ${{ matrix.target }}, got $actual" >&2
             exit 1
           }
+      # Cache compiled third-party crates (dev/check/test and release profiles), not
+      # just downloaded registries. Keys include rustc, OS, target and manifests.
+      # Share with the native release workflow, but never with other platforms.
+      - name: Restore compiled Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-${{ matrix.target }}
+          cache-on-failure: true
+          cache-bin: false
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check

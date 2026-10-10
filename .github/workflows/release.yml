@@ -99,6 +99,14 @@ jobs:
             echo "expected native host ${{ matrix.target }}, got $actual" >&2
             exit 1
           }
+      # Restore the same native dependency artifacts warmed by CI on main.
+      # Compiler versions and dependency manifests remain part of the key.
+      - name: Restore compiled Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-${{ matrix.target }}
+          cache-on-failure: true
+          cache-bin: false
       - name: Quality gates
         run: |
           cargo fmt --all -- --check
