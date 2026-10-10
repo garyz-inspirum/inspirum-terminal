@@ -5415,13 +5415,19 @@ impl App {
                                 policy_field("Password authentication", self.form.password_auth, Message::PasswordAuth),
                                 policy_field("Keyboard-interactive authentication", self.form.keyboard_interactive_auth, Message::KeyboardInteractiveAuth),
                                 policy_field("Kerberos / GSSAPI authentication", self.form.gssapi_auth, Message::GssapiAuth),
+                                text("GSSAPI requires Kerberos tickets and a capable system OpenSSH; runtime-verified against an isolated Linux realm, not yet verified on Windows/macOS.")
+                                    .size(11)
+                                    .color(MUTED),
                                 text("Session behavior · inherited unless explicitly overridden")
                                     .size(11)
                                     .color(MUTED),
                                 policy_field("SSH agent forwarding", self.form.agent_forwarding, Message::AgentForwarding),
                                 policy_field("X11 forwarding", self.form.x11_forwarding, Message::X11Forwarding),
                                 policy_field("Compression", self.form.compression, Message::Compression),
-                                text("Only enable agent or X11 forwarding for remote hosts you trust.")
+                                text("Only enable agent or X11 forwarding for remote hosts you trust; agent forwarding exposes signing capability to that host.")
+                                    .size(11)
+                                    .color(MUTED),
+                                text("X11 requires a local X server/DISPLAY and remote X11 support; it has not been verified in Windows/macOS native CI.")
                                     .size(11)
                                     .color(MUTED),
                                 field(
