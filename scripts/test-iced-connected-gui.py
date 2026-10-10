@@ -18,7 +18,9 @@ import json
 import os
 from pathlib import Path
 import shutil
+import struct
 import subprocess
+import zlib
 import sys
 import tempfile
 import time
@@ -173,30 +175,387 @@ def screenshot(window: str, path: Path, env: dict[str, str]) -> None:
         raise RuntimeError(f"empty GUI screenshot: {path.name}")
 
 
-def locate_visible_label(
-    path: Path,
-    label: str,
-    *,
-    region=None,
-):
-    """Return conservative interior bounds for one visibly rendered label.
+def parse_visible_words(tsv: str):
+    """Return word boxes above a zero confidence floor.
 
-    Iced does not expose these production controls through AT-SPI. The point is
-    therefore derived from the actual screenshot immediately before the click.
-    A crop is used only when the full-window OCR cannot resolve a small label;
-    returned coordinates are always mapped back to the source image.
+    The old locator dropped anything below 40. That discarded the only
+    visible fragments of the remote fixture name. Zero and negative
+    confidences are still noise (tesseract uses -1 for non-words).
     """
-    tesseract = shutil.which("tesseract")
-    if tesseract is None:
-        raise RuntimeError("visible label targeting requires tesseract")
+    rows = []
+    for line in tsv.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 12 or not parts[11].strip():
+            continue
+        try:
+            confidence = float(parts[10])
+            left = int(parts[6])
+            top = int(parts[7])
+            width = int(parts[8])
+            height = int(parts[9])
+        except ValueError:
+            continue
+        if confidence <= 0 or width <= 0 or height <= 0:
+            continue
+        rows.append((parts[11].strip(), left, top, width, height, confidence))
+    return rows
+
+
+def _key(text: str) -> str:
+    """Compare labels after OCR drops spaces, underscores, and arrows."""
+    return "".join(ch for ch in text if ch.isalnum() or ch == ".")
+
+
+def _same_line(left, right) -> bool:
+    overlap = min(left[2] + left[4], right[2] + right[4]) - max(left[2], right[2])
+    if overlap <= 0:
+        return False
+    return overlap >= min(left[4], right[4]) * 0.45
+
+
+def _group_lines(rows):
+    ordered = sorted(rows, key=lambda row: (row[2], row[1]))
+    lines = []
+    for row in ordered:
+        placed = False
+        for line in lines:
+            if _same_line(line[0], row):
+                line.append(row)
+                placed = True
+                break
+        if not placed:
+            lines.append([row])
+    for line in lines:
+        line.sort(key=lambda row: row[1])
+    return lines
+
+
+def _bounds(matched):
+    bounds = (
+        min(item[1] for item in matched) + 4,
+        min(item[2] for item in matched) + 3,
+        max(item[1] + item[3] for item in matched) - 4,
+        max(item[2] + item[4] for item in matched) - 3,
+    )
+    if bounds[2] > bounds[0] and bounds[3] > bounds[1]:
+        return bounds
+    return None
+
+
+def _token_matches(text: str, label: str) -> bool:
+    got = _key(text)
+    want = _key(label)
+    if not got or not want:
+        return False
+    if got == want:
+        return True
+    if got.startswith(want):
+        remainder = got[len(want):]
+        return bool(remainder) and all(not ch.isalnum() for ch in remainder)
+    return False
+
+
+def match_visible_label(rows, label: str):
+    """Return interior bounds for label, or None.
+
+    A match is either one OCR token (arrows may be glued on, as in
+    ``Upload->``) or a left-to-right run of tokens on the same visible
+    line whose normalized text equals the label. A proper prefix such as
+    ``000_GUI_DOWNLOAD`` is not a click target. Tokens on the next line
+    are not consumed.
+    """
+    target = _key(label)
+    if not target:
+        return None
+    for line in _group_lines(rows):
+        for row in line:
+            if _token_matches(row[0], label):
+                bounds = _bounds([row])
+                if bounds is not None:
+                    return bounds
+        for start, first in enumerate(line):
+            if not target.startswith(_key(first[0])):
+                continue
+            matched = []
+            joined = ""
+            previous = None
+            for row in line[start:]:
+                if previous is not None:
+                    gap = row[1] - (previous[1] + previous[3])
+                    limit = max(64, previous[4] * 3, row[4] * 3)
+                    if gap > limit or gap < -max(8, previous[4]):
+                        break
+                piece = _key(row[0])
+                if not piece:
+                    continue
+                trial = joined + piece
+                if trial != target and not target.startswith(trial):
+                    break
+                matched.append(row)
+                joined = trial
+                previous = row
+                if joined == target:
+                    bounds = _bounds(matched)
+                    if bounds is not None:
+                        return bounds
+                    break
+                if len(matched) >= 12:
+                    break
+    return None
+
+
+def _read_png(path: Path):
+    data = path.read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise RuntimeError(f"visible label targeting expected a PNG screenshot: {path.name}")
+    pos = 8
+    width = height = color_type = None
+    idat = []
+    while pos + 8 <= len(data):
+        length = struct.unpack(">I", data[pos:pos + 4])[0]
+        kind = data[pos + 4:pos + 8]
+        chunk = data[pos + 8:pos + 8 + length]
+        pos += 12 + length
+        if kind == b"IHDR":
+            width, height, _depth, color_type = struct.unpack(">IIBB", chunk[:10])
+        elif kind == b"IDAT":
+            idat.append(chunk)
+        elif kind == b"IEND":
+            break
+    if not width or not height or color_type not in (2, 6):
+        raise RuntimeError(f"unsupported screenshot PNG: {path.name}")
+    raw = zlib.decompress(b"".join(idat))
+    channels = 3 if color_type == 2 else 4
+    stride = width * channels
+    rows = []
+    index = 0
+    previous = bytearray(stride)
+    for _y in range(height):
+        filt = raw[index]
+        index += 1
+        row = bytearray(raw[index:index + stride])
+        index += stride
+        if filt == 1:
+            for x in range(stride):
+                left = row[x - channels] if x >= channels else 0
+                row[x] = (row[x] + left) & 255
+        elif filt == 2:
+            for x in range(stride):
+                row[x] = (row[x] + previous[x]) & 255
+        elif filt == 3:
+            for x in range(stride):
+                left = row[x - channels] if x >= channels else 0
+                row[x] = (row[x] + ((left + previous[x]) // 2)) & 255
+        elif filt == 4:
+            for x in range(stride):
+                left = row[x - channels] if x >= channels else 0
+                up = previous[x]
+                ul = previous[x - channels] if x >= channels else 0
+                predict = left + up - ul
+                pa, pb, pc = abs(predict - left), abs(predict - up), abs(predict - ul)
+                pred = left if pa <= pb and pa <= pc else up if pb <= pc else ul
+                row[x] = (row[x] + pred) & 255
+        elif filt != 0:
+            raise RuntimeError(f"unsupported PNG filter {filt} in {path.name}")
+        previous = row
+        rows.append(row)
+    return width, height, channels, rows
+
+
+def _write_png(path: Path, width: int, height: int, rgb: bytes) -> None:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + kind
+            + payload
+            + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+        )
+    raw = bytearray()
+    stride = width * 3
+    for y in range(height):
+        raw.append(0)
+        raw.extend(rgb[y * stride:(y + 1) * stride])
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(bytes(raw), 6))
+        + chunk(b"IEND", b"")
+    )
+
+
+def _text_threshold(width, height, channels, rows) -> int:
+    sample = []
+    for y in range(0, height, 4):
+        row = rows[y]
+        for x in range(0, width, 4):
+            base = x * channels
+            sample.append((row[base] + row[base + 1] + row[base + 2]) // 3)
+    sample.sort()
+    if not sample:
+        return 120
+    p90 = sample[int(len(sample) * 0.90)]
+    p99 = sample[min(len(sample) - 1, int(len(sample) * 0.99))]
+    # Measured on the failing 1280x800 dock: background p90 is ~30 and the
+    # light filename pixels sit near 205. The midpoint separates them
+    # without a hardcoded crop.
+    return max(90, min(160, (p90 + p99) // 2))
+
+
+def _ocr_tsv(tesseract: str, image: Path, psm: str) -> str:
+    try:
+        result = subprocess.run(
+            [tesseract, str(image), "stdout", "--psm", psm, "tsv"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout
+
+
+def _scaled_words(tsv: str, origin, scale: int):
+    words = []
+    ox, oy = origin
+    for text, x, y, width, height, confidence in parse_visible_words(tsv):
+        words.append((
+            text,
+            ox + x // scale,
+            oy + y // scale,
+            max(1, width // scale),
+            max(1, height // scale),
+            confidence,
+        ))
+    return words
+
+
+def _upscaled_crop(rows, channels, box, scale: int, dest: Path) -> None:
+    left, top, right, bot = box
+    width = right - left + 1
+    height = bot - top + 1
+    out_w = width * scale
+    out_h = height * scale
+    rgb = bytearray(out_w * out_h * 3)
+    for y in range(out_h):
+        source = rows[top + min(height - 1, y // scale)]
+        for x in range(out_w):
+            base = (left + min(width - 1, x // scale)) * channels
+            dest_at = (y * out_w + x) * 3
+            rgb[dest_at:dest_at + 3] = source[base:base + 3]
+    _write_png(dest, out_w, out_h, bytes(rgb))
+
+
+def _visible_bands(width, height, channels, rows, thresh: int):
+    bands = []
+    active = False
+    start = 0
+    minimum = max(6, width // 200)
+    for y in range(height):
+        count = 0
+        row = rows[y]
+        for x in range(0, width, 2):
+            base = x * channels
+            if (row[base] + row[base + 1] + row[base + 2]) // 3 >= thresh:
+                count += 1
+        lit = count >= minimum
+        if lit and not active:
+            start = y
+            active = True
+        elif not lit and active:
+            if y - start >= 5:
+                bands.append((start, y - 1))
+            active = False
+    if active and height - start >= 5:
+        bands.append((start, height - 1))
+    return bands
+
+
+def _band_clusters(width, rows, channels, thresh, y1, y2, gap: int):
+    columns = []
+    for x in range(width):
+        for y in range(y1, y2 + 1):
+            base = x * channels
+            pixel = rows[y]
+            if (pixel[base] + pixel[base + 1] + pixel[base + 2]) // 3 >= thresh:
+                columns.append(x)
+                break
+    if not columns:
+        return []
+    clusters = []
+    start = previous = columns[0]
+    for x in columns[1:]:
+        if x - previous > gap:
+            if previous - start >= 8:
+                clusters.append((start, previous))
+            start = x
+        previous = x
+    if previous - start >= 8:
+        clusters.append((start, previous))
+    return clusters
+
+
+def visible_pixel_rows(path: Path, tesseract: str, *, clusters: bool = False):
+    """OCR each light text row, optionally each narrow glyph cluster.
+
+    Coordinates are mapped back to the source screenshot. This is the
+    fallback when full-window PSM 11 splits or drops a label. Cluster
+    passes recover short controls such as ``Dock right`` that a long-line
+    OCR pass garbles, using the glyph's own pixels rather than a fixed crop.
+    """
+    stat = path.stat()
+    key = (str(path), stat.st_mtime_ns, stat.st_size, clusters)
+    cached = _PIXEL_CACHE.get(key)
+    if cached is not None:
+        return cached
+    width, height, channels, rows = _read_png(path)
+    thresh = _text_threshold(width, height, channels, rows)
+    words = []
+    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    try:
+        for y1, y2 in _visible_bands(width, height, channels, rows, thresh):
+            pad = 3
+            box = (
+                0,
+                max(0, y1 - pad),
+                width - 1,
+                min(height - 1, y2 + pad),
+            )
+            _upscaled_crop(rows, channels, box, 4, temporary)
+            words.extend(_scaled_words(_ocr_tsv(tesseract, temporary, "7"), (box[0], box[1]), 4))
+            if not clusters:
+                continue
+            for x1, x2 in _band_clusters(width, rows, channels, thresh, y1, y2, 14):
+                if x2 - x1 > 160:
+                    continue
+                cluster = (
+                    max(0, x1 - 4),
+                    max(0, y1 - 4),
+                    min(width - 1, x2 + 4),
+                    min(height - 1, y2 + 4),
+                )
+                _upscaled_crop(rows, channels, cluster, 6, temporary)
+                words.extend(_scaled_words(
+                    _ocr_tsv(tesseract, temporary, "7"),
+                    (cluster[0], cluster[1]),
+                    6,
+                ))
+    finally:
+        temporary.unlink(missing_ok=True)
+    _PIXEL_CACHE[key] = words
+    return words
+
+
+def ocr_rows(path: Path, tesseract: str, region=None):
     source = path
     offset = (0, 0)
+    scale = 1
     temporary = None
     if region is not None:
         temporary = path.with_suffix(".crop.png")
         x1, y1, x2, y2 = region
         result = subprocess.run(
-            ["convert", str(path), "-crop", f"{x2-x1}x{y2-y1}+{x1}+{y1}",
+            ["convert", str(path), "-crop", f"{x2 - x1}x{y2 - y1}+{x1}+{y1}",
              "+repage", "-resize", "300%", "-colorspace", "Gray",
              "-contrast-stretch", "5%x5%", str(temporary)],
             capture_output=True, text=True, timeout=15,
@@ -205,50 +564,55 @@ def locate_visible_label(
             raise RuntimeError(f"visible label crop failed: {result.stderr[:200]}")
         source = temporary
         offset = (x1, y1)
+        scale = 3
     try:
-        result = subprocess.run(
-            [tesseract, str(source), "stdout", "--psm", "11" if region is None else "6", "tsv"],
-            capture_output=True, text=True, timeout=20, check=True,
-        )
+        tsv = _ocr_tsv(tesseract, source, "6" if region is not None else "11")
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
-    words = label.split()
-    rows = []
-    scale = 3 if region is not None else 1
-    for line in result.stdout.splitlines()[1:]:
-        parts = line.split("\t")
-        if len(parts) < 12 or int(float(parts[10])) < 40:
-            continue
-        rows.append((
-            parts[11],
-            offset[0] + int(parts[6]) // scale,
-            offset[1] + int(parts[7]) // scale,
-            max(1, int(parts[8]) // scale),
-            max(1, int(parts[9]) // scale),
-        ))
-    for index, (text, x, y, width, height) in enumerate(rows):
-        if text != words[0]:
-            continue
-        matched = []
-        consumed = 0
-        for item in rows[index:]:
-            matched.append(item)
-            consumed += len(item[0])
-            if consumed >= len(label):
-                break
-        recognized = "".join(item[0] for item in matched)
-        if recognized != label and not label.startswith(recognized):
-            continue
-        bounds = (
-            min(item[1] for item in matched) + 4,
-            min(item[2] for item in matched) + 3,
-            max(item[1] + item[3] for item in matched) - 4,
-            max(item[2] + item[4] for item in matched) - 3,
+    return _scaled_words(tsv, offset, scale)
+
+
+def locate_visible_label(
+    path: Path,
+    label: str,
+    *,
+    region=None,
+):
+    """Return conservative interior bounds for one visibly rendered label.
+
+    Iced does not expose these production controls through AT-SPI. The point
+    is derived from the screenshot taken immediately before the click. Full
+    window OCR is matched by joining same-line fragments, including the
+    low-confidence filename split seen on Ubuntu tesseract 5.3.4. If that
+    misses, each light text band is cropped from the pixels themselves and
+    re-read. Returned coordinates are always in the source image.
+    """
+    tesseract = shutil.which("tesseract")
+    if tesseract is None:
+        raise RuntimeError("visible label targeting requires tesseract")
+    bounds = match_visible_label(ocr_rows(path, tesseract, region), label)
+    if bounds is None:
+        pixel_rows = visible_pixel_rows(path, tesseract, clusters=False)
+        if region is not None:
+            x1, y1, x2, y2 = region
+            inside = [
+                row for row in pixel_rows
+                if not (
+                    row[1] + row[3] < x1 or row[1] > x2
+                    or row[2] + row[4] < y1 or row[2] > y2
+                )
+            ]
+            bounds = match_visible_label(inside, label)
+        if bounds is None:
+            bounds = match_visible_label(pixel_rows, label)
+    if bounds is None:
+        bounds = match_visible_label(
+            visible_pixel_rows(path, tesseract, clusters=True), label,
         )
-        if bounds[2] > bounds[0] and bounds[3] > bounds[1]:
-            return bounds
-    raise RuntimeError(f"visible label not found in screenshot: {label}")
+    if bounds is None:
+        raise RuntimeError(f"visible label not found in screenshot: {label}")
+    return bounds
 
 
 def center(bounds):
