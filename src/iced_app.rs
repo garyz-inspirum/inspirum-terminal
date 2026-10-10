@@ -99,6 +99,13 @@ impl Drop for SlowIcedScope {
     }
 }
 
+// This is a privacy curtain for the application window, not an OS screen lock.
+fn privacy_lock_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
+    modifiers.command()
+        && modifiers.shift()
+        && matches!(key.as_ref(), keyboard::Key::Character("l" | "L"))
+}
+
 pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result {
     iced::application(
         move || App::boot(profiles_path.clone(), ssh_config.clone()),
@@ -132,6 +139,11 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
     .subscription(|_: &App| {
         Subscription::batch([
             event::listen_with(|event, status, _| match &event {
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                    if privacy_lock_chord(key, *modifiers) =>
+                {
+                    Some(Message::TogglePrivacyLock)
+                }
                 // A focused text field can consume Escape. Route only this
                 // captured key to dialog dismissal; never leak it to SSH.
                 iced::Event::Keyboard(keyboard::Event::KeyPressed {
@@ -817,6 +829,7 @@ enum Message {
     FilesLocalLoaded(u64, Result<Vec<LocalFileEntry>, String>),
     FilesRemoteLoaded(u64, Result<Vec<sftp::RemoteEntry>, String>),
     ToggleSidebar,
+    TogglePrivacyLock,
     RequestPaste,
     ClipboardRead(u64, Vec<u64>, Option<String>),
     ConfirmPaste,
@@ -1808,6 +1821,7 @@ struct App {
     snippet_content: text_editor::Content,
     editing_snippet: Option<String>,
     sidebar_collapsed: bool,
+    privacy_locked: bool,
     profile_visible: usize,
     profile_matches: Vec<usize>,
     form: ConnectionForm,
@@ -1888,6 +1902,7 @@ impl App {
             snippet_content: text_editor::Content::new(),
             editing_snippet: None,
             sidebar_collapsed: false,
+            privacy_locked: false,
             profile_visible: PROFILE_PAGE_SIZE,
             profile_matches,
             form: ConnectionForm::default(),
@@ -2661,6 +2676,51 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         let _slow = SlowIcedScope::start("event_update");
+        if matches!(&message, Message::TogglePrivacyLock) {
+            self.privacy_locked = !self.privacy_locked;
+            self.ime_cursor = None;
+            if self.privacy_locked {
+                self.status = "Workspace hidden by privacy lock.".into();
+            } else {
+                if !self.tabs.is_empty() {
+                    self.refresh_workspace_displays(self.active);
+                }
+                self.status = "Workspace visible again.".into();
+            }
+            return Task::none();
+        }
+        // The curtain does not suspend SSH or background transfers, but no
+        // keyboard, IME, clipboard or command injection may reach a PTY while
+        // the window is locked (including events queued before the lock).
+        if self.privacy_locked
+            && matches!(
+                &message,
+                Message::Event(_)
+                    | Message::TerminalImeCommit(..)
+                    | Message::RequestPaste
+                    | Message::ClipboardRead(..)
+                    | Message::ConfirmPaste
+                    | Message::PanePaste(..)
+                    | Message::TerminalMouse(..)
+                    | Message::TerminalMouseWheel(..)
+                    | Message::TerminalSelectStart(..)
+                    | Message::TerminalSelectUpdate(..)
+                    | Message::SelectionFinished(..)
+                    | Message::TerminalScroll(..)
+                    | Message::CopySelection(..)
+                    | Message::CommandSend
+                    | Message::Tool(
+                        tools::Action::SendCommand
+                            | tools::Action::Confirm
+                            | tools::Action::TmuxAttach(..)
+                            | tools::Action::TmuxCreate
+                            | tools::Action::SftpTerminal
+                            | tools::Action::SyncArm(..)
+                    )
+            )
+        {
+            return Task::none();
+        }
         if !self.profiles_writable
             && matches!(&message, Message::Submit | Message::ConfirmImportProfiles)
         {
@@ -2687,6 +2747,7 @@ impl App {
                 }
             }
             Message::TerminalImeCursor(..) | Message::TerminalImeCommit(..) => {}
+            Message::TogglePrivacyLock => unreachable!("privacy lock handled before match"),
             Message::Tool(action) => return self.tool_update(action),
             Message::Search(value) => {
                 if self.dialog.is_none() || matches!(self.dialog, Some(Dialog::Tools)) {
@@ -4136,6 +4197,30 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        if self.privacy_locked {
+            // Do not render the sensitive workspace behind a translucent
+            // modal: the entire view must be replaced, including tabs, host
+            // labels, SFTP paths and terminal scrollback.
+            return center(
+                column![
+                    text("Workspace hidden").size(30).color(FG),
+                    text("SSH connections and transfers continue while this window is hidden.")
+                        .size(15)
+                        .color(MUTED),
+                    text("This is an in-app privacy curtain, not an OS lock or encryption.")
+                        .size(12)
+                        .color(MUTED),
+                    action("Unlock workspace", Message::TogglePrivacyLock).style(primary),
+                    text("Shortcut: Ctrl/Cmd + Shift + L").size(12).color(BLUE),
+                ]
+                .spacing(18)
+                .align_x(iced::Center),
+            )
+            .style(surface)
+            .width(Fill)
+            .height(Fill)
+            .into();
+        }
         let target = if self.dialog.is_none() && self.remote_editor.is_none() {
             self.focused_terminal_id()
         } else {
@@ -4175,6 +4260,7 @@ impl App {
                     Message::Tool(tools::Action::Open(tools::Panel::Profiles))
                 ),
                 action("Commands", Message::Commands),
+                action("Lock", Message::TogglePrivacyLock),
                 action("A-", Message::Scale(-0.1)),
                 action("A+", Message::Scale(0.1)),
                 action("About", Message::About),
@@ -5909,6 +5995,50 @@ mod tests {
         assert_eq!(app.profile_visible, PROFILE_PAGE_SIZE);
         assert_eq!(app.profile_matches.len(), 61);
         assert_eq!(next_profile_page(usize::MAX, 250), 250);
+    }
+
+    #[test]
+    fn privacy_lock_keeps_sessions_but_blocks_deferred_input() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-privacy-lock-{}-missing.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session {
+            name: "masked-session".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        app.tabs.push(Workspace::new(profile, pane));
+        assert!(!app.privacy_locked);
+
+        let _ = app.update(Message::TogglePrivacyLock);
+        assert!(app.privacy_locked);
+        assert_eq!(app.tabs.len(), 1);
+        let locked_status = app.status.clone();
+        let _ = app.update(Message::RequestPaste);
+        let _ = app.update(Message::CommandSend);
+        let _ = app.update(Message::Tool(tools::Action::SendCommand));
+        let _ = app.update(Message::Tool(tools::Action::Confirm));
+        assert_eq!(app.status, locked_status);
+        assert_eq!(app.tabs.len(), 1);
+
+        let _ = app.update(Message::TogglePrivacyLock);
+        assert!(!app.privacy_locked);
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn privacy_lock_chord_requires_command_and_shift() {
+        let key = keyboard::Key::Character("l".into());
+        let shift = keyboard::Modifiers::SHIFT;
+        assert!(!privacy_lock_chord(&key, shift));
+        assert!(!privacy_lock_chord(&key, keyboard::Modifiers::default()));
+        assert!(!privacy_lock_chord(
+            &keyboard::Key::Character("x".into()),
+            keyboard::Modifiers::CTRL | shift,
+        ));
     }
 
     #[test]

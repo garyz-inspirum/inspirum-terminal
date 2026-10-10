@@ -49,7 +49,10 @@ jobs:
       - name: Unit and interaction-model tests
         run: cargo test --manifest-path prototypes/iced-shell/Cargo.toml
       - name: Production Iced shell tests
-        run: cargo test --features iced-ui
+        # The production GUI module tests are all library tests. Native CI
+        # independently exercises every integration target, with bounded
+        # Windows execution. Avoid rerunning the full Windows suite here.
+        run: cargo test --locked --lib --features iced-ui
       - name: Production Iced shell Clippy
         run: cargo clippy --locked --features iced-ui --all-targets -- -D warnings
       - name: Build production Iced shell
@@ -147,6 +150,27 @@ jobs:
           workspace_diff=$(compare -metric AE preview-artifacts/screenshots/production-after-escape.png preview-artifacts/screenshots/production-search-typed.png null: 2>&1 || true)
           echo "Search interaction differs from empty workspace by $workspace_diff pixels"
           test "$workspace_diff" -lt 50000 || { echo "Clicking sidebar search unexpectedly opened an overlay"; exit 1; }
+          # The privacy lock replaces the entire production workspace with
+          # an opaque view, even if a text field owns keyboard focus. Typing
+          # while locked must not change the screen or reach terminal input.
+          xdotool windowfocus "$window" key ctrl+shift+l
+          sleep 2
+          import -window "$window" preview-artifacts/screenshots/production-privacy-locked.png
+          locked_diff=$(compare -metric AE preview-artifacts/screenshots/production-search-typed.png preview-artifacts/screenshots/production-privacy-locked.png null: 2>&1 || true)
+          echo "Privacy lock changed $locked_diff pixels"
+          test "$locked_diff" -gt 10000 || { echo "Privacy lock did not obscure workspace"; exit 1; }
+          xdotool type --clearmodifiers --delay 5 "ignored-while-locked"
+          sleep 1
+          import -window "$window" preview-artifacts/screenshots/production-privacy-locked-after-typing.png
+          locked_type_diff=$(compare -metric AE preview-artifacts/screenshots/production-privacy-locked.png preview-artifacts/screenshots/production-privacy-locked-after-typing.png null: 2>&1 || true)
+          echo "Typing while locked changed $locked_type_diff pixels"
+          test "$locked_type_diff" -lt 1000 || { echo "Privacy curtain changed while typing"; exit 1; }
+          xdotool windowfocus "$window" key ctrl+shift+l
+          sleep 2
+          import -window "$window" preview-artifacts/screenshots/production-privacy-unlocked.png
+          unlocked_diff=$(compare -metric AE preview-artifacts/screenshots/production-search-typed.png preview-artifacts/screenshots/production-privacy-unlocked.png null: 2>&1 || true)
+          echo "Restored workspace differs by $unlocked_diff pixels"
+          test "$unlocked_diff" -lt "$((locked_diff / 3))" || { echo "Privacy unlock did not restore workspace"; exit 1; }
           # Visit every production tool panel with native keyboard input.
           xdotool windowfocus "$window" key ctrl+comma
           sleep 1
