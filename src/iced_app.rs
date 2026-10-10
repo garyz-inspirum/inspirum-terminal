@@ -5229,6 +5229,7 @@ impl App {
             .key(pane.id)
             .on_resize(move |size| Message::TerminalResized(pane.id, size))
             .into();
+            let pane_terminal_id = pane.id;
             let body: Element<'_, Message> = if let Some(draft) = self.free_type.get(&pane.id) {
                 column![
                     terminal_view,
@@ -5239,7 +5240,7 @@ impl App {
                                 .color(BLUE),
                             text_editor(draft)
                                 .placeholder("Compose here; Send is always explicit")
-                                .on_action(move |action| Message::FreeTypeEdit(pane.id, action))
+                                .on_action(move |action| Message::FreeTypeEdit(pane_terminal_id, action))
                                 .height(96)
                                 .padding(8),
                             row![
