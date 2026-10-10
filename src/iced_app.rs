@@ -2385,6 +2385,26 @@ impl App {
         targets.sort_unstable();
         targets
     }
+    // Never mirror input into other SSH panes if the focused source has
+    // disappeared or cannot accept a write. Target IDs can be sorted before
+    // the source ID, so a naive for-loop can otherwise send to the wrong
+    // session before discovering that the source is unavailable.
+    fn write_source_then_mirrors(
+        source: u64,
+        targets: &[u64],
+        mut write: impl FnMut(u64) -> bool,
+    ) -> bool {
+        if !write(source) {
+            return false;
+        }
+        for &target in targets {
+            if target != source {
+                let _ = write(target);
+            }
+        }
+        true
+    }
+
     fn send_to_terminal(&mut self, id: u64, bytes: Vec<u8>) -> bool {
         if !self.focused_pane_matches(id)
             || self.local_navigation.contains(&id)
@@ -2393,15 +2413,9 @@ impl App {
             return false;
         }
         let targets = self.paste_targets(id);
-        let mut sent = false;
-        for target in targets {
-            let result =
-                self.command_terminal(target, terminal_core::BackendCommand::Write(bytes.clone()));
-            if target == id {
-                sent = result;
-            }
-        }
-        sent
+        Self::write_source_then_mirrors(id, &targets, |target| {
+            self.command_terminal(target, terminal_core::BackendCommand::Write(bytes.clone()))
+        })
     }
 
     fn command_terminal(&mut self, id: u64, command: terminal_core::BackendCommand) -> bool {
@@ -6865,6 +6879,33 @@ mod tests {
         assert_eq!(free_type_editor_id(1), "free-type-1");
         assert_eq!(free_type_editor_id(123), "free-type-123");
         assert_ne!(free_type_editor_id(1), free_type_editor_id(2));
+    }
+
+    #[test]
+    fn synchronized_write_never_retargets_when_focused_source_is_unavailable() {
+        let mut attempts = Vec::new();
+        let sent = App::write_source_then_mirrors(20, &[10, 20, 30], |id| {
+            attempts.push(id);
+            id != 20
+        });
+        assert!(!sent);
+        assert_eq!(
+            attempts,
+            vec![20],
+            "no mirrored PTY may receive failed source input"
+        );
+
+        attempts.clear();
+        let sent = App::write_source_then_mirrors(20, &[10, 20, 30], |id| {
+            attempts.push(id);
+            true
+        });
+        assert!(sent);
+        assert_eq!(
+            attempts,
+            vec![20, 10, 30],
+            "focused source must be written first"
+        );
     }
 
     #[test]
