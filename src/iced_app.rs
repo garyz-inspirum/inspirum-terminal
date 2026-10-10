@@ -51,6 +51,43 @@ const PROFILE_PAGE_SIZE: usize = 100;
 // Enable on demand with INSPIRUM_ICED_TRACE_MS=25. There is no per-frame
 // console output and no clock read when the setting is absent.
 static ICED_TRACE_THRESHOLD: OnceLock<Option<Duration>> = OnceLock::new();
+// Tracing is entirely opt-in and stores only terminal IDs and monotonic time.
+// Click-to-canvas timing is NOT screen-present latency (GPU/OS not included).
+static PENDING_TERMINAL_CLICKS: OnceLock<Mutex<HashMap<u64, Instant>>> = OnceLock::new();
+
+fn trace_terminal_click_started(id: u64) {
+    if iced_trace_threshold().is_none() {
+        return;
+    }
+    if let Ok(mut clicks) = PENDING_TERMINAL_CLICKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        if clicks.len() > 16 {
+            clicks.clear();
+        }
+        clicks.insert(id, Instant::now());
+    }
+}
+
+fn trace_terminal_click_canvas_drawn(id: u64) {
+    let Some(threshold) = iced_trace_threshold() else {
+        return;
+    };
+    let started = PENDING_TERMINAL_CLICKS
+        .get()
+        .and_then(|map| map.lock().ok().and_then(|mut clicks| clicks.remove(&id)));
+    if let Some(started) = started {
+        let elapsed = started.elapsed();
+        if elapsed >= threshold {
+            eprintln!(
+                "iced slow click_to_canvas_draw: {:.1} ms (threshold {} ms)",
+                elapsed.as_secs_f64() * 1000.0,
+                threshold.as_millis()
+            );
+        }
+    }
+}
 
 fn parse_iced_trace_threshold(raw: &str) -> Option<Duration> {
     raw.trim()
@@ -1543,6 +1580,9 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
         bounds: iced::Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
+        if self.focused {
+            trace_terminal_click_canvas_drawn(self.id);
+        }
         let _slow = SlowIcedScope::start("terminal_canvas_draw");
         fn rgb(value: [u8; 3]) -> Color {
             Color::from_rgb8(value[0], value[1], value[2])
@@ -4285,6 +4325,7 @@ impl App {
                 if !self.active_pane_matches(pane_id, id) {
                     return Task::none();
                 }
+                trace_terminal_click_started(id);
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.focus = pane_id;
                 }
