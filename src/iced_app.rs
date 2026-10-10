@@ -8036,7 +8036,9 @@ mod tests {
         // 960x640 bottom dock (~254px) collapses the queue to a summary line
         // so the listings keep two full rows.
         assert_eq!(bottom_queue_viewport_height(254.0, policy), None);
-        assert!(254.0 - BOTTOM_FILES_CHROME + 34.0 >= 2.0 * 31.0 + 48.0);
+        // Just enough spare space keeps a small viewport rather than collapsing.
+        let tight = BOTTOM_FILES_CHROME + policy.list_min_height + BOTTOM_QUEUE_MIN_VIEWPORT;
+        assert_eq!(bottom_queue_viewport_height(tight, policy), Some(BOTTOM_QUEUE_MIN_VIEWPORT));
     }
 
     #[test]
