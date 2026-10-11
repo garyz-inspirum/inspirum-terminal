@@ -398,8 +398,7 @@ impl TerminalBackend {
         let col = (x.max(0.0) / terminal_size.hit_cell_width.max(f32::EPSILON)).floor() as usize;
         let col = min(Column(col), Column(terminal_size.num_cols as usize - 1));
 
-        let line =
-            (y.max(0.0) / terminal_size.hit_cell_height.max(f32::EPSILON)).floor() as usize;
+        let line = (y.max(0.0) / terminal_size.hit_cell_height.max(f32::EPSILON)).floor() as usize;
         let line = min(line, terminal_size.num_lines as usize - 1);
 
         viewport_to_point(display_offset, Point::new(line, col))
