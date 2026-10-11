@@ -6900,7 +6900,7 @@ impl App {
             row![
                 container(scrollable(tunnel_list).height(430))
                     .padding(10)
-                    .width(300)
+                    .width(260)
                     .style(card),
                 editor,
             ]
@@ -7587,13 +7587,18 @@ impl App {
             .into(),
         };
 
+        let (dialog_width, dialog_height) = if matches!(dialog, Dialog::Tools) {
+            (880.0, 720.0)
+        } else if matches!(dialog, Dialog::Tunnels) {
+            (900.0, 820.0)
+        } else {
+            (600.0, 720.0)
+        };
+
         container(scrollable(body))
-            .width(if matches!(dialog, Dialog::Tools) {
-                880
-            } else {
-                600
-            })
-            .max_height(720)
+            .width(Fill)
+            .max_width(dialog_width)
+            .max_height(dialog_height)
             .padding(28)
             .style(active_card)
             .into()
