@@ -174,8 +174,16 @@ fn specs_mut(session: &mut Session, kind: ForwardKind) -> &mut Vec<String> {
     }
 }
 
-pub fn add_forward(session: &mut Session, kind: ForwardKind, spec: String, label: &str) -> Result<()> {
-    ensure!(!spec.trim().is_empty(), "tunnel specification cannot be empty");
+pub fn add_forward(
+    session: &mut Session,
+    kind: ForwardKind,
+    spec: String,
+    label: &str,
+) -> Result<()> {
+    ensure!(
+        !spec.trim().is_empty(),
+        "tunnel specification cannot be empty"
+    );
     let mut candidate = session.clone();
     specs_mut(&mut candidate, kind).push(spec.clone());
     set_label(&mut candidate, kind, &spec, label);
@@ -282,7 +290,9 @@ impl ForwardDraft {
         let host = self.destination_host.trim();
         ensure!(!host.is_empty(), "destination host is required");
         ensure!(
-            host.len() <= 253 && !host.chars().any(char::is_control) && !host.chars().any(char::is_whitespace),
+            host.len() <= 253
+                && !host.chars().any(char::is_control)
+                && !host.chars().any(char::is_whitespace),
             "destination host is invalid"
         );
         let destination_port = parse_port("destination port", &self.destination_port)?;
