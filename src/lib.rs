@@ -187,7 +187,10 @@ impl SshOptions {
         validate_forward_specs("local forward", &self.local_forwards)?;
         validate_forward_specs("remote forward", &self.remote_forwards)?;
         validate_forward_specs("dynamic forward", &self.dynamic_forwards)?;
-        ensure!(self.tunnel_labels.len() <= 96, "at most 96 tunnel labels are supported");
+        ensure!(
+            self.tunnel_labels.len() <= 96,
+            "at most 96 tunnel labels are supported"
+        );
         for meta in &self.tunnel_labels {
             ensure!(
                 valid_single_argument(&meta.spec, 2048),
