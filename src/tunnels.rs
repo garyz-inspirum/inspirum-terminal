@@ -12,7 +12,9 @@ use std::path::Path;
 use anyhow::{Result, ensure};
 
 use crate::terminal::TunnelProcess;
-use crate::{Session, session_profile_key, session_requires_forward_risk_ack};
+use crate::{
+    Session, TunnelKind, TunnelLabel, session_profile_key, session_requires_forward_risk_ack,
+};
 
 /// Which OpenSSH forwarding flag a row came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +22,26 @@ pub enum ForwardKind {
     Local,
     Remote,
     Dynamic,
+}
+
+impl From<ForwardKind> for TunnelKind {
+    fn from(value: ForwardKind) -> Self {
+        match value {
+            ForwardKind::Local => TunnelKind::Local,
+            ForwardKind::Remote => TunnelKind::Remote,
+            ForwardKind::Dynamic => TunnelKind::Dynamic,
+        }
+    }
+}
+
+impl From<TunnelKind> for ForwardKind {
+    fn from(value: TunnelKind) -> Self {
+        match value {
+            TunnelKind::Local => ForwardKind::Local,
+            TunnelKind::Remote => ForwardKind::Remote,
+            TunnelKind::Dynamic => ForwardKind::Dynamic,
+        }
+    }
 }
 
 impl ForwardKind {
@@ -51,6 +73,7 @@ pub struct ForwardRow {
     /// `host:port` on the far side; empty for dynamic forwards.
     pub target: String,
     pub spec: String,
+    pub label: String,
 }
 
 /// Split an OpenSSH forward spec into its listener and target halves for
@@ -101,10 +124,208 @@ pub fn rows_for(session: &Session) -> Vec<ForwardRow> {
                 listen,
                 target,
                 spec: spec.clone(),
+                label: label_for(session, kind, spec),
             });
         }
     }
     rows
+}
+
+pub fn label_for(session: &Session, kind: ForwardKind, spec: &str) -> String {
+    session
+        .ssh
+        .tunnel_labels
+        .iter()
+        .find(|meta| meta.kind == TunnelKind::from(kind) && meta.spec == spec)
+        .map(|meta| meta.label.trim().to_owned())
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| default_label(kind, spec))
+}
+
+fn default_label(kind: ForwardKind, spec: &str) -> String {
+    let (listen, target) = split_spec(kind, spec);
+    match kind {
+        ForwardKind::Dynamic => format!("SOCKS {listen}"),
+        ForwardKind::Local => format!("{listen} -> {target}"),
+        ForwardKind::Remote => format!("{listen} <- {target}"),
+    }
+}
+
+pub fn set_label(session: &mut Session, kind: ForwardKind, spec: &str, label: &str) {
+    session
+        .ssh
+        .tunnel_labels
+        .retain(|meta| !(meta.kind == TunnelKind::from(kind) && meta.spec == spec));
+    let label = label.trim();
+    if !label.is_empty() {
+        session.ssh.tunnel_labels.push(TunnelLabel {
+            kind: kind.into(),
+            spec: spec.to_owned(),
+            label: label.to_owned(),
+        });
+    }
+}
+
+fn specs_mut(session: &mut Session, kind: ForwardKind) -> &mut Vec<String> {
+    match kind {
+        ForwardKind::Local => &mut session.ssh.local_forwards,
+        ForwardKind::Remote => &mut session.ssh.remote_forwards,
+        ForwardKind::Dynamic => &mut session.ssh.dynamic_forwards,
+    }
+}
+
+pub fn add_forward(
+    session: &mut Session,
+    kind: ForwardKind,
+    spec: String,
+    label: &str,
+) -> Result<()> {
+    ensure!(
+        !spec.trim().is_empty(),
+        "tunnel specification cannot be empty"
+    );
+    let mut candidate = session.clone();
+    specs_mut(&mut candidate, kind).push(spec.clone());
+    set_label(&mut candidate, kind, &spec, label);
+    candidate.ssh_args()?;
+    *session = candidate;
+    Ok(())
+}
+
+pub fn replace_forward(
+    session: &mut Session,
+    old_kind: ForwardKind,
+    old_spec: &str,
+    kind: ForwardKind,
+    spec: String,
+    label: &str,
+) -> Result<()> {
+    let mut candidate = session.clone();
+    let old_specs = specs_mut(&mut candidate, old_kind);
+    let index = old_specs
+        .iter()
+        .position(|value| value == old_spec)
+        .ok_or_else(|| anyhow::anyhow!("tunnel entry no longer exists"))?;
+    old_specs.remove(index);
+    candidate
+        .ssh
+        .tunnel_labels
+        .retain(|meta| !(meta.kind == TunnelKind::from(old_kind) && meta.spec == old_spec));
+    specs_mut(&mut candidate, kind).push(spec.clone());
+    set_label(&mut candidate, kind, &spec, label);
+    candidate.ssh_args()?;
+    *session = candidate;
+    Ok(())
+}
+
+pub fn remove_forward(session: &mut Session, kind: ForwardKind, spec: &str) -> Result<()> {
+    let mut candidate = session.clone();
+    let specs = specs_mut(&mut candidate, kind);
+    let index = specs
+        .iter()
+        .position(|value| value == spec)
+        .ok_or_else(|| anyhow::anyhow!("tunnel entry no longer exists"))?;
+    specs.remove(index);
+    candidate
+        .ssh
+        .tunnel_labels
+        .retain(|meta| !(meta.kind == TunnelKind::from(kind) && meta.spec == spec));
+    candidate.ssh_args()?;
+    *session = candidate;
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForwardDraft {
+    pub kind: ForwardKind,
+    pub label: String,
+    pub bind_address: String,
+    pub listen_port: String,
+    pub destination_host: String,
+    pub destination_port: String,
+}
+
+impl Default for ForwardDraft {
+    fn default() -> Self {
+        Self {
+            kind: ForwardKind::Local,
+            label: String::new(),
+            bind_address: "127.0.0.1".into(),
+            listen_port: String::new(),
+            destination_host: String::new(),
+            destination_port: String::new(),
+        }
+    }
+}
+
+impl ForwardDraft {
+    pub fn from_row(row: &ForwardRow) -> Self {
+        let (bind_address, listen_port) = split_listener(&row.listen);
+        let (destination_host, destination_port) = split_target(&row.target);
+        Self {
+            kind: row.kind,
+            label: row.label.clone(),
+            bind_address,
+            listen_port,
+            destination_host,
+            destination_port,
+        }
+    }
+
+    pub fn spec(&self) -> Result<String> {
+        let port = parse_port("listen port", &self.listen_port)?;
+        let bind = self.bind_address.trim();
+        ensure!(
+            bind.len() <= 253 && !bind.chars().any(char::is_control),
+            "bind address is invalid"
+        );
+        let listen = if bind.is_empty() {
+            port.to_string()
+        } else {
+            format!("{bind}:{port}")
+        };
+        if self.kind == ForwardKind::Dynamic {
+            return Ok(listen);
+        }
+        let host = self.destination_host.trim();
+        ensure!(!host.is_empty(), "destination host is required");
+        ensure!(
+            host.len() <= 253
+                && !host.chars().any(char::is_control)
+                && !host.chars().any(char::is_whitespace),
+            "destination host is invalid"
+        );
+        let destination_port = parse_port("destination port", &self.destination_port)?;
+        Ok(format!("{listen}:{host}:{destination_port}"))
+    }
+}
+
+fn parse_port(name: &str, value: &str) -> Result<u16> {
+    let port: u16 = value
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("{name} must be a number from 1 to 65535"))?;
+    ensure!(port > 0, "{name} must be from 1 to 65535");
+    Ok(port)
+}
+
+fn split_listener(value: &str) -> (String, String) {
+    if let Some((bind, port)) = value.rsplit_once(':') {
+        (bind.to_owned(), port.to_owned())
+    } else {
+        (String::new(), value.to_owned())
+    }
+}
+
+fn split_target(value: &str) -> (String, String) {
+    if value.is_empty() {
+        return (String::new(), String::new());
+    }
+    if let Some((host, port)) = value.rsplit_once(':') {
+        (host.to_owned(), port.to_owned())
+    } else {
+        (value.to_owned(), String::new())
+    }
 }
 
 /// Every forward of every saved profile, in profile order.
@@ -326,5 +547,59 @@ mod tests {
             parse_forward_lines("a:1:b:2 ; c:3:d:4;"),
             vec!["a:1:b:2".to_owned(), "c:3:d:4".to_owned()]
         );
+    }
+
+    #[test]
+    fn structured_draft_round_trips_local_forward() {
+        let row = ForwardRow {
+            profile_key: "p".into(),
+            profile_name: "p".into(),
+            kind: ForwardKind::Local,
+            listen: "127.0.0.1:8080".into(),
+            target: "db.internal:5432".into(),
+            spec: "127.0.0.1:8080:db.internal:5432".into(),
+            label: "Database".into(),
+        };
+        let draft = ForwardDraft::from_row(&row);
+        assert_eq!(draft.label, "Database");
+        assert_eq!(draft.spec().unwrap(), row.spec);
+    }
+
+    #[test]
+    fn labels_follow_add_replace_remove() {
+        let mut session = Session {
+            name: "srv".into(),
+            host: "srv.example".into(),
+            ..Default::default()
+        };
+        add_forward(
+            &mut session,
+            ForwardKind::Local,
+            "127.0.0.1:8080:web:80".into(),
+            "Web",
+        )
+        .unwrap();
+        assert_eq!(rows_for(&session)[0].label, "Web");
+        replace_forward(
+            &mut session,
+            ForwardKind::Local,
+            "127.0.0.1:8080:web:80",
+            ForwardKind::Remote,
+            "127.0.0.1:9000:127.0.0.1:3000".into(),
+            "Remote API",
+        )
+        .unwrap();
+        let rows = rows_for(&session);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, ForwardKind::Remote);
+        assert_eq!(rows[0].label, "Remote API");
+        remove_forward(
+            &mut session,
+            ForwardKind::Remote,
+            "127.0.0.1:9000:127.0.0.1:3000",
+        )
+        .unwrap();
+        assert!(rows_for(&session).is_empty());
+        assert!(session.ssh.tunnel_labels.is_empty());
     }
 }

@@ -31,6 +31,32 @@ pub enum ControlMasterMode {
     Auto,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TunnelKind {
+    Local,
+    Remote,
+    Dynamic,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TunnelLabel {
+    pub kind: TunnelKind,
+    pub spec: String,
+    pub label: String,
+}
+
+impl Default for TunnelLabel {
+    fn default() -> Self {
+        Self {
+            kind: TunnelKind::Local,
+            spec: String::new(),
+            label: String::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SshOptions {
@@ -78,6 +104,10 @@ pub struct SshOptions {
     pub remote_forwards: Vec<String>,
     /// OpenSSH -D specifications. Each entry is passed as one argv token.
     pub dynamic_forwards: Vec<String>,
+    /// Optional user-facing labels for tunnel entries. Forward vectors remain
+    /// the execution source of truth so older profile files stay compatible.
+    #[serde(default)]
+    pub tunnel_labels: Vec<TunnelLabel>,
 }
 
 impl SshOptions {
@@ -157,6 +187,20 @@ impl SshOptions {
         validate_forward_specs("local forward", &self.local_forwards)?;
         validate_forward_specs("remote forward", &self.remote_forwards)?;
         validate_forward_specs("dynamic forward", &self.dynamic_forwards)?;
+        ensure!(
+            self.tunnel_labels.len() <= 96,
+            "at most 96 tunnel labels are supported"
+        );
+        for meta in &self.tunnel_labels {
+            ensure!(
+                valid_single_argument(&meta.spec, 2048),
+                "tunnel label spec must be 1–2048 bytes without control characters"
+            );
+            ensure!(
+                meta.label.len() <= 128 && !meta.label.chars().any(char::is_control),
+                "tunnel label must be at most 128 bytes without control characters"
+            );
+        }
         Ok(())
     }
 
