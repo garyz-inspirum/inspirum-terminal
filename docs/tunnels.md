@@ -4,11 +4,14 @@ Inspirum can run the local (`-L`), remote (`-R`) and dynamic SOCKS (`-D`) forwar
 
 ## Where it lives in the Iced GUI
 
-- **Tunnels** in the top toolbar opens the centralised manager. It lists every forward from every saved profile in one table: session, type (`L`/`R`/`D`), listen (`bind:port`), target (`host:port`) and status (Stopped / Running · ssh *pid* / Failed · *OpenSSH error*).
-- Each profile has its own **Start** / **Stop** control; one forwarding-only `ssh -N -T` process serves all forwards of that profile. The footer shows the number of running tunnel sessions.
-- Forwards are edited in the profile's connection dialog under *Advanced* → *Tunnels*: OpenSSH specs for Local, Remote and Dynamic, separated by `;`. They are saved with the profile and validated by the same rules as the CLI.
+- **Tunnels** in the top toolbar opens the centralised manager. The layout follows a WindTerm-class list-and-editor workflow: saved tunnel entries are on the left and the selected tunnel's structured editor is on the right.
+- Press **+** beside a profile to add a tunnel directly in the manager. Select **Local**, **Remote** or **Dynamic**, give the entry a label, and edit its bind address/listen port plus destination host/port where applicable. Existing raw OpenSSH forward specs are converted into the structured editor automatically.
+- Select an existing entry to edit or delete it. **Save** validates the resulting OpenSSH specification through the same session validation used elsewhere. A profile's running tunnel process must be stopped before its forward definitions can be changed.
+- Each profile retains its own **Start** / **Stop** control; one forwarding-only `ssh -N -T` process serves all enabled forwards for that profile. Status and startup failure information remain visible beside the profile.
+- User-facing labels are optional metadata; the existing `local_forwards`, `remote_forwards`, and `dynamic_forwards` vectors remain the execution source of truth for backward compatibility.
+- The connection dialog's Advanced raw-spec fields remain available as an expert/compatibility path.
 
-The manager UI was dropped when the egui frontend was removed (PR #84); the backend remained. This section documents the restored Iced UI.
+The manager UI was dropped when the egui frontend was removed (PR #84), restored in PR #128, and then expanded into the structured editor tracked by #129.
 
 ## Lifecycle and status
 
