@@ -7595,13 +7595,22 @@ impl App {
             (600.0, 720.0)
         };
 
-        container(scrollable(body))
-            .width(Fill)
-            .max_width(dialog_width)
-            .max_height(dialog_height)
-            .padding(28)
-            .style(active_card)
-            .into()
+        let scrollbar = iced::widget::scrollable::Scrollbar::new()
+            .width(8)
+            .scroller_width(4)
+            .spacing(10);
+
+        container(
+            scrollable(body).direction(
+                iced::widget::scrollable::Direction::Vertical(scrollbar)
+            ),
+        )
+        .width(Fill)
+        .max_width(dialog_width + 18.0)
+        .max_height(dialog_height)
+        .padding(28)
+        .style(active_card)
+        .into()
     }
 }
 
