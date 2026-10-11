@@ -3801,7 +3801,11 @@ impl App {
             }
             Message::TunnelRefresh => self.refresh_tunnel_status(),
             Message::TunnelAdd(key) => {
-                if !self.profiles.iter().any(|profile| session_profile_key(profile) == key) {
+                if !self
+                    .profiles
+                    .iter()
+                    .any(|profile| session_profile_key(profile) == key)
+                {
                     self.tunnel_notice = "Profile no longer exists.".into();
                     return Task::none();
                 }
@@ -3908,14 +3912,11 @@ impl App {
                         &edit.draft.label,
                     )
                 } else {
-                    tunnels::add_forward(
-                        profile,
-                        edit.draft.kind,
-                        spec,
-                        &edit.draft.label,
-                    )
+                    tunnels::add_forward(profile, edit.draft.kind, spec, &edit.draft.label)
                 };
-                if let Err(error) = result.and_then(|_| save_sessions(&self.profiles_path, &profiles)) {
+                if let Err(error) =
+                    result.and_then(|_| save_sessions(&self.profiles_path, &profiles))
+                {
                     self.tunnel_notice = format!("Cannot save tunnel: {error:#}");
                     return Task::none();
                 }
@@ -6645,7 +6646,11 @@ impl App {
         ]
         .spacing(8);
 
-        if self.profiles.iter().all(|profile| tunnels::rows_for(profile).is_empty()) {
+        if self
+            .profiles
+            .iter()
+            .all(|profile| tunnels::rows_for(profile).is_empty())
+        {
             tunnel_list = tunnel_list.push(
                 text("No tunnels yet. Use + on a profile to create one.")
                     .size(12)
@@ -6735,12 +6740,33 @@ impl App {
                 "New Tunnel"
             };
             let kind_row = row![
-                action("Local", Message::TunnelDraftKind(tunnels::ForwardKind::Local))
-                    .style(if edit.draft.kind == tunnels::ForwardKind::Local { primary } else { quiet }),
-                action("Remote", Message::TunnelDraftKind(tunnels::ForwardKind::Remote))
-                    .style(if edit.draft.kind == tunnels::ForwardKind::Remote { primary } else { quiet }),
-                action("Dynamic", Message::TunnelDraftKind(tunnels::ForwardKind::Dynamic))
-                    .style(if edit.draft.kind == tunnels::ForwardKind::Dynamic { primary } else { quiet }),
+                action(
+                    "Local",
+                    Message::TunnelDraftKind(tunnels::ForwardKind::Local)
+                )
+                .style(if edit.draft.kind == tunnels::ForwardKind::Local {
+                    primary
+                } else {
+                    quiet
+                }),
+                action(
+                    "Remote",
+                    Message::TunnelDraftKind(tunnels::ForwardKind::Remote)
+                )
+                .style(if edit.draft.kind == tunnels::ForwardKind::Remote {
+                    primary
+                } else {
+                    quiet
+                }),
+                action(
+                    "Dynamic",
+                    Message::TunnelDraftKind(tunnels::ForwardKind::Dynamic)
+                )
+                .style(if edit.draft.kind == tunnels::ForwardKind::Dynamic {
+                    primary
+                } else {
+                    quiet
+                }),
             ]
             .spacing(8);
 
@@ -6781,7 +6807,9 @@ impl App {
             container(
                 column![
                     text(title).size(20),
-                    text("WindTerm-style structured tunnel editor").size(11).color(MUTED),
+                    text("WindTerm-style structured tunnel editor")
+                        .size(11)
+                        .color(MUTED),
                     text("Type").size(11).color(MUTED),
                     kind_row,
                     column![
