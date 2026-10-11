@@ -107,8 +107,17 @@ pub enum LinkAction {
 
 #[derive(Clone, Copy, Debug)]
 pub struct TerminalSize {
+    /// Integer cell dimensions required by the PTY resize protocol.
     pub cell_width: u16,
     pub cell_height: u16,
+    /// Exact rendered cell dimensions used for pointer hit-testing.
+    ///
+    /// The Iced renderer commonly uses fractional widths (for example 8.4px).
+    /// Truncating those before x/y -> row/column conversion accumulates error
+    /// across a line and makes selection start several cells away from the
+    /// pointer.
+    hit_cell_width: f32,
+    hit_cell_height: f32,
     num_cols: u16,
     num_lines: u16,
     layout_size: Size,
@@ -119,6 +128,8 @@ impl Default for TerminalSize {
         Self {
             cell_width: 1,
             cell_height: 1,
+            hit_cell_width: 1.0,
+            hit_cell_height: 1.0,
             num_cols: 80,
             num_lines: 50,
             layout_size: Size::default(),
@@ -384,10 +395,11 @@ impl TerminalBackend {
         terminal_size: &TerminalSize,
         display_offset: usize,
     ) -> Point {
-        let col = (x as usize) / (terminal_size.cell_width as usize);
+        let col = (x.max(0.0) / terminal_size.hit_cell_width.max(f32::EPSILON)).floor() as usize;
         let col = min(Column(col), Column(terminal_size.num_cols as usize - 1));
 
-        let line = (y as usize) / (terminal_size.cell_height as usize);
+        let line =
+            (y.max(0.0) / terminal_size.hit_cell_height.max(f32::EPSILON)).floor() as usize;
         let line = min(line, terminal_size.num_lines as usize - 1);
 
         viewport_to_point(display_offset, Point::new(line, col))
@@ -708,10 +720,10 @@ impl TerminalBackend {
     }
 
     fn selection_side(&self, x: f32) -> Side {
-        let cell_x = x as usize % self.size.cell_width as usize;
-        let half_cell_width = (self.size.cell_width as f32 / 2.0) as usize;
+        let cell_width = self.size.hit_cell_width.max(f32::EPSILON);
+        let cell_x = x.max(0.0).rem_euclid(cell_width);
 
-        if cell_x > half_cell_width {
+        if cell_x > cell_width / 2.0 {
             Side::Right
         } else {
             Side::Left
@@ -720,19 +732,25 @@ impl TerminalBackend {
 
     fn resize(&mut self, terminal: &mut Term<EventProxy>, layout_size: Size, font_size: Size) {
         if layout_size == self.size.layout_size
-            && font_size.width as u16 == self.size.cell_width
-            && font_size.height as u16 == self.size.cell_height
+            && font_size.width == self.size.hit_cell_width
+            && font_size.height == self.size.hit_cell_height
         {
             return;
         }
 
-        let lines = (layout_size.height / font_size.height.floor()) as u16;
-        let cols = (layout_size.width / font_size.width.floor()) as u16;
+        if font_size.width <= 0.0 || font_size.height <= 0.0 {
+            return;
+        }
+
+        let lines = (layout_size.height / font_size.height).floor() as u16;
+        let cols = (layout_size.width / font_size.width).floor() as u16;
         if lines > 0 && cols > 0 {
             self.size = TerminalSize {
                 layout_size,
-                cell_height: font_size.height as u16,
-                cell_width: font_size.width as u16,
+                cell_height: font_size.height.round().max(1.0) as u16,
+                cell_width: font_size.width.round().max(1.0) as u16,
+                hit_cell_height: font_size.height,
+                hit_cell_width: font_size.width,
                 num_lines: lines,
                 num_cols: cols,
             };
@@ -929,5 +947,41 @@ mod display_snapshot_tests {
     fn row_ranges_ignore_cells_outside_visible_row_count() {
         let cells = vec![cell(0, 0, 'a'), cell(4, 0, 'x')];
         assert_eq!(display_row_ranges(2, &cells), vec![(0, 1), (0, 0)]);
+    }
+
+    #[test]
+    fn selection_point_uses_exact_fractional_cell_width() {
+        let size = TerminalSize {
+            cell_width: 8,
+            cell_height: 18,
+            hit_cell_width: 8.4,
+            hit_cell_height: 18.0,
+            num_cols: 120,
+            num_lines: 40,
+            layout_size: Size::new(1008.0, 720.0),
+        };
+
+        // 60 rendered cells at 8.4px lands at x=504. Truncating the width to
+        // 8px would incorrectly map this to column 63.
+        let point = TerminalBackend::selection_point(60.1 * 8.4, 5.2 * 18.0, &size, 0);
+        assert_eq!(point.column, Column(60));
+        assert_eq!(point.line, Line(5));
+    }
+
+    #[test]
+    fn selection_point_clamps_negative_pointer_coordinates() {
+        let size = TerminalSize {
+            cell_width: 8,
+            cell_height: 18,
+            hit_cell_width: 8.4,
+            hit_cell_height: 18.0,
+            num_cols: 80,
+            num_lines: 24,
+            layout_size: Size::new(672.0, 432.0),
+        };
+
+        let point = TerminalBackend::selection_point(-12.0, -4.0, &size, 0);
+        assert_eq!(point.column, Column(0));
+        assert_eq!(point.line, Line(0));
     }
 }
