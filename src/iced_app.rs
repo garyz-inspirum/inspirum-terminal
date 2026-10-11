@@ -1005,8 +1005,18 @@ enum Message {
     Search(String),
     ShowMoreProfiles,
     Open(usize),
+    OpenNew(usize),
     EditProfile(usize),
     SelectTab(usize),
+    ShowTabContext(usize),
+    CloseTabContext,
+    TabDuplicate(usize),
+    TabReconnect(usize),
+    TabSplit(usize, pane_grid::Axis),
+    TabSettings(usize),
+    TabCloseOthers(usize),
+    TabCloseRight(usize),
+    TabColor(usize, crate::tab_management::TabVisualLabel),
     SelectNextTab,
     SelectPreviousTab,
     New,
@@ -2312,6 +2322,7 @@ struct App {
     tunnel_status: std::collections::BTreeMap<String, tunnels::Status>,
     tunnel_notice: String,
     tunnel_edit: Option<TunnelEditState>,
+    tab_context: Option<usize>,
     scale: f64,
     status: String,
     load_error: Option<String>,
@@ -2463,6 +2474,7 @@ impl App {
             tunnel_status: Default::default(),
             tunnel_notice: String::new(),
             tunnel_edit: None,
+            tab_context: None,
             scale: 1.0,
             status: "Ready".into(),
             load_error,
@@ -2907,12 +2919,21 @@ impl App {
     }
 
     fn open(&mut self, index: usize) {
+        self.open_profile(index, false);
+    }
+
+    fn open_new(&mut self, index: usize) {
+        self.open_profile(index, true);
+    }
+
+    fn open_profile(&mut self, index: usize, force_new: bool) {
         if let Some(profile) = self.profiles.get(index).cloned() {
             let key = session_profile_key(&profile);
-            if let Some(existing) = self
-                .tabs
-                .iter()
-                .position(|tab| session_profile_key(&tab.profile) == key)
+            if !force_new
+                && let Some(existing) = self
+                    .tabs
+                    .iter()
+                    .position(|tab| session_profile_key(&tab.profile) == key)
             {
                 self.activate_tab(existing);
             } else {
@@ -2921,12 +2942,71 @@ impl App {
                 self.activate_tab(self.tabs.len() - 1);
             }
             self.status = if self.pty_bridge.is_some() {
-                "SSH session opened through the production OpenSSH/PTY backend.".into()
+                if force_new {
+                    "Additional SSH session opened in a new tab.".into()
+                } else {
+                    "SSH session opened through the production OpenSSH/PTY backend.".into()
+                }
+            } else if force_new {
+                "Additional SSH session queued in a new tab.".into()
             } else {
                 "SSH session queued until the terminal event bridge is ready.".into()
             };
         }
         self.dialog = None;
+        self.tab_context = None;
+    }
+
+    fn profile_index_for_tab(&self, tab_index: usize) -> Option<usize> {
+        let key = session_profile_key(&self.tabs.get(tab_index)?.profile);
+        self.profiles
+            .iter()
+            .position(|profile| session_profile_key(profile) == key)
+    }
+
+    fn close_tab_indexes(&mut self, indexes: &[usize]) -> bool {
+        if indexes.is_empty() {
+            return true;
+        }
+        let closing_keys: HashSet<String> = indexes
+            .iter()
+            .filter_map(|&index| self.tabs.get(index))
+            .map(|tab| session_profile_key(&tab.profile))
+            .collect();
+        if self.remote_editor.as_ref().is_some_and(|editor| {
+            closing_keys.contains(&editor.session_key) && (editor.dirty || editor.saving)
+        }) {
+            self.status =
+                "Save or explicitly discard remote editor changes before closing these tabs."
+                    .into();
+            return false;
+        }
+
+        let active_id = self.tabs.get(self.active).map(|tab| tab.id);
+        let closing_ids: HashSet<u64> = indexes
+            .iter()
+            .filter_map(|&index| self.tabs.get(index).map(|tab| tab.id))
+            .collect();
+        self.tabs.retain(|tab| !closing_ids.contains(&tab.id));
+        self.tools.sync.set_armed(false);
+        self.prune_tool_panes();
+        self.prune_free_type();
+
+        if let Some(active_id) = active_id {
+            self.active = self
+                .tabs
+                .iter()
+                .position(|tab| tab.id == active_id)
+                .unwrap_or_else(|| self.tabs.len().saturating_sub(1));
+        } else {
+            self.active = self.active.min(self.tabs.len().saturating_sub(1));
+        }
+        if !self.tabs.is_empty() {
+            self.refresh_workspace_displays(self.active);
+        } else if self.files_dock.is_some() {
+            self.toggle_files();
+        }
+        true
     }
 
     fn toggle_files(&mut self) {
@@ -3603,6 +3683,77 @@ impl App {
                 self.open(index);
                 if self.files_dock.is_some() {
                     return self.reload_files();
+                }
+            }
+            Message::OpenNew(index) => {
+                self.open_new(index);
+                if self.files_dock.is_some() {
+                    return self.reload_files();
+                }
+            }
+            Message::ShowTabContext(index) => {
+                if index < self.tabs.len() {
+                    self.tab_context = Some(index);
+                    self.activate_tab(index);
+                }
+            }
+            Message::CloseTabContext => self.tab_context = None,
+            Message::TabDuplicate(index) => {
+                if let Some(profile_index) = self.profile_index_for_tab(index) {
+                    self.open_new(profile_index);
+                    if self.files_dock.is_some() {
+                        return self.reload_files();
+                    }
+                }
+            }
+            Message::TabReconnect(index) => {
+                self.tab_context = None;
+                if index < self.tabs.len() {
+                    self.activate_tab(index);
+                    let pane = self.tabs[index].focus;
+                    return self.update(Message::Reconnect(pane));
+                }
+            }
+            Message::TabSplit(index, axis) => {
+                self.tab_context = None;
+                if index < self.tabs.len() {
+                    self.activate_tab(index);
+                    return self.update(Message::Split(axis));
+                }
+            }
+            Message::TabSettings(index) => {
+                self.tab_context = None;
+                if let Some(profile_index) = self.profile_index_for_tab(index) {
+                    return self.update(Message::EditProfile(profile_index));
+                }
+            }
+            Message::TabCloseOthers(index) => {
+                self.tab_context = None;
+                if index < self.tabs.len() {
+                    let indexes: Vec<usize> =
+                        (0..self.tabs.len()).filter(|candidate| *candidate != index).collect();
+                    if self.close_tab_indexes(&indexes) && self.files_dock.is_some() {
+                        return self.reload_files();
+                    }
+                }
+            }
+            Message::TabCloseRight(index) => {
+                self.tab_context = None;
+                if index < self.tabs.len() {
+                    let indexes: Vec<usize> = ((index + 1)..self.tabs.len()).collect();
+                    if self.close_tab_indexes(&indexes) && self.files_dock.is_some() {
+                        return self.reload_files();
+                    }
+                }
+            }
+            Message::TabColor(index, label) => {
+                self.tab_context = None;
+                if let Some(tab) = self.tabs.get(index) {
+                    if label == crate::tab_management::TabVisualLabel::None {
+                        self.tools.tab_labels.remove(&tab.id);
+                    } else {
+                        self.tools.tab_labels.insert(tab.id, label);
+                    }
                 }
             }
             Message::EditProfile(index) => {
@@ -5669,26 +5820,29 @@ impl App {
             } else {
                 format!("{}@{}", profile.user, profile.host)
             };
-            let item = button(
-                column![
-                    row![
-                        text(profile.name.clone()).size(14),
-                        space::horizontal(),
-                        if profile.favorite {
-                            text("PIN").size(10).color(GREEN)
-                        } else {
-                            text("SSH").size(10).color(BLUE)
-                        }
+            let item = mouse_area(
+                button(
+                    column![
+                        row![
+                            text(profile.name.clone()).size(14),
+                            space::horizontal(),
+                            if profile.favorite {
+                                text("PIN").size(10).color(GREEN)
+                            } else {
+                                text("SSH").size(10).color(BLUE)
+                            }
+                        ]
+                        .spacing(4),
+                        text(destination).size(12).color(MUTED),
                     ]
-                    .spacing(4),
-                    text(destination).size(12).color(MUTED),
-                ]
-                .spacing(5),
+                    .spacing(5),
+                )
+                .padding(10)
+                .width(Fill)
+                .on_press(Message::Open(index))
+                .style(if selected { selected_button } else { quiet }),
             )
-            .padding(10)
-            .width(Fill)
-            .on_press(Message::Open(index))
-            .style(if selected { selected_button } else { quiet });
+            .on_double_click(Message::OpenNew(index));
             list = list.push(
                 row![item, action("Edit", Message::EditProfile(index))]
                     .spacing(4)
@@ -5747,24 +5901,27 @@ impl App {
                     format!("{}@{}", profile.user, profile.host)
                 };
                 saved = saved.push(
-                    button(
-                        row![
-                            column![
-                                text(profile.name.clone()).size(14),
-                                text(destination).size(11).color(MUTED),
+                    mouse_area(
+                        button(
+                            row![
+                                column![
+                                    text(profile.name.clone()).size(14),
+                                    text(destination).size(11).color(MUTED),
+                                ]
+                                .spacing(2),
+                                space::horizontal(),
+                                text(if profile.favorite { "PIN" } else { "SSH" })
+                                    .size(10)
+                                    .color(if profile.favorite { GREEN } else { BLUE }),
                             ]
-                            .spacing(2),
-                            space::horizontal(),
-                            text(if profile.favorite { "PIN" } else { "SSH" })
-                                .size(10)
-                                .color(if profile.favorite { GREEN } else { BLUE }),
-                        ]
-                        .align_y(iced::Center),
+                            .align_y(iced::Center),
+                        )
+                        .padding([9, 12])
+                        .width(Fill)
+                        .style(quiet)
+                        .on_press(Message::Open(index)),
                     )
-                    .padding([9, 12])
-                    .width(Fill)
-                    .style(quiet)
-                    .on_press(Message::Open(index)),
+                    .on_double_click(Message::OpenNew(index)),
                 );
             }
 
@@ -5833,28 +5990,95 @@ impl App {
                 crate::tab_management::TabVisualLabel::Red => DANGER,
             };
             tabs = tabs.push(
-                container(
-                    row![
-                        text(label.marker()).color(color),
-                        action(tab_label, Message::SelectTab(index)).style(
-                            if index == self.active {
-                                selected_button
-                            } else {
-                                quiet
-                            }
-                        ),
-                        action("x", Message::AskClose(index)),
-                    ]
-                    .spacing(0),
+                mouse_area(
+                    container(
+                        row![
+                            text(label.marker()).color(color),
+                            action(tab_label, Message::SelectTab(index)).style(
+                                if index == self.active {
+                                    selected_button
+                                } else {
+                                    quiet
+                                }
+                            ),
+                            action("x", Message::AskClose(index)),
+                        ]
+                        .spacing(0),
+                    )
+                    .style(if index == self.active {
+                        active_card
+                    } else {
+                        surface
+                    }),
                 )
-                .style(if index == self.active {
-                    active_card
-                } else {
-                    surface
-                }),
+                .on_right_press(Message::ShowTabContext(index))
+                .interaction(mouse::Interaction::ContextMenu),
             );
         }
         tabs = tabs.push(action("+", Message::New));
+
+        let tab_context: Element<'_, Message> = if let Some(index) = self.tab_context {
+            if let Some(tab) = self.tabs.get(index) {
+                let current_label = self
+                    .tools
+                    .tab_labels
+                    .get(&tab.id)
+                    .copied()
+                    .unwrap_or_default();
+                container(
+                    column![
+                        text(format!("Session · {}", tab.profile.name)).size(12).color(MUTED),
+                        action("Duplicate Session", Message::TabDuplicate(index)).width(Fill),
+                        action("Reconnect Session", Message::TabReconnect(index)).width(Fill),
+                        action(
+                            "Split View Horizontally",
+                            Message::TabSplit(index, pane_grid::Axis::Horizontal)
+                        )
+                        .width(Fill),
+                        action(
+                            "Split View Vertically",
+                            Message::TabSplit(index, pane_grid::Axis::Vertical)
+                        )
+                        .width(Fill),
+                        text("Tab Color").size(11).color(MUTED),
+                        row(
+                            crate::tab_management::TabVisualLabel::ALL
+                                .into_iter()
+                                .map(|label| {
+                                    action(
+                                        if label == current_label {
+                                            format!("✓ {}", label.name())
+                                        } else {
+                                            label.name().to_owned()
+                                        },
+                                        Message::TabColor(index, label),
+                                    )
+                                    .style(quiet)
+                                    .into()
+                                })
+                                .collect::<Vec<Element<'_, Message>>>(),
+                        )
+                        .spacing(4),
+                        action("Close View", Message::AskClose(index)).width(Fill),
+                        action("Close All Views But Active", Message::TabCloseOthers(index))
+                            .width(Fill),
+                        action("Close All Views To The Right", Message::TabCloseRight(index))
+                            .width(Fill),
+                        action("Session Settings…", Message::TabSettings(index)).width(Fill),
+                        action("Dismiss", Message::CloseTabContext).width(Fill),
+                    ]
+                    .spacing(6),
+                )
+                .padding(10)
+                .width(430)
+                .style(active_card)
+                .into()
+            } else {
+                space::vertical().height(0).into()
+            }
+        } else {
+            space::vertical().height(0).into()
+        };
 
         let toolbar = row![
             text("LIVE SSH").size(12).color(GREEN),
@@ -5936,6 +6160,7 @@ impl App {
                 scrollable(tabs).direction(scrollable::Direction::Horizontal(
                     scrollable::Scrollbar::default()
                 )),
+                tab_context,
                 toolbar,
                 dock
             ]
