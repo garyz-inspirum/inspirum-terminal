@@ -5839,9 +5839,9 @@ impl App {
                 )
                 .padding(10)
                 .width(Fill)
-                .on_press(Message::Open(index))
                 .style(if selected { selected_button } else { quiet }),
             )
+            .on_press(Message::Open(index))
             .on_double_click(Message::OpenNew(index));
             list = list.push(
                 row![item, action("Edit", Message::EditProfile(index))]
@@ -5918,9 +5918,9 @@ impl App {
                         )
                         .padding([9, 12])
                         .width(Fill)
-                        .style(quiet)
-                        .on_press(Message::Open(index)),
+                        .style(quiet),
                     )
+                    .on_press(Message::Open(index))
                     .on_double_click(Message::OpenNew(index)),
                 );
             }
