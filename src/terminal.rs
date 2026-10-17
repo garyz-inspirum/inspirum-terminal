@@ -394,7 +394,10 @@ pub fn sftp_launch_args_with_proxy_helper(
         args.extend(["-F".into(), config_path_arg(config)?]);
     }
     if !session.ssh.identity_file.is_empty() {
-        args.extend(["-i".into(), session.ssh.identity_file.clone()]);
+        args.extend([
+            "-i".into(),
+            crate::identity::protected_identity_argument(&session.ssh.identity_file),
+        ]);
     }
     if !session.ssh.proxy_jump.is_empty() {
         args.extend(["-J".into(), session.ssh.proxy_jump.clone()]);
