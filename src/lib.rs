@@ -207,7 +207,10 @@ impl SshOptions {
     fn append_args(&self, args: &mut Vec<String>) -> Result<()> {
         self.validate()?;
         if !self.identity_file.is_empty() {
-            args.extend(["-i".into(), self.identity_file.clone()]);
+            args.extend([
+                "-i".into(),
+                identity::protected_identity_argument(&self.identity_file),
+            ]);
         }
         if !self.proxy_jump.is_empty() {
             args.extend(["-J".into(), self.proxy_jump.clone()]);
@@ -762,6 +765,7 @@ fn read_sessions(file: fs::File) -> Result<Vec<Session>> {
 pub mod appearance;
 pub mod command_palette;
 pub mod history;
+pub mod identity;
 pub mod keyboard;
 pub mod proxy;
 pub mod remote_edit;
