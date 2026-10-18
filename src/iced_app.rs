@@ -903,6 +903,7 @@ fn local_permissions(metadata: &std::fs::Metadata) -> String {
     format!("{kind}{access}")
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn unix_mode_string(kind: char, mode: u32) -> String {
     let mut out = String::with_capacity(10);
     out.push(kind);
@@ -1144,8 +1145,14 @@ fn file_listing_row<'a>(
             .width(width)
             .wrapping(text::Wrapping::None)
     };
+    // The name keeps the proportional UI font: it is the click target users
+    // read first, and the OCR-driven GUI acceptance tests expect it.
+    let name = text(cells.name)
+        .size(14)
+        .width(FILE_COL_NAME)
+        .wrapping(text::Wrapping::None);
     let content = row![
-        cell(cells.name, FILE_COL_NAME),
+        name,
         cell(cells.size, FILE_COL_SIZE),
         cell(cells.kind, FILE_COL_TYPE),
         cell(cells.permissions, FILE_COL_PERMS),
