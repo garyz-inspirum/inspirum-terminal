@@ -14,6 +14,25 @@ pub struct RemoteEntry {
     pub name: String,
     pub is_dir: bool,
     pub size: Option<u64>,
+    /// Mode string as printed by `ls -l`, e.g. `drwxr-xr-x`.
+    pub permissions: Option<String>,
+    /// `owner:group` as reported by `ls -lan` (numeric ids).
+    pub owner: Option<String>,
+    /// Modification time as printed by `ls -l` (`Mon DD HH:MM` or `Mon DD  YYYY`).
+    pub modified: Option<String>,
+}
+
+impl RemoteEntry {
+    pub fn new(name: impl Into<String>, is_dir: bool, size: Option<u64>) -> Self {
+        Self {
+            name: name.into(),
+            is_dir,
+            size,
+            permissions: None,
+            owner: None,
+            modified: None,
+        }
+    }
 }
 
 fn quote_batch_arg(value: &str) -> Result<String> {
@@ -86,6 +105,9 @@ fn parse_listing(output: &str) -> Vec<RemoteEntry> {
             name,
             is_dir: fields[0].starts_with('d'),
             size: fields[4].parse().ok(),
+            permissions: Some(fields[0].to_owned()),
+            owner: Some(format!("{}:{}", fields[2], fields[3])),
+            modified: Some(fields[5..8].join(" ")),
         });
     }
     entries
@@ -567,14 +589,41 @@ mod tests {
                     name: "hello world.txt".into(),
                     is_dir: false,
                     size: Some(12),
+                    permissions: Some("-rw-r--r--".into()),
+                    owner: Some("1000:1000".into()),
+                    modified: Some("Jan 01 00:00".into()),
                 },
                 RemoteEntry {
                     name: "folder name".into(),
                     is_dir: true,
                     size: Some(4096),
+                    permissions: Some("drwxr-xr-x".into()),
+                    owner: Some("1000:1000".into()),
+                    modified: Some("Jan 01 00:00".into()),
                 }
             ]
         );
+    }
+
+    #[test]
+    fn listing_parser_keeps_metadata_for_both_date_styles() {
+        let parsed = parse_listing(
+            "sftp> ls -lan\n\
+             drwxr-xr-x    2 0        0            4096 Mar  3  2024 etc\n\
+             lrwxrwxrwx    1 1000     1001            7 Oct 18 09:41 link -> target\n\
+             -rwsr-xr-x    1 0        0           12345 Oct 18 09:41 sbin\n",
+        );
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].permissions.as_deref(), Some("drwxr-xr-x"));
+        assert_eq!(parsed[0].owner.as_deref(), Some("0:0"));
+        assert_eq!(parsed[0].modified.as_deref(), Some("Mar 3 2024"));
+        assert!(parsed[0].is_dir);
+        assert_eq!(parsed[1].name, "link");
+        assert_eq!(parsed[1].permissions.as_deref(), Some("lrwxrwxrwx"));
+        assert_eq!(parsed[1].owner.as_deref(), Some("1000:1001"));
+        assert_eq!(parsed[1].modified.as_deref(), Some("Oct 18 09:41"));
+        assert_eq!(parsed[2].permissions.as_deref(), Some("-rwsr-xr-x"));
+        assert_eq!(parsed[2].size, Some(12345));
     }
 
     #[test]
