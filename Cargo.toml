@@ -20,6 +20,7 @@ serde_json = "1"
 tempfile = "3"
 directories = "6"
 terminal_core = { package = "inspirum-terminal-core", path = "vendor/terminal-core" }
+chrono = "0.4"
 # Enable the Metal/WGPU backend on macOS and retain tiny-skia as a fallback.
 # The third-party notice verifier must pass for this native target before
 # enabling GPU acceleration in distributed builds; never waive license checks.
