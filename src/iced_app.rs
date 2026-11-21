@@ -1490,7 +1490,6 @@ enum Message {
     ResumeTransfer(u64),
     FilesLocalLoaded(u64, Result<Vec<LocalFileEntry>, String>),
     FilesRemoteLoaded(u64, Result<Vec<sftp::RemoteEntry>, String>),
-    ToggleSidebar,
     TogglePrivacyLock,
     ToggleFocusMode,
     ToggleLocalNavigation,
@@ -2699,7 +2698,6 @@ struct App {
     snippet_body: String,
     snippet_content: text_editor::Content,
     editing_snippet: Option<String>,
-    sidebar_collapsed: bool,
     open_menu: Option<menu::Menu>,
     docks: dock::DockLayout,
     dock_menu: Option<dock::Area>,
@@ -2855,7 +2853,6 @@ impl App {
             snippet_body: String::new(),
             snippet_content: text_editor::Content::new(),
             editing_snippet: None,
-            sidebar_collapsed: false,
             open_menu: None,
             docks: {
                 let mut docks = dock::DockLayout::default();
@@ -5210,10 +5207,6 @@ impl App {
                     }
                 }
             }
-            Message::ToggleSidebar => {
-                self.dialog = None;
-                self.docks.toggle(dock::Panel::Session);
-            }
             Message::RequestPaste => {
                 if self
                     .tabs
@@ -6130,7 +6123,7 @@ impl App {
                 body,
                 opaque(
                     mouse_area(center(opaque(content)).style(|_| container::Style {
-                        background: Some(Color::from_rgba(0.02, 0.03, 0.05, 0.82).into()),
+                        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.35).into()),
                         ..Default::default()
                     }))
                     .on_press(Message::CloseDialog)
@@ -6227,28 +6220,6 @@ impl App {
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
-        if self.sidebar_collapsed {
-            return container(
-                column![
-                    action(">>", Message::ToggleSidebar).width(Fill),
-                    action("+", Message::New).style(primary).width(Fill),
-                    space::vertical().height(6),
-                    text("SSH").size(10).color(blue()),
-                    space::vertical(),
-                    text(self.profiles.len().to_string())
-                        .size(11)
-                        .color(muted()),
-                ]
-                .spacing(10)
-                .align_x(iced::Center),
-            )
-            .width(58)
-            .height(Fill)
-            .padding([14, 8])
-            .style(surface)
-            .into();
-        }
-
         let p = theme::palette();
         let filter = column![
             text_input("Filter", &self.query)
