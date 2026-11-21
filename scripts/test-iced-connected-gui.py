@@ -1353,8 +1353,21 @@ async def main() -> int:
                     )
                 # The native graphics stack may still be initializing after
                 # the X11 window first appears, especially on shared runners.
+                # A fixed 2 s wait is still blank on a loaded host; screenshot()
+                # rejects that as "empty GUI screenshot". Retry only that miss.
+                first_frame_deadline = time.monotonic() + 20 * TIME_SCALE
                 await asyncio.sleep(2)
-                screenshot(window, destination / "connected-before-open.png", env)
+                first_frame = destination / "connected-before-open.png"
+                while True:
+                    try:
+                        screenshot(window, first_frame, env)
+                        break
+                    except RuntimeError as error:
+                        if "empty GUI screenshot" not in str(error):
+                            raise
+                        if first_frame_deadline - time.monotonic() < 1:
+                            raise
+                        await asyncio.sleep(1)
 
                 # Saved sessions are listed in the bottom Session dock panel
                 # (Filter row, 'Sessions' group row, then one flat 23px row per
