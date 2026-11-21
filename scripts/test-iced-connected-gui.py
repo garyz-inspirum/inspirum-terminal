@@ -1006,7 +1006,15 @@ def diff(first: Path, second: Path, env: dict[str, str]) -> int:
     )
     if result.returncode not in (0, 1):
         raise RuntimeError(f"ImageMagick screenshot comparison failed: {result.stderr[:200]}")
-    return int(result.stderr.strip().split()[0])
+    # ImageMagick prints large counts in scientific notation ("1.024e+06")
+    # and newer builds append "(fraction)"; keep the first token.
+    token = result.stderr.strip().split()[0] if result.stderr.strip() else ""
+    try:
+        return int(float(token))
+    except ValueError as exc:
+        raise RuntimeError(
+            f"ImageMagick screenshot comparison printed no pixel count: {result.stderr[:200]!r}"
+        ) from exc
 
 
 async def locate_rendered_label(
