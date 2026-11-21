@@ -84,6 +84,7 @@ impl Menu {
                 item("Focus Mode", "Alt+Enter", FocusMode),
                 Entry::Separator,
                 item("Session", "", ToggleSessions),
+                item("Sender", "", TogglePanel(DockPanel::Sender)),
                 item("Transfer", "", TogglePanel(DockPanel::Transfer)),
                 item("Filer", "", TogglePanel(DockPanel::Filer)),
                 item("Explorer", "", TogglePanel(DockPanel::Explorer)),
