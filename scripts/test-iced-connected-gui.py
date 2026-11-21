@@ -124,7 +124,13 @@ async def monitored_shell(
                     stdout.write("NATIVE_REMOTE_CURSOR_LEFT\r\n")
                 elif line.startswith("echo:"):
                     answer = f"NATIVE_ECHO:{line[5:]}"
-                    if line in ("echo:TOUR_PROBE", "echo:AFTER_MENU", "echo:AFTER_SENDER_ESCAPE"):
+                    if line in (
+                        "echo:TOUR_PROBE",
+                        "echo:TERMINAL_OWNED",
+                        "echo:AFTER_MENU",
+                        "echo:AFTER_SENDER_ESCAPE",
+                        "echo:AFTER_GEAR",
+                    ):
                         events.write(answer)
                     stdout.write(f"{answer}\r\n")
                 elif line == "exit":
@@ -1163,15 +1169,20 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
         return 1
     await asyncio.sleep(2)
     shot("tour-05-terminal.png")
-    command("xdotool", "windowfocus", window, env=env)
-    command("xdotool", "type", "--delay", "20", "echo:TOUR_PROBE", env=env)
-    key("Return")
-    await wait_for(
-        lambda: "NATIVE_ECHO:TOUR_PROBE" in log_text().splitlines(),
-        "tour shell answered NATIVE_ECHO:TOUR_PROBE",
-    )
-    await asyncio.sleep(1)
-    shot("tour-06-terminal-output.png")
+
+    async def s06():
+        # Best-effort: a missed echo must not fail the screenshot tour.
+        # wait_for raises RuntimeError, which step() already logs as WARNING.
+        command("xdotool", "windowfocus", window, env=env)
+        command("xdotool", "type", "--delay", "20", "echo:TOUR_PROBE", env=env)
+        key("Return")
+        await wait_for(
+            lambda: "NATIVE_ECHO:TOUR_PROBE" in log_text().splitlines(),
+            "tour shell answered NATIVE_ECHO:TOUR_PROBE",
+        )
+        await asyncio.sleep(1)
+        shot("tour-06-terminal-output.png")
+    await step("terminal-echo", s06)
 
     async def s07():
         key("ctrl+shift+r")
@@ -1376,13 +1387,35 @@ async def main() -> int:
                 await asyncio.sleep(1)
                 screenshot(window, destination / "connected-terminal.png", env)
 
-                # The Session menu and Sender dock must own keyboard input
-                # locally. Watch raw PTY chunks, not just completed commands,
-                # so even a stray Escape or an unterminated sentinel fails.
-                probe_state["phase"] = "MENU"
+                # The session-list click that started SSH does not prove the
+                # focused pane owns the keyboard: the dock filter is a text
+                # input, and a button click is not the terminal. Click the
+                # pane and require an echo before any negative PTY assertion,
+                # or a chrome control that never had the keys would pass.
+                command(
+                    "xdotool", "windowfocus", window, "mousemove", "--window", window,
+                    "640", "280", "click", "1", env=env,
+                )
+                await asyncio.sleep(.3)
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:TERMINAL_OWNED", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: "NATIVE_ECHO:TERMINAL_OWNED" in events.path.read_text(encoding="utf-8").splitlines(),
+                    "terminal owns keyboard before chrome menu probes",
+                )
+
+                # Session menu, Sender editor and bottom-dock gear must own
+                # keyboard input locally. Arm the PTY watch only after the
+                # opening click settles: that click can resize the PTY, and
+                # resize is not keyboard input. Watch raw chunks, not just
+                # completed commands, so a stray Escape or unterminated
+                # sentinel fails. Do not select a gear/menu row from the
+                # keyboard; legitimate menu choices stay mouse-only later.
                 command("xdotool", "mousemove", "--window", window,
                         "30", "16", "click", "1", env=env)
                 await asyncio.sleep(.3)
+                probe_state["phase"] = "MENU"
                 command("xdotool", "type", "--clearmodifiers", "--delay", "25",
                         "MENU_LOCAL_SENTINEL", env=env)
                 command("xdotool", "key", "--clearmodifiers", "Return", env=env)
@@ -1399,10 +1432,16 @@ async def main() -> int:
                     "shell echo after dismissing Session menu",
                 )
 
-                probe_state["phase"] = "SENDER"
+                # DockActivate on the tab does not focus the text_editor.
+                # Click the editor body (below the 28px header) or typed
+                # keys still belong to the terminal and the probe is vacuous.
                 command("xdotool", "mousemove", "--window", window,
                         "47", "552", "click", "1", env=env)
                 await asyncio.sleep(.3)
+                command("xdotool", "mousemove", "--window", window,
+                        "240", "680", "click", "1", env=env)
+                await asyncio.sleep(.3)
+                probe_state["phase"] = "SENDER"
                 command("xdotool", "type", "--clearmodifiers", "--delay", "25",
                         "SENDER_LOCAL_SENTINEL", env=env)
                 command("xdotool", "key", "--clearmodifiers", "Return", env=env)
@@ -1419,11 +1458,41 @@ async def main() -> int:
                     lambda: "NATIVE_ECHO:AFTER_SENDER_ESCAPE" in events.path.read_text(encoding="utf-8").splitlines(),
                     "shell echo after Sender Escape without terminal click",
                 )
+
+                # Bottom-dock gear at the tour coordinate (width-40, strip
+                # centre 552 on the 1280x800 window). Open with the mouse,
+                # then watch only the following keys. Do not click a row.
+                gear_width, _gear_height = window_size(window, env)
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    str(gear_width - 40), "552", "click", "1", env=env,
+                )
+                await asyncio.sleep(.3)
+                probe_state["phase"] = "GEAR"
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "GEAR_LOCAL_SENTINEL", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                await asyncio.sleep(.6)
+                if "UNEXPECTED_GEAR_PTY_INPUT" in events.path.read_text(encoding="utf-8"):
+                    raise RuntimeError("dock gear menu forwarded typing, Return, or Escape to SSH")
+                probe_state["phase"] = None
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:AFTER_GEAR", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: "NATIVE_ECHO:AFTER_GEAR" in events.path.read_text(encoding="utf-8").splitlines(),
+                    "shell echo after dismissing dock gear menu",
+                )
                 if any(
                     marker in events.path.read_text(encoding="utf-8")
-                    for marker in ("UNEXPECTED_MENU_PTY_INPUT", "UNEXPECTED_SENDER_PTY_INPUT")
+                    for marker in (
+                        "UNEXPECTED_MENU_PTY_INPUT",
+                        "UNEXPECTED_SENDER_PTY_INPUT",
+                        "UNEXPECTED_GEAR_PTY_INPUT",
+                    )
                 ):
-                    raise RuntimeError("menu or Sender input leaked into SSH PTY")
+                    raise RuntimeError("menu, Sender or dock gear input leaked into SSH PTY")
 
                 # These shortcuts are intentionally exercised through native
                 # Iced keyboard events, never a direct Rust state transition.
@@ -1959,8 +2028,15 @@ async def main() -> int:
                     raise RuntimeError("privacy curtain forwarded synthetic keyboard input to SSH")
                 if "UNEXPECTED_FREE_TYPE_PTY_INPUT" in event_log:
                     raise RuntimeError("free-type editing leaked synthetic input to remote SSH PTY")
-                if "UNEXPECTED_MENU_PTY_INPUT" in event_log or "UNEXPECTED_SENDER_PTY_INPUT" in event_log:
-                    raise RuntimeError("Session menu or Sender keyboard input leaked to SSH")
+                if any(
+                    marker in event_log
+                    for marker in (
+                        "UNEXPECTED_MENU_PTY_INPUT",
+                        "UNEXPECTED_SENDER_PTY_INPUT",
+                        "UNEXPECTED_GEAR_PTY_INPUT",
+                    )
+                ):
+                    raise RuntimeError("Session menu, Sender or dock gear keyboard input leaked to SSH")
                 if event_log.count("AUTH_ACCEPT:native-smoke") < 2:
                     raise RuntimeError("two distinct SSH panes were not authenticated")
                 (destination / "connected-acceptance.txt").write_text(
@@ -1980,8 +2056,9 @@ async def main() -> int:
                     f"Alternate-screen screenshot change: {fullscreen_pixels} pixels\n"
                     f"Remote-key mode screenshot change: {remote_keys_pixels} pixels\n"
                     "PASS: real remote-key Left arrow reached the isolated SFTP-capable SSH shell\n"
-                    "PASS: Session menu and Sender consumed typing, Return and Escape without SSH input\n"
-                    "PASS: shell answered AFTER_MENU and AFTER_SENDER_ESCAPE without terminal re-click\n"
+                    "PASS: terminal owned the keyboard before chrome menu probes\n"
+                    "PASS: Session menu, Sender and dock gear consumed typing, Return and Escape without SSH input\n"
+                    "PASS: shell answered AFTER_MENU, AFTER_SENDER_ESCAPE and AFTER_GEAR without terminal re-click\n"
                     "PASS: privacy-locked and free-type synthetic text never reached SSH\n"
                     "All keys generated in isolated temporary fixture; no real host or credential.\n",
                     encoding="utf-8",
