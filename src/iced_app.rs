@@ -6127,11 +6127,13 @@ impl App {
             text(value)
                 .size(theme::metrics::STATUS_TEXT)
                 .color(theme::palette().status_text)
+                .wrapping(iced::widget::text::Wrapping::None)
         };
         let mut right = row![
             text(mode)
                 .size(theme::metrics::STATUS_TEXT)
                 .color(theme::palette().status_text)
+                .wrapping(iced::widget::text::Wrapping::None)
                 .font(iced::Font {
                     weight: iced::font::Weight::Bold,
                     ..iced::Font::MONOSPACE
@@ -6179,7 +6181,7 @@ impl App {
             )));
         }
         let footer = container(
-            row![left, space::horizontal(), right]
+            row![container(left).width(Fill).clip(true), right]
                 .spacing(16)
                 .align_y(iced::Center),
         )
@@ -6254,7 +6256,8 @@ impl App {
                     button(
                         text(menu.title())
                             .size(theme::metrics::UI_TEXT)
-                            .color(theme::palette().text),
+                            .color(theme::palette().text)
+                            .wrapping(iced::widget::text::Wrapping::None),
                     )
                     .padding([4, 8])
                     .width(menu.title_width())
