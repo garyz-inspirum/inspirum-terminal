@@ -25,7 +25,7 @@ use crate::{
 use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
 use iced::widget::{
     button, canvas, center, column, container, mouse_area, opaque, operation, pane_grid,
-    responsive, row, scrollable, sensor, space, stack, text, text_editor, text_input,
+    progress_bar, row, scrollable, sensor, space, stack, text, text_editor, text_input,
 };
 use iced::{
     Border, Color, Element, Fill, Font, Subscription, Task, Theme, event, font, keyboard, mouse,
@@ -1423,7 +1423,6 @@ enum Message {
     AskClose(usize),
     ConfirmClose(usize),
     ToggleFiles,
-    FilesToggleDockPosition,
     ToggleAuxiliaryShell,
     FilesRefresh,
     FilesLocalUp,
@@ -2723,61 +2722,11 @@ struct App {
     remote_editor_open_generation: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct FilesLayoutPolicy {
-    list_min_height: f32,
-    queue_viewport_height: f32,
-    compact_actions: bool,
-}
-
-/// Fixed vertical space in the bottom Files dock outside the listings and the
-/// transfer queue viewport, measured on the 1280x800 Linux acceptance
-/// screenshots: panel padding, header row, actions bar with its scrollbar,
-/// column spacing, and the queue's own label and padding.
-const BOTTOM_FILES_CHROME: f32 = 154.0;
-const BOTTOM_QUEUE_MIN_VIEWPORT: f32 = 24.0;
-
-/// Extra chrome in the side dock: a second header line for the target and
-/// wider spacing, plus the second stacked listing.
-const SIDE_FILES_EXTRA_CHROME: f32 = 30.0;
-const SIDE_QUEUE_MAX_VIEWPORT: f32 = 144.0;
-
-/// Transfer-queue viewport for a dock of `dock_height` pixels, or `None`
-/// when the queue must collapse to a single summary line so the listings
-/// keep at least `list_min_height` each.
-fn files_queue_viewport_height(
-    dock_height: f32,
-    side_dock: bool,
-    policy: FilesLayoutPolicy,
-) -> Option<f32> {
-    let (chrome, listings, max_viewport) = if side_dock {
-        (
-            BOTTOM_FILES_CHROME + SIDE_FILES_EXTRA_CHROME,
-            2.0 * policy.list_min_height + 8.0,
-            SIDE_QUEUE_MAX_VIEWPORT,
-        )
-    } else {
-        (
-            BOTTOM_FILES_CHROME,
-            policy.list_min_height,
-            policy.queue_viewport_height,
-        )
-    };
-    let spare = dock_height - chrome - listings;
-    (spare >= BOTTOM_QUEUE_MIN_VIEWPORT).then(|| spare.min(max_viewport))
-}
-
-fn bottom_files_layout_policy() -> FilesLayoutPolicy {
-    FilesLayoutPolicy {
-        // Enough for the pane header and one complete file-row hit target at
-        // the supported minimum window size. The surrounding column uses
-        // fixed-height overflow regions so this space cannot be consumed by
-        // transfer history.
-        list_min_height: 110.0,
-        queue_viewport_height: 44.0,
-        compact_actions: true,
-    }
-}
+const FILES_PANELS: [dock::Panel; 3] = [
+    dock::Panel::Filer,
+    dock::Panel::Explorer,
+    dock::Panel::Transfer,
+];
 
 impl App {
     fn boot(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> Self {
@@ -3323,11 +3272,10 @@ impl App {
     }
 
     fn files_open(&self) -> bool {
-        !self.tabs.is_empty() && self.docks.is_visible(dock::Panel::Filer)
-    }
-
-    fn files_in_side_dock(&self) -> bool {
-        self.docks.area_of(dock::Panel::Filer) != Some(dock::Area::Bottom)
+        !self.tabs.is_empty()
+            && FILES_PANELS
+                .iter()
+                .any(|&panel| self.docks.is_visible(panel))
     }
 
     /// Side effects of the Filer panel becoming visible: refresh listings.
@@ -3337,9 +3285,18 @@ impl App {
 
     fn toggle_files(&mut self) {
         if self.files_open() {
-            self.docks.close(dock::Panel::Filer);
+            for panel in FILES_PANELS {
+                self.docks.close(panel);
+            }
         } else if !self.tabs.is_empty() {
-            self.docks.show(dock::Panel::Filer);
+            // Filer last so it ends up the active panel of its area.
+            for panel in [
+                dock::Panel::Transfer,
+                dock::Panel::Explorer,
+                dock::Panel::Filer,
+            ] {
+                self.docks.show(panel);
+            }
         }
     }
 
@@ -4503,23 +4460,6 @@ impl App {
                 if !was_open && self.files_open() {
                     return self.files_became_visible();
                 }
-            }
-            Message::FilesToggleDockPosition => {
-                if !self.files_open() || self.dialog.is_some() || self.privacy_locked {
-                    return Task::none();
-                }
-                // Only alter dock placement. The selected remote target,
-                // outstanding transfer jobs and any remote editor stay intact.
-                if self.docks.area_of(dock::Panel::Filer) == Some(dock::Area::Bottom) {
-                    self.docks.move_to(dock::Panel::Filer, dock::Area::Right);
-                } else {
-                    self.docks.move_to(dock::Panel::Filer, dock::Area::Bottom);
-                }
-                self.status = if self.files_in_side_dock() {
-                    "Files explorer docked on the right.".into()
-                } else {
-                    "Files explorer docked at the bottom.".into()
-                };
             }
             Message::FilesRefresh => return self.reload_files(),
             Message::FilesLocalUp => {
@@ -6972,105 +6912,106 @@ impl App {
                 remote_list.push(file_listing_footer(self.files.remote_entries.len(), total));
         }
 
-        let local_panel = container(
-            column![
-                row![
-                    text("LOCAL").size(11).color(muted()),
-                    text_input("Local directory path", &self.files.local_path_input)
-                        .size(12)
-                        .on_input(Message::FilesLocalPathInput)
-                        .on_submit(Message::FilesLocalPathSubmit)
-                        .width(Fill),
-                    action("Go", Message::FilesLocalPathSubmit),
-                    action("Up", Message::FilesLocalUp),
-                ]
-                .spacing(8)
-                .align_y(iced::Center),
-                scrollable(local_list)
-                    .direction(scrollable::Direction::Both {
-                        vertical: scrollable::Scrollbar::default(),
-                        horizontal: scrollable::Scrollbar::default(),
-                    })
-                    .height(Fill),
-            ]
-            .spacing(8),
-        )
-        .padding(10)
+        let local_panel = column![
+            files_path_bar(
+                text_input("Local directory path", &self.files.local_path_input)
+                    .size(12)
+                    .style(files_path_input)
+                    .on_input(Message::FilesLocalPathInput)
+                    .on_submit(Message::FilesLocalPathSubmit)
+                    .width(Fill)
+                    .into(),
+                action("Go", Message::FilesLocalPathSubmit),
+                Message::FilesLocalUp,
+            ),
+            scrollable(local_list)
+                .direction(scrollable::Direction::Both {
+                    vertical: scrollable::Scrollbar::default(),
+                    horizontal: scrollable::Scrollbar::default(),
+                })
+                .height(Fill),
+        ]
         .width(Fill)
-        .height(Fill)
-        .style(card);
+        .height(Fill);
 
-        let remote_panel = container(
-            column![
-                row![
-                    text("REMOTE").size(11).color(blue()),
-                    text_input("Remote directory path", &self.files.remote_path_input)
-                        .size(12)
-                        .on_input(Message::FilesRemotePathInput)
-                        .on_submit(Message::FilesRemotePathSubmit)
-                        .width(Fill),
-                    action("Go", Message::FilesRemotePathSubmit),
-                    action("Up", Message::FilesRemoteUp),
-                ]
-                .spacing(8)
-                .align_y(iced::Center),
-                scrollable(remote_list)
-                    .direction(scrollable::Direction::Both {
-                        vertical: scrollable::Scrollbar::default(),
-                        horizontal: scrollable::Scrollbar::default(),
-                    })
-                    .height(Fill),
-            ]
-            .spacing(8),
-        )
-        .padding(10)
+        let remote_panel = column![
+            files_path_bar(
+                text_input("Remote directory path", &self.files.remote_path_input)
+                    .size(12)
+                    .style(files_path_input)
+                    .on_input(Message::FilesRemotePathInput)
+                    .on_submit(Message::FilesRemotePathSubmit)
+                    .width(Fill)
+                    .into(),
+                action("Go", Message::FilesRemotePathSubmit),
+                Message::FilesRemoteUp,
+            ),
+            scrollable(remote_list)
+                .direction(scrollable::Direction::Both {
+                    vertical: scrollable::Scrollbar::default(),
+                    horizontal: scrollable::Scrollbar::default(),
+                })
+                .height(Fill),
+        ]
         .width(Fill)
-        .height(Fill)
-        .style(card);
+        .height(Fill);
         (local_panel.into(), remote_panel.into())
     }
 
-    fn files(&self) -> Element<'_, Message> {
-        // Either dock is a fixed share of the window. Lay the panel out from
-        // its real height so the transfer queue, not the file listings, is
-        // what gives way at the minimum window size.
-        responsive(move |size| self.files_layout(size.height)).into()
+    fn files_unavailable(&self) -> Element<'_, Message> {
+        container(
+            text("Open a session to browse files")
+                .size(13)
+                .color(muted()),
+        )
+        .center(Fill)
+        .into()
     }
 
-    fn files_layout(&self, dock_height: f32) -> Element<'_, Message> {
-        let profile = &self.tabs[self.active].profile;
-        let target = if profile.user.is_empty() {
-            profile.host.clone()
-        } else {
-            format!("{}@{}", profile.user, profile.host)
-        };
+    /// Filer dock panel (spec 5.2): remote path bar, table, actions, editor.
+    fn filer_panel(&self) -> Element<'_, Message> {
+        if self.tabs.is_empty() {
+            return self.files_unavailable();
+        }
+        let (_, remote_panel) = self.file_listing_panels();
+        let actions = files_action_row(vec![
+            action("<- Download", Message::FilesRequestDownload).into(),
+            action("New remote folder", Message::FilesRequestMkdirRemote).into(),
+            action("Rename remote", Message::FilesRequestRenameRemote).into(),
+            action("Edit remote", Message::FilesRequestEditRemote).into(),
+            action("Delete remote", Message::FilesRequestDeleteRemote).into(),
+        ]);
+        column![remote_panel, actions, self.remote_editor_section()]
+            .height(Fill)
+            .width(Fill)
+            .into()
+    }
 
-        let bottom_layout = bottom_files_layout_policy();
-        let (local_panel, remote_panel) = self.file_listing_panels();
-        // The listings take every pixel the header, actions bar and bounded
-        // transfer queue leave, so completed transfers cannot consume them.
-        let file_panels: Element<'_, Message> = if self.files_in_side_dock() {
-            column![local_panel, remote_panel]
-                .spacing(8)
-                .height(Fill)
-                .into()
-        } else {
-            row![local_panel, remote_panel]
-                .spacing(8)
-                .height(Fill)
-                .into()
-        };
+    /// Explorer dock panel: local path bar, table and local actions.
+    fn explorer_panel(&self) -> Element<'_, Message> {
+        if self.tabs.is_empty() {
+            return self.files_unavailable();
+        }
+        let (local_panel, _) = self.file_listing_panels();
+        let actions = files_action_row(vec![
+            action("Upload ->", Message::FilesRequestUpload).into(),
+            action("New local folder", Message::FilesRequestMkdirLocal).into(),
+            action("Rename local", Message::FilesRequestRenameLocal).into(),
+            action("Delete local", Message::FilesRequestDeleteLocal).into(),
+        ]);
+        column![local_panel, actions]
+            .height(Fill)
+            .width(Fill)
+            .into()
+    }
 
-        let activity = if self.files.local_loading || self.files.remote_loading {
-            "Loading"
-        } else if self.files.local_error.is_some() || self.files.remote_error.is_some() {
-            "Needs attention"
-        } else {
-            "Ready"
-        };
-
+    /// Transfer dock panel (spec 5.3): one block per job with a progress bar.
+    fn transfer_panel(&self) -> Element<'_, Message> {
+        if self.tabs.is_empty() {
+            return self.files_unavailable();
+        }
         let active_session = self.files.session_key.as_deref();
-        let mut transfer_list = column![].spacing(5);
+        let mut transfer_list = column![].spacing(8).padding(8);
         let mut visible_transfers = 0usize;
         for job in self
             .files
@@ -7078,7 +7019,6 @@ impl App {
             .iter()
             .rev()
             .filter(|job| active_session == Some(job.pending.session_key.as_str()))
-            .take(6)
         {
             visible_transfers += 1;
             let state = match job.state {
@@ -7113,34 +7053,49 @@ impl App {
                 TransferJobState::Completed => {}
             }
 
+            let (name, verb, direction, destination) = transfer_job_summary(job);
+            let fraction = match job.total {
+                Some(total) if total > 0 => {
+                    (job.transferred as f64 / total as f64).clamp(0.0, 1.0) as f32
+                }
+                _ if job.state == TransferJobState::Completed => 1.0,
+                _ => 0.0,
+            };
+            let status_line = if job.error.is_empty() {
+                format!("{state} {progress}").trim().to_owned()
+            } else {
+                format!("{state}: {}", job.error)
+            };
             transfer_list = transfer_list.push(
-                container(
+                column![
                     row![
-                        column![
-                            text(job.label()).size(12),
-                            text(if job.error.is_empty() {
-                                format!("{state} {progress}").trim().to_owned()
-                            } else {
-                                format!("{state}: {}", job.error)
-                            })
-                            .size(11)
-                            .color(
-                                if job.state == TransferJobState::Failed {
-                                    danger()
-                                } else {
-                                    muted()
-                                }
-                            ),
-                        ]
-                        .spacing(2),
+                        icons::icon(icons::Icon::File, 12.0, theme::palette().text),
+                        text(format!(
+                            "{name} - {} {verb}",
+                            format_file_size(Some(job.transferred))
+                        ))
+                        .size(12),
                         space::horizontal(),
+                        text(format!("{destination} {direction}"))
+                            .size(11)
+                            .color(muted()),
+                        text(status_line).size(11).color(
+                            if job.state == TransferJobState::Failed {
+                                danger()
+                            } else {
+                                muted()
+                            }
+                        ),
                         controls,
                     ]
+                    .spacing(6)
                     .align_y(iced::Center),
-                )
-                .padding([6, 8])
-                .width(Fill)
-                .style(card),
+                    progress_bar(0.0..=1.0, fraction)
+                        .length(Fill)
+                        .girth(13)
+                        .style(transfer_progress),
+                ]
+                .spacing(3),
             );
         }
         if visible_transfers == 0 {
@@ -7151,105 +7106,19 @@ impl App {
             );
         }
 
-        let actions_panel: Element<'_, Message> = scrollable(
-            row![
-                action("Upload ->", Message::FilesRequestUpload),
-                action("<- Download", Message::FilesRequestDownload),
-                action("New local folder", Message::FilesRequestMkdirLocal),
-                action("New remote folder", Message::FilesRequestMkdirRemote),
-                action("Rename local", Message::FilesRequestRenameLocal),
-                action("Rename remote", Message::FilesRequestRenameRemote),
-                action("Edit remote", Message::FilesRequestEditRemote),
-                action("Delete local", Message::FilesRequestDeleteLocal),
-                action("Delete remote", Message::FilesRequestDeleteRemote),
-                text("Destructive operations require confirmation.")
-                    .size(11)
-                    .color(muted()),
-            ]
-            .spacing(8),
-        )
-        .direction(scrollable::Direction::Horizontal(
-            scrollable::Scrollbar::default(),
-        ))
-        .height(if bottom_layout.compact_actions {
-            34
-        } else {
-            68
-        })
-        .into();
+        scrollable(transfer_list).height(Fill).width(Fill).into()
+    }
 
-        let queue_viewport_height =
-            files_queue_viewport_height(dock_height, self.files_in_side_dock(), bottom_layout);
-        let transfer_queue = match queue_viewport_height {
-            Some(viewport) => container(
-                column![
-                    text("TRANSFER QUEUE").size(11).color(muted()),
-                    scrollable(transfer_list).height(viewport),
-                ]
-                .spacing(6),
-            )
-            .padding(8)
-            .width(Fill)
-            .style(surface),
-            // Too short for a queue viewport: keep the listings usable and
-            // summarise the queue on one line instead of eating their row.
-            None => container(
-                text(format!(
-                    "TRANSFER QUEUE · {visible_transfers} for this session · enlarge the window to review"
-                ))
-                .size(11)
-                .color(muted()),
-            )
-            .padding([4, 8])
-            .width(Fill)
-            .style(surface),
-        };
-
-        let content_spacing = if self.files_in_side_dock() { 8 } else { 4 };
-
-        let target_label = text(format!("Target: {target}")).size(12).color(blue());
-        let header: Element<'_, Message> = if self.files_in_side_dock() {
-            // The narrow side dock cannot fit the target beside the controls
-            // without wrapping the Dock button label; give it its own line.
-            column![
-                row![
-                    text(activity).size(11).color(muted()),
-                    space::horizontal(),
-                    action("Refresh", Message::FilesRefresh),
-                    action("Dock bottom", Message::FilesToggleDockPosition),
-                ]
-                .spacing(12)
-                .align_y(iced::Center),
-                target_label,
-            ]
-            .spacing(2)
-            .into()
-        } else {
-            row![
-                target_label,
-                text(activity).size(11).color(muted()),
-                space::horizontal(),
-                action("Refresh", Message::FilesRefresh),
-                action("Dock right", Message::FilesToggleDockPosition),
-            ]
-            .spacing(12)
-            .align_y(iced::Center)
-            .into()
-        };
-
-        container(
-            column![
-                header,
-                file_panels,
-                actions_panel,
-                if let Some(editor) = self
-                    .remote_editor
-                    .as_ref()
-                    .filter(|editor| active_session == Some(editor.session_key.as_str()))
-                {
-                    // Rendering must not wait on an in-flight SFTP save.
-                    let dirty = editor.dirty;
-                    container(
+    fn remote_editor_section(&self) -> Element<'_, Message> {
+        let active_session = self.files.session_key.as_deref();
+        let section = if let Some(editor) = self
+            .remote_editor
+            .as_ref()
+            .filter(|editor| active_session == Some(editor.session_key.as_str()))
+        {
+            // Rendering must not wait on an in-flight SFTP save.
+            let dirty = editor.dirty;
+            container(
                         column![
                             row![
                                 text(format!("EDIT · {}", editor.remote)).size(12).color(blue()),
@@ -7326,19 +7195,10 @@ impl App {
                     )
                     .padding(8)
                     .style(active_card)
-                } else {
-                    container(column![]).height(0).padding(0)
-                },
-                transfer_queue,
-            ]
-            .spacing(content_spacing)
-            .height(Fill),
-        )
-        .padding(if self.files_in_side_dock() { 10 } else { 6 })
-        .height(Fill)
-        .width(Fill)
-        .style(card)
-        .into()
+        } else {
+            container(column![]).height(0).padding(0)
+        };
+        section.into()
     }
 
     fn refresh_tunnel_status(&mut self) {
@@ -8761,6 +8621,131 @@ fn dialog_frame<'a>(body: impl Into<Element<'a, Message>>) -> container::Contain
     .style(dialog_window)
 }
 
+/// `(name, verb, DIRECTION, destination dir)` for a transfer block (spec 5.3).
+fn transfer_job_summary(job: &TransferJob) -> (String, &'static str, &'static str, String) {
+    let local_name = job
+        .pending
+        .local
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| job.pending.local.to_string_lossy().into_owned());
+    let remote_name = job
+        .pending
+        .remote
+        .rsplit('/')
+        .next()
+        .unwrap_or(job.pending.remote.as_str())
+        .to_owned();
+    match job.pending.direction {
+        TransferDirection::Upload => {
+            let dir = job
+                .pending
+                .remote
+                .rsplit_once('/')
+                .map(|(dir, _)| if dir.is_empty() { "/" } else { dir })
+                .unwrap_or(".")
+                .to_owned();
+            (local_name, "uploaded", "UPLOAD", dir)
+        }
+        TransferDirection::Download => {
+            let dir = job
+                .pending
+                .local
+                .parent()
+                .map(|dir| dir.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            (remote_name, "downloaded", "DOWNLOAD", dir)
+        }
+    }
+}
+
+/// Path bar (34px): underlined plain-text path input then flat buttons.
+fn files_path_bar<'a>(
+    input: Element<'a, Message>,
+    go: button::Button<'a, Message>,
+    up_message: Message,
+) -> Element<'a, Message> {
+    let p = theme::palette();
+    // Icon + label: CI OCR clicks the literal `Up`.
+    let up = iced::widget::tooltip(
+        button(
+            row![
+                icons::icon(icons::Icon::ArrowUp, 12.0, p.text),
+                text("Up").size(12)
+            ]
+            .spacing(3)
+            .align_y(iced::Center),
+        )
+        .padding([2, 6])
+        .style(icon_button)
+        .on_press(up_message),
+        container(text("Parent directory").size(theme::metrics::STATUS_TEXT))
+            .padding([2, 6])
+            .style(card),
+        iced::widget::tooltip::Position::Bottom,
+    );
+    row![
+        column![
+            input,
+            container(space::horizontal())
+                .height(1)
+                .width(Fill)
+                .style(border_fill),
+        ]
+        .width(Fill),
+        up,
+        tool_icon(icons::Icon::Refresh, "Refresh", Message::FilesRefresh),
+        go,
+    ]
+    .spacing(4)
+    .padding([0, 6])
+    .height(34)
+    .align_y(iced::Center)
+    .into()
+}
+
+fn files_action_row(buttons: Vec<Element<'_, Message>>) -> Element<'_, Message> {
+    scrollable(
+        row(buttons)
+            .spacing(6)
+            .padding([2, 6])
+            .align_y(iced::Center),
+    )
+    .direction(scrollable::Direction::Horizontal(
+        scrollable::Scrollbar::new().width(2).scroller_width(2),
+    ))
+    .height(30)
+    .into()
+}
+
+fn files_path_input(_: &Theme, status: text_input::Status) -> text_input::Style {
+    let p = theme::palette();
+    text_input::Style {
+        background: Color::TRANSPARENT.into(),
+        border: Border::default(),
+        icon: p.muted,
+        placeholder: p.muted,
+        value: p.text,
+        selection: match status {
+            text_input::Status::Disabled => p.hover,
+            _ => p.selected_row,
+        },
+    }
+}
+
+fn transfer_progress(_: &Theme) -> progress_bar::Style {
+    let p = theme::palette();
+    progress_bar::Style {
+        background: Color::TRANSPARENT.into(),
+        bar: p.accent.into(),
+        border: Border {
+            color: p.accent,
+            width: 1.0,
+            radius: 1.0.into(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -9772,31 +9757,6 @@ mod tests {
     }
 
     #[test]
-    fn bottom_files_layout_bounds_queue_and_reserves_a_hit_target_row() {
-        let policy = bottom_files_layout_policy();
-        assert!(policy.queue_viewport_height <= 56.0);
-        assert!(policy.list_min_height >= 104.0);
-        assert!(policy.compact_actions);
-        // 1280x800 bottom dock keeps the full queue viewport.
-        assert_eq!(
-            files_queue_viewport_height(366.0, false, policy),
-            Some(policy.queue_viewport_height)
-        );
-        // 960x640 bottom dock (~254px) collapses the queue to a summary line
-        // so the listings keep two full rows.
-        assert_eq!(files_queue_viewport_height(254.0, false, policy), None);
-        // Just enough spare space keeps a small viewport rather than collapsing.
-        let tight = BOTTOM_FILES_CHROME + policy.list_min_height + BOTTOM_QUEUE_MIN_VIEWPORT;
-        assert_eq!(
-            files_queue_viewport_height(tight, false, policy),
-            Some(BOTTOM_QUEUE_MIN_VIEWPORT)
-        );
-        // 1280x800 side dock (~600px) keeps two listings and a bounded queue.
-        let side = files_queue_viewport_height(600.0, true, policy).expect("side queue");
-        assert!((BOTTOM_QUEUE_MIN_VIEWPORT..=SIDE_QUEUE_MAX_VIEWPORT).contains(&side));
-    }
-
-    #[test]
     fn active_session_guard_rejects_events_after_tab_switch() {
         let path = std::env::temp_dir().join(format!(
             "inspirum-iced-active-editor-{}-nonexistent.json",
@@ -9850,7 +9810,9 @@ mod tests {
             app.docks.area_of(dock::Panel::Filer),
             Some(dock::Area::Bottom)
         );
-        let _ = app.update(Message::FilesToggleDockPosition);
+        assert!(app.docks.is_visible(dock::Panel::Explorer));
+        assert!(app.docks.is_visible(dock::Panel::Transfer));
+        app.docks.move_to(dock::Panel::Filer, dock::Area::Right);
         assert_eq!(
             app.docks.area_of(dock::Panel::Filer),
             Some(dock::Area::Right)
@@ -9861,15 +9823,11 @@ mod tests {
             app.files.session_key.as_deref(),
             Some("preserve-transfer-target")
         );
-        let _ = app.update(Message::FilesToggleDockPosition);
-        assert!(!app.files_in_side_dock());
-        assert!(app.files_open());
-        let _ = app.update(Message::TogglePrivacyLock);
-        let _ = app.update(Message::FilesToggleDockPosition);
-        assert!(
-            !app.files_in_side_dock(),
-            "privacy lock prevents re-docking"
-        );
+        app.toggle_files();
+        assert!(!app.files_open());
+        for panel in FILES_PANELS {
+            assert!(!app.docks.is_visible(panel));
+        }
     }
 
     #[test]
