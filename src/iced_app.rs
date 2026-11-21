@@ -9810,8 +9810,12 @@ mod tests {
             app.docks.area_of(dock::Panel::Filer),
             Some(dock::Area::Bottom)
         );
-        assert!(app.docks.is_visible(dock::Panel::Explorer));
-        assert!(app.docks.is_visible(dock::Panel::Transfer));
+        assert!(
+            app.docks.is_visible(dock::Panel::Filer),
+            "Filer opens last, active"
+        );
+        assert!(app.docks.area_of(dock::Panel::Explorer).is_some());
+        assert!(app.docks.area_of(dock::Panel::Transfer).is_some());
         app.docks.move_to(dock::Panel::Filer, dock::Area::Right);
         assert_eq!(
             app.docks.area_of(dock::Panel::Filer),
@@ -9826,7 +9830,7 @@ mod tests {
         app.toggle_files();
         assert!(!app.files_open());
         for panel in FILES_PANELS {
-            assert!(!app.docks.is_visible(panel));
+            assert_eq!(app.docks.area_of(panel), None);
         }
     }
 
