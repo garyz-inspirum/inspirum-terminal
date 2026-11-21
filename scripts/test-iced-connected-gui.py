@@ -1974,12 +1974,19 @@ async def main() -> int:
                     lambda: "SCREEN_OFF" in events.path.read_text(encoding="utf-8"),
                     "live SSH alternate-screen leave",
                 )
-                await asyncio.sleep(.5)
-                screenshot(window, destination / "connected-fullscreen-restored.png", env)
-                fullscreen_pixels = diff(
-                    destination / "connected-fullscreen-active.png",
-                    destination / "connected-fullscreen-restored.png", env,
-                )
+                # SCREEN_OFF is a server event, not a repaint: on a loaded
+                # host the canvas can still show the alternate screen half a
+                # second later. Poll until the restore is visible.
+                restore_deadline = time.monotonic() + 10 * TIME_SCALE
+                while True:
+                    await asyncio.sleep(.5)
+                    screenshot(window, destination / "connected-fullscreen-restored.png", env)
+                    fullscreen_pixels = diff(
+                        destination / "connected-fullscreen-active.png",
+                        destination / "connected-fullscreen-restored.png", env,
+                    )
+                    if fullscreen_pixels >= 1500 or time.monotonic() >= restore_deadline:
+                        break
                 if fullscreen_pixels < 1500:
                     raise RuntimeError(
                         f"alternate-screen restore changed only {fullscreen_pixels} pixels"
