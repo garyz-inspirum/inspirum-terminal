@@ -840,8 +840,8 @@ struct LocalFileEntry {
     size: Option<u64>,
     permissions: String,
     owner: String,
+    group: String,
     modified: Option<std::time::SystemTime>,
-    created: Option<std::time::SystemTime>,
 }
 
 impl LocalFileEntry {
@@ -860,16 +860,10 @@ impl LocalFileEntry {
             .as_ref()
             .map(local_permissions)
             .unwrap_or_else(|| "-".into());
-        let owner = metadata
-            .as_ref()
-            .map(local_owner)
-            .unwrap_or_else(|| "-".into());
+        let (owner, group) = metadata.as_ref().map(local_owner).unwrap_or_default();
         let modified = metadata
             .as_ref()
             .and_then(|metadata| metadata.modified().ok());
-        let created = metadata
-            .as_ref()
-            .and_then(|metadata| metadata.created().ok());
         Self {
             path,
             name,
@@ -877,8 +871,8 @@ impl LocalFileEntry {
             size,
             permissions,
             owner,
+            group,
             modified,
-            created,
         }
     }
 }
@@ -934,24 +928,125 @@ fn unix_mode_string(kind: char, mode: u32) -> String {
     out
 }
 
+/// Parses an `/etc/passwd`- or `/etc/group`-style file into an id -> name map.
 #[cfg(unix)]
-fn local_owner(metadata: &std::fs::Metadata) -> String {
+fn parse_id_names(contents: &str) -> std::collections::HashMap<u32, String> {
+    contents
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split(':');
+            let name = fields.next()?;
+            let id = fields.nth(1)?.parse().ok()?;
+            (!name.is_empty()).then(|| (id, name.to_owned()))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn cached_id_names(
+    cell: &'static std::sync::OnceLock<std::collections::HashMap<u32, String>>,
+    path: &str,
+) -> &'static std::collections::HashMap<u32, String> {
+    cell.get_or_init(|| {
+        std::fs::read_to_string(path)
+            .map(|contents| parse_id_names(&contents))
+            .unwrap_or_default()
+    })
+}
+
+#[cfg(unix)]
+fn local_owner(metadata: &std::fs::Metadata) -> (String, String) {
     use std::os::unix::fs::MetadataExt;
-    format!("{}:{}", metadata.uid(), metadata.gid())
+    static USERS: std::sync::OnceLock<std::collections::HashMap<u32, String>> =
+        std::sync::OnceLock::new();
+    static GROUPS: std::sync::OnceLock<std::collections::HashMap<u32, String>> =
+        std::sync::OnceLock::new();
+    let name = |map: &std::collections::HashMap<u32, String>, id: u32| {
+        map.get(&id).cloned().unwrap_or_else(|| id.to_string())
+    };
+    (
+        name(cached_id_names(&USERS, "/etc/passwd"), metadata.uid()),
+        name(cached_id_names(&GROUPS, "/etc/group"), metadata.gid()),
+    )
 }
 
 #[cfg(not(unix))]
-fn local_owner(_metadata: &std::fs::Metadata) -> String {
-    "-".into()
+fn local_owner(_metadata: &std::fs::Metadata) -> (String, String) {
+    (String::new(), String::new())
 }
 
 fn format_local_time(time: Option<std::time::SystemTime>) -> String {
     time.map(|time| {
         chrono::DateTime::<chrono::Local>::from(time)
-            .format("%Y-%m-%d %H:%M:%S")
+            .format("%Y/%m/%d %H:%M:%S")
             .to_string()
     })
-    .unwrap_or_else(|| "-".into())
+    .unwrap_or_default()
+}
+
+/// WindTerm-style size: `1 Byte`, `18 Bytes`, `8.0 KB`, `139.3 MB`, `5.1 GB`.
+fn windterm_size(bytes: u64) -> String {
+    const UNITS: [(u64, &str); 4] = [
+        (1 << 40, "TB"),
+        (1 << 30, "GB"),
+        (1 << 20, "MB"),
+        (1 << 10, "KB"),
+    ];
+    UNITS
+        .iter()
+        .find(|(scale, _)| bytes >= *scale)
+        .map(|(scale, unit)| format!("{:.1} {unit}", bytes as f64 / *scale as f64))
+        .unwrap_or_else(|| {
+            if bytes == 1 {
+                "1 Byte".into()
+            } else {
+                format!("{bytes} Bytes")
+            }
+        })
+}
+
+/// WindTerm-style type column: `Directory`, `TOML File`, `BASH_HISTORY File`.
+fn windterm_type(name: &str, is_dir: bool) -> String {
+    if is_dir {
+        return "Directory".into();
+    }
+    let kind = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() && !extension.is_empty() => extension,
+        Some(("", rest)) if !rest.is_empty() => rest,
+        _ => return "File".into(),
+    };
+    format!("{} File", kind.to_ascii_uppercase())
+}
+
+/// Converts an `ls -l` time (`Mon DD HH:MM` or `Mon DD YYYY`) into
+/// `YYYY/MM/DD HH:MM` / `YYYY/MM/DD`; falls back to the raw text.
+fn windterm_remote_date(raw: &str, today: chrono::NaiveDate) -> String {
+    use chrono::Datelike;
+    let fields: Vec<&str> = raw.split_whitespace().collect();
+    let parsed = (|| {
+        let [month, day, last] = fields.as_slice() else {
+            return None;
+        };
+        let month = chrono::NaiveDate::parse_from_str(&format!("2000 {month} 1"), "%Y %b %d")
+            .ok()?
+            .month();
+        let day: u32 = day.parse().ok()?;
+        if let Some((hour, minute)) = last.split_once(':') {
+            let mut year = today.year();
+            let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+            if date > today {
+                year -= 1;
+            }
+            Some(format!(
+                "{year:04}/{month:02}/{day:02} {hour:0>2}:{minute:0>2}"
+            ))
+        } else {
+            let year: i32 = last.parse().ok()?;
+            chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+            Some(format!("{year:04}/{month:02}/{day:02}"))
+        }
+    })();
+    parsed.unwrap_or_else(|| raw.to_owned())
 }
 
 fn expand_local_path(input: &str) -> Option<PathBuf> {
@@ -1087,54 +1182,83 @@ fn display_leaf(value: &str) -> String {
         .collect()
 }
 
-const FILE_COL_NAME: f32 = 260.0;
-const FILE_COL_SIZE: f32 = 80.0;
-const FILE_COL_TYPE: f32 = 60.0;
-const FILE_COL_PERMS: f32 = 90.0;
-const FILE_COL_OWNER: f32 = 90.0;
-const FILE_COL_TIME: f32 = 140.0;
+const FILE_COL_NAME: f32 = 290.0;
+const FILE_COL_TIME: f32 = 148.0;
+const FILE_COL_TYPE: f32 = 132.0;
+const FILE_COL_SIZE: f32 = 76.0;
+const FILE_COL_PERMS: f32 = 106.0;
+const FILE_COL_OWNER: f32 = 62.0;
+const FILE_COL_GROUP: f32 = 80.0;
+const FILE_CELL_PAD: u16 = 6;
 
 struct FileListingCells {
     name: String,
-    size: String,
+    is_dir: bool,
+    modified: String,
     kind: String,
+    size: String,
     permissions: String,
     owner: String,
-    modified: String,
-    created: String,
+    group: String,
 }
 
-fn file_kind_label(is_dir: bool, name: &str) -> String {
-    if is_dir {
-        return "<DIR>".into();
-    }
-    match name.rsplit_once('.') {
-        Some((stem, extension)) if !stem.is_empty() && !extension.is_empty() => {
-            extension.to_ascii_uppercase()
-        }
-        _ => "File".into(),
+fn file_listing_columns() -> [(&'static str, f32, bool); 7] {
+    [
+        ("Name", FILE_COL_NAME, false),
+        ("Date Modified", FILE_COL_TIME, false),
+        ("Type", FILE_COL_TYPE, false),
+        ("Size", FILE_COL_SIZE, true),
+        ("Permissions", FILE_COL_PERMS, false),
+        ("Owner", FILE_COL_OWNER, false),
+        ("Group", FILE_COL_GROUP, false),
+    ]
+}
+
+fn file_listing_table_width() -> f32 {
+    file_listing_columns()
+        .iter()
+        .map(|(_, width, _)| width + 1.0)
+        .sum()
+}
+
+fn file_cell<'a>(value: String, width: f32, right: bool) -> Element<'a, Message> {
+    let label = text(value)
+        .size(theme::metrics::UI_TEXT)
+        .font(Font::MONOSPACE)
+        .color(theme::palette().text_dock)
+        .wrapping(text::Wrapping::None);
+    let cell = container(label)
+        .width(width)
+        .height(Fill)
+        .padding([0, FILE_CELL_PAD])
+        .align_y(iced::Center)
+        .clip(true);
+    if right {
+        cell.align_x(iced::Right).into()
+    } else {
+        cell.into()
     }
 }
 
 fn file_listing_header<'a>() -> Element<'a, Message> {
-    let cell = |label: &'a str, width: f32| {
-        text(label)
-            .size(11)
-            .color(muted())
-            .font(Font::MONOSPACE)
-            .width(width)
-    };
-    row![
-        cell("Name", FILE_COL_NAME),
-        cell("Size", FILE_COL_SIZE),
-        cell("Type", FILE_COL_TYPE),
-        cell("Permissions", FILE_COL_PERMS),
-        cell("Owner", FILE_COL_OWNER),
-        cell("Modified", FILE_COL_TIME),
-        cell("Created", FILE_COL_TIME),
+    let mut header = row![];
+    for (label, width, right) in file_listing_columns() {
+        header = header.push(file_cell(label.into(), width, right)).push(
+            container(text(""))
+                .width(1)
+                .height(Fill)
+                .style(file_divider),
+        );
+    }
+    column![
+        container(header.height(theme::metrics::TABLE_HEADER_HEIGHT))
+            .width(file_listing_table_width())
+            .style(file_header),
+        container(text(""))
+            .width(file_listing_table_width())
+            .height(1)
+            .style(file_divider),
     ]
-    .spacing(8)
-    .padding([0, 8])
     .into()
 }
 
@@ -1143,37 +1267,65 @@ fn file_listing_row<'a>(
     message: Message,
     selected: bool,
 ) -> Element<'a, Message> {
-    let cell = |value: String, width: f32| {
-        text(value)
-            .size(12)
-            .font(Font::MONOSPACE)
-            .width(width)
-            .wrapping(text::Wrapping::None)
+    let (glyph, color) = if cells.is_dir {
+        let color = match theme::current() {
+            theme::ChromeTheme::Dark => Color::from_rgb8(0xF6, 0xD5, 0x6F),
+            _ => Color::from_rgb8(0x12, 0xBF, 0xE5),
+        };
+        (icons::Icon::Folder, color)
+    } else {
+        (icons::Icon::File, theme::palette().muted)
     };
-    // The name keeps the proportional UI font: it is the click target users
-    // read first, and the OCR-driven GUI acceptance tests expect it.
-    let name = text(cells.name)
-        .size(14)
-        .width(FILE_COL_NAME)
-        .wrapping(text::Wrapping::None);
+    // The name stays one unbroken text in the main dock text colour: the
+    // OCR-driven GUI acceptance tests click it.
+    let name = row![
+        icons::icon(glyph, 14.0, color),
+        text(cells.name)
+            .size(theme::metrics::UI_TEXT)
+            .font(Font::MONOSPACE)
+            .color(theme::palette().text_dock)
+            .wrapping(text::Wrapping::None),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
+    let name = container(name)
+        .width(FILE_COL_NAME + 1.0)
+        .height(Fill)
+        .padding([0, FILE_CELL_PAD])
+        .align_y(iced::Center)
+        .clip(true);
     let content = row![
         name,
-        cell(cells.size, FILE_COL_SIZE),
-        cell(cells.kind, FILE_COL_TYPE),
-        cell(cells.permissions, FILE_COL_PERMS),
-        cell(cells.owner, FILE_COL_OWNER),
-        cell(cells.modified, FILE_COL_TIME),
-        cell(cells.created, FILE_COL_TIME),
+        file_cell(cells.modified, FILE_COL_TIME + 1.0, false),
+        file_cell(cells.kind, FILE_COL_TYPE + 1.0, false),
+        file_cell(cells.size, FILE_COL_SIZE + 1.0, true),
+        file_cell(cells.permissions, FILE_COL_PERMS + 1.0, false),
+        file_cell(cells.owner, FILE_COL_OWNER + 1.0, false),
+        file_cell(cells.group, FILE_COL_GROUP + 1.0, false),
     ]
-    .spacing(8);
-    let mut button = button(content)
+    .height(theme::metrics::ROW_HEIGHT);
+    button(content)
         .on_press(message)
-        .padding([4, 8])
-        .style(quiet);
-    if selected {
-        button = button.style(selected_button);
-    }
-    button.into()
+        .padding(0)
+        .width(file_listing_table_width())
+        .style(if selected {
+            file_row_selected
+        } else {
+            file_row
+        })
+        .into()
+}
+
+fn file_listing_footer<'a>(count: usize, total: u64) -> Element<'a, Message> {
+    container(
+        text(format!("{count} items {}", windterm_size(total)))
+            .size(theme::metrics::UI_TEXT)
+            .font(Font::MONOSPACE)
+            .color(theme::palette().muted),
+    )
+    .height(16)
+    .padding([0, FILE_CELL_PAD])
+    .into()
 }
 
 fn format_file_size(size: Option<u64>) -> String {
@@ -6615,7 +6767,7 @@ impl App {
     }
 
     fn file_listing_panels(&self) -> (Element<'_, Message>, Element<'_, Message>) {
-        let mut local_list = column![file_listing_header()].spacing(3);
+        let mut local_list = column![file_listing_header()];
         if self.files.local_loading {
             local_list =
                 local_list.push(text("Loading local directory...").size(12).color(muted()));
@@ -6624,24 +6776,22 @@ impl App {
         } else if self.files.local_entries.is_empty() {
             local_list = local_list.push(text("Directory is empty.").size(12).color(muted()));
         } else {
-            for entry in self
-                .files
-                .local_entries
-                .iter()
-                .take(self.files.local_visible)
-            {
+            let mut sorted: Vec<&LocalFileEntry> = self.files.local_entries.iter().collect();
+            sorted.sort_by_cached_key(|entry| (!entry.is_dir, entry.name.to_lowercase()));
+            for entry in sorted.into_iter().take(self.files.local_visible) {
                 let cells = FileListingCells {
                     name: display_leaf(&entry.name),
-                    size: if entry.is_dir {
-                        String::new()
-                    } else {
-                        format_file_size(entry.size)
-                    },
-                    kind: file_kind_label(entry.is_dir, &entry.name),
+                    is_dir: entry.is_dir,
+                    modified: format_local_time(entry.modified),
+                    kind: windterm_type(&entry.name, entry.is_dir),
+                    size: entry
+                        .size
+                        .filter(|_| !entry.is_dir)
+                        .map(windterm_size)
+                        .unwrap_or_default(),
                     permissions: entry.permissions.clone(),
                     owner: entry.owner.clone(),
-                    modified: format_local_time(entry.modified),
-                    created: format_local_time(entry.created),
+                    group: entry.group.clone(),
                 };
                 if entry.is_dir {
                     local_list = local_list.push(file_listing_row(
@@ -6673,7 +6823,7 @@ impl App {
             }
         }
 
-        let mut remote_list = column![file_listing_header()].spacing(3);
+        let mut remote_list = column![file_listing_header()];
         if self.files.remote_loading {
             remote_list =
                 remote_list.push(text("Loading remote directory...").size(12).color(muted()));
@@ -6682,25 +6832,27 @@ impl App {
         } else if self.files.remote_entries.is_empty() {
             remote_list = remote_list.push(text("Directory is empty.").size(12).color(muted()));
         } else {
-            for entry in self
-                .files
-                .remote_entries
-                .iter()
-                .take(self.files.remote_visible)
-            {
+            let today = chrono::Local::now().date_naive();
+            let mut sorted: Vec<&sftp::RemoteEntry> = self.files.remote_entries.iter().collect();
+            sorted.sort_by_cached_key(|entry| (!entry.is_dir, entry.name.to_lowercase()));
+            for entry in sorted.into_iter().take(self.files.remote_visible) {
                 let cells = FileListingCells {
                     name: display_leaf(&entry.name),
-                    size: if entry.is_dir {
-                        String::new()
-                    } else {
-                        format_file_size(entry.size)
-                    },
-                    kind: file_kind_label(entry.is_dir, &entry.name),
-                    permissions: entry.permissions.clone().unwrap_or_else(|| "-".into()),
-                    owner: entry.owner.clone().unwrap_or_else(|| "-".into()),
-                    modified: entry.modified.clone().unwrap_or_else(|| "-".into()),
-                    // SFTP `ls` does not expose creation time.
-                    created: "-".into(),
+                    is_dir: entry.is_dir,
+                    modified: entry
+                        .modified
+                        .as_deref()
+                        .map(|raw| windterm_remote_date(raw, today))
+                        .unwrap_or_default(),
+                    kind: windterm_type(&entry.name, entry.is_dir),
+                    size: entry
+                        .size
+                        .filter(|_| !entry.is_dir)
+                        .map(windterm_size)
+                        .unwrap_or_default(),
+                    permissions: entry.permissions.clone().unwrap_or_default(),
+                    owner: entry.owner.clone().unwrap_or_default(),
+                    group: entry.group.clone().unwrap_or_default(),
                 };
                 if entry.is_dir {
                     let path = sftp::join_remote(&self.files.remote_dir, &entry.name);
@@ -6735,6 +6887,29 @@ impl App {
                     .width(Fill),
                 );
             }
+        }
+
+        if !self.files.local_loading && self.files.local_error.is_none() {
+            let total = self
+                .files
+                .local_entries
+                .iter()
+                .filter(|entry| !entry.is_dir)
+                .filter_map(|entry| entry.size)
+                .sum();
+            local_list =
+                local_list.push(file_listing_footer(self.files.local_entries.len(), total));
+        }
+        if !self.files.remote_loading && self.files.remote_error.is_none() {
+            let total = self
+                .files
+                .remote_entries
+                .iter()
+                .filter(|entry| !entry.is_dir)
+                .filter_map(|entry| entry.size)
+                .sum();
+            remote_list =
+                remote_list.push(file_listing_footer(self.files.remote_entries.len(), total));
         }
 
         let local_panel = container(
@@ -8393,6 +8568,38 @@ fn tab_button(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+fn file_row(_theme: &Theme, status: button::Status) -> button::Style {
+    let palette = theme::palette();
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => palette.hover,
+        _ => palette.list,
+    };
+    button::Style {
+        background: Some(background.into()),
+        text_color: palette.text_dock,
+        border: Border::default(),
+        ..button::Style::default()
+    }
+}
+
+fn file_row_selected(_theme: &Theme, _status: button::Status) -> button::Style {
+    let palette = theme::palette();
+    button::Style {
+        background: Some(palette.selected_row.into()),
+        text_color: palette.text_dock,
+        border: Border::default(),
+        ..button::Style::default()
+    }
+}
+
+fn file_header(_theme: &Theme) -> container::Style {
+    container::Style::default().background(theme::palette().header)
+}
+
+fn file_divider(_theme: &Theme) -> container::Style {
+    container::Style::default().background(theme::palette().border)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -9173,10 +9380,26 @@ mod tests {
 
     #[test]
     fn file_kind_labels() {
-        assert_eq!(file_kind_label(true, "src"), "<DIR>");
-        assert_eq!(file_kind_label(false, "Cargo.toml"), "TOML");
-        assert_eq!(file_kind_label(false, "README"), "File");
-        assert_eq!(file_kind_label(false, ".bashrc"), "File");
+        assert_eq!(windterm_type("src", true), "Directory");
+        assert_eq!(windterm_type("Cargo.toml", false), "TOML File");
+        assert_eq!(windterm_type("README", false), "File");
+        assert_eq!(windterm_type(".bash_history", false), "BASH_HISTORY File");
+        assert_eq!(windterm_size(1), "1 Byte");
+        assert_eq!(windterm_size(18), "18 Bytes");
+        assert_eq!(windterm_size(8192), "8.0 KB");
+        assert_eq!(windterm_size(146_066_636), "139.3 MB");
+        assert_eq!(windterm_size(5_476_083_302), "5.1 GB");
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 9, 10).unwrap();
+        assert_eq!(
+            windterm_remote_date("Sep 9 12:04", today),
+            "2026/09/09 12:04"
+        );
+        assert_eq!(
+            windterm_remote_date("Dec 1 08:00", today),
+            "2025/12/01 08:00"
+        );
+        assert_eq!(windterm_remote_date("Mar 3 2024", today), "2024/03/03");
+        assert_eq!(windterm_remote_date("garbage", today), "garbage");
     }
 
     #[test]
