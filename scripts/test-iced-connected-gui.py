@@ -745,6 +745,29 @@ INVERTED_MIN_S = 10.0 * TIME_SCALE
 TOOLBAR_BOTTOM_Y = 90
 
 
+def _bounds_inside(bounds, region):
+    """Return ``bounds`` only when the box lies wholly inside ``region``.
+
+    ``region`` is ``(left, top, right, bottom)``. ``None`` keeps every box,
+    matching the historical whole-window search. An outside box is not a
+    match: callers skip it and keep searching.
+    """
+    if bounds is None or region is None:
+        return bounds
+    left, top, right, bottom = bounds
+    x1, y1, x2, y2 = region
+    if left >= x1 and top >= y1 and right <= x2 and bottom <= y2:
+        return bounds
+    return None
+
+
+def _word_inside(word, region) -> bool:
+    if region is None:
+        return True
+    left, top, width, height = word[1], word[2], word[3], word[4]
+    return _bounds_inside((left, top, left + width, top + height), region) is not None
+
+
 def _inverted_segment_search(path: Path, tesseract: str, label: str, region, deadline):
     """Last resort: re-read light segments inverted (dark on light grey, x4).
 
@@ -788,11 +811,60 @@ def _inverted_segment_search(path: Path, tesseract: str, label: str, region, dea
                 bounds = match_visible_label(words, label)
                 if bounds is None:
                     bounds = match_visible_segment([words], label)
+                # A band that merely overlaps the region can still OCR the
+                # status line below it. Skip that box and keep scanning.
+                bounds = _bounds_inside(bounds, region)
                 if bounds is not None:
                     return bounds, segments
     finally:
         temporary.unlink(missing_ok=True)
     return None, segments
+
+
+def _region_band_label(path: Path, tesseract: str, label: str, region):
+    """Re-read each light text band inside ``region``, one column at a time.
+
+    A dock-body crop of a 13 px monospace name loses the trailing token
+    (``444_GUI_DOWNLOAD`` plus a 2 px ``FIXTURE.``). The same glyphs as one
+    row band, without the date column beside them, read as the filename.
+    Narrow regions are already one column; wide regions are split on the
+    dark gaps between columns. Returns a box wholly inside ``region``.
+    """
+    width, height, channels, rows = _read_png(path)
+    x1, y1, x2, y2 = region
+    thresh = _text_threshold(width, height, channels, rows)
+    for by1, by2 in _visible_bands(width, height, channels, rows, thresh):
+        if by2 < y1 or by1 >= y2:
+            continue
+        if x2 - x1 <= 360:
+            spans = [(x1, x2)]
+        else:
+            spans = []
+            for sx1, sx2 in _band_segments(width, rows, channels, thresh, by1, by2, 24):
+                left = max(x1, sx1)
+                right = min(x2, sx2 + 1)
+                if right - left >= 24:
+                    spans.append((left, right))
+        for sx1, sx2 in spans:
+            band = (
+                max(0, sx1),
+                max(0, by1 - 2),
+                min(width, sx2),
+                min(height, by2 + 3),
+            )
+            if band[2] - band[0] < 24 or band[3] - band[1] < 8:
+                continue
+            words = region_upscaled_rows(
+                path, tesseract, band, psm="7", scale=4, invert=True,
+            )
+            words = [word for word in words if _word_inside(word, region)]
+            bounds = match_visible_label(words, label)
+            if bounds is None:
+                bounds = match_visible_segment([words], label)
+            bounds = _bounds_inside(bounds, region)
+            if bounds is not None:
+                return bounds
+    return None
 
 
 def locate_visible_label(
@@ -830,40 +902,45 @@ def locate_visible_label(
             bounds = match_visible_label(words, label)
             if bounds is None:
                 bounds = match_visible_segment([words], label)
+            bounds = _bounds_inside(bounds, region)
             if bounds is not None:
                 break
+        # Full-width upscale still drops the trailing token of a 13 px name.
+        # Row bands inside the region recover it; never a box outside region.
+        if bounds is None:
+            bounds = _region_band_label(path, tesseract, label, region)
     else:
         first_words = ocr_rows(path, tesseract, None)
         bounds = match_visible_label(first_words, label)
     if bounds is None and time.monotonic() < deadline:
         pixel_rows = visible_pixel_rows(path, tesseract, clusters=False)
         if region is not None:
-            x1, y1, x2, y2 = region
-            inside = [
-                row for row in pixel_rows
-                if not (
-                    row[1] + row[3] < x1 or row[1] > x2
-                    or row[2] + row[4] < y1 or row[2] > y2
-                )
-            ]
-            bounds = match_visible_label(inside, label)
-        if bounds is None:
-            bounds = match_visible_label(pixel_rows, label)
+            pixel_rows = [row for row in pixel_rows if _word_inside(row, region)]
+        bounds = _bounds_inside(match_visible_label(pixel_rows, label), region)
     if bounds is None and time.monotonic() < deadline:
-        bounds = match_visible_label(
-            visible_pixel_rows(path, tesseract, clusters=True), label,
-        )
+        clustered = visible_pixel_rows(path, tesseract, clusters=True)
+        if region is not None:
+            clustered = [row for row in clustered if _word_inside(row, region)]
+        bounds = _bounds_inside(match_visible_label(clustered, label), region)
     if bounds is None and time.monotonic() < deadline:
         segments = visible_segment_rows(path, tesseract)
+        if region is not None:
+            segments = [
+                [word for word in words if _word_inside(word, region)]
+                for words in segments
+            ]
+            segments = [words for words in segments if words]
         flat = [word for words in segments for word in words]
         bounds = match_visible_label(flat, label)
         if bounds is None:
             bounds = match_visible_segment(segments, label)
+        bounds = _bounds_inside(bounds, region)
     if bounds is None:
         bounds, inverted = _inverted_segment_search(
             path, tesseract, label, region,
             max(deadline, time.monotonic() + INVERTED_MIN_S),
         )
+        bounds = _bounds_inside(bounds, region)
     else:
         inverted = []
     if bounds is None:
@@ -880,6 +957,42 @@ def locate_visible_label(
             f"(screenshot: {path}, region={region})"
         )
     return bounds
+
+
+def name_rows_region(first_row_bounds, row_count, *, row_height=23, name_right=None):
+    """Name-column data-row box derived from the located first data row.
+
+    The band does not move when the listing reorders. ``left`` covers the
+    file icon inset from the glyph box; ``bottom`` covers ``row_count``
+    rows of ``row_height``.
+    """
+    first_left, first_top = first_row_bounds[0], first_row_bounds[1]
+    left = max(0, first_left - 36)
+    top = first_top - 6
+    right = name_right if name_right is not None else first_left + 270
+    bottom = first_top + row_count * row_height + 2
+    return (left, top, right, bottom)
+
+
+def name_order_tops(shot, first_label, second_label, rows_region):
+    """Return ``(top_first, top_second)`` only if both boxes are inside the rows.
+
+    Locates both labels with ``region=rows_region``. A miss is ``None``, not
+    an exception. A box that is not wholly inside ``rows_region`` — the
+    transfer status line, for example — is also ``None``.
+    """
+    try:
+        first = locate_visible_label(
+            shot, first_label, region=rows_region, budget=LOCATE_BUDGET_S,
+        )
+        second = locate_visible_label(
+            shot, second_label, region=rows_region, budget=LOCATE_BUDGET_S,
+        )
+    except RuntimeError:
+        return None
+    if _bounds_inside(first, rows_region) is None or _bounds_inside(second, rows_region) is None:
+        return None
+    return (first[1], second[1])
 
 
 def center(bounds):
@@ -1853,17 +1966,23 @@ async def main() -> int:
                     window, destination / "connected-files-sort-before.png",
                     third_name, env=env, region=body, timeout=20,
                 )
-                row_444 = await locate_rendered_label(
-                    window, destination / "connected-files-sort-before.png",
-                    download_name, env=env, region=body, timeout=20,
+                # Name-column data rows, fixed to the first file row. Reordering
+                # does not move the band, and the transfer status line is outside
+                # it, so a later read of 444 cannot land on "Download 444 …".
+                rows_region = name_rows_region(row_111, 3)
+                default_order = await asyncio.to_thread(
+                    name_order_tops,
+                    destination / "connected-files-sort-before.png",
+                    third_name,
+                    download_name,
+                    rows_region,
                 )
-                # Helpers return (left, top, right, bottom); center() averages
-                # the pairs. Compare tops: rows do not overlap.
-                y_111, y_444 = row_111[1], row_444[1]
-                if y_111 >= y_444:
+                if default_order is None or default_order[0] >= default_order[1]:
+                    y_111 = None if default_order is None else default_order[0]
+                    y_444 = None if default_order is None else default_order[1]
                     raise RuntimeError(
                         "Filer default name order is not ascending: "
-                        f"y(111)={y_111} y(444)={y_444}"
+                        f"y(111)={y_111} y(444)={y_444} rows_region={rows_region}"
                     )
                 # Band derived from the located 111 row, which is the first
                 # file row. OCR bounds are the filename glyphs (inset 3px),
@@ -1888,31 +2007,23 @@ async def main() -> int:
 
                 async def wait_name_order(shot: Path, *, descending: bool) -> tuple[int, int]:
                     deadline = time.monotonic() + 15 * TIME_SCALE
-                    seen_111 = seen_444 = None
+                    seen = None
                     while True:
                         await asyncio.to_thread(screenshot, window, shot, env)
-                        try:
-                            top_111 = await asyncio.to_thread(
-                                locate_visible_label, shot, third_name, region=body,
-                            )
-                            top_444 = await asyncio.to_thread(
-                                locate_visible_label, shot, download_name, region=body,
-                            )
-                        except RuntimeError:
-                            top_111 = top_444 = None
-                        else:
-                            seen_111, seen_444 = top_111[1], top_444[1]
-                            if descending:
-                                matched = seen_111 > seen_444
-                            else:
-                                matched = seen_111 < seen_444
+                        seen = await asyncio.to_thread(
+                            name_order_tops, shot, third_name, download_name, rows_region,
+                        )
+                        if seen is not None:
+                            matched = seen[0] > seen[1] if descending else seen[0] < seen[1]
                             if matched:
-                                return seen_111, seen_444
+                                return seen
                         if time.monotonic() >= deadline:
                             order = "descending" if descending else "ascending"
+                            y_111 = None if seen is None else seen[0]
+                            y_444 = None if seen is None else seen[1]
                             raise RuntimeError(
                                 f"Name header click did not produce {order} Filer order: "
-                                f"y(111)={seen_111} y(444)={seen_444}"
+                                f"y(111)={y_111} y(444)={y_444} rows_region={rows_region}"
                             )
                         await asyncio.sleep(.5)
 

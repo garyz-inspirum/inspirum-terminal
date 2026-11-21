@@ -52,14 +52,13 @@ def _wholly_inside(box, region) -> bool:
     return left >= x1 and top >= y1 and right <= x2 and bottom <= y2
 
 
-def _rows_region_from_asc():
-    """Same band the live sort check derives from the initial 111 row."""
-    row_111 = module.locate_visible_label(ASC, LABEL_111, region=BODY, budget=8)
-    return module.name_rows_region(row_111, 3), row_111
-
-
 @unittest.skipUnless(HAS_TESSERACT, "tesseract is not installed")
 class NameOrderOracleTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.row_111 = module.locate_visible_label(ASC, LABEL_111, region=BODY, budget=8)
+        cls.rows_region = module.name_rows_region(cls.row_111, 3)
+
     def test_region_locate_never_returns_box_outside_region(self):
         box = module.locate_visible_label(
             ASC, LABEL_444, region=BODY, budget=20,
@@ -72,7 +71,7 @@ class NameOrderOracleTest(unittest.TestCase):
         self.assertLessEqual(box[3], 700)
 
     def test_ascending_frame_reads_ascending_from_real_rows(self):
-        rows_region, _row_111 = _rows_region_from_asc()
+        rows_region = self.rows_region
         tops = module.name_order_tops(ASC, LABEL_111, LABEL_444, rows_region)
         self.assertIsNotNone(tops, f"oracle missed ascending rows in {rows_region}")
         top_111, top_444 = tops
@@ -83,7 +82,7 @@ class NameOrderOracleTest(unittest.TestCase):
         self.assertLess(top_111, top_444)
 
     def test_descending_frame_fails_restore_check(self):
-        rows_region, _row_111 = _rows_region_from_asc()
+        rows_region = self.rows_region
         tops = module.name_order_tops(DESC, LABEL_111, LABEL_444, rows_region)
         self.assertIsNotNone(tops, f"oracle missed descending rows in {rows_region}")
         top_111, top_444 = tops
@@ -95,40 +94,42 @@ class NameOrderOracleTest(unittest.TestCase):
         self.assertFalse(restored)
 
     def test_frozen_descending_frame_with_only_status_line_444_is_rejected(self):
-        rows_region, _row_111 = _rows_region_from_asc()
-        # Locate the real 444 glyphs from a Name-column crop. The unmodified
-        # full-window fallback would point at the status line; this crop does not.
-        words = module.region_upscaled_rows(
-            DESC, shutil.which("tesseract"), (0, 616, 300, 700),
-            psm="6", invert=True,
-        )
-        located = module.match_visible_label(words, LABEL_444)
-        if located is None:
-            located = module.match_visible_segment([words], LABEL_444)
-        self.assertIsNotNone(located, f"could not locate 444 row to paint; words={words[:12]}")
+        rows_region = self.rows_region
+        located = module.locate_visible_label(DESC, LABEL_444, region=rows_region, budget=8)
+        self.assertTrue(_wholly_inside(located, rows_region), located)
         width, height, channels, rows = module._read_png(DESC)
-        sample_y = max(0, located[1] - 8)
-        background = bytes(rows[sample_y][0:3])
-        y0 = max(0, located[1])
-        y1 = min(height, located[1] + 23)
+        # 23 px data row that contains the located glyphs (rows start at y=623).
+        row_top = located[1] - ((located[1] - 623) % 23)
+        background = bytes(rows[min(height - 1, row_top + 4)][channels:channels + 3])
+        y0 = max(0, row_top)
+        y1 = min(height, row_top + 23)
         for y in range(y0, y1):
             row = rows[y]
             for x in range(0, 290):
                 base = x * channels
                 row[base:base + 3] = background
         rgb = b"".join(bytes(row) for row in rows)
-        with tempfile.TemporaryDirectory() as tmp:
-            frozen = Path(tmp) / "frozen-desc.png"
-            module._write_png(frozen, width, height, rgb)
-            # Status line still names 444; the Name-column row does not.
-            tops = module.name_order_tops(frozen, LABEL_111, LABEL_444, rows_region)
+        saved_budget = module.LOCATE_BUDGET_S
+        saved_inverted = module.INVERTED_MIN_S
+        # A miss must not walk whole-window fallbacks. Region stages still run.
+        setattr(module, "LOCATE_BUDGET_S", 0)
+        setattr(module, "INVERTED_MIN_S", 0)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                frozen = Path(tmp) / "frozen-desc.png"
+                module._write_png(frozen, width, height, rgb)
+                tops = module.name_order_tops(frozen, LABEL_111, LABEL_444, rows_region)
+        finally:
+            setattr(module, "LOCATE_BUDGET_S", saved_budget)
+            setattr(module, "INVERTED_MIN_S", saved_inverted)
         self.assertIsNone(
             tops,
             f"frozen descending frame with only the status-line 444 was accepted: {tops}",
         )
 
     def test_status_line_box_from_a_fallback_is_rejected(self):
-        rows_region, row_111 = _rows_region_from_asc()
+        rows_region = self.rows_region
+        row_111 = self.row_111
         status = (70, 784, 300, 794)
         self.assertFalse(_wholly_inside(status, rows_region))
 
