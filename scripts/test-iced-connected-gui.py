@@ -64,6 +64,10 @@ class MonitoredServer(fixture.NativeServer):
         return MonitoredSession(self.events)
 
 
+# Exists only to prove the tour fails when the echo is missing.
+# Must not suppress any other echo.
+TOUR_WITHHOLD_ECHO = os.environ.get("INSPIRUM_GUI_TOUR_WITHHOLD_ECHO") == "1"
+
 
 async def monitored_shell(
     stdin: asyncssh.SSHReader[str],
@@ -123,6 +127,8 @@ async def monitored_shell(
                     events.write("REMOTE_CURSOR_LEFT")
                     stdout.write("NATIVE_REMOTE_CURSOR_LEFT\r\n")
                 elif line.startswith("echo:"):
+                    if line == "echo:TOUR_PROBE" and TOUR_WITHHOLD_ECHO:
+                        continue
                     answer = f"NATIVE_ECHO:{line[5:]}"
                     if line in (
                         "echo:TOUR_PROBE",
@@ -1084,10 +1090,11 @@ TOUR = os.environ.get("INSPIRUM_GUI_TOUR") == "1"
 
 
 async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app_log: Path) -> int:
-    """Best-effort LIGHT-theme screenshot tour (INSPIRUM_GUI_TOUR=1).
+    """LIGHT-theme screenshot tour (INSPIRUM_GUI_TOUR=1).
 
-    Only the window and a real SSH session are asserted; every other step
-    logs a warning and continues. Coordinates assume the 1280x800 layout.
+    The window, a real SSH session, and the terminal echo probe are required.
+    Every other step logs a warning and continues. Coordinates assume the
+    1280x800 layout.
     """
     tour_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
@@ -1170,19 +1177,35 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
     await asyncio.sleep(2)
     shot("tour-05-terminal.png")
 
-    async def s06():
-        # Best-effort: a missed echo must not fail the screenshot tour.
-        # wait_for raises RuntimeError, which step() already logs as WARNING.
-        command("xdotool", "windowfocus", window, env=env)
-        command("xdotool", "type", "--delay", "20", "echo:TOUR_PROBE", env=env)
-        key("Return")
+    # Required: a missed echo fails the tour. INSPIRUM_GUI_TOUR_WITHHOLD_ECHO=1
+    # makes the fixture stay silent so this path can be proven.
+    command("xdotool", "windowfocus", window, env=env)
+    probe_typed_at = time.time()
+    command("xdotool", "type", "--delay", "20", "echo:TOUR_PROBE", env=env)
+    key("Return")
+    try:
         await wait_for(
             lambda: "NATIVE_ECHO:TOUR_PROBE" in log_text().splitlines(),
             "tour shell answered NATIVE_ECHO:TOUR_PROBE",
         )
-        await asyncio.sleep(1)
-        shot("tour-06-terminal-output.png")
-    await step("terminal-echo", s06)
+    except RuntimeError:
+        print(
+            "tour: FAILED terminal did not answer echo:TOUR_PROBE "
+            + log_text()[-800:],
+            flush=True,
+        )
+        return 1
+    await asyncio.sleep(1)
+    echo_shot = tour_dir / "tour-06-terminal-output.png"
+    if echo_shot.exists():
+        echo_shot.unlink()
+    shot("tour-06-terminal-output.png")
+    if not echo_shot.is_file() or echo_shot.stat().st_mtime <= probe_typed_at:
+        print(
+            "tour: FAILED tour-06-terminal-output.png missing or not newer than the echo probe",
+            flush=True,
+        )
+        return 1
 
     async def s07():
         key("ctrl+shift+r")
@@ -1507,11 +1530,101 @@ async def main() -> int:
                 ):
                     raise RuntimeError("menu, Sender or dock gear input leaked into SSH PTY")
 
+                # Ctrl+Shift+J toggles an auxiliary shell: a second independent
+                # SSH pane for the same profile. With a menu open the chord must
+                # not close or reopen it; Escape alone must restore the chord
+                # (do not click the terminal before the closing press). Leave
+                # probe_state["phase"] as None: the auxiliary session's own
+                # startup output is not keyboard leakage. Fails while a menu-open
+                # chord still disconnects the shell.
+                def count(marker: str) -> int:
+                    return sum(
+                        1
+                        for line in events.path.read_text(encoding="utf-8").splitlines()
+                        if line == marker
+                    )
+
+                def press_ctrl_shift_j() -> None:
+                    command(
+                        "xdotool", "windowfocus", window, "key",
+                        "--clearmodifiers", "ctrl+shift+j", env=env,
+                    )
+
+                command(
+                    "xdotool", "windowfocus", window, "mousemove", "--window", window,
+                    "640", "280", "click", "1", env=env,
+                )
+                await asyncio.sleep(.3)
+                started0 = count("SESSION_STARTED")
+                closed0 = count("SESSION_CLOSED:clean")
+                press_ctrl_shift_j()
+                await wait_for(
+                    lambda: count("SESSION_STARTED") == started0 + 1,
+                    "auxiliary shell opened by Ctrl+Shift+J",
+                )
+                await asyncio.sleep(1)
+                screenshot(window, destination / "connected-aux-shell-open.png", env)
+
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    "30", "16", "click", "1", env=env,
+                )
+                await asyncio.sleep(.4)
+                press_ctrl_shift_j()
+                await asyncio.sleep(min(8, 2 * TIME_SCALE))
+                if (
+                    count("SESSION_CLOSED:clean") != closed0
+                    or count("SESSION_STARTED") != started0 + 1
+                ):
+                    raise RuntimeError(
+                        "Ctrl+Shift+J under the Session menu closed or reopened the auxiliary shell"
+                    )
+                screenshot(
+                    window, destination / "connected-aux-shell-session-menu.png", env,
+                )
+                command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                await asyncio.sleep(.4)
+
+                # Opening the auxiliary shell splits the workspace, but the
+                # bottom dock is unchanged: the gear probe's point still hits.
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    str(gear_width - 40), "552", "click", "1", env=env,
+                )
+                await asyncio.sleep(.4)
+                press_ctrl_shift_j()
+                await asyncio.sleep(min(8, 2 * TIME_SCALE))
+                if (
+                    count("SESSION_CLOSED:clean") != closed0
+                    or count("SESSION_STARTED") != started0 + 1
+                ):
+                    raise RuntimeError(
+                        "Ctrl+Shift+J under the dock gear menu closed or reopened the auxiliary shell"
+                    )
+                screenshot(
+                    window, destination / "connected-aux-shell-gear-menu.png", env,
+                )
+                command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                await asyncio.sleep(.4)
+
+                # No terminal click: the shortcut must work again after Escape.
+                press_ctrl_shift_j()
+                await wait_for(
+                    lambda: count("SESSION_CLOSED:clean") == closed0 + 1,
+                    "auxiliary shell closed by Ctrl+Shift+J after the menu was dismissed",
+                )
+                await asyncio.sleep(1)
+
                 # These shortcuts are intentionally exercised through native
                 # Iced keyboard events, never a direct Rust state transition.
+                # The auxiliary shell already added one SESSION_STARTED and one
+                # clean close, so later lifetime counts are relative to here.
+                started_before_split = count("SESSION_STARTED")
+                shells_ended_before_split = count("SHELL_HANDLER_ENDED")
+                shell_eof_before_split = count("SHELL_STREAM_EOF")
                 command("xdotool", "windowfocus", window, "key", "--clearmodifiers", "ctrl+shift+r", env=env)
                 await wait_for(
-                    lambda: events.path.read_text(encoding="utf-8").count("SESSION_STARTED") >= 2,
+                    lambda: count("SESSION_STARTED") >= started_before_split + 1,
                     "second real SSH pane via Ctrl+Shift+R",
                 )
                 await asyncio.sleep(1)
@@ -2039,7 +2152,14 @@ async def main() -> int:
                 event_log = events.path.read_text(encoding="utf-8")
                 if "SHELL_PTY_RESIZE" not in event_log:
                     raise RuntimeError("connected SSH fixture never observed a live PTY resize")
-                if "SHELL_HANDLER_ENDED" in event_log or "SHELL_STREAM_EOF" in event_log:
+                # The auxiliary-shell probe closes one shell on purpose. Anything
+                # beyond that baseline is an unexpected exit during the rest.
+                if (
+                    sum(line == "SHELL_HANDLER_ENDED" for line in event_log.splitlines())
+                    > shells_ended_before_split
+                    or sum(line == "SHELL_STREAM_EOF" for line in event_log.splitlines())
+                    > shell_eof_before_split
+                ):
                     raise RuntimeError(
                         "SSH terminal unexpectedly exited during split/dock/focus acceptance: "
                         + repr(event_log[-900:])
@@ -2057,8 +2177,10 @@ async def main() -> int:
                     )
                 ):
                     raise RuntimeError("Session menu, Sender or dock gear keyboard input leaked to SSH")
-                if event_log.count("AUTH_ACCEPT:native-smoke") < 2:
-                    raise RuntimeError("two distinct SSH panes were not authenticated")
+                if event_log.count("AUTH_ACCEPT:native-smoke") < 3:
+                    raise RuntimeError(
+                        "three sessions (main, auxiliary, split) were not authenticated"
+                    )
                 (destination / "connected-acceptance.txt").write_text(
                     "PASS: two authenticated independent OpenSSH PTYs through production Iced\n"
                     "PASS: native Files dock established actual isolated SSH SFTP subsystem\n"
@@ -2079,6 +2201,7 @@ async def main() -> int:
                     "PASS: terminal owned the keyboard before chrome menu probes\n"
                     "PASS: Session menu, Sender and dock gear consumed typing, Return and Escape without SSH input\n"
                     "PASS: shell answered AFTER_MENU, AFTER_SENDER_ESCAPE and AFTER_GEAR without terminal re-click\n"
+                    "PASS: Ctrl+Shift+J under the Session and dock gear menus left the auxiliary SSH shell connected; it closed it after Escape\n"
                     "PASS: privacy-locked and free-type synthetic text never reached SSH\n"
                     "All keys generated in isolated temporary fixture; no real host or credential.\n",
                     encoding="utf-8",
