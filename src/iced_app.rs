@@ -1426,9 +1426,10 @@ fn next_file_sort(
 
 /// Values a file-table row can be ordered by.
 ///
-/// `ModifiedKey` is the timestamp or string the entry already stores. Local
-/// rows use `SystemTime`. Remote rows use the raw `ls -l` string, not the
-/// formatted `YYYY/MM/DD` display and not a parsed date.
+/// `ModifiedKey` is an `Ord` value derived from the timestamp the entry
+/// already stores. Local rows use `SystemTime`. Remote rows parse the raw
+/// `ls -l` date into `(year, month, day, hour, minute)` so Date Modified is
+/// chronological. The column still displays the formatted date, not this key.
 trait FileSortEntry {
     type ModifiedKey: Ord;
 
@@ -1479,7 +1480,7 @@ impl FileSortEntry for LocalFileEntry {
 }
 
 impl FileSortEntry for sftp::RemoteEntry {
-    type ModifiedKey = Option<String>;
+    type ModifiedKey = Option<(i32, u32, u32, u32, u32)>;
 
     fn file_is_dir(&self) -> bool {
         self.is_dir
@@ -1510,7 +1511,10 @@ impl FileSortEntry for sftp::RemoteEntry {
     }
 
     fn file_modified_key(&self) -> Self::ModifiedKey {
-        self.modified.clone()
+        let now = chrono::Local::now().date_naive();
+        self.modified
+            .as_deref()
+            .and_then(|raw| ls_modified_sort_key(raw, now))
     }
 }
 
@@ -1582,6 +1586,50 @@ fn sort_file_entries<T: FileSortEntry>(entries: &mut [T], column: FileSortColumn
         };
         primary.then_with(|| cmp_ignore_case(left.file_name(), right.file_name()))
     });
+}
+
+/// Chronological key for an `ls -l` date (`Mon D HH:MM` or `Mon D YYYY`).
+///
+/// `ls` omits the year for files modified within about the last six months.
+/// That form uses `now`'s year unless the month and day are still in the
+/// future, in which case it is the previous year. A `YYYY` form has no time
+/// and sorts at 00:00. Unparseable text is `None`, which sorts before every
+/// real timestamp; the caller still breaks those ties by name.
+fn ls_modified_sort_key(raw: &str, now: chrono::NaiveDate) -> Option<(i32, u32, u32, u32, u32)> {
+    use chrono::Datelike;
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let mut fields = raw.split_whitespace();
+    let month_name = fields.next()?;
+    let day = fields.next()?;
+    let last = fields.next()?;
+    if fields.next().is_some() {
+        return None;
+    }
+    let month = MONTHS
+        .iter()
+        .position(|name| *name == month_name)
+        .map(|index| index as u32 + 1)?;
+    let day: u32 = day.parse().ok()?;
+    let (year, hour, minute) = if let Some((hour, minute)) = last.split_once(':') {
+        let hour: u32 = hour.parse().ok()?;
+        let minute: u32 = minute.parse().ok()?;
+        if hour > 23 || minute > 59 {
+            return None;
+        }
+        let mut year = now.year();
+        if chrono::NaiveDate::from_ymd_opt(year, month, day)? > now {
+            year -= 1;
+        }
+        chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+        (year, hour, minute)
+    } else {
+        let year: i32 = last.parse().ok()?;
+        chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+        (year, 0, 0)
+    };
+    Some((year, month, day, hour, minute))
 }
 
 fn file_listing_row<'a>(
@@ -11863,7 +11911,7 @@ mod tests {
     }
 
     #[test]
-    fn file_sort_dates_use_stored_timestamp_or_raw_ls_string() {
+    fn file_sort_dates_use_stored_timestamp_or_chronological_ls_date() {
         let earlier = std::time::SystemTime::UNIX_EPOCH;
         let later = earlier + std::time::Duration::from_secs(60);
         let mut local = vec![
@@ -11873,17 +11921,16 @@ mod tests {
         sort_file_entries(&mut local, FileSortColumn::DateModified, true);
         assert_eq!(listing_names(&local), ["earlier", "later"]);
 
-        // Remote dates are the raw `ls -l` strings. "Dec" < "Jan"
-        // lexicographically, which is not chronological.
+        // "Jan" < "Oct" as text, but January 2024 is after October 2023.
         let mut remote = vec![
             {
                 let mut entry = sftp::RemoteEntry::new("jan", false, Some(1));
-                entry.modified = Some("Jan 15 10:00".into());
+                entry.modified = Some("Jan 2 2024".into());
                 entry
             },
             {
-                let mut entry = sftp::RemoteEntry::new("dec", false, Some(1));
-                entry.modified = Some("Dec 01 2020".into());
+                let mut entry = sftp::RemoteEntry::new("oct", false, Some(1));
+                entry.modified = Some("Oct 18 2023".into());
                 entry
             },
         ];
@@ -11893,7 +11940,78 @@ mod tests {
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect::<Vec<_>>(),
-            ["dec", "jan"]
+            ["oct", "jan"]
+        );
+    }
+
+    #[test]
+    fn ls_modified_sort_key_december_is_previous_year_in_mid_january() {
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let december = ls_modified_sort_key("Dec 30 10:00", now).unwrap();
+        let january = ls_modified_sort_key("Jan 02 09:00", now).unwrap();
+        assert_eq!(december, (2025, 12, 30, 10, 0));
+        assert_eq!(january, (2026, 1, 2, 9, 0));
+        assert!(december < january);
+    }
+
+    #[test]
+    fn ls_modified_sort_key_year_form_sorts_before_recent_time_form() {
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        let march = ls_modified_sort_key("Mar 3 2024", now).unwrap();
+        let october = ls_modified_sort_key("Oct 18 09:41", now).unwrap();
+        assert_eq!(march, (2024, 3, 3, 0, 0));
+        assert_eq!(october, (2026, 10, 18, 9, 41));
+        assert!(march < october);
+    }
+
+    #[test]
+    fn ls_modified_sort_key_accepts_single_and_double_digit_days() {
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        assert_eq!(
+            ls_modified_sort_key("Mar 3 2024", now),
+            Some((2024, 3, 3, 0, 0))
+        );
+        assert_eq!(
+            ls_modified_sort_key("Mar 03 2024", now),
+            Some((2024, 3, 3, 0, 0))
+        );
+        // "Oct 18" < "Oct 8" as text; the day numbers sort the other way.
+        let single = ls_modified_sort_key("Oct 8 09:41", now);
+        let double = ls_modified_sort_key("Oct 18 09:41", now);
+        assert_eq!(single, Some((2026, 10, 8, 9, 41)));
+        assert_eq!(double, Some((2026, 10, 18, 9, 41)));
+        assert!(single < double);
+    }
+
+    #[test]
+    fn ls_modified_sort_key_garbage_sorts_before_parsed_dates() {
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        assert_eq!(ls_modified_sort_key("not-a-date", now), None);
+        assert_eq!(ls_modified_sort_key("", now), None);
+
+        let mut remote = vec![
+            {
+                let mut entry = sftp::RemoteEntry::new("zeta", false, Some(1));
+                entry.modified = Some("Mar 3 2024".into());
+                entry
+            },
+            {
+                let mut entry = sftp::RemoteEntry::new("missing", false, Some(1));
+                entry
+            },
+            {
+                let mut entry = sftp::RemoteEntry::new("garbage", false, Some(1));
+                entry.modified = Some("not-a-date".into());
+                entry
+            },
+        ];
+        sort_file_entries(&mut remote, FileSortColumn::DateModified, true);
+        assert_eq!(
+            remote
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["garbage", "missing", "zeta"]
         );
     }
 
