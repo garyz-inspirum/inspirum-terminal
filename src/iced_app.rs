@@ -4,6 +4,7 @@
 //! The frontend uses the live PTY backend and preserves
 //! host-key, argv, paste, process-lifecycle, or transfer safeguards.
 mod terminal_ime;
+mod theme;
 mod tools;
 
 use crate::{
@@ -36,15 +37,39 @@ use std::{
     time::{Duration, Instant},
 };
 
-const BG: Color = Color::from_rgb8(14, 18, 25);
-const PANEL: Color = Color::from_rgb8(22, 29, 40);
-const ELEVATED: Color = Color::from_rgb8(30, 40, 55);
-const LINE: Color = Color::from_rgb8(48, 62, 81);
-const FG: Color = Color::from_rgb8(231, 237, 247);
-const MUTED: Color = Color::from_rgb8(163, 177, 196);
-const BLUE: Color = Color::from_rgb8(123, 176, 255);
-const GREEN: Color = Color::from_rgb8(113, 217, 171);
-const DANGER: Color = Color::from_rgb8(255, 138, 151);
+/// Fixed accent for marks drawn on the terminal canvas (link/IME underlines).
+/// The terminal keeps its own dark palette, independent of the chrome theme.
+const TERMINAL_ACCENT: Color = Color::from_rgb8(123, 176, 255);
+
+// Chrome colour lookups against the current WindTerm theme palette.
+fn bg() -> Color {
+    theme::palette().list
+}
+fn panel() -> Color {
+    theme::palette().dock
+}
+fn elevated() -> Color {
+    theme::palette().raised
+}
+fn line() -> Color {
+    theme::palette().border
+}
+fn fg() -> Color {
+    theme::palette().text
+}
+fn muted() -> Color {
+    theme::palette().muted
+}
+fn blue() -> Color {
+    theme::palette().accent
+}
+fn green() -> Color {
+    theme::palette().success
+}
+fn danger() -> Color {
+    theme::palette().danger
+}
+
 const TERMINAL_CELL_WIDTH: f32 = 8.4;
 const TERMINAL_CELL_HEIGHT: f32 = 18.0;
 const FILES_PAGE_SIZE: usize = 200;
@@ -300,27 +325,17 @@ fn local_navigation_scroll(key: &keyboard::Key, modifiers: keyboard::Modifiers) 
 }
 
 pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result {
+    theme::init_from_env();
     iced::application(
         move || App::boot(profiles_path.clone(), ssh_config.clone()),
         App::update,
         App::view,
     )
     .title("Inspirum Terminal")
-    .theme(|_: &App| {
-        Theme::custom(
-            "Inspirum",
-            iced::theme::Palette {
-                background: BG,
-                text: FG,
-                primary: BLUE,
-                success: GREEN,
-                warning: Color::from_rgb8(240, 190, 100),
-                danger: DANGER,
-            },
-        )
-    })
+    .theme(|_: &App| theme::iced_theme())
     .settings(iced::Settings {
-        default_text_size: iced::Pixels(14.0),
+        default_font: Font::MONOSPACE,
+        default_text_size: iced::Pixels(theme::metrics::UI_TEXT),
         ..Default::default()
     })
     .window(iced::window::Settings {
@@ -1115,7 +1130,7 @@ fn file_listing_header<'a>() -> Element<'a, Message> {
     let cell = |label: &'a str, width: f32| {
         text(label)
             .size(11)
-            .color(MUTED)
+            .color(muted())
             .font(Font::MONOSPACE)
             .width(width)
     };
@@ -2114,7 +2129,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                                 iced::Point::new(x, y + cell_height - 4.0),
                                 iced::Size::new(cell_width, 1.0),
                             ),
-                            BLUE,
+                            TERMINAL_ACCENT,
                         );
                     }
                     if cell.strikeout {
@@ -2138,7 +2153,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                                 iced::Point::new(x, y + cell_height - 3.0),
                                 iced::Size::new(cell_width, 2.0),
                             ),
-                            BLUE,
+                            TERMINAL_ACCENT,
                         );
                     }
                 }
@@ -5648,15 +5663,17 @@ impl App {
             // labels, SFTP paths and terminal scrollback.
             return center(
                 column![
-                    text("Workspace hidden").size(30).color(FG),
+                    text("Workspace hidden").size(30).color(fg()),
                     text("SSH connections and transfers continue while this window is hidden.")
                         .size(15)
-                        .color(MUTED),
+                        .color(muted()),
                     text("This is an in-app privacy curtain, not an OS lock or encryption.")
                         .size(12)
-                        .color(MUTED),
+                        .color(muted()),
                     action("Unlock workspace", Message::TogglePrivacyLock).style(primary),
-                    text("Shortcut: Ctrl/Cmd + Shift + L").size(12).color(BLUE),
+                    text("Shortcut: Ctrl/Cmd + Shift + L")
+                        .size(12)
+                        .color(blue()),
                 ]
                 .spacing(18)
                 .align_x(iced::Center),
@@ -5691,13 +5708,15 @@ impl App {
             return container(
                 column![
                     row![
-                        text("FOCUS MODE · Alt+Enter to exit").size(12).color(BLUE),
+                        text("FOCUS MODE · Alt+Enter to exit")
+                            .size(12)
+                            .color(blue()),
                         text(&self.tabs[self.active].profile.name)
                             .size(12)
-                            .color(MUTED),
+                            .color(muted()),
                         space::horizontal(),
                         if self.tools.sync.armed() {
-                            text("SYNC INPUT ARMED").size(12).color(DANGER)
+                            text("SYNC INPUT ARMED").size(12).color(danger())
                         } else {
                             text("").size(12)
                         },
@@ -5735,11 +5754,11 @@ impl App {
 
         let header = container(
             row![
-                container(text(">_").size(21).color(BLUE))
+                container(text(">_").size(21).color(blue()))
                     .padding([3, 8])
                     .style(card),
                 text("Inspirum").size(19),
-                text("Native SSH workspace").size(12).color(MUTED),
+                text("Native SSH workspace").size(12).color(muted()),
                 space::horizontal(),
                 action(
                     "Tools",
@@ -5761,27 +5780,27 @@ impl App {
 
         let footer = container(
             row![
-                text("ICED").size(12).color(BLUE),
+                text("ICED").size(12).color(blue()),
                 text(if self.tools.sync.armed() {
                     format!("SYNC ARMED · {} panes", self.tools.sync.selected_count())
                 } else {
                     String::new()
                 })
                 .size(12)
-                .color(DANGER),
-                text(&self.status).size(12).color(MUTED),
+                .color(danger()),
+                text(&self.status).size(12).color(muted()),
                 space::horizontal(),
                 if active_transfers > 0 {
                     text(format!("{active_transfers} active transfer(s)"))
                         .size(12)
-                        .color(BLUE)
+                        .color(blue())
                 } else {
                     text("").size(12)
                 },
                 if running_tunnels > 0 {
                     text(format!("{running_tunnels} tunnel session(s)"))
                         .size(12)
-                        .color(GREEN)
+                        .color(green())
                 } else {
                     text("").size(12)
                 },
@@ -5795,7 +5814,7 @@ impl App {
                     }
                 ))
                 .size(12)
-                .color(MUTED),
+                .color(muted()),
             ]
             .spacing(12)
             .align_y(iced::Center),
@@ -5812,7 +5831,7 @@ impl App {
 
         if let Some(error) = &self.load_error {
             body = body.push(
-                container(text(error).size(12).color(DANGER))
+                container(text(error).size(12).color(danger()))
                     .padding([8, 16])
                     .width(Fill)
                     .style(surface),
@@ -5844,9 +5863,11 @@ impl App {
                     action(">>", Message::ToggleSidebar).width(Fill),
                     action("+", Message::New).style(primary).width(Fill),
                     space::vertical().height(6),
-                    text("SSH").size(10).color(BLUE),
+                    text("SSH").size(10).color(blue()),
                     space::vertical(),
-                    text(self.profiles.len().to_string()).size(11).color(MUTED),
+                    text(self.profiles.len().to_string())
+                        .size(11)
+                        .color(muted()),
                 ]
                 .spacing(10)
                 .align_x(iced::Center),
@@ -5860,9 +5881,11 @@ impl App {
 
         let mut list = column![
             row![
-                text("SESSIONS").size(12).color(MUTED),
+                text("SESSIONS").size(12).color(muted()),
                 space::horizontal(),
-                text(self.profiles.len().to_string()).size(12).color(MUTED),
+                text(self.profiles.len().to_string())
+                    .size(12)
+                    .color(muted()),
                 action("<<", Message::ToggleSidebar),
             ]
             .spacing(6)
@@ -5899,8 +5922,9 @@ impl App {
                 profile.folder.as_str()
             };
             if current_group != group {
-                list = list
-                    .push(container(text(group.to_owned()).size(12).color(MUTED)).padding([8, 2]));
+                list = list.push(
+                    container(text(group.to_owned()).size(12).color(muted())).padding([8, 2]),
+                );
                 current_group = group.to_owned();
             }
 
@@ -5918,13 +5942,13 @@ impl App {
                         text(profile.name.clone()).size(14),
                         space::horizontal(),
                         if profile.favorite {
-                            text("PIN").size(10).color(GREEN)
+                            text("PIN").size(10).color(green())
                         } else {
-                            text("SSH").size(10).color(BLUE)
+                            text("SSH").size(10).color(blue())
                         }
                     ]
                     .spacing(4),
-                    text(destination).size(12).color(MUTED),
+                    text(destination).size(12).color(muted()),
                 ]
                 .spacing(5),
             )
@@ -5941,7 +5965,7 @@ impl App {
         }
 
         if count == 0 {
-            list = list.push(text("No matching saved sessions").color(MUTED));
+            list = list.push(text("No matching saved sessions").color(muted()));
         } else if count < matches {
             list = list.push(
                 action(
@@ -5957,7 +5981,7 @@ impl App {
                 scrollable(list).height(Fill),
                 text("Saved profiles are read from the existing Inspirum profile store.")
                     .size(12)
-                    .color(MUTED)
+                    .color(muted())
             ]
             .spacing(16),
         )
@@ -5994,13 +6018,13 @@ impl App {
                         row![
                             column![
                                 text(profile.name.clone()).size(14),
-                                text(destination).size(11).color(MUTED),
+                                text(destination).size(11).color(muted()),
                             ]
                             .spacing(2),
                             space::horizontal(),
                             text(if profile.favorite { "PIN" } else { "SSH" })
                                 .size(10)
-                                .color(if profile.favorite { GREEN } else { BLUE }),
+                                .color(if profile.favorite { green() } else { blue() }),
                         ]
                         .align_y(iced::Center),
                     )
@@ -6014,15 +6038,15 @@ impl App {
             let saved: Element<'_, Message> = if self.profiles.is_empty() {
                 text("No saved SSH sessions yet.")
                     .size(12)
-                    .color(MUTED)
+                    .color(muted())
                     .into()
             } else {
                 column![
-                    text("SAVED SESSIONS").size(11).color(MUTED),
+                    text("SAVED SESSIONS").size(11).color(muted()),
                     saved,
                     text("Use the session sidebar for the complete library, folders and search.")
                         .size(11)
-                        .color(MUTED),
+                        .color(muted()),
                 ]
                 .spacing(8)
                 .into()
@@ -6030,11 +6054,11 @@ impl App {
 
             return center(
                 column![
-                    text(">_").size(56).color(BLUE),
+                    text(">_").size(56).color(blue()),
                     text("Your workspace, ready.").size(30),
                     text("Open a saved session or create a new connection.")
                         .size(16)
-                        .color(MUTED),
+                        .color(muted()),
                     space::vertical().height(8),
                     row![
                         action("+  New connection", Message::New).style(primary),
@@ -6046,7 +6070,7 @@ impl App {
                     space::vertical().height(8),
                     text("The Iced shell uses the production OpenSSH PTY backend.")
                         .size(12)
-                        .color(MUTED),
+                        .color(muted()),
                 ]
                 .spacing(12)
                 .align_x(iced::Center),
@@ -6069,11 +6093,11 @@ impl App {
                 .copied()
                 .unwrap_or_default();
             let color = match label {
-                crate::tab_management::TabVisualLabel::None => MUTED,
-                crate::tab_management::TabVisualLabel::Blue => BLUE,
-                crate::tab_management::TabVisualLabel::Green => GREEN,
+                crate::tab_management::TabVisualLabel::None => muted(),
+                crate::tab_management::TabVisualLabel::Blue => blue(),
+                crate::tab_management::TabVisualLabel::Green => green(),
                 crate::tab_management::TabVisualLabel::Amber => Color::from_rgb8(245, 190, 80),
-                crate::tab_management::TabVisualLabel::Red => DANGER,
+                crate::tab_management::TabVisualLabel::Red => danger(),
             };
             tabs = tabs.push(
                 container(
@@ -6100,7 +6124,7 @@ impl App {
         tabs = tabs.push(action("+", Message::New));
 
         let toolbar = row![
-            text("LIVE SSH").size(12).color(GREEN),
+            text("LIVE SSH").size(12).color(green()),
             space::horizontal(),
             action(
                 if self
@@ -6195,19 +6219,19 @@ impl App {
         pane_grid(&tab.panes, |id, pane, _| {
             let focused = tab.focus == id;
             let state = if pane.exited {
-                ("EXITED", MUTED)
+                ("EXITED", muted())
             } else if pane.error.is_some() {
-                ("ERROR", DANGER)
+                ("ERROR", danger())
             } else if pane.terminal.is_some() {
-                ("CONNECTED", GREEN)
+                ("CONNECTED", green())
             } else {
-                ("CONNECTING", BLUE)
+                ("CONNECTING", blue())
             };
             let title = pane_grid::TitleBar::new(
                 row![
                     text(if pane.auxiliary_shell { "AUX SHELL" } else { "PTY" })
                         .size(10)
-                        .color(if pane.auxiliary_shell { BLUE } else { MUTED }),
+                        .color(if pane.auxiliary_shell { blue() } else { muted() }),
                     text(if self.free_type.contains_key(&pane.id) {
                         "FREE TYPE"
                     } else if self.local_navigation.contains(&pane.id) {
@@ -6220,7 +6244,7 @@ impl App {
                         "SSH"
                     })
                     .size(11)
-                    .color(if focused { BLUE } else { MUTED }),
+                    .color(if focused { blue() } else { muted() }),
                     text(
                         pane.terminal_title
                             .as_deref()
@@ -6275,12 +6299,12 @@ impl App {
 
             let terminal_body: Element<'_, Message> = if let Some(error) = &pane.error {
                 column![
-                    text("Unable to start SSH session").size(16).color(DANGER),
-                    text(error).size(13).color(MUTED),
+                    text("Unable to start SSH session").size(16).color(danger()),
+                    text(error).size(13).color(muted()),
                     space::vertical().height(8),
                     text("The saved profile was not altered.")
                         .size(12)
-                        .color(MUTED),
+                        .color(muted()),
                 ]
                 .spacing(10)
                 .width(Fill)
@@ -6318,7 +6342,7 @@ impl App {
                 text(transcript)
                     .font(Font::MONOSPACE)
                     .size(15)
-                    .color(FG)
+                    .color(fg())
                     .width(Fill)
                     .height(Fill)
                     .into()
@@ -6343,7 +6367,7 @@ impl App {
                         column![
                             text("FREE TYPE · local editable draft · remote input suspended · Ctrl/Cmd+Shift+E")
                                 .size(11)
-                                .color(BLUE),
+                                .color(blue()),
                             text_editor(draft)
                                 .id(free_type_editor_id(pane_terminal_id))
                                 .placeholder("Compose here; Send is always explicit")
@@ -6356,7 +6380,7 @@ impl App {
                                 action("Discard", Message::FreeTypeDiscard(pane.id)),
                                 text("Multiline still requires paste confirmation.")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                             ]
                             .spacing(8)
                             .align_y(iced::Center),
@@ -6374,7 +6398,7 @@ impl App {
                     terminal_view,
                     text("REMOTE KEYS · real SSH key input · h/j/k/l · 0/$ · u/d · Esc exits")
                         .size(11)
-                        .color(BLUE),
+                        .color(blue()),
                     row![
                         action("Left", Message::RemoteCursorPress(pane.id, RemoteCursorKey::Left)),
                         action("Up", Message::RemoteCursorPress(pane.id, RemoteCursorKey::Up)),
@@ -6412,11 +6436,12 @@ impl App {
     fn file_listing_panels(&self) -> (Element<'_, Message>, Element<'_, Message>) {
         let mut local_list = column![file_listing_header()].spacing(3);
         if self.files.local_loading {
-            local_list = local_list.push(text("Loading local directory...").size(12).color(MUTED));
+            local_list =
+                local_list.push(text("Loading local directory...").size(12).color(muted()));
         } else if let Some(error) = &self.files.local_error {
-            local_list = local_list.push(text(error).size(12).color(DANGER));
+            local_list = local_list.push(text(error).size(12).color(danger()));
         } else if self.files.local_entries.is_empty() {
-            local_list = local_list.push(text("Directory is empty.").size(12).color(MUTED));
+            local_list = local_list.push(text("Directory is empty.").size(12).color(muted()));
         } else {
             for entry in self
                 .files
@@ -6470,11 +6495,11 @@ impl App {
         let mut remote_list = column![file_listing_header()].spacing(3);
         if self.files.remote_loading {
             remote_list =
-                remote_list.push(text("Loading remote directory...").size(12).color(MUTED));
+                remote_list.push(text("Loading remote directory...").size(12).color(muted()));
         } else if let Some(error) = &self.files.remote_error {
-            remote_list = remote_list.push(text(error).size(12).color(DANGER));
+            remote_list = remote_list.push(text(error).size(12).color(danger()));
         } else if self.files.remote_entries.is_empty() {
-            remote_list = remote_list.push(text("Directory is empty.").size(12).color(MUTED));
+            remote_list = remote_list.push(text("Directory is empty.").size(12).color(muted()));
         } else {
             for entry in self
                 .files
@@ -6534,7 +6559,7 @@ impl App {
         let local_panel = container(
             column![
                 row![
-                    text("LOCAL").size(11).color(MUTED),
+                    text("LOCAL").size(11).color(muted()),
                     text_input("Local directory path", &self.files.local_path_input)
                         .size(12)
                         .on_input(Message::FilesLocalPathInput)
@@ -6562,7 +6587,7 @@ impl App {
         let remote_panel = container(
             column![
                 row![
-                    text("REMOTE").size(11).color(BLUE),
+                    text("REMOTE").size(11).color(blue()),
                     text_input("Remote directory path", &self.files.remote_path_input)
                         .size(12)
                         .on_input(Message::FilesRemotePathInput)
@@ -6685,9 +6710,9 @@ impl App {
                             .size(11)
                             .color(
                                 if job.state == TransferJobState::Failed {
-                                    DANGER
+                                    danger()
                                 } else {
-                                    MUTED
+                                    muted()
                                 }
                             ),
                         ]
@@ -6703,8 +6728,11 @@ impl App {
             );
         }
         if visible_transfers == 0 {
-            transfer_list =
-                transfer_list.push(text("No transfers for this session.").size(11).color(MUTED));
+            transfer_list = transfer_list.push(
+                text("No transfers for this session.")
+                    .size(11)
+                    .color(muted()),
+            );
         }
 
         let actions_panel: Element<'_, Message> = scrollable(
@@ -6720,7 +6748,7 @@ impl App {
                 action("Delete remote", Message::FilesRequestDeleteRemote),
                 text("Destructive operations require confirmation.")
                     .size(11)
-                    .color(MUTED),
+                    .color(muted()),
             ]
             .spacing(8),
         )
@@ -6739,7 +6767,7 @@ impl App {
         let transfer_queue = match queue_viewport_height {
             Some(viewport) => container(
                 column![
-                    text("TRANSFER QUEUE").size(11).color(MUTED),
+                    text("TRANSFER QUEUE").size(11).color(muted()),
                     scrollable(transfer_list).height(viewport),
                 ]
                 .spacing(6),
@@ -6754,7 +6782,7 @@ impl App {
                     "TRANSFER QUEUE · {visible_transfers} for this session · enlarge the window to review"
                 ))
                 .size(11)
-                .color(MUTED),
+                .color(muted()),
             )
             .padding([4, 8])
             .width(Fill)
@@ -6763,14 +6791,14 @@ impl App {
 
         let content_spacing = if self.files_side_dock { 8 } else { 4 };
 
-        let target_label = text(format!("Target: {target}")).size(12).color(BLUE);
+        let target_label = text(format!("Target: {target}")).size(12).color(blue());
         let header: Element<'_, Message> = if self.files_side_dock {
             // The narrow side dock cannot fit the target beside the controls
             // without wrapping the Dock button label; give it its own line.
             column![
                 row![
                     text("Files").size(16),
-                    text(activity).size(11).color(MUTED),
+                    text(activity).size(11).color(muted()),
                     space::horizontal(),
                     action("Refresh", Message::FilesRefresh),
                     action("Dock bottom", Message::FilesToggleDockPosition),
@@ -6785,7 +6813,7 @@ impl App {
             row![
                 text("Files").size(16),
                 target_label,
-                text(activity).size(11).color(MUTED),
+                text(activity).size(11).color(muted()),
                 space::horizontal(),
                 action("Refresh", Message::FilesRefresh),
                 action("Dock right", Message::FilesToggleDockPosition),
@@ -6810,11 +6838,11 @@ impl App {
                     container(
                         column![
                             row![
-                                text(format!("EDIT · {}", editor.remote)).size(12).color(BLUE),
+                                text(format!("EDIT · {}", editor.remote)).size(12).color(blue()),
                                 if dirty {
-                                    text("MODIFIED").size(10).color(DANGER)
+                                    text("MODIFIED").size(10).color(danger())
                                 } else {
-                                    text("SAVED").size(10).color(GREEN)
+                                    text("SAVED").size(10).color(green())
                                 },
                                 space::horizontal(),
                                 action(
@@ -6834,7 +6862,7 @@ impl App {
                                     row![
                                         text("Remote file changed since open.")
                                             .size(12)
-                                            .color(DANGER),
+                                            .color(danger()),
                                         space::horizontal(),
                                         action(
                                             "Overwrite changed remote",
@@ -6856,7 +6884,7 @@ impl App {
                                     row![
                                         text("Discard unsaved editor changes?")
                                             .size(12)
-                                            .color(DANGER),
+                                            .color(danger()),
                                         space::horizontal(),
                                         action("Discard", Message::RemoteEditorDiscard)
                                             .style(button::danger),
@@ -6868,14 +6896,14 @@ impl App {
                                 .padding(8)
                                 .style(card)
                             } else if let Some(error) = &editor.error {
-                                container(text(error).size(11).color(DANGER))
+                                container(text(error).size(11).color(danger()))
                                     .padding(8)
                                     .style(card)
                             } else {
                                 container(
                                     text("Saving re-checks the remote contents and uses staged replacement; closing never uploads automatically.")
                                         .size(11)
-                                        .color(MUTED)
+                                        .color(muted())
                                 )
                                 .padding(4)
                             },
@@ -6911,7 +6939,7 @@ impl App {
     fn tunnels_view(&self) -> Element<'_, Message> {
         let mut tunnel_list = column![
             text("Tunnel").size(16),
-            text("Saved forwards").size(11).color(MUTED),
+            text("Saved forwards").size(11).color(muted()),
         ]
         .spacing(8);
 
@@ -6923,7 +6951,7 @@ impl App {
             tunnel_list = tunnel_list.push(
                 text("No tunnels yet. Use + on a profile to create one.")
                     .size(12)
-                    .color(MUTED),
+                    .color(muted()),
             );
         }
 
@@ -6934,7 +6962,11 @@ impl App {
                 .get(&key)
                 .cloned()
                 .unwrap_or(tunnels::Status::Stopped);
-            let status_color = if status.is_running() { GREEN } else { MUTED };
+            let status_color = if status.is_running() {
+                green()
+            } else {
+                muted()
+            };
             let mut group = column![
                 row![
                     text(truncate(&profile.name, 22)).size(13),
@@ -6967,7 +6999,7 @@ impl App {
                 let item = button(
                     column![
                         text(truncate(&row_data.label, 28)).size(13),
-                        text(truncate(&subtitle, 42)).size(10).color(MUTED),
+                        text(truncate(&subtitle, 42)).size(10).color(muted()),
                     ]
                     .spacing(2),
                 )
@@ -7041,10 +7073,10 @@ impl App {
 
             let destination = if edit.draft.kind == tunnels::ForwardKind::Dynamic {
                 column![
-                    text("Dynamic SOCKS tunnel").size(12).color(MUTED),
+                    text("Dynamic SOCKS tunnel").size(12).color(muted()),
                     text("SOCKS clients may send hostnames through the tunnel for remote resolution; there is no fixed destination host for -D.")
                         .size(11)
-                        .color(MUTED),
+                        .color(muted()),
                 ]
                 .spacing(5)
             } else {
@@ -7052,7 +7084,7 @@ impl App {
                     text("Destination").size(13),
                     row![
                         column![
-                            text("Host").size(11).color(MUTED),
+                            text("Host").size(11).color(muted()),
                             text_input("10.1.10.10", &edit.draft.destination_host)
                                 .on_input(Message::TunnelDraftDestinationHost)
                                 .padding(10)
@@ -7060,7 +7092,7 @@ impl App {
                         .spacing(3)
                         .width(Fill),
                         column![
-                            text("Port").size(11).color(MUTED),
+                            text("Port").size(11).color(muted()),
                             text_input("8000", &edit.draft.destination_port)
                                 .on_input(Message::TunnelDraftDestinationPort)
                                 .padding(10)
@@ -7078,11 +7110,11 @@ impl App {
                     text(title).size(20),
                     text("WindTerm-style structured tunnel editor")
                         .size(11)
-                        .color(MUTED),
-                    text("Type").size(11).color(MUTED),
+                        .color(muted()),
+                    text("Type").size(11).color(muted()),
                     kind_row,
                     column![
-                        text("Label").size(11).color(MUTED),
+                        text("Label").size(11).color(muted()),
                         text_input("e.g. database", &edit.draft.label)
                             .on_input(Message::TunnelDraftLabel)
                             .padding(10)
@@ -7091,7 +7123,7 @@ impl App {
                     text("Listen").size(13),
                     row![
                         column![
-                            text("Bind address").size(11).color(MUTED),
+                            text("Bind address").size(11).color(muted()),
                             text_input("127.0.0.1", &edit.draft.bind_address)
                                 .on_input(Message::TunnelDraftBind)
                                 .padding(10)
@@ -7099,7 +7131,7 @@ impl App {
                         .spacing(3)
                         .width(Fill),
                         column![
-                            text("Port").size(11).color(MUTED),
+                            text("Port").size(11).color(muted()),
                             text_input("2000", &edit.draft.listen_port)
                                 .on_input(Message::TunnelDraftListenPort)
                                 .padding(10)
@@ -7112,7 +7144,7 @@ impl App {
                         .label("Check requested listener is available before reporting Running"),
                     destination,
                     if !self.tunnel_notice.is_empty() {
-                        text(&self.tunnel_notice).size(12).color(DANGER)
+                        text(&self.tunnel_notice).size(12).color(danger())
                     } else {
                         text("").size(1)
                     },
@@ -7141,10 +7173,10 @@ impl App {
                     text("Tunnel").size(20),
                     text("Choose a tunnel on the left, or press + beside a profile to add one.")
                         .size(13)
-                        .color(MUTED),
+                        .color(muted()),
                     text("The editor exposes Local, Remote and Dynamic forwards as structured fields instead of raw OpenSSH -L/-R/-D strings.")
                         .size(11)
-                        .color(MUTED),
+                        .color(muted()),
                 ]
                 .spacing(8),
             )
@@ -7165,7 +7197,7 @@ impl App {
             .align_y(iced::Center),
             text("Manage saved SSH port forwards with a WindTerm-style list-and-editor workflow. Running tunnel processes are still isolated per profile and use OpenSSH ExitOnForwardFailure.")
                 .size(12)
-                .color(MUTED),
+                .color(muted()),
             row![
                 container(scrollable(tunnel_list).height(430))
                     .padding(10)
@@ -7198,7 +7230,7 @@ impl App {
                     } else {
                         "Saved through the existing validated, non-secret profile store."
                     })
-                    .color(MUTED),
+                    .color(muted()),
                     field(
                         "Session name",
                         "Optional; defaults to host",
@@ -7234,7 +7266,7 @@ impl App {
                         Message::Folder
                     ),
                     row![
-                        text("Favourite").size(13).color(MUTED),
+                        text("Favourite").size(13).color(muted()),
                         action(
                             if self.form.favorite { "Pinned" } else { "Not pinned" },
                             Message::Favorite(!self.form.favorite)
@@ -7248,7 +7280,7 @@ impl App {
                     .spacing(10)
                     .align_y(iced::Center),
                     column![
-                        text("Tags").size(13).color(MUTED),
+                        text("Tags").size(13).color(muted()),
                         row![
                             text_input("Add profile tag", &self.form.tag_input)
                                 .id("connection-tag")
@@ -7291,7 +7323,7 @@ impl App {
                     form = form.push(
                         container(
                             column![
-                                text("Host key verification").size(11).color(MUTED),
+                                text("Host key verification").size(11).color(muted()),
                                 row![
                                     action(
                                         "Ask on new/changed host",
@@ -7315,7 +7347,7 @@ impl App {
                                 .spacing(8),
                                 text("Host-key verification is always enabled. “Known hosts only” refuses unknown hosts; “Ask” keeps OpenSSH's interactive trust prompt.")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                                 field(
                                     "Identity file",
                                     "~/.ssh/id_ed25519 or other key path",
@@ -7324,26 +7356,26 @@ impl App {
                                 ),
                                 text("Authentication · Inherit follows SSH config defaults")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                                 policy_field("Public-key authentication", self.form.public_key_auth, Message::PublicKeyAuth),
                                 policy_field("Password authentication", self.form.password_auth, Message::PasswordAuth),
                                 policy_field("Keyboard-interactive authentication", self.form.keyboard_interactive_auth, Message::KeyboardInteractiveAuth),
                                 policy_field("Kerberos / GSSAPI authentication", self.form.gssapi_auth, Message::GssapiAuth),
                                 text("GSSAPI requires Kerberos tickets and a capable system OpenSSH; runtime-verified against an isolated Linux realm, not yet verified on Windows/macOS.")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                                 text("Session behavior · inherited unless explicitly overridden")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                                 policy_field("SSH agent forwarding", self.form.agent_forwarding, Message::AgentForwarding),
                                 policy_field("X11 forwarding", self.form.x11_forwarding, Message::X11Forwarding),
                                 policy_field("Compression", self.form.compression, Message::Compression),
                                 text("Only enable agent or X11 forwarding for remote hosts you trust; agent forwarding exposes signing capability to that host.")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                                 text("X11 requires a local X server/DISPLAY and remote X11 support; it has not been verified in Windows/macOS native CI.")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                                 text(forwarding_preflight_hint(
                                     self.form.agent_forwarding,
                                     self.form.x11_forwarding,
@@ -7361,7 +7393,7 @@ impl App {
                                 ),
                                 text("Structured proxy · mutually exclusive with ProxyJump")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                                 row![
                                     action(
                                         "None",
@@ -7415,7 +7447,7 @@ impl App {
                                         row![
                                             text("Proxy authentication")
                                                 .size(12)
-                                                .color(MUTED),
+                                                .color(muted()),
                                             action(
                                                 "None",
                                                 Message::ProxyAuth(ProxyAuth::None)
@@ -7439,14 +7471,14 @@ impl App {
                                         .align_y(iced::Center),
                                         text("Environment mode reads ephemeral proxy credentials at runtime; usernames/passwords are never saved in the profile.")
                                             .size(11)
-                                            .color(MUTED),
+                                            .color(muted()),
                                     ]
                                     .spacing(10)
                                     .into()
                                 },
                                 text("Algorithm policy · leave empty to inherit OpenSSH defaults")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                                 field(
                                     "Ciphers",
                                     "e.g. chacha20-poly1305@openssh.com,aes256-gcm@openssh.com",
@@ -7494,7 +7526,7 @@ impl App {
                                 ),
                                 text("Tunnels · OpenSSH forward specs separated by \";\"; started and stopped from the Tunnels panel")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                                 forward_editor(
                                     "Local forward (-L)",
                                     "127.0.0.1:8080:internal.example:80",
@@ -7515,7 +7547,7 @@ impl App {
                                 ),
                                 text("These values write directly into the existing Session::ssh model and use its current validation. Algorithm fields inherit OpenSSH/config defaults when empty; legacy algorithms still require explicit user input and retain the existing warning policy. Other advanced settings not exposed here yet are preserved when editing an existing profile.")
                                     .size(12)
-                                    .color(MUTED),
+                                    .color(muted()),
                             ]
                             .spacing(14)
                         )
@@ -7524,7 +7556,7 @@ impl App {
                     );
                 }
                 if let Some(error) = &self.form.error {
-                    form = form.push(text(error).color(DANGER));
+                    form = form.push(text(error).color(danger()));
                 }
                 form.push(
                     row![
@@ -7547,7 +7579,7 @@ impl App {
                     text("Command palette").size(24),
                     text("Application actions are [APP]. Snippets are [REMOTE TEXT] and only stage text; they never execute automatically.")
                         .size(12)
-                        .color(MUTED),
+                        .color(muted()),
                     text_input("Search actions or snippets", &self.command_query)
                         .id("command-query")
                         .on_input(Message::CommandQuery)
@@ -7556,7 +7588,7 @@ impl App {
                 .spacing(8);
 
                 if items.is_empty() {
-                    palette = palette.push(text("No matching commands.").size(12).color(MUTED));
+                    palette = palette.push(text("No matching commands.").size(12).color(muted()));
                 } else {
                     for (index, item) in items.iter().enumerate().take(12) {
                         let label = match item {
@@ -7571,7 +7603,7 @@ impl App {
                 }
 
                 let mut snippets = column![
-                    text("REUSABLE SNIPPETS").size(11).color(MUTED),
+                    text("REUSABLE SNIPPETS").size(11).color(muted()),
                     text_input("Snippet name", &self.snippet_name)
                         .on_input(Message::SnippetName)
                         .padding(9),
@@ -7612,7 +7644,7 @@ impl App {
                     palette,
                     container(
                         column![
-                            text("COMMAND SENDER · FOCUSED PANE").size(11).color(BLUE),
+                            text("COMMAND SENDER · FOCUSED PANE").size(11).color(blue()),
                             text_editor(&self.command_content)
                                 .placeholder("Remote-shell text to stage")
                                 .on_action(Message::CommandEdit)
@@ -7622,7 +7654,7 @@ impl App {
                                 action("Send explicitly", Message::CommandSend).style(primary),
                                 text("Multiline payloads still require the terminal paste confirmation.")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                             ]
                             .spacing(10)
                             .align_y(iced::Center),
@@ -7648,7 +7680,7 @@ impl App {
             Dialog::Close(index) => column![
                 text("Close this session?").size(24),
                 text("This disconnects the live SSH/PTY session and closes its Iced workspace tab.")
-                    .color(MUTED),
+                    .color(muted()),
                 row![
                     space::horizontal(),
                     action("Cancel", Message::CloseDialog),
@@ -7675,7 +7707,7 @@ impl App {
                     )),
                     text("Review carefully. Multiline terminal pastes can execute several commands immediately.")
                         .size(13)
-                        .color(MUTED),
+                        .color(muted()),
                     action(
                         if *normalize_line_endings {
                             "Line endings: normalize CRLF / CR to LF (enabled)"
@@ -7686,7 +7718,7 @@ impl App {
                     ),
                     text("The preview below shows the exact prepared text; nonprinting controls are escaped for review.")
                         .size(12)
-                        .color(MUTED),
+                        .color(muted()),
                     container(
                         scrollable(text(preview).font(Font::MONOSPACE).size(13))
                             .height(220)
@@ -7702,7 +7734,7 @@ impl App {
                     .spacing(10),
                     text("Keyboard: Enter confirms; Escape cancels.")
                         .size(12)
-                        .color(MUTED),
+                        .color(muted()),
                 ]
                 .spacing(16)
                 .into()
@@ -7725,12 +7757,12 @@ impl App {
                     text(format!(
                         "A file already exists at the {direction} destination."
                     ))
-                    .color(MUTED),
+                    .color(muted()),
                     container(
                         column![
-                            text("Source").size(11).color(MUTED),
+                            text("Source").size(11).color(muted()),
                             text(source).font(Font::MONOSPACE).size(12),
-                            text("Destination").size(11).color(MUTED),
+                            text("Destination").size(11).color(muted()),
                             text(destination).font(Font::MONOSPACE).size(12),
                         ]
                         .spacing(6)
@@ -7740,7 +7772,7 @@ impl App {
                     .style(card),
                     text("Replacing is explicit. The transfer still uses the existing validated SFTP path and verification/resume policy.")
                         .size(12)
-                        .color(MUTED),
+                        .color(muted()),
                     row![
                         space::horizontal(),
                         action("Cancel", Message::CloseDialog),
@@ -7759,7 +7791,7 @@ impl App {
                     .size(12),
                 text("This action is permanent. Directories are removed only when empty.")
                     .size(12)
-                    .color(MUTED),
+                    .color(muted()),
                 row![
                     space::horizontal(),
                     action("Cancel", Message::CloseDialog),
@@ -7783,7 +7815,7 @@ impl App {
                     "This action is permanent and uses the validated SFTP delete path."
                 })
                 .size(12)
-                .color(MUTED),
+                .color(muted()),
                 row![
                     space::horizontal(),
                     action("Cancel", Message::CloseDialog),
@@ -7809,7 +7841,7 @@ impl App {
                         .padding(11),
                     text("Names are validated by the existing SFTP/local-file policy before any operation is executed.")
                         .size(12)
-                        .color(MUTED),
+                        .color(muted()),
                     row![
                         space::horizontal(),
                         action("Cancel", Message::CloseDialog),
@@ -7823,9 +7855,9 @@ impl App {
             Dialog::ImportProfiles => column![
                 text("Import SSH profiles").size(24),
                 text("Merge a validated non-secret Inspirum profile JSON file into the current library. Existing profiles are never overwritten by import.")
-                    .color(MUTED),
+                    .color(muted()),
                 column![
-                    text("Import file").size(13).color(MUTED),
+                    text("Import file").size(13).color(muted()),
                     text_input("/path/to/profiles.json", &self.import_path)
                         .id("import-path")
                         .on_input(Message::ImportPath)
@@ -7835,7 +7867,7 @@ impl App {
                 .spacing(7),
                 text("Conflicting folder/name entries, invalid SSH policy, secret-bearing unsupported fields, oversized files, and malformed JSON are rejected before the active profile store is changed.")
                     .size(12)
-                    .color(MUTED),
+                    .color(muted()),
                 row![
                     space::horizontal(),
                     action("Cancel", Message::CloseDialog),
@@ -7849,7 +7881,7 @@ impl App {
             Dialog::About => column![
                 text("Inspirum Terminal · Iced").size(24),
                 text("Inspirum Terminal uses Iced for the desktop interface and the shared OpenSSH/PTY backend for terminal sessions.\n\nTools includes profiles and startup, tabs and saved split workspaces, synchronized input, history and logging, terminal appearance and pointer preferences, SSH trust and multiplexing, forwarding, tmux, SCP, snippets and sanitized support reports.\n\nThe Files pane provides graphical SFTP transfers and remote editing. Clipboard and command sends retain explicit confirmation and terminal identity checks.")
-                    .color(MUTED),
+                    .color(muted()),
                 action("Back to workspace", Message::CloseDialog).style(primary),
             ]
             .spacing(20)
@@ -7886,7 +7918,7 @@ fn forward_editor<'a>(
     message: fn(String) -> Message,
 ) -> Element<'a, Message> {
     column![
-        text(label).size(13).color(MUTED),
+        text(label).size(13).color(muted()),
         text_input(hint, value)
             .on_input(message)
             .padding(11)
@@ -7921,7 +7953,7 @@ fn field<'a>(
         _ => "connection-name",
     };
     column![
-        text(label).size(13).color(MUTED),
+        text(label).size(13).color(muted()),
         text_input(hint, value)
             .id(id)
             .on_input(message)
@@ -7938,7 +7970,7 @@ fn policy_field<'a>(
     message: fn(Option<bool>) -> Message,
 ) -> Element<'a, Message> {
     column![
-        text(label).size(12).color(MUTED),
+        text(label).size(12).color(muted()),
         row![
             action("Inherit", message(None)).style(if value.is_none() {
                 selected_button
@@ -7970,21 +8002,23 @@ fn action<'a>(label: impl Into<String>, message: Message) -> button::Button<'a, 
 }
 
 fn surface(_: &Theme) -> container::Style {
+    let p = theme::palette();
     container::Style {
-        background: Some(PANEL.into()),
-        text_color: Some(FG),
+        background: Some(p.chrome.into()),
+        text_color: Some(p.text),
         ..Default::default()
     }
 }
 
 fn card(_: &Theme) -> container::Style {
+    let p = theme::palette();
     container::Style {
-        background: Some(BG.into()),
-        text_color: Some(FG),
+        background: Some(p.dock.into()),
+        text_color: Some(p.text),
         border: Border {
-            color: LINE,
+            color: p.border,
             width: 1.0,
-            radius: 6.0.into(),
+            radius: 0.0.into(),
         },
         ..Default::default()
     }
@@ -7993,28 +8027,23 @@ fn card(_: &Theme) -> container::Style {
 fn active_card(theme: &Theme) -> container::Style {
     container::Style {
         border: Border {
-            color: BLUE,
+            color: blue(),
             width: 1.0,
-            radius: 6.0.into(),
+            radius: 0.0.into(),
         },
         ..card(theme)
     }
 }
 
-/// Resting fill and outline for every clickable control. A control must read
-/// as clickable before the pointer reaches it, so plain labels (no fill, no
-/// outline) and buttons (filled, outlined) never share the same look.
-const CONTROL_FILL: Color = Color::from_rgb8(26, 35, 48);
-const CONTROL_HOVER: Color = Color::from_rgb8(38, 50, 68);
-const CONTROL_PRESSED: Color = Color::from_rgb8(20, 27, 38);
-const CONTROL_BORDER: Color = Color::from_rgb8(72, 90, 115);
-
+/// Flat WindTerm text button: `list` fill with a 1px `border` outline at rest,
+/// so a control still reads as clickable before the pointer reaches it.
 fn quiet(_: &Theme, status: button::Status) -> button::Style {
+    let p = theme::palette();
     let (background, border_color, text_color) = match status {
-        button::Status::Hovered => (CONTROL_HOVER, BLUE, FG),
-        button::Status::Pressed => (CONTROL_PRESSED, BLUE, FG),
-        button::Status::Disabled => (ELEVATED, LINE, MUTED),
-        button::Status::Active => (CONTROL_FILL, CONTROL_BORDER, FG),
+        button::Status::Hovered => (p.hover, p.accent, p.text),
+        button::Status::Pressed => (p.selected_row, p.accent, p.text),
+        button::Status::Disabled => (p.dock, p.border, p.muted),
+        button::Status::Active => (p.list, p.border, p.text),
     };
     button::Style {
         background: Some(background.into()),
@@ -8022,26 +8051,20 @@ fn quiet(_: &Theme, status: button::Status) -> button::Style {
         border: Border {
             color: border_color,
             width: 1.0,
-            radius: 5.0.into(),
+            radius: 2.0.into(),
         },
         ..Default::default()
     }
 }
 
-/// Selected fill: the accent at low alpha over the elevated surface, so the
-/// state reads from the row itself while the text stays high contrast.
-const SELECTED_FILL: Color = Color::from_rgb8(38, 58, 88);
-
 fn selected_button(theme: &Theme, status: button::Status) -> button::Style {
     let base = quiet(theme, status);
+    let p = theme::palette();
     button::Style {
-        background: Some(SELECTED_FILL.into()),
-        // Keep selected text as bright as resting text; accent lives in the
-        // fill and outline. Accent-coloured text on an accent-tinted fill was
-        // the least readable state in the dock.
-        text_color: FG,
+        background: Some(p.selected_row.into()),
+        text_color: p.text,
         border: Border {
-            color: BLUE,
+            color: p.accent,
             ..base.border
         },
         ..base
@@ -8050,11 +8073,12 @@ fn selected_button(theme: &Theme, status: button::Status) -> button::Style {
 
 fn primary(theme: &Theme, status: button::Status) -> button::Style {
     let base = quiet(theme, status);
+    let p = theme::palette();
     button::Style {
-        background: Some(BLUE.into()),
-        text_color: BG,
+        background: Some(p.accent.into()),
+        text_color: Color::WHITE,
         border: Border {
-            color: BLUE,
+            color: p.accent,
             ..base.border
         },
         ..base
@@ -8081,9 +8105,12 @@ mod tests {
         let hover = super::quiet(&theme, Status::Hovered);
         assert_ne!(rest.border.color, hover.border.color);
         let selected = super::selected_button(&theme, Status::Active);
-        assert_eq!(selected.border.color, super::BLUE);
-        assert_eq!(selected.text_color, super::FG);
-        assert_eq!(super::primary(&theme, Status::Active).text_color, super::BG);
+        assert_eq!(selected.border.color, super::blue());
+        assert_eq!(selected.text_color, super::fg());
+        assert_eq!(
+            super::primary(&theme, Status::Active).text_color,
+            Color::WHITE
+        );
     }
 
     #[test]

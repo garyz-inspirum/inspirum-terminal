@@ -330,7 +330,7 @@ fn act(label: impl Into<String>, action: Action) -> iced::widget::Button<'static
 }
 fn input<'a>(label: &'a str, value: &'a str, field: Field) -> Element<'a, Message> {
     column![
-        text(label).size(12).color(MUTED),
+        text(label).size(12).color(muted()),
         text_input(label, value)
             .padding(8)
             .on_input(move |v| msg(Action::Set(field, v)))
@@ -1249,12 +1249,12 @@ impl App {
         column![
             nav,
             if self.tools.busy {
-                text("Working in background…").color(BLUE)
+                text("Working in background…").color(blue())
             } else {
                 text("")
             },
             content,
-            text(&self.status).size(12).color(MUTED),
+            text(&self.status).size(12).color(muted()),
             super::action("Close", Message::CloseDialog)
         ]
         .spacing(12)
@@ -1532,7 +1532,7 @@ impl App {
                 Field::Background
             ),
             text(a.contrast_warning().unwrap_or_default())
-                .color(DANGER)
+                .color(danger())
                 .size(12),
             row![
                 act("Block cursor", Action::Cursor(TerminalCursorStyle::Block)),
