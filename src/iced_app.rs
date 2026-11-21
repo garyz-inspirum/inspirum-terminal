@@ -5983,98 +5983,29 @@ impl App {
 
     fn workspace(&self) -> Element<'_, Message> {
         if self.tabs.is_empty() {
-            let mut saved = column![].spacing(6).width(360);
-            for (index, profile) in self
-                .profiles
-                .iter()
-                .enumerate()
-                .filter(|(_, profile)| profile.favorite)
-                .chain(
-                    self.profiles
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, profile)| !profile.favorite),
-                )
-                .take(4)
-            {
-                let destination = if profile.user.is_empty() {
-                    profile.host.clone()
-                } else {
-                    format!("{}@{}", profile.user, profile.host)
-                };
-                saved = saved.push(
-                    button(
-                        row![
-                            column![
-                                text(profile.name.clone()).size(14),
-                                text(destination).size(11).color(muted()),
-                            ]
-                            .spacing(2),
-                            space::horizontal(),
-                            text(if profile.favorite { "PIN" } else { "SSH" })
-                                .size(10)
-                                .color(if profile.favorite { green() } else { blue() }),
-                        ]
-                        .align_y(iced::Center),
-                    )
-                    .padding([9, 12])
-                    .width(Fill)
-                    .style(quiet)
-                    .on_press(Message::Open(index)),
-                );
-            }
-
-            let saved: Element<'_, Message> = if self.profiles.is_empty() {
-                text("No saved SSH sessions yet.")
-                    .size(12)
-                    .color(muted())
-                    .into()
-            } else {
-                column![
-                    text("SAVED SESSIONS").size(11).color(muted()),
-                    saved,
-                    text("Use the session sidebar for the complete library, folders and search.")
-                        .size(11)
-                        .color(muted()),
-                ]
-                .spacing(8)
-                .into()
-            };
-
-            return center(
-                column![
-                    text(">_").size(56).color(blue()),
-                    text("Your workspace, ready.").size(30),
-                    text("Open a saved session or create a new connection.")
-                        .size(16)
-                        .color(muted()),
-                    space::vertical().height(8),
-                    row![
-                        action("+  New connection", Message::New).style(primary),
-                        action("Import profiles", Message::ImportProfiles),
-                    ]
-                    .spacing(8),
-                    space::vertical().height(10),
-                    saved,
-                    space::vertical().height(8),
-                    text("The Iced shell uses the production OpenSSH PTY backend.")
-                        .size(12)
-                        .color(muted()),
-                ]
-                .spacing(12)
-                .align_x(iced::Center),
-            )
+            return container(center(
+                text("Double-click a session to connect, or Session > New Session (Ctrl+N)")
+                    .size(theme::metrics::UI_TEXT)
+                    .color(muted()),
+            ))
+            .width(Fill)
+            .height(Fill)
+            .style(list_area)
             .into();
         }
 
-        let mut tabs = row![].spacing(4);
+        let p = theme::palette();
+        let mut tabs = row![].spacing(0);
         for (index, tab) in self.tabs.iter().enumerate() {
-            let tab_label = tab
-                .panes
-                .get(tab.focus)
+            let active = index == self.active;
+            let focused_pane = tab.panes.get(tab.focus);
+            let tab_label = focused_pane
                 .and_then(|pane| pane.terminal_title.as_deref())
                 .unwrap_or(&tab.profile.name)
                 .to_owned();
+            let connected = focused_pane.is_some_and(|pane| {
+                pane.terminal.is_some() && !pane.exited && pane.error.is_none()
+            });
             let label = self
                 .tools
                 .tab_labels
@@ -6088,94 +6019,174 @@ impl App {
                 crate::tab_management::TabVisualLabel::Amber => Color::from_rgb8(245, 190, 80),
                 crate::tab_management::TabVisualLabel::Red => danger(),
             };
-            tabs = tabs.push(
-                container(
-                    row![
-                        text(label.marker()).color(color),
-                        action(tab_label, Message::SelectTab(index)).style(
-                            if index == self.active {
-                                selected_button
-                            } else {
-                                quiet
-                            }
-                        ),
-                        action("x", Message::AskClose(index)),
-                    ]
-                    .spacing(0),
-                )
-                .style(if index == self.active {
-                    active_card
-                } else {
-                    surface
-                }),
-            );
-        }
-        tabs = tabs.push(action("+", Message::New));
-
-        let toolbar = row![
-            text("LIVE SSH").size(12).color(green()),
-            space::horizontal(),
-            action(
-                if self
-                    .focused_terminal_id()
-                    .is_some_and(|id| self.local_navigation.contains(&id))
-                {
-                    "LOCAL NAV"
-                } else if self
-                    .focused_terminal_id()
-                    .is_some_and(|id| self.remote_keys.contains(&id))
-                {
-                    "REMOTE KEYS"
-                } else {
-                    "REMOTE INPUT"
-                },
-                Message::ToggleLocalNavigation
-            ),
-            action(
-                if self.tools.sync.armed() {
-                    "SYNC ARMED · Disarm"
-                } else if self.tools.sync.selected_count() >= 2 {
-                    "Arm sync"
-                } else {
-                    "Select sync targets"
-                },
-                if self.tools.sync.selected_count() >= 2 {
-                    Message::Tool(tools::Action::SyncArm(!self.tools.sync.armed()))
-                } else {
-                    Message::Tool(tools::Action::Open(tools::Panel::Workspace))
-                },
-            )
-            .style(if self.tools.sync.armed() {
-                button::danger
+            let status: Element<'_, Message> = if connected {
+                icons::dot(p.magenta, 8.0)
             } else {
-                quiet
-            }),
-            action("Paste", Message::RequestPaste),
-            action("Split right", Message::Split(pane_grid::Axis::Vertical)),
-            action("Split down", Message::Split(pane_grid::Axis::Horizontal)),
-            action(
-                if self.tabs[self.active]
-                    .panes
-                    .iter()
-                    .any(|(_, pane)| pane.auxiliary_shell)
-                {
-                    "Close shell"
+                icons::icon(icons::Icon::CircleHollow, 8.0, p.muted)
+            };
+            let mut body = row![].spacing(4).align_y(iced::Center);
+            if label != crate::tab_management::TabVisualLabel::None {
+                body = body.push(
+                    text(label.marker())
+                        .size(theme::metrics::UI_TEXT)
+                        .color(color),
+                );
+            }
+            let body = body
+                .push(status)
+                .push(
+                    button(text(tab_label).size(theme::metrics::UI_TEXT))
+                        .padding([2, 2])
+                        .style(tab_button)
+                        .on_press(Message::SelectTab(index)),
+                )
+                .push(
+                    button(icons::icon(
+                        icons::Icon::Close,
+                        10.0,
+                        if active { p.text } else { p.muted },
+                    ))
+                    .padding(3)
+                    .style(icon_button)
+                    .on_press(Message::AskClose(index)),
+                );
+            let body = container(body)
+                .padding(iced::Padding::new(0.0).left(10.0).right(4.0).top(2.0))
+                .height(theme::metrics::STRIP_HEIGHT - 1.0)
+                .align_y(iced::Center)
+                .style(if active {
+                    tab_active_fill
                 } else {
-                    "Shell"
-                },
-                Message::ToggleAuxiliaryShell
-            ),
-            action(
-                if self.files_dock.is_some() {
-                    "Hide files"
+                    tab_inactive_fill
+                });
+            tabs = tabs.push(if active {
+                stack![
+                    body,
+                    container(space::horizontal())
+                        .width(Fill)
+                        .height(2)
+                        .style(accent_fill)
+                ]
+                .into()
+            } else {
+                Element::from(body)
+            });
+        }
+        let tab_strip = column![
+            row![
+                scrollable(tabs)
+                    .direction(scrollable::Direction::Horizontal(
+                        scrollable::Scrollbar::new().width(2).scroller_width(2)
+                    ))
+                    .width(Fill),
+                button(icons::icon(icons::Icon::Plus, 12.0, p.text))
+                    .padding(6)
+                    .style(icon_button)
+                    .on_press(Message::New),
+            ]
+            .height(theme::metrics::STRIP_HEIGHT - 1.0)
+            .align_y(iced::Center),
+            hline(),
+        ];
+
+        let tab = &self.tabs[self.active];
+        let folder = if tab.profile.folder.trim().is_empty() {
+            "sessions".to_owned()
+        } else {
+            tab.profile.folder.clone()
+        };
+        let crumb_text = |value: String| text(value).size(theme::metrics::UI_TEXT).color(p.text);
+        let breadcrumb = container(
+            row![
+                icons::icon(icons::Icon::Info, 12.0, p.muted),
+                container(space::horizontal())
+                    .width(1)
+                    .height(13)
+                    .style(border_fill),
+                crumb_text("ssh".to_owned()),
+                icons::icon(icons::Icon::TriangleRight, 8.0, p.muted),
+                crumb_text(folder),
+                icons::icon(icons::Icon::TriangleRight, 8.0, p.muted),
+                crumb_text(tab.profile.name.clone()),
+            ]
+            .spacing(6)
+            .align_y(iced::Center),
+        )
+        .padding([0, 8])
+        .height(23)
+        .width(Fill)
+        .align_y(iced::Center)
+        .style(breadcrumb_field);
+        let shell_open = tab.panes.iter().any(|(_, pane)| pane.auxiliary_shell);
+        let toolbar = column![
+            row![
+                tool_icon(
+                    icons::Icon::SplitRight,
+                    "Split right",
+                    Message::Split(pane_grid::Axis::Vertical)
+                ),
+                tool_icon(
+                    icons::Icon::SplitDown,
+                    "Split down",
+                    Message::Split(pane_grid::Axis::Horizontal)
+                ),
+                tool_icon(
+                    icons::Icon::Terminal,
+                    if shell_open { "Close shell" } else { "Shell" },
+                    Message::ToggleAuxiliaryShell
+                ),
+                breadcrumb,
+                compact_action("Paste", Message::RequestPaste),
+                compact_action(
+                    if self
+                        .focused_terminal_id()
+                        .is_some_and(|id| self.local_navigation.contains(&id))
+                    {
+                        "LOCAL NAV"
+                    } else if self
+                        .focused_terminal_id()
+                        .is_some_and(|id| self.remote_keys.contains(&id))
+                    {
+                        "REMOTE KEYS"
+                    } else {
+                        "REMOTE INPUT"
+                    },
+                    Message::ToggleLocalNavigation
+                ),
+                compact_action(
+                    if self.tools.sync.armed() {
+                        "SYNC ARMED · Disarm"
+                    } else if self.tools.sync.selected_count() >= 2 {
+                        "Arm sync"
+                    } else {
+                        "Select sync targets"
+                    },
+                    if self.tools.sync.selected_count() >= 2 {
+                        Message::Tool(tools::Action::SyncArm(!self.tools.sync.armed()))
+                    } else {
+                        Message::Tool(tools::Action::Open(tools::Panel::Workspace))
+                    },
+                )
+                .style(if self.tools.sync.armed() {
+                    button::danger
                 } else {
-                    "Files"
-                },
-                Message::ToggleFiles
-            ),
-        ]
-        .spacing(8)
-        .align_y(iced::Center);
+                    icon_button
+                }),
+                compact_action(
+                    if self.files_dock.is_some() {
+                        "Hide files"
+                    } else {
+                        "Files"
+                    },
+                    Message::ToggleFiles
+                ),
+            ]
+            .spacing(2)
+            .padding([0, 6])
+            .height(33)
+            .align_y(iced::Center),
+            hline(),
+        ];
 
         let dock = pane_grid(&self.dock, |_, panel, _| {
             pane_grid::Content::new(match panel {
@@ -6183,21 +6194,15 @@ impl App {
                 Dock::Files => self.files(),
             })
         })
-        .spacing(6)
+        .spacing(1)
         .on_resize(8, Message::DockResize)
         .height(Fill);
 
-        container(
-            column![
-                scrollable(tabs).direction(scrollable::Direction::Horizontal(
-                    scrollable::Scrollbar::default()
-                )),
-                toolbar,
-                dock
-            ]
-            .spacing(10),
-        )
-        .padding(14)
+        container(column![
+            container(tab_strip).style(surface),
+            container(toolbar).style(surface),
+            container(dock).height(Fill).style(border_fill)
+        ])
         .height(Fill)
         .width(Fill)
         .into()
@@ -6205,46 +6210,57 @@ impl App {
 
     fn terminals(&self) -> Element<'_, Message> {
         let tab = &self.tabs[self.active];
-        pane_grid(&tab.panes, |id, pane, _| {
+        let grid = pane_grid(&tab.panes, |id, pane, _| {
             let focused = tab.focus == id;
+            let p = theme::palette();
             let state = if pane.exited {
-                ("EXITED", muted())
+                Some(("EXITED", muted()))
             } else if pane.error.is_some() {
-                ("ERROR", danger())
+                Some(("ERROR", danger()))
             } else if pane.terminal.is_some() {
-                ("CONNECTED", green())
+                None
             } else {
-                ("CONNECTING", blue())
+                Some(("CONNECTING", blue()))
             };
-            let title = pane_grid::TitleBar::new(
+            let mode = if self.free_type.contains_key(&pane.id) {
+                Some("FREE TYPE")
+            } else if self.local_navigation.contains(&pane.id) {
+                Some("LOCAL NAV")
+            } else if self.remote_keys.contains(&pane.id) {
+                Some("REMOTE KEYS")
+            } else if pane.auxiliary_shell {
+                Some("AUX SHELL")
+            } else {
+                None
+            };
+            let status: Element<'_, Message> = if state.is_none() {
+                icons::dot(p.magenta, 8.0)
+            } else {
+                icons::icon(icons::Icon::CircleHollow, 8.0, p.muted)
+            };
+            let mut header = row![
+                status,
+                text(
+                    pane.terminal_title
+                        .as_deref()
+                        .unwrap_or(&pane.profile.name)
+                        .to_owned()
+                )
+                .size(12)
+                .color(p.text),
+            ]
+            .spacing(6)
+            .align_y(iced::Center);
+            if let Some(mode) = mode {
+                header = header.push(text(mode).size(10).color(blue()));
+            }
+            if let Some((label, color)) = state {
+                header = header.push(text(label).size(10).color(color));
+            }
+            let header = header.push(space::horizontal()).push(
                 row![
-                    text(if pane.auxiliary_shell { "AUX SHELL" } else { "PTY" })
-                        .size(10)
-                        .color(if pane.auxiliary_shell { blue() } else { muted() }),
-                    text(if self.free_type.contains_key(&pane.id) {
-                        "FREE TYPE"
-                    } else if self.local_navigation.contains(&pane.id) {
-                        "LOCAL NAV"
-                    } else if self.remote_keys.contains(&pane.id) {
-                        "REMOTE KEYS"
-                    } else if focused {
-                        "FOCUSED"
-                    } else {
-                        "SSH"
-                    })
-                    .size(11)
-                    .color(if focused { blue() } else { muted() }),
-                    text(
-                        pane.terminal_title
-                            .as_deref()
-                            .unwrap_or(&pane.profile.name)
-                            .to_owned()
-                    )
-                    .size(13),
-                    text(state.0).size(10).color(state.1),
-                    space::horizontal(),
-                    action("Copy", Message::CopySelection(pane.id)),
-                    action(
+                    compact_action("Copy", Message::CopySelection(pane.id)),
+                    compact_action(
                         if self.tools.sync.is_target(pane.id) {
                             "SYNC"
                         } else {
@@ -6258,14 +6274,14 @@ impl App {
                     .style(if self.tools.sync.is_target(pane.id) {
                         selected_button
                     } else {
-                        quiet
+                        icon_button
                     }),
                     if self.free_type.contains_key(&pane.id) {
-                        action("Discard draft", Message::FreeTypeDiscard(pane.id))
+                        compact_action("Discard draft", Message::FreeTypeDiscard(pane.id))
                     } else {
-                        action("Free type", Message::ToggleFreeType(pane.id))
+                        compact_action("Free type", Message::ToggleFreeType(pane.id))
                     },
-                    action(
+                    compact_action(
                         if self.remote_keys.contains(&pane.id) {
                             "Exit keys"
                         } else {
@@ -6274,17 +6290,23 @@ impl App {
                         Message::ToggleRemoteKeys(pane.id),
                     ),
                     if pane.exited || pane.error.is_some() {
-                        action("Reconnect", Message::Reconnect(id))
+                        compact_action("Reconnect", Message::Reconnect(id))
                     } else {
-                        action("Paste", Message::RequestPaste)
+                        compact_action("Paste", Message::RequestPaste)
                     },
-                    action("x", Message::ClosePane(id)),
+                    compact_action("x", Message::ClosePane(id)),
                 ]
-                .spacing(10)
+                .spacing(0)
                 .align_y(iced::Center),
-            )
-            .padding([4, 10])
-            .style(surface);
+            );
+            let title = pane_grid::TitleBar::new(column![
+                container(space::horizontal())
+                    .width(Fill)
+                    .height(2)
+                    .style(if focused { accent_fill } else { pane_header_fill }),
+                container(header).padding([0, 8]).height(20).align_y(iced::Center),
+            ])
+            .style(pane_header_fill);
 
             let terminal_body: Element<'_, Message> = if let Some(error) = &pane.error {
                 column![
@@ -6412,14 +6434,14 @@ impl App {
             };
             pane_grid::Content::new(body)
             .title_bar(title)
-            .style(if focused { active_card } else { card })
+            .style(pane_body)
         })
-        .spacing(8)
+        .spacing(1)
         .on_click(Message::Focus)
         .on_drag(Message::Drag)
         .on_resize(8, Message::Resize)
-        .height(Fill)
-        .into()
+        .height(Fill);
+        container(grid).height(Fill).style(border_fill).into()
     }
 
     fn file_listing_panels(&self) -> (Element<'_, Message>, Element<'_, Message>) {
@@ -8071,6 +8093,109 @@ fn primary(theme: &Theme, status: button::Status) -> button::Style {
             ..base.border
         },
         ..base
+    }
+}
+
+fn hline<'a>() -> Element<'a, Message> {
+    container(space::horizontal())
+        .width(Fill)
+        .height(1)
+        .style(border_fill)
+        .into()
+}
+
+fn compact_action<'a>(label: impl Into<String>, message: Message) -> button::Button<'a, Message> {
+    button(text(label.into()).size(12))
+        .padding([2, 6])
+        .style(icon_button)
+        .on_press(message)
+}
+
+fn tool_icon<'a>(icon: icons::Icon, tip: &'a str, message: Message) -> Element<'a, Message> {
+    let p = theme::palette();
+    iced::widget::tooltip(
+        button(icons::icon(icon, 14.0, p.text))
+            .padding(6)
+            .style(icon_button)
+            .on_press(message),
+        container(text(tip).size(theme::metrics::STATUS_TEXT))
+            .padding([2, 6])
+            .style(card),
+        iced::widget::tooltip::Position::Bottom,
+    )
+    .into()
+}
+
+fn fill_style(color: Color) -> container::Style {
+    container::Style {
+        background: Some(color.into()),
+        text_color: Some(theme::palette().text),
+        ..Default::default()
+    }
+}
+
+fn list_area(_: &Theme) -> container::Style {
+    fill_style(theme::palette().list)
+}
+
+fn border_fill(_: &Theme) -> container::Style {
+    fill_style(theme::palette().border)
+}
+
+fn accent_fill(_: &Theme) -> container::Style {
+    fill_style(theme::palette().accent)
+}
+
+fn tab_active_fill(_: &Theme) -> container::Style {
+    fill_style(theme::palette().tab_active)
+}
+
+fn tab_inactive_fill(_: &Theme) -> container::Style {
+    fill_style(theme::palette().tab_inactive)
+}
+
+fn pane_header_fill(_: &Theme) -> container::Style {
+    fill_style(theme::palette().header)
+}
+
+fn pane_body(_: &Theme) -> container::Style {
+    fill_style(theme::palette().dock)
+}
+
+fn breadcrumb_field(_: &Theme) -> container::Style {
+    let p = theme::palette();
+    container::Style {
+        border: Border {
+            color: p.border,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..fill_style(p.raised)
+    }
+}
+
+/// Flat icon/compact control: no fill or outline at rest, square hover.
+fn icon_button(_: &Theme, status: button::Status) -> button::Style {
+    let p = theme::palette();
+    let (background, text_color) = match status {
+        button::Status::Hovered => (Some(p.hover.into()), p.text),
+        button::Status::Pressed => (Some(p.selected_row.into()), p.text),
+        button::Status::Disabled => (None, p.muted),
+        button::Status::Active => (None, p.text),
+    };
+    button::Style {
+        background,
+        text_color,
+        border: Border::default(),
+        ..Default::default()
+    }
+}
+
+/// Tab label: transparent so the tab container fill shows through.
+fn tab_button(theme: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: None,
+        ..icon_button(theme, status)
     }
 }
 
