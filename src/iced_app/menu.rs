@@ -1,5 +1,6 @@
 //! WindTerm-style menu bar data: titles, entries and the commands they map to.
 
+use super::dock::Panel as DockPanel;
 use super::tools::Panel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,9 +62,14 @@ impl Menu {
                 Entry::Separator,
                 item("Tunnels", "", Tunnels),
                 Entry::Separator,
+                item("Edit Session", "", EditSession),
+                item("Reconnect", "", Reconnect),
+                item("Close Session", "", CloseSession),
+                Entry::Separator,
                 item("Lock Screen", "Ctrl+Shift+L", LockScreen),
             ],
             Menu::Edit => vec![
+                item("Copy", "", Copy),
                 item("Paste", "", Paste),
                 Entry::Separator,
                 item("Command Palette", "", Palette),
@@ -78,13 +84,17 @@ impl Menu {
                 item("Focus Mode", "Alt+Enter", FocusMode),
                 Entry::Separator,
                 item("Session", "", ToggleSessions),
-                item("Files", "", ToggleFiles),
+                item("Transfer", "", TogglePanel(DockPanel::Transfer)),
+                item("Filer", "", TogglePanel(DockPanel::Filer)),
+                item("Explorer", "", TogglePanel(DockPanel::Explorer)),
                 item("Shell", "", ToggleShell),
             ],
             Menu::Mode => vec![
                 item("Remote / Local Mode", "", LocalMode),
                 item("Free Type Mode", "", FreeType),
                 item("Remote Keys", "", RemoteKeys),
+                Entry::Separator,
+                item("Sync Input...", "", SyncInput),
             ],
             Menu::Window => vec![
                 item("Layout: Bottom tabs", "", LayoutBottomTabs),
@@ -92,6 +102,7 @@ impl Menu {
                 Entry::Separator,
                 item("Split Right", "", SplitRight),
                 item("Split Down", "", SplitDown),
+                item("Close Pane", "", ClosePane),
                 Entry::Separator,
                 item("Next Tab", "", NextTab),
                 item("Previous Tab", "", PreviousTab),
@@ -134,7 +145,13 @@ pub(super) enum Command {
     ZoomOut,
     FocusMode,
     ToggleSessions,
-    ToggleFiles,
+    TogglePanel(DockPanel),
+    EditSession,
+    Reconnect,
+    CloseSession,
+    Copy,
+    SyncInput,
+    ClosePane,
     ToggleShell,
     LocalMode,
     FreeType,

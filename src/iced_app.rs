@@ -4199,7 +4199,45 @@ impl App {
                     C::ToggleSessions => Message::DockToggle(dock::Panel::Session),
                     C::LayoutBottomTabs => Message::DockPreset(false),
                     C::LayoutWindTerm => Message::DockPreset(true),
-                    C::ToggleFiles => Message::ToggleFiles,
+                    C::TogglePanel(panel) => Message::DockToggle(panel),
+                    C::EditSession | C::Reconnect | C::CloseSession | C::Copy | C::ClosePane => {
+                        let Some(tab) = self.tabs.get(self.active) else {
+                            self.status = "No active session.".into();
+                            return Task::none();
+                        };
+                        let focus = tab.focus;
+                        match command {
+                            C::EditSession => {
+                                match self.profiles.iter().position(|p| *p == tab.profile) {
+                                    Some(index) => Message::EditProfile(index),
+                                    None => {
+                                        self.status = "This session is not a saved profile.".into();
+                                        return Task::none();
+                                    }
+                                }
+                            }
+                            C::Reconnect => Message::Reconnect(focus),
+                            C::CloseSession => Message::AskClose(self.active),
+                            C::Copy => match tab.panes.get(focus) {
+                                Some(pane) => Message::CopySelection(pane.id),
+                                None => return Task::none(),
+                            },
+                            _ => {
+                                if tab.panes.len() < 2 {
+                                    self.status = "Only one pane is open.".into();
+                                    return Task::none();
+                                }
+                                Message::ClosePane(focus)
+                            }
+                        }
+                    }
+                    C::SyncInput => {
+                        if self.tools.sync.selected_count() >= 2 {
+                            Message::Tool(tools::Action::SyncArm(!self.tools.sync.armed()))
+                        } else {
+                            Message::Tool(tools::Action::Open(tools::Panel::Workspace))
+                        }
+                    }
                     C::ToggleShell => Message::ToggleAuxiliaryShell,
                     C::LocalMode => Message::ToggleLocalNavigation,
                     C::FreeType => Message::ToggleFocusedFreeType,
