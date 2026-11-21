@@ -77,7 +77,7 @@ impl Menu {
                 item("Zoom Out", "", ZoomOut),
                 item("Focus Mode", "Alt+Enter", FocusMode),
                 Entry::Separator,
-                item("Sessions", "", ToggleSessions),
+                item("Session", "", ToggleSessions),
                 item("Files", "", ToggleFiles),
                 item("Shell", "", ToggleShell),
             ],
@@ -87,6 +87,9 @@ impl Menu {
                 item("Remote Keys", "", RemoteKeys),
             ],
             Menu::Window => vec![
+                item("Layout: Bottom tabs", "", LayoutBottomTabs),
+                item("Layout: WindTerm default", "", LayoutWindTerm),
+                Entry::Separator,
                 item("Split Right", "", SplitRight),
                 item("Split Down", "", SplitDown),
                 Entry::Separator,
@@ -142,6 +145,8 @@ pub(super) enum Command {
     PreviousTab,
     Tool(Panel),
     About,
+    LayoutBottomTabs,
+    LayoutWindTerm,
 }
 
 #[cfg(test)]

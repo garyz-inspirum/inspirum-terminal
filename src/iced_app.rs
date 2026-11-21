@@ -4,6 +4,8 @@
 //! The frontend uses the live PTY backend and preserves
 //! host-key, argv, paste, process-lifecycle, or transfer safeguards.
 mod dock;
+mod dock_view;
+use dock_view::available_panels;
 mod icons;
 mod menu;
 mod terminal_ime;
@@ -1596,6 +1598,13 @@ enum Message {
     TerminalScroll(u64, i32),
     CopySelection(u64),
     Event(iced::Event),
+    DockActivate(dock::Panel),
+    DockClose(dock::Panel),
+    DockMove(dock::Panel, dock::Area),
+    DockToggle(dock::Panel),
+    DockCollapse(dock::Area),
+    DockMenu(dock::Area),
+    DockPreset(bool),
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -2692,6 +2701,8 @@ struct App {
     editing_snippet: Option<String>,
     sidebar_collapsed: bool,
     open_menu: Option<menu::Menu>,
+    docks: dock::DockLayout,
+    dock_menu: Option<dock::Area>,
     privacy_locked: bool,
     focus_mode: bool,
     local_navigation: HashSet<u64>,
@@ -2846,6 +2857,12 @@ impl App {
             editing_snippet: None,
             sidebar_collapsed: false,
             open_menu: None,
+            docks: {
+                let mut docks = dock::DockLayout::default();
+                docks.retain_available(&available_panels());
+                docks
+            },
+            dock_menu: None,
             privacy_locked: false,
             focus_mode: false,
             local_navigation: HashSet::new(),
@@ -4212,7 +4229,9 @@ impl App {
                     C::ZoomIn => Message::Scale(0.1),
                     C::ZoomOut => Message::Scale(-0.1),
                     C::FocusMode => Message::ToggleFocusMode,
-                    C::ToggleSessions => Message::ToggleSidebar,
+                    C::ToggleSessions => Message::DockToggle(dock::Panel::Session),
+                    C::LayoutBottomTabs => Message::DockPreset(false),
+                    C::LayoutWindTerm => Message::DockPreset(true),
                     C::ToggleFiles => Message::ToggleFiles,
                     C::ToggleShell => Message::ToggleAuxiliaryShell,
                     C::LocalMode => Message::ToggleLocalNavigation,
@@ -4436,7 +4455,7 @@ impl App {
                 self.files.name_input.clear();
             }
             Message::DismissModalKey => {
-                if self.open_menu.take().is_some() {
+                if self.open_menu.take().is_some() || self.dock_menu.take().is_some() {
                     return Task::none();
                 }
                 if self.dialog.is_some() {
@@ -5193,7 +5212,7 @@ impl App {
             }
             Message::ToggleSidebar => {
                 self.dialog = None;
-                self.sidebar_collapsed = !self.sidebar_collapsed;
+                self.docks.toggle(dock::Panel::Session);
             }
             Message::RequestPaste => {
                 if self
@@ -5744,8 +5763,11 @@ impl App {
             })) => {
                 use keyboard::key::Named;
 
-                if self.open_menu.is_some() && key.as_ref() == keyboard::Key::Named(Named::Escape) {
+                if (self.open_menu.is_some() || self.dock_menu.is_some())
+                    && key.as_ref() == keyboard::Key::Named(Named::Escape)
+                {
                     self.open_menu = None;
+                    self.dock_menu = None;
                     return Task::none();
                 }
                 if modifiers.command()
@@ -5857,6 +5879,42 @@ impl App {
                 }
             }
             Message::Event(_) => {}
+            Message::DockActivate(panel) => {
+                self.dock_menu = None;
+                self.docks.activate(panel);
+            }
+            Message::DockClose(panel) => {
+                self.dock_menu = None;
+                self.docks.close(panel);
+            }
+            Message::DockMove(panel, area) => {
+                self.dock_menu = None;
+                self.docks.move_to(panel, area);
+            }
+            Message::DockToggle(panel) => {
+                self.dock_menu = None;
+                self.docks.toggle(panel);
+            }
+            Message::DockCollapse(area) => {
+                self.dock_menu = None;
+                self.docks.toggle_collapsed(area);
+            }
+            Message::DockMenu(area) => {
+                self.dock_menu = if self.dock_menu == Some(area) {
+                    None
+                } else {
+                    Some(area)
+                };
+            }
+            Message::DockPreset(windterm) => {
+                self.dock_menu = None;
+                self.docks = dock::DockLayout::preset(if windterm {
+                    dock::Preset::WindTermDefault
+                } else {
+                    dock::Preset::BottomTabs
+                });
+                self.docks.retain_available(&available_panels());
+            }
         }
         Task::none()
     }
@@ -6031,12 +6089,7 @@ impl App {
             ..Default::default()
         });
 
-        let mut body = column![
-            header,
-            row![self.sidebar(), self.workspace()].height(Fill),
-            footer
-        ]
-        .height(Fill);
+        let mut body = column![header, self.dock_body(), footer].height(Fill);
 
         if let Some(error) = &self.load_error {
             body = body.push(
@@ -6064,6 +6117,11 @@ impl App {
             .into()
         } else {
             body.into()
+        };
+
+        let body: Element<'_, Message> = match self.dock_menu {
+            Some(area) => self.dock_menu_overlay(body, area),
+            None => body,
         };
 
         if let Some(dialog) = &self.dialog {

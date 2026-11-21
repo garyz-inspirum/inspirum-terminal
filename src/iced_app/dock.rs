@@ -1,5 +1,3 @@
-#![allow(dead_code)] // wired in by the dock view stage
-
 //! Pure dock layout model (spec section 5): which panels live in which dock
 //! area, which tab is active, collapse state and sizes. No Iced widgets here.
 
