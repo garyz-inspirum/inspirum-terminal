@@ -64,6 +64,10 @@ class MonitoredServer(fixture.NativeServer):
         return MonitoredSession(self.events)
 
 
+# Exists only to prove the tour fails when the echo is missing.
+# Must not suppress any other echo.
+TOUR_WITHHOLD_ECHO = os.environ.get("INSPIRUM_GUI_TOUR_WITHHOLD_ECHO") == "1"
+
 
 async def monitored_shell(
     stdin: asyncssh.SSHReader[str],
@@ -123,6 +127,8 @@ async def monitored_shell(
                     events.write("REMOTE_CURSOR_LEFT")
                     stdout.write("NATIVE_REMOTE_CURSOR_LEFT\r\n")
                 elif line.startswith("echo:"):
+                    if line == "echo:TOUR_PROBE" and TOUR_WITHHOLD_ECHO:
+                        continue
                     answer = f"NATIVE_ECHO:{line[5:]}"
                     if line in (
                         "echo:TOUR_PROBE",
@@ -1084,10 +1090,11 @@ TOUR = os.environ.get("INSPIRUM_GUI_TOUR") == "1"
 
 
 async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app_log: Path) -> int:
-    """Best-effort LIGHT-theme screenshot tour (INSPIRUM_GUI_TOUR=1).
+    """LIGHT-theme screenshot tour (INSPIRUM_GUI_TOUR=1).
 
-    Only the window and a real SSH session are asserted; every other step
-    logs a warning and continues. Coordinates assume the 1280x800 layout.
+    The window, a real SSH session, and the terminal echo probe are required.
+    Every other step logs a warning and continues. Coordinates assume the
+    1280x800 layout.
     """
     tour_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
@@ -1170,19 +1177,35 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
     await asyncio.sleep(2)
     shot("tour-05-terminal.png")
 
-    async def s06():
-        # Best-effort: a missed echo must not fail the screenshot tour.
-        # wait_for raises RuntimeError, which step() already logs as WARNING.
-        command("xdotool", "windowfocus", window, env=env)
-        command("xdotool", "type", "--delay", "20", "echo:TOUR_PROBE", env=env)
-        key("Return")
+    # Required: a missed echo fails the tour. INSPIRUM_GUI_TOUR_WITHHOLD_ECHO=1
+    # makes the fixture stay silent so this path can be proven.
+    command("xdotool", "windowfocus", window, env=env)
+    probe_typed_at = time.time()
+    command("xdotool", "type", "--delay", "20", "echo:TOUR_PROBE", env=env)
+    key("Return")
+    try:
         await wait_for(
             lambda: "NATIVE_ECHO:TOUR_PROBE" in log_text().splitlines(),
             "tour shell answered NATIVE_ECHO:TOUR_PROBE",
         )
-        await asyncio.sleep(1)
-        shot("tour-06-terminal-output.png")
-    await step("terminal-echo", s06)
+    except RuntimeError:
+        print(
+            "tour: FAILED terminal did not answer echo:TOUR_PROBE "
+            + log_text()[-800:],
+            flush=True,
+        )
+        return 1
+    await asyncio.sleep(1)
+    echo_shot = tour_dir / "tour-06-terminal-output.png"
+    if echo_shot.exists():
+        echo_shot.unlink()
+    shot("tour-06-terminal-output.png")
+    if not echo_shot.is_file() or echo_shot.stat().st_mtime <= probe_typed_at:
+        print(
+            "tour: FAILED tour-06-terminal-output.png missing or not newer than the echo probe",
+            flush=True,
+        )
+        return 1
 
     async def s07():
         key("ctrl+shift+r")
