@@ -70,6 +70,7 @@ async def monitored_shell(
     stdout: asyncssh.SSHWriter[str],
     stderr: asyncssh.SSHWriter[str],
     events: fixture.EventLog,
+    probe_state: dict[str, str | None],
 ) -> None:
     # AsyncSSH dispatches all sessions through SSHServerStreamSession when
     # sftp_factory is configured. In that mode SSHServer.session_requested()
@@ -92,6 +93,10 @@ async def monitored_shell(
             if not chunk:
                 events.write("SHELL_STREAM_EOF")
                 return
+            # Observe *any* PTY bytes while a chrome control owns focus,
+            # including incomplete lines and a bare Escape. Never log input.
+            if probe_state["phase"] is not None:
+                events.write(f"UNEXPECTED_{probe_state['phase']}_PTY_INPUT")
             buffer += chunk.replace("\r\n", "\n").replace("\r", "\n")
             # Cursor-key escape sequences are unbuffered PTY input, not
             # newline-terminated shell commands. Detect them as bytes arrive;
@@ -118,7 +123,10 @@ async def monitored_shell(
                     events.write("REMOTE_CURSOR_LEFT")
                     stdout.write("NATIVE_REMOTE_CURSOR_LEFT\r\n")
                 elif line.startswith("echo:"):
-                    stdout.write(f"NATIVE_ECHO:{line[5:]}\r\n")
+                    answer = f"NATIVE_ECHO:{line[5:]}"
+                    if line in ("echo:TOUR_PROBE", "echo:AFTER_MENU", "echo:AFTER_SENDER_ESCAPE"):
+                        events.write(answer)
+                    stdout.write(f"{answer}\r\n")
                 elif line == "exit":
                     events.write("SESSION_EXIT_REQUEST")
                     return
@@ -1156,8 +1164,12 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
     await asyncio.sleep(2)
     shot("tour-05-terminal.png")
     command("xdotool", "windowfocus", window, env=env)
-    command("xdotool", "type", "--delay", "20", "echo WindTerm layout tour", env=env)
+    command("xdotool", "type", "--delay", "20", "echo:TOUR_PROBE", env=env)
     key("Return")
+    await wait_for(
+        lambda: "NATIVE_ECHO:TOUR_PROBE" in log_text().splitlines(),
+        "tour shell answered NATIVE_ECHO:TOUR_PROBE",
+    )
     await asyncio.sleep(1)
     shot("tour-06-terminal-output.png")
 
@@ -1224,6 +1236,7 @@ async def main() -> int:
         root = Path(temp)
         events = fixture.EventLog(root / "ssh-events.log")
         events.path.write_text("", encoding="utf-8")
+        probe_state: dict[str, str | None] = {"phase": None}
         host = fixture.generate_key(root, "host")
         client = fixture.generate_key(root, "client")
         trusted = asyncssh.read_public_key(str(client) + ".pub")
@@ -1247,7 +1260,7 @@ async def main() -> int:
             line_editor=False,
             sftp_factory=lambda chan: isolated_sftp_server(chan, remote_root, events),
             session_factory=lambda stdin, stdout, stderr: monitored_shell(
-                stdin, stdout, stderr, events
+                stdin, stdout, stderr, events, probe_state
             ),
         )
         port = server.get_port()
@@ -1362,6 +1375,55 @@ async def main() -> int:
                     )
                 await asyncio.sleep(1)
                 screenshot(window, destination / "connected-terminal.png", env)
+
+                # The Session menu and Sender dock must own keyboard input
+                # locally. Watch raw PTY chunks, not just completed commands,
+                # so even a stray Escape or an unterminated sentinel fails.
+                probe_state["phase"] = "MENU"
+                command("xdotool", "mousemove", "--window", window,
+                        "30", "16", "click", "1", env=env)
+                await asyncio.sleep(.3)
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "MENU_LOCAL_SENTINEL", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                await asyncio.sleep(.6)
+                if "UNEXPECTED_MENU_PTY_INPUT" in events.path.read_text(encoding="utf-8"):
+                    raise RuntimeError("Session menu forwarded typing, Return, or Escape to SSH")
+                probe_state["phase"] = None
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:AFTER_MENU", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: "NATIVE_ECHO:AFTER_MENU" in events.path.read_text(encoding="utf-8").splitlines(),
+                    "shell echo after dismissing Session menu",
+                )
+
+                probe_state["phase"] = "SENDER"
+                command("xdotool", "mousemove", "--window", window,
+                        "47", "552", "click", "1", env=env)
+                await asyncio.sleep(.3)
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "SENDER_LOCAL_SENTINEL", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                await asyncio.sleep(.6)
+                if "UNEXPECTED_SENDER_PTY_INPUT" in events.path.read_text(encoding="utf-8"):
+                    raise RuntimeError("Sender dock forwarded typing, Return, or Escape to SSH")
+                probe_state["phase"] = None
+                # Do not click the terminal: Escape itself must restore focus.
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:AFTER_SENDER_ESCAPE", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: "NATIVE_ECHO:AFTER_SENDER_ESCAPE" in events.path.read_text(encoding="utf-8").splitlines(),
+                    "shell echo after Sender Escape without terminal click",
+                )
+                if any(
+                    marker in events.path.read_text(encoding="utf-8")
+                    for marker in ("UNEXPECTED_MENU_PTY_INPUT", "UNEXPECTED_SENDER_PTY_INPUT")
+                ):
+                    raise RuntimeError("menu or Sender input leaked into SSH PTY")
 
                 # These shortcuts are intentionally exercised through native
                 # Iced keyboard events, never a direct Rust state transition.
@@ -1897,6 +1959,8 @@ async def main() -> int:
                     raise RuntimeError("privacy curtain forwarded synthetic keyboard input to SSH")
                 if "UNEXPECTED_FREE_TYPE_PTY_INPUT" in event_log:
                     raise RuntimeError("free-type editing leaked synthetic input to remote SSH PTY")
+                if "UNEXPECTED_MENU_PTY_INPUT" in event_log or "UNEXPECTED_SENDER_PTY_INPUT" in event_log:
+                    raise RuntimeError("Session menu or Sender keyboard input leaked to SSH")
                 if event_log.count("AUTH_ACCEPT:native-smoke") < 2:
                     raise RuntimeError("two distinct SSH panes were not authenticated")
                 (destination / "connected-acceptance.txt").write_text(
@@ -1916,6 +1980,8 @@ async def main() -> int:
                     f"Alternate-screen screenshot change: {fullscreen_pixels} pixels\n"
                     f"Remote-key mode screenshot change: {remote_keys_pixels} pixels\n"
                     "PASS: real remote-key Left arrow reached the isolated SFTP-capable SSH shell\n"
+                    "PASS: Session menu and Sender consumed typing, Return and Escape without SSH input\n"
+                    "PASS: shell answered AFTER_MENU and AFTER_SENDER_ESCAPE without terminal re-click\n"
                     "PASS: privacy-locked and free-type synthetic text never reached SSH\n"
                     "All keys generated in isolated temporary fixture; no real host or credential.\n",
                     encoding="utf-8",
