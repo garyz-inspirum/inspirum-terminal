@@ -1843,6 +1843,99 @@ async def main() -> int:
                 ) < 20:
                     raise RuntimeError("distinct post-transfer file row was not visibly selected")
 
+                # Name-header click reverses the remote listing in place.
+                # Default is name ascending (directories first, then name; this
+                # fixture has no directories), so 111 is above 444. A second
+                # click must restore that order: the 960x640 step needs 111
+                # first. Header clicks must not start another SFTP listing.
+                row_111 = await locate_rendered_label(
+                    window, destination / "connected-files-sort-before.png",
+                    third_name, env=env, region=body, timeout=20,
+                )
+                row_444 = await locate_rendered_label(
+                    window, destination / "connected-files-sort-before.png",
+                    download_name, env=env, region=body, timeout=20,
+                )
+                # Helpers return (left, top, right, bottom); center() averages
+                # the pairs. Compare tops: rows do not overlap.
+                y_111, y_444 = row_111[1], row_444[1]
+                if y_111 >= y_444:
+                    raise RuntimeError(
+                        "Filer default name order is not ascending: "
+                        f"y(111)={y_111} y(444)={y_444}"
+                    )
+                # Band derived from the located 111 row, which is the first
+                # file row. OCR bounds are the filename glyphs (inset 3px),
+                # vertically centred in the 23px row and ~20px right of the
+                # header label (14px file icon + 6px gap). The Name header is
+                # the 20px table header plus a 1px divider immediately above
+                # that row. The strip is therefore just above the glyphs,
+                # shifted left to cover the word Name, and not tall enough to
+                # include the path bar or the filename. It stays put when the
+                # rows reorder, so both clicks use this same band.
+                name_header = (
+                    max(0, row_111[0] - 36),
+                    max(0, row_111[1] - 36),
+                    row_111[0] + 48,
+                    row_111[1] - 2,
+                )
+                if name_header[3] <= name_header[1] or name_header[2] <= name_header[0]:
+                    raise RuntimeError(
+                        f"Name header band collapsed from row bounds {row_111}: {name_header}"
+                    )
+                listings_at_sort = events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY")
+
+                async def wait_name_order(shot: Path, *, descending: bool) -> tuple[int, int]:
+                    deadline = time.monotonic() + 15 * TIME_SCALE
+                    seen_111 = seen_444 = None
+                    while True:
+                        await asyncio.to_thread(screenshot, window, shot, env)
+                        try:
+                            top_111 = await asyncio.to_thread(
+                                locate_visible_label, shot, third_name, region=body,
+                            )
+                            top_444 = await asyncio.to_thread(
+                                locate_visible_label, shot, download_name, region=body,
+                            )
+                        except RuntimeError:
+                            top_111 = top_444 = None
+                        else:
+                            seen_111, seen_444 = top_111[1], top_444[1]
+                            if descending:
+                                matched = seen_111 > seen_444
+                            else:
+                                matched = seen_111 < seen_444
+                            if matched:
+                                return seen_111, seen_444
+                        if time.monotonic() >= deadline:
+                            order = "descending" if descending else "ascending"
+                            raise RuntimeError(
+                                f"Name header click did not produce {order} Filer order: "
+                                f"y(111)={seen_111} y(444)={seen_444}"
+                            )
+                        await asyncio.sleep(.5)
+
+                await click_label(
+                    window, destination / "connected-files-sort-header.png",
+                    "Name", env, region=name_header, settle=.4,
+                )
+                await wait_name_order(
+                    destination / "connected-files-sorted-desc.png", descending=True,
+                )
+                await click_label(
+                    window, destination / "connected-files-sort-header-again.png",
+                    "Name", env, region=name_header, settle=.4,
+                )
+                await wait_name_order(
+                    destination / "connected-files-sorted-asc.png", descending=False,
+                )
+                listings_after_sort = events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY")
+                if listings_after_sort != listings_at_sort:
+                    raise RuntimeError(
+                        "Name header click started an SFTP listing: "
+                        f"SFTP_LIST_READY {listings_at_sort} -> {listings_after_sort}"
+                    )
+
                 # The populated queue lives in the Transfer tab. Both completed
                 # jobs must be listed; scroll its visible interior and retain
                 # the resulting production screenshot.
@@ -2250,6 +2343,7 @@ async def main() -> int:
                     "PASS: PTY resize events preserved both SSH shell sessions through the test\n"
                     "PASS: click-driven SFTP upload preserved exact binary bytes in the native-smoke chroot\n"
                     "PASS: click-driven SFTP download preserved exact binary bytes in the visible local directory\n"
+                    "PASS: Filer Name header click reversed remote name order and the second click restored it without a new SFTP listing\n"
                     "PASS: exact payloads appeared at the expected disposable remote and local paths\n"
                     f"Connected split screenshot change: {split_pixels} pixels\n"
                     f"Opened utility dock screenshot change: {files_pixels} pixels\n"
