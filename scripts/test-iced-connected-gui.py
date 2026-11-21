@@ -1608,20 +1608,74 @@ async def main() -> int:
                 await asyncio.sleep(.4)
 
                 # No terminal click: the shortcut must work again after Escape.
+                # Both shells are still up. An exit already logged here must
+                # fail now: recording it after the close would hide it inside
+                # the baseline the rest of the run compares against.
+                ended_before_aux_close = count("SHELL_HANDLER_ENDED")
+                eof_before_aux_close = count("SHELL_STREAM_EOF")
+                if ended_before_aux_close != 0 or eof_before_aux_close != 0:
+                    raise RuntimeError(
+                        "SSH shell ended before the intentional auxiliary close: "
+                        f"SHELL_HANDLER_ENDED={ended_before_aux_close} "
+                        f"SHELL_STREAM_EOF={eof_before_aux_close} (expected 0 and 0)"
+                    )
                 press_ctrl_shift_j()
                 await wait_for(
                     lambda: count("SESSION_CLOSED:clean") == closed0 + 1,
                     "auxiliary shell closed by Ctrl+Shift+J after the menu was dismissed",
                 )
+                # One monitored_shell ends once. Empty stdin.read writes exactly
+                # one SHELL_STREAM_EOF and returns; finally then writes exactly
+                # one SHELL_HANDLER_ENDED (and SESSION_CLOSED:clean). The "exit"
+                # line and the exception path omit EOF, but Ctrl+Shift+J closes
+                # the channel — it does not send "exit". One intentional close
+                # is therefore exactly one of each, not whatever has accumulated.
+                def auxiliary_close_ended_once() -> bool:
+                    ended = count("SHELL_HANDLER_ENDED")
+                    eof = count("SHELL_STREAM_EOF")
+                    if ended > 1 or eof > 1:
+                        raise RuntimeError(
+                            "intentional auxiliary close ended more than one shell: "
+                            f"SHELL_HANDLER_ENDED={ended} "
+                            f"SHELL_STREAM_EOF={eof} (expected 1 and 1)"
+                        )
+                    return ended == 1 and eof == 1
+
+                try:
+                    await wait_for(
+                        auxiliary_close_ended_once,
+                        "exactly one SHELL_HANDLER_ENDED and one SHELL_STREAM_EOF "
+                        "after the intentional auxiliary close",
+                    )
+                except RuntimeError as exc:
+                    ended = count("SHELL_HANDLER_ENDED")
+                    eof = count("SHELL_STREAM_EOF")
+                    if (ended == 1 and eof == 1) or "SHELL_HANDLER_ENDED=" in str(exc):
+                        raise
+                    raise RuntimeError(
+                        "intentional auxiliary close did not end exactly one shell: "
+                        f"SHELL_HANDLER_ENDED={ended} "
+                        f"SHELL_STREAM_EOF={eof} (expected 1 and 1)"
+                    ) from exc
+                # Freeze these before the settle sleep. A recount after the
+                # sleep would adopt any extra exit as the accepted baseline.
+                shells_ended_before_split = count("SHELL_HANDLER_ENDED")
+                shell_eof_before_split = count("SHELL_STREAM_EOF")
+                if shells_ended_before_split != 1 or shell_eof_before_split != 1:
+                    raise RuntimeError(
+                        "shell-end baseline after intentional auxiliary close "
+                        "is not exactly one: "
+                        f"SHELL_HANDLER_ENDED={shells_ended_before_split} "
+                        f"SHELL_STREAM_EOF={shell_eof_before_split} (expected 1 and 1)"
+                    )
                 await asyncio.sleep(1)
 
                 # These shortcuts are intentionally exercised through native
                 # Iced keyboard events, never a direct Rust state transition.
                 # The auxiliary shell already added one SESSION_STARTED and one
-                # clean close, so later lifetime counts are relative to here.
+                # clean close. Shell-end baselines were frozen at exactly one
+                # immediately after that close, before this sleep.
                 started_before_split = count("SESSION_STARTED")
-                shells_ended_before_split = count("SHELL_HANDLER_ENDED")
-                shell_eof_before_split = count("SHELL_STREAM_EOF")
                 command("xdotool", "windowfocus", window, "key", "--clearmodifiers", "ctrl+shift+r", env=env)
                 await wait_for(
                     lambda: count("SESSION_STARTED") >= started_before_split + 1,
@@ -2152,16 +2206,25 @@ async def main() -> int:
                 event_log = events.path.read_text(encoding="utf-8")
                 if "SHELL_PTY_RESIZE" not in event_log:
                     raise RuntimeError("connected SSH fixture never observed a live PTY resize")
-                # The auxiliary-shell probe closes one shell on purpose. Anything
-                # beyond that baseline is an unexpected exit during the rest.
+                # The auxiliary-shell probe closes one shell on purpose. The
+                # baseline is that one close, frozen before the settle sleep,
+                # not a later sample. Anything beyond it is an unexpected exit.
+                ended_during_rest = sum(
+                    line == "SHELL_HANDLER_ENDED" for line in event_log.splitlines()
+                )
+                eof_during_rest = sum(
+                    line == "SHELL_STREAM_EOF" for line in event_log.splitlines()
+                )
                 if (
-                    sum(line == "SHELL_HANDLER_ENDED" for line in event_log.splitlines())
-                    > shells_ended_before_split
-                    or sum(line == "SHELL_STREAM_EOF" for line in event_log.splitlines())
-                    > shell_eof_before_split
+                    ended_during_rest > shells_ended_before_split
+                    or eof_during_rest > shell_eof_before_split
                 ):
                     raise RuntimeError(
                         "SSH terminal unexpectedly exited during split/dock/focus acceptance: "
+                        f"SHELL_HANDLER_ENDED={ended_during_rest} "
+                        f"(baseline {shells_ended_before_split}) "
+                        f"SHELL_STREAM_EOF={eof_during_rest} "
+                        f"(baseline {shell_eof_before_split}): "
                         + repr(event_log[-900:])
                     )
                 if "UNEXPECTED_LOCKED_PTY_INPUT" in event_log:
