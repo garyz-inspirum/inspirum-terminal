@@ -8995,7 +8995,7 @@ impl App {
             .spacing(8)
             .into(),
             Dialog::Exit => column![
-                text(exit_confirm_body(self.tabs.len())).color(muted()),
+                text(exit_confirm_body(self.tabs.len())).color(fg()),
                 row![
                     space::horizontal(),
                     action("Cancel", Message::CloseDialog),
@@ -9045,7 +9045,11 @@ impl App {
 }
 
 fn exit_confirm_body(open_sessions: usize) -> String {
-    format!("{open_sessions} session(s) are open. Exit and disconnect them?")
+    if open_sessions == 1 {
+        "1 session is open. Exit and disconnect it?".to_owned()
+    } else {
+        format!("{open_sessions} sessions are open. Exit and disconnect them?")
+    }
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -12067,11 +12071,23 @@ mod tests {
         assert_eq!(app.tabs.len(), 1);
         assert_eq!(
             exit_confirm_body(1),
-            "1 session(s) are open. Exit and disconnect them?"
+            "1 session is open. Exit and disconnect it?"
         );
         assert_eq!(
             exit_confirm_body(2),
-            "2 session(s) are open. Exit and disconnect them?"
+            "2 sessions are open. Exit and disconnect them?"
+        );
+    }
+
+    #[test]
+    fn exit_confirmation_text_singular_for_one_and_plural_otherwise() {
+        assert_eq!(
+            exit_confirm_body(1),
+            "1 session is open. Exit and disconnect it?"
+        );
+        assert_eq!(
+            exit_confirm_body(3),
+            "3 sessions are open. Exit and disconnect them?"
         );
     }
 
