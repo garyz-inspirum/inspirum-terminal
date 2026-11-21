@@ -333,7 +333,8 @@ fn input<'a>(label: &'a str, value: &'a str, field: Field) -> Element<'a, Messag
         text(label).size(12).color(muted()),
         text_input(label, value)
             .style(flat_input)
-            .padding(8)
+            .size(13)
+            .padding([3, 6])
             .on_input(move |v| msg(Action::Set(field, v)))
     ]
     .spacing(5)
@@ -1285,7 +1286,8 @@ impl App {
             text_input("Filter profiles", &self.query)
                 .style(flat_input)
                 .on_input(Message::Search)
-                .padding(8),
+                .size(13)
+                .padding([3, 6]),
             scrollable(list).height(240),
             act("Show more profiles", Action::Open(Panel::Profiles))
                 .on_press(Message::ShowMoreProfiles),
@@ -1468,7 +1470,8 @@ impl App {
             text_input("Find text", state.map(|s| s.query()).unwrap_or(""))
                 .style(flat_input)
                 .on_input(|q| msg(Action::HistoryQuery(q)))
-                .padding(8),
+                .size(13)
+                .padding([3, 6]),
             row![
                 act("Previous", Action::HistoryNext(false)),
                 act("Next", Action::HistoryNext(true)),

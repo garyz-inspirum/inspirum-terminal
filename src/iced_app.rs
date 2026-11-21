@@ -7362,20 +7362,22 @@ impl App {
                     text("Destination").size(13),
                     row![
                         column![
-                            text("Host").size(11).color(muted()),
+                            text("Host").size(11).color(fg()),
                             text_input("10.1.10.10", &edit.draft.destination_host)
                                 .style(flat_input)
                                 .on_input(Message::TunnelDraftDestinationHost)
-                                .padding(8)
+                                .size(13)
+                                .padding([3, 6])
                         ]
                         .spacing(3)
                         .width(Fill),
                         column![
-                            text("Port").size(11).color(muted()),
+                            text("Port").size(11).color(fg()),
                             text_input("8000", &edit.draft.destination_port)
                                 .style(flat_input)
                                 .on_input(Message::TunnelDraftDestinationPort)
-                                .padding(8)
+                                .size(13)
+                                .padding([3, 6])
                         ]
                         .spacing(3)
                         .width(120),
@@ -7391,33 +7393,36 @@ impl App {
                     text("WindTerm-style structured tunnel editor")
                         .size(11)
                         .color(muted()),
-                    text("Type").size(11).color(muted()),
+                    text("Type").size(11).color(fg()),
                     kind_row,
                     column![
-                        text("Label").size(11).color(muted()),
+                        text("Label").size(11).color(fg()),
                         text_input("e.g. database", &edit.draft.label)
                             .style(flat_input)
                             .on_input(Message::TunnelDraftLabel)
-                            .padding(8)
+                            .size(13)
+                            .padding([3, 6])
                     ]
                     .spacing(3),
                     text("Listen").size(13),
                     row![
                         column![
-                            text("Bind address").size(11).color(muted()),
+                            text("Bind address").size(11).color(fg()),
                             text_input("127.0.0.1", &edit.draft.bind_address)
                                 .style(flat_input)
                                 .on_input(Message::TunnelDraftBind)
-                                .padding(8)
+                                .size(13)
+                                .padding([3, 6])
                         ]
                         .spacing(3)
                         .width(Fill),
                         column![
-                            text("Port").size(11).color(muted()),
+                            text("Port").size(11).color(fg()),
                             text_input("2000", &edit.draft.listen_port)
                                 .style(flat_input)
                                 .on_input(Message::TunnelDraftListenPort)
-                                .padding(8)
+                                .size(13)
+                                .padding([3, 6])
                         ]
                         .spacing(3)
                         .width(120),
@@ -7574,7 +7579,7 @@ impl App {
                         Message::Folder
                     ),
                     row![
-                        text("Favourite").size(13).color(muted()),
+                        text("Favourite").size(13).color(fg()),
                         action(
                             if self.form.favorite { "Pinned" } else { "Not pinned" },
                             Message::Favorite(!self.form.favorite)
@@ -7588,17 +7593,18 @@ impl App {
                     .spacing(8)
                     .align_y(iced::Center),
                     column![
-                        text("Tags").size(13).color(muted()),
+                        text("Tags").size(13).color(fg()),
                         row![
                             text_input("Add profile tag", &self.form.tag_input)
 .style(flat_input)
                                 .id("connection-tag")
                                 .on_input(Message::TagInput)
                                 .on_submit(Message::AddTag)
-                                .padding(8),
+                                .size(13).padding([3, 6]),
                             action("Add", Message::AddTag),
                         ]
-                        .spacing(8),
+                        .spacing(8)
+                        .align_y(iced::Center),
                         row(
                             self.form
                                 .tags
@@ -7632,7 +7638,7 @@ impl App {
                     form = form.push(
                         container(
                             column![
-                                text("Host key verification").size(11).color(muted()),
+                                text("Host key verification").size(11).color(fg()),
                                 row![
                                     action(
                                         "Ask on new/changed host",
@@ -7892,7 +7898,7 @@ impl App {
 .style(flat_input)
                         .id("command-query")
                         .on_input(Message::CommandQuery)
-                        .padding(8),
+                        .size(13).padding([3, 6]),
                 ]
                 .spacing(8);
 
@@ -7916,7 +7922,7 @@ impl App {
                     text_input("Snippet name", &self.snippet_name)
 .style(flat_input)
                         .on_input(Message::SnippetName)
-                        .padding(9),
+                        .size(13).padding([3, 6]),
                     text_editor(&self.snippet_content)
                         .placeholder("Snippet body (non-secret remote text)")
                         .on_action(Message::SnippetEdit)
@@ -8067,9 +8073,9 @@ impl App {
                     .color(muted()),
                     container(
                         column![
-                            text("Source").size(11).color(muted()),
+                            text("Source").size(11).color(fg()),
                             text(source).font(Font::MONOSPACE).size(12),
-                            text("Destination").size(11).color(muted()),
+                            text("Destination").size(11).color(fg()),
                             text(destination).font(Font::MONOSPACE).size(12),
                         ]
                         .spacing(6)
@@ -8138,7 +8144,7 @@ impl App {
                         .id("file-name")
                         .on_input(Message::FilesNameChanged)
                         .on_submit(Message::ConfirmFileNameAction)
-                        .padding(8),
+                        .size(13).padding([3, 6]),
                     text("Names are validated by the existing SFTP/local-file policy before any operation is executed.")
                         .size(12)
                         .color(muted()),
@@ -8162,7 +8168,7 @@ impl App {
                         .id("import-path")
                         .on_input(Message::ImportPath)
                         .on_submit(Message::ConfirmImportProfiles)
-                        .padding(8)
+                        .size(13).padding([3, 6])
                 ]
                 .spacing(7),
                 text("Conflicting folder/name entries, invalid SSH policy, secret-bearing unsupported fields, oversized files, and malformed JSON are rejected before the active profile store is changed.")
