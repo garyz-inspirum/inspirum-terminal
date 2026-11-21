@@ -1208,6 +1208,29 @@ def reserved_display() -> str:
     raise RuntimeError("no disposable Xvfb display number available")
 
 
+def danger_fill_run(path: Path, y: int, x1: int, x2: int, *, min_width: int = 30):
+    """Horizontal extent of the danger button fill on row ``y``.
+
+    The label's dark glyphs interrupt the fill on its text rows, so this is
+    the span from the first to the last strongly red pixel between ``x1`` and
+    ``x2``. Returns ``(left, right)`` in image coordinates, or ``None`` when
+    fewer than ``min_width`` such pixels are on the row.
+    """
+    width, height, channels, rows = _read_png(path)
+    if not 0 <= y < height:
+        return None
+    row = rows[y]
+    red = [
+        x for x in range(max(0, x1), min(width, x2))
+        if row[x * channels] >= 190
+        and row[x * channels + 1] <= 130
+        and row[x * channels + 2] <= 130
+    ]
+    if len(red) < min_width:
+        return None
+    return (red[0], red[-1] + 1)
+
+
 def request_window_close(window: str, env: dict[str, str]) -> None:
     """Send the ICCCM close a window manager's close button sends.
 
@@ -2716,6 +2739,29 @@ async def main() -> int:
                     env,
                 )
                 await asyncio.to_thread(request_window_close, window, env)
+                # A locate call can spend its whole OCR budget on one frame,
+                # so wait for the repaint the request causes before reading it.
+                requested_shot = destination / "connected-close-requested.png"
+                repaint_deadline = time.monotonic() + 10 * TIME_SCALE
+                while True:
+                    await asyncio.sleep(.4)
+                    if app.poll() is not None:
+                        raise RuntimeError(
+                            "window-manager close exited without confirmation "
+                            f"(code {app.returncode})"
+                        )
+                    await asyncio.to_thread(screenshot, window, requested_shot, env)
+                    close_pixels = await asyncio.to_thread(
+                        diff, destination / "connected-before-wm-close.png", requested_shot, env,
+                    )
+                    if close_pixels >= 5000:
+                        break
+                    if time.monotonic() >= repaint_deadline:
+                        raise RuntimeError(
+                            "window-manager close request changed nothing on screen: "
+                            f"{close_pixels} pixels (need >= 5000)"
+                        )
+                print(f"window-manager close request repaint: {close_pixels} pixels", flush=True)
                 try:
                     close_confirm = await locate_rendered_label(
                         window,
@@ -2760,13 +2806,25 @@ async def main() -> int:
                         "confirming Exit button box collapsed from "
                         f"Cancel {cancel_bounds}: {exit_box}"
                     )
-                await click_label(
-                    window,
-                    destination / "connected-close-exit.png",
-                    "Exit",
-                    env,
-                    region=exit_box,
-                    settle=.3,
+                # The confirming button is dark text on the danger fill, which
+                # the light-text OCR cannot read. Find the fill itself on
+                # Cancel's row, right of Cancel, and click its centre.
+                exit_shot = destination / "connected-close-exit.png"
+                await asyncio.to_thread(screenshot, window, exit_shot, env)
+                exit_run = danger_fill_run(
+                    exit_shot, (cancel_top + cancel_bottom) // 2, exit_box[0], exit_box[2],
+                )
+                if exit_run is None:
+                    raise RuntimeError(
+                        "confirming Exit button fill not found right of Cancel "
+                        f"{cancel_bounds} in {exit_box}"
+                    )
+                exit_x = (exit_run[0] + exit_run[1]) // 2
+                exit_y = (cancel_top + cancel_bottom) // 2
+                print(f"confirming Exit button fill x={exit_run} click=({exit_x}, {exit_y})", flush=True)
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    str(exit_x), str(exit_y), "click", "1", env=env,
                 )
                 close_started = time.monotonic()
                 close_deadline = close_started + 20 * TIME_SCALE
