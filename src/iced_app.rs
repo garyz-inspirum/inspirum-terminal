@@ -1106,6 +1106,23 @@ struct FilesState {
     remote_generation: u64,
     local_visible: usize,
     remote_visible: usize,
+    /// Indices into `local_entries` in display order. Rebuilt only when the
+    /// listing or the Explorer sort changes, never during view construction.
+    local_order: Vec<usize>,
+    /// Indices into `remote_entries` in display order. Rebuilt only when the
+    /// listing or the Filer sort changes, never during view construction.
+    remote_order: Vec<usize>,
+    /// Client-local date captured once when the current remote listing was
+    /// stored. Year inference for `ls` dates that omit a year is an
+    /// approximation against this date, not against the clock at each
+    /// comparison.
+    remote_sort_reference: chrono::NaiveDate,
+    /// Cheap instrumentation incremented each time local display order is
+    /// recomputed. Tests read this to prove view construction does not re-sort.
+    local_sort_runs: u64,
+    /// Cheap instrumentation incremented each time remote display order is
+    /// recomputed. Tests read this to prove view construction does not re-sort.
+    remote_sort_runs: u64,
     selected_local: Option<PathBuf>,
     selected_remote: Option<sftp::RemoteEntry>,
     name_input: String,
@@ -1133,6 +1150,11 @@ impl FilesState {
             remote_generation: 0,
             local_visible: FILES_PAGE_SIZE,
             remote_visible: FILES_PAGE_SIZE,
+            local_order: Vec::new(),
+            remote_order: Vec::new(),
+            remote_sort_reference: chrono::Local::now().date_naive(),
+            local_sort_runs: 0,
+            remote_sort_runs: 0,
             selected_local: None,
             selected_remote: None,
             name_input: String::new(),
@@ -1427,9 +1449,11 @@ fn next_file_sort(
 /// Values a file-table row can be ordered by.
 ///
 /// `ModifiedKey` is an `Ord` value derived from the timestamp the entry
-/// already stores. Local rows use `SystemTime`. Remote rows parse the raw
-/// `ls -l` date into `(year, month, day, hour, minute)` so Date Modified is
-/// chronological. The column still displays the formatted date, not this key.
+/// already stores. Local rows use `SystemTime` and ignore the reference
+/// date. Remote rows parse the raw `ls -l` date into
+/// `(year, month, day, hour, minute)` against the client-local date captured
+/// when the listing arrived, so Date Modified is chronological. The column
+/// still displays the formatted date, not this key.
 trait FileSortEntry {
     type ModifiedKey: Ord;
 
@@ -1440,7 +1464,9 @@ trait FileSortEntry {
     fn file_permissions(&self) -> &str;
     fn file_owner(&self) -> &str;
     fn file_group(&self) -> &str;
-    fn file_modified_key(&self) -> Self::ModifiedKey;
+    /// `reference` is the client-local date captured when a remote listing
+    /// arrived. Local rows ignore it.
+    fn file_modified_key(&self, reference: chrono::NaiveDate) -> Self::ModifiedKey;
 }
 
 impl FileSortEntry for LocalFileEntry {
@@ -1474,7 +1500,7 @@ impl FileSortEntry for LocalFileEntry {
         &self.group
     }
 
-    fn file_modified_key(&self) -> Self::ModifiedKey {
+    fn file_modified_key(&self, _reference: chrono::NaiveDate) -> Self::ModifiedKey {
         self.modified
     }
 }
@@ -1510,11 +1536,10 @@ impl FileSortEntry for sftp::RemoteEntry {
         self.group.as_deref().unwrap_or("")
     }
 
-    fn file_modified_key(&self) -> Self::ModifiedKey {
-        let now = chrono::Local::now().date_naive();
+    fn file_modified_key(&self, reference: chrono::NaiveDate) -> Self::ModifiedKey {
         self.modified
             .as_deref()
-            .and_then(|raw| ls_modified_sort_key(raw, now))
+            .and_then(|raw| ls_modified_sort_key(raw, reference))
     }
 }
 
@@ -1549,8 +1574,8 @@ impl<T: FileSortEntry + ?Sized> FileSortEntry for &T {
         T::file_group(*self)
     }
 
-    fn file_modified_key(&self) -> Self::ModifiedKey {
-        T::file_modified_key(*self)
+    fn file_modified_key(&self, reference: chrono::NaiveDate) -> Self::ModifiedKey {
+        T::file_modified_key(*self, reference)
     }
 }
 
@@ -1560,41 +1585,129 @@ fn cmp_ignore_case(left: &str, right: &str) -> std::cmp::Ordering {
 
 /// Directories stay before files in every sort. `ascending` applies only to
 /// `column`; ties break by lowercase name and do not reverse.
-fn sort_file_entries<T: FileSortEntry>(entries: &mut [T], column: FileSortColumn, ascending: bool) {
-    entries.sort_by(|left, right| {
-        let directories = right.file_is_dir().cmp(&left.file_is_dir());
-        if directories != std::cmp::Ordering::Equal {
-            return directories;
+///
+/// `reference` is the client-local date captured when a remote listing
+/// arrived. Local rows ignore it. Date Modified keys are computed once per
+/// entry, not once per comparison.
+fn sort_file_entries<T: FileSortEntry>(
+    entries: &mut [T],
+    column: FileSortColumn,
+    ascending: bool,
+    reference: chrono::NaiveDate,
+) {
+    let order = file_display_order(entries, column, ascending, reference);
+    apply_index_order(entries, order);
+}
+
+/// Indices of `entries` in display order. Does not reorder `entries`.
+fn file_display_order<T: FileSortEntry>(
+    entries: &[T],
+    column: FileSortColumn,
+    ascending: bool,
+    reference: chrono::NaiveDate,
+) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    match column {
+        FileSortColumn::DateModified => {
+            let keys: Vec<T::ModifiedKey> = entries
+                .iter()
+                .map(|entry| entry.file_modified_key(reference))
+                .collect();
+            order.sort_by(|&left, &right| {
+                file_sort_cmp(
+                    entries[left].file_is_dir(),
+                    entries[right].file_is_dir(),
+                    keys[left].cmp(&keys[right]),
+                    entries[left].file_name(),
+                    entries[right].file_name(),
+                    ascending,
+                )
+            });
         }
-        let primary = match column {
-            FileSortColumn::Name => cmp_ignore_case(left.file_name(), right.file_name()),
-            FileSortColumn::DateModified => {
-                left.file_modified_key().cmp(&right.file_modified_key())
+        other => {
+            order.sort_by(|&left, &right| {
+                file_sort_cmp(
+                    entries[left].file_is_dir(),
+                    entries[right].file_is_dir(),
+                    non_date_ordering(&entries[left], &entries[right], other),
+                    entries[left].file_name(),
+                    entries[right].file_name(),
+                    ascending,
+                )
+            });
+        }
+    }
+    order
+}
+
+fn file_sort_cmp(
+    left_dir: bool,
+    right_dir: bool,
+    primary: std::cmp::Ordering,
+    left_name: &str,
+    right_name: &str,
+    ascending: bool,
+) -> std::cmp::Ordering {
+    let directories = right_dir.cmp(&left_dir);
+    if directories != std::cmp::Ordering::Equal {
+        return directories;
+    }
+    let primary = if ascending {
+        primary
+    } else {
+        primary.reverse()
+    };
+    primary.then_with(|| cmp_ignore_case(left_name, right_name))
+}
+
+fn non_date_ordering<T: FileSortEntry>(
+    left: &T,
+    right: &T,
+    column: FileSortColumn,
+) -> std::cmp::Ordering {
+    match column {
+        FileSortColumn::Name => cmp_ignore_case(left.file_name(), right.file_name()),
+        FileSortColumn::Type => cmp_ignore_case(&left.file_type_key(), &right.file_type_key()),
+        FileSortColumn::Size => left.file_size().cmp(&right.file_size()),
+        FileSortColumn::Permissions => {
+            cmp_ignore_case(left.file_permissions(), right.file_permissions())
+        }
+        FileSortColumn::Owner => cmp_ignore_case(left.file_owner(), right.file_owner()),
+        FileSortColumn::Group => cmp_ignore_case(left.file_group(), right.file_group()),
+        // Date Modified uses the cached-key path in `file_display_order`.
+        FileSortColumn::DateModified => std::cmp::Ordering::Equal,
+    }
+}
+
+/// `order[dest]` is the source index of the item that belongs at `dest`.
+fn apply_index_order<T>(items: &mut [T], mut order: Vec<usize>) {
+    let mut index = 0;
+    while index < order.len() {
+        if order[index] != index {
+            let mut current = index;
+            loop {
+                let next = order[current];
+                order[current] = current;
+                if next == index {
+                    break;
+                }
+                items.swap(current, next);
+                current = next;
             }
-            FileSortColumn::Type => cmp_ignore_case(&left.file_type_key(), &right.file_type_key()),
-            FileSortColumn::Size => left.file_size().cmp(&right.file_size()),
-            FileSortColumn::Permissions => {
-                cmp_ignore_case(left.file_permissions(), right.file_permissions())
-            }
-            FileSortColumn::Owner => cmp_ignore_case(left.file_owner(), right.file_owner()),
-            FileSortColumn::Group => cmp_ignore_case(left.file_group(), right.file_group()),
-        };
-        let primary = if ascending {
-            primary
-        } else {
-            primary.reverse()
-        };
-        primary.then_with(|| cmp_ignore_case(left.file_name(), right.file_name()))
-    });
+        }
+        index += 1;
+    }
 }
 
 /// Chronological key for an `ls -l` date (`Mon D HH:MM` or `Mon D YYYY`).
 ///
 /// `ls` omits the year for files modified within about the last six months.
-/// That form uses `now`'s year unless the month and day are still in the
-/// future, in which case it is the previous year. A `YYYY` form has no time
-/// and sorts at 00:00. Unparseable text is `None`, which sorts before every
-/// real timestamp; the caller still breaks those ties by name.
+/// Year inference for that form is an approximation based on the client's
+/// local date captured when the listing arrived (`now`), not on the clock at
+/// comparison time. That form uses `now`'s year unless the month and day are
+/// still in the future, in which case it is the previous year. A `YYYY` form
+/// has no time and sorts at 00:00. Unparseable text is `None`, which sorts
+/// before every real timestamp; the caller still breaks those ties by name.
 fn ls_modified_sort_key(raw: &str, now: chrono::NaiveDate) -> Option<(i32, u32, u32, u32, u32)> {
     use chrono::Datelike;
     const MONTHS: [&str; 12] = [
@@ -3788,6 +3901,7 @@ impl App {
             self.files.remote_dir = ".".into();
             self.files.remote_visible = FILES_PAGE_SIZE;
             self.files.remote_entries.clear();
+            self.resort_remote_files();
             self.files.selected_remote = None;
             self.files.remote_error = None;
             self.files.remote_generation = self.files.remote_generation.wrapping_add(1);
@@ -5674,6 +5788,7 @@ impl App {
                             self.files.local_error = Some(error);
                         }
                     }
+                    self.resort_local_files();
                 }
             }
             Message::FilesRemoteLoaded(generation, result) => {
@@ -5681,6 +5796,8 @@ impl App {
                     self.files.remote_loading = false;
                     match result {
                         Ok(entries) => {
+                            // Capture once per stored listing, before the sort.
+                            self.files.remote_sort_reference = chrono::Local::now().date_naive();
                             self.files.remote_entries = entries;
                             self.files.remote_error = None;
                         }
@@ -5689,6 +5806,7 @@ impl App {
                             self.files.remote_error = Some(error);
                         }
                     }
+                    self.resort_remote_files();
                 }
             }
             Message::RequestPaste => {
@@ -6466,6 +6584,7 @@ impl App {
                     next_file_sort(self.local_file_sort, self.local_file_sort_ascending, column);
                 self.local_file_sort = column;
                 self.local_file_sort_ascending = ascending;
+                self.resort_local_files();
             }
             Message::FilesSortRemote(column) => {
                 let (column, ascending) = next_file_sort(
@@ -6475,6 +6594,7 @@ impl App {
                 );
                 self.remote_file_sort = column;
                 self.remote_file_sort_ascending = ascending;
+                self.resort_remote_files();
             }
             Message::Exit => {
                 self.open_menu = None;
@@ -7520,7 +7640,34 @@ impl App {
         container(grid).height(Fill).style(border_fill).into()
     }
 
+    /// Rebuild Explorer display order from the current listing and sort.
+    /// Local rows ignore the stored remote reference date. Not called from
+    /// view construction.
+    fn resort_local_files(&mut self) {
+        self.files.local_order = file_display_order(
+            &self.files.local_entries,
+            self.local_file_sort,
+            self.local_file_sort_ascending,
+            self.files.remote_sort_reference,
+        );
+        self.files.local_sort_runs += 1;
+    }
+
+    /// Rebuild Filer display order from the current listing, sort, and the
+    /// reference date captured when that listing was stored.
+    fn resort_remote_files(&mut self) {
+        self.files.remote_order = file_display_order(
+            &self.files.remote_entries,
+            self.remote_file_sort,
+            self.remote_file_sort_ascending,
+            self.files.remote_sort_reference,
+        );
+        self.files.remote_sort_runs += 1;
+    }
+
     /// Local and remote file tables laid out `table_width` wide.
+    ///
+    /// Walks the cached display order and takes the visible page. Does not sort.
     fn file_lists(&self, table_width: f32) -> (Column<'_, Message>, Column<'_, Message>) {
         let mut local_list = column![file_listing_header(
             table_width,
@@ -7536,13 +7683,14 @@ impl App {
         } else if self.files.local_entries.is_empty() {
             local_list = local_list.push(text("Directory is empty.").size(12).color(muted()));
         } else {
-            let mut sorted: Vec<&LocalFileEntry> = self.files.local_entries.iter().collect();
-            sort_file_entries(
-                &mut sorted,
-                self.local_file_sort,
-                self.local_file_sort_ascending,
-            );
-            for entry in sorted.into_iter().take(self.files.local_visible) {
+            let order = &self.files.local_order;
+            let entries = &self.files.local_entries;
+            let visible = self.files.local_visible;
+            for entry in order
+                .iter()
+                .filter_map(|&index| entries.get(index))
+                .take(visible)
+            {
                 let cells = FileListingCells {
                     name: display_leaf(&entry.name),
                     is_dir: entry.is_dir,
@@ -7604,13 +7752,14 @@ impl App {
             remote_list = remote_list.push(text("Directory is empty.").size(12).color(muted()));
         } else {
             let today = chrono::Local::now().date_naive();
-            let mut sorted: Vec<&sftp::RemoteEntry> = self.files.remote_entries.iter().collect();
-            sort_file_entries(
-                &mut sorted,
-                self.remote_file_sort,
-                self.remote_file_sort_ascending,
-            );
-            for entry in sorted.into_iter().take(self.files.remote_visible) {
+            let order = &self.files.remote_order;
+            let entries = &self.files.remote_entries;
+            let visible = self.files.remote_visible;
+            for entry in order
+                .iter()
+                .filter_map(|&index| entries.get(index))
+                .take(visible)
+            {
                 let cells = FileListingCells {
                     name: display_leaf(&entry.name),
                     is_dir: entry.is_dir,
@@ -11824,6 +11973,10 @@ mod tests {
         assert_eq!(app.open_menu, Some(menu::Menu::Session));
     }
 
+    fn sort_reference() -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap()
+    }
+
     fn listing_entry(
         name: &str,
         is_dir: bool,
@@ -11854,7 +12007,7 @@ mod tests {
             listing_entry("A", false, Some(1), None),
             listing_entry("B", true, None, None),
         ];
-        sort_file_entries(&mut entries, FileSortColumn::Name, true);
+        sort_file_entries(&mut entries, FileSortColumn::Name, true, sort_reference());
         assert_eq!(listing_names(&entries), ["a", "B", "A", "b"]);
         assert!(entries.iter().take(2).all(|entry| entry.is_dir));
         assert!(entries.iter().skip(2).all(|entry| !entry.is_dir));
@@ -11868,7 +12021,7 @@ mod tests {
             listing_entry("big-dir", true, Some(50), None),
             listing_entry("tiny", false, Some(2), None),
         ];
-        sort_file_entries(&mut entries, FileSortColumn::Size, false);
+        sort_file_entries(&mut entries, FileSortColumn::Size, false, sort_reference());
         assert_eq!(
             listing_names(&entries),
             ["big-dir", "small-dir", "huge", "tiny"]
@@ -11892,8 +12045,8 @@ mod tests {
             listing_entry("b", false, Some(2), None),
         ];
         let mut descending = ascending.clone();
-        sort_file_entries(&mut ascending, once.0, once.1);
-        sort_file_entries(&mut descending, twice.0, twice.1);
+        sort_file_entries(&mut ascending, once.0, once.1, sort_reference());
+        sort_file_entries(&mut descending, twice.0, twice.1, sort_reference());
         assert_eq!(listing_names(&ascending), ["a", "b", "c"]);
         assert_eq!(listing_names(&descending), ["c", "b", "a"]);
     }
@@ -11905,12 +12058,12 @@ mod tests {
             listing_entry("A.txt", false, Some(5), None),
             listing_entry("c.txt", false, Some(9), None),
         ];
-        sort_file_entries(&mut entries, FileSortColumn::Size, true);
+        sort_file_entries(&mut entries, FileSortColumn::Size, true, sort_reference());
         assert_eq!(listing_names(&entries), ["A.txt", "b.txt", "c.txt"]);
 
         // Descending size still breaks the equal-size tie by lowercase name,
         // not by reversed name.
-        sort_file_entries(&mut entries, FileSortColumn::Size, false);
+        sort_file_entries(&mut entries, FileSortColumn::Size, false, sort_reference());
         assert_eq!(listing_names(&entries), ["c.txt", "A.txt", "b.txt"]);
     }
 
@@ -11922,7 +12075,7 @@ mod tests {
             listing_entry("later", false, Some(1), Some(later)),
             listing_entry("earlier", false, Some(1), Some(earlier)),
         ];
-        sort_file_entries(&mut local, FileSortColumn::DateModified, true);
+        sort_file_entries(&mut local, FileSortColumn::DateModified, true, sort_reference());
         assert_eq!(listing_names(&local), ["earlier", "later"]);
 
         // "Jan" < "Oct" as text, but January 2024 is after October 2023.
@@ -11938,7 +12091,7 @@ mod tests {
                 entry
             },
         ];
-        sort_file_entries(&mut remote, FileSortColumn::DateModified, true);
+        sort_file_entries(&mut remote, FileSortColumn::DateModified, true, sort_reference());
         assert_eq!(
             remote
                 .iter()
@@ -12006,7 +12159,7 @@ mod tests {
                 entry
             },
         ];
-        sort_file_entries(&mut remote, FileSortColumn::DateModified, true);
+        sort_file_entries(&mut remote, FileSortColumn::DateModified, true, sort_reference());
         assert_eq!(
             remote
                 .iter()
