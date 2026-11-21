@@ -6611,7 +6611,12 @@ impl App {
         } else {
             tab.profile.folder.clone()
         };
-        let crumb_text = |value: String| text(value).size(theme::metrics::UI_TEXT).color(p.text);
+        let crumb_text = |value: String| {
+            text(value)
+                .size(theme::metrics::UI_TEXT)
+                .color(p.text)
+                .wrapping(iced::widget::text::Wrapping::None)
+        };
         let breadcrumb = container(
             row![
                 icons::icon(icons::Icon::Info, 12.0, p.muted),
@@ -6631,6 +6636,7 @@ impl App {
         .padding([0, 8])
         .height(23)
         .width(Fill)
+        .clip(true)
         .align_y(iced::Center)
         .style(breadcrumb_field);
         let shell_open = tab.panes.iter().any(|(_, pane)| pane.auxiliary_shell);
@@ -6762,10 +6768,20 @@ impl App {
         };
         let mut labels = row![].spacing(6).align_y(iced::Center);
         if let Some(mode) = mode {
-            labels = labels.push(text(mode).size(10).color(blue()));
+            labels = labels.push(
+                text(mode)
+                    .size(10)
+                    .color(blue())
+                    .wrapping(iced::widget::text::Wrapping::None),
+            );
         }
         if let Some((label, color)) = state {
-            labels = labels.push(text(label).size(10).color(color));
+            labels = labels.push(
+                text(label)
+                    .size(10)
+                    .color(color)
+                    .wrapping(iced::widget::text::Wrapping::None),
+            );
         }
         let mut controls = row![
             compact_action("Copy", Message::CopySelection(pane.id)),
@@ -6815,30 +6831,48 @@ impl App {
         let multi_pane = tab.panes.len() > 1;
         let grid = pane_grid(&tab.panes, |id, pane, _| {
             let focused = tab.focus == id;
-            let p = theme::palette();
-            let (labels, controls) = self.pane_header_parts(id, pane, true);
             let live = !pane.exited && pane.error.is_none() && pane.terminal.is_some();
-            let status: Element<'_, Message> = if live {
-                icons::dot(p.magenta, 8.0)
-            } else {
-                icons::icon(icons::Icon::CircleHollow, 8.0, p.muted)
-            };
-            let header = row![
-                status,
-                text(
-                    pane.terminal_title
-                        .as_deref()
-                        .unwrap_or(&pane.profile.name)
-                        .to_owned()
+            // Narrow-pane rule: below PANE_HEADER_COMPACT_WIDTH only the
+            // status dot, clipped name, state labels, Reconnect and close stay
+            // in the header; the rest is reachable via Edit/Mode menus.
+            let header = responsive(move |size| {
+                let p = theme::palette();
+                let status: Element<'_, Message> = if live {
+                    icons::dot(p.magenta, 8.0)
+                } else {
+                    icons::icon(icons::Icon::CircleHollow, 8.0, p.muted)
+                };
+                let (labels, controls) = if size.width < PANE_HEADER_COMPACT_WIDTH {
+                    let (labels, _) = self.pane_header_parts(id, pane, true);
+                    let mut controls = row![].spacing(0).align_y(iced::Center);
+                    if pane.exited || pane.error.is_some() {
+                        controls =
+                            controls.push(compact_action("Reconnect", Message::Reconnect(id)));
+                    }
+                    controls = controls.push(compact_action("x", Message::ClosePane(id)));
+                    (labels, controls)
+                } else {
+                    self.pane_header_parts(id, pane, true)
+                };
+                let name = container(
+                    text(
+                        pane.terminal_title
+                            .as_deref()
+                            .unwrap_or(&pane.profile.name)
+                            .to_owned(),
+                    )
+                    .size(12)
+                    .color(p.text)
+                    .wrapping(iced::widget::text::Wrapping::None),
                 )
-                .size(12)
-                .color(p.text),
-                labels,
-                space::horizontal(),
-                controls,
-            ]
-            .spacing(6)
-            .align_y(iced::Center);
+                .width(Fill)
+                .clip(true);
+                row![status, name, labels, controls]
+                    .spacing(6)
+                    .height(20)
+                    .align_y(iced::Center)
+                    .into()
+            });
             let title = pane_grid::TitleBar::new(column![
                 container(space::horizontal())
                     .width(Fill)
@@ -8661,11 +8695,18 @@ fn hline<'a>() -> Element<'a, Message> {
         .into()
 }
 
+/// Pane width below which the pane header drops its secondary controls.
+const PANE_HEADER_COMPACT_WIDTH: f32 = 420.0;
+
 fn compact_action<'a>(label: impl Into<String>, message: Message) -> button::Button<'a, Message> {
-    button(text(label.into()).size(12))
-        .padding([2, 6])
-        .style(icon_button)
-        .on_press(message)
+    button(
+        text(label.into())
+            .size(12)
+            .wrapping(iced::widget::text::Wrapping::None),
+    )
+    .padding([2, 6])
+    .style(icon_button)
+    .on_press(message)
 }
 
 fn tool_icon<'a>(icon: icons::Icon, tip: &'a str, message: Message) -> Element<'a, Message> {
