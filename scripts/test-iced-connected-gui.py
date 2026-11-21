@@ -206,6 +206,11 @@ def _key(text: str) -> str:
     return "".join(ch for ch in text if ch.isalnum() or ch == ".")
 
 
+# Monospace dotted zeros in 13 px table cells are read as ``@``, which _key
+# would drop entirely. Map it back before the exact 3-char prefix check.
+_OCR_GLYPH_FIXES = str.maketrans({"@": "0"})
+
+
 def _near_key(text: str, label: str) -> bool:
     """Whole-line match tolerating a few single-glyph OCR confusions.
 
@@ -213,7 +218,7 @@ def _near_key(text: str, label: str) -> bool:
     ``GUI`` read as ``GUL`` or ``bin`` as ``bir`` cannot turn one fixture name
     into another; the digit prefix and length must still match exactly.
     """
-    got, want = _key(text), _key(label)
+    got, want = _key(text.translate(_OCR_GLYPH_FIXES)), _key(label)
     if len(want) < 12 or len(got) != len(want):
         return False
     if got[:3] != want[:3]:
@@ -224,6 +229,12 @@ def _near_key(text: str, label: str) -> bool:
 def match_visible_segment(segments, label: str):
     """Match a label against each OCR'd segment as a whole, with tolerance."""
     for words in segments:
+        if not words:
+            continue
+        # Drop leading icon glyphs (file icons read as ``)`` or ``*``) so the
+        # bounds and click centre sit on the name, not the icon.
+        while words and not _key(words[0][0].translate(_OCR_GLYPH_FIXES)):
+            words = words[1:]
         if not words:
             continue
         joined = "".join(word[0] for word in words)
@@ -456,7 +467,9 @@ def _scaled_words(tsv: str, origin, scale: int):
     return words
 
 
-def _upscaled_crop(rows, channels, box, scale: int, dest: Path) -> None:
+def _upscaled_crop(
+    rows, channels, box, scale: int, dest: Path, *, invert: bool = False,
+) -> None:
     left, top, right, bot = box
     width = right - left + 1
     height = bot - top + 1
@@ -468,7 +481,11 @@ def _upscaled_crop(rows, channels, box, scale: int, dest: Path) -> None:
         for x in range(out_w):
             base = (left + min(width - 1, x // scale)) * channels
             dest_at = (y * out_w + x) * 3
-            rgb[dest_at:dest_at + 3] = source[base:base + 3]
+            if invert:
+                lum = 255 - (source[base] + source[base + 1] + source[base + 2]) // 3
+                rgb[dest_at:dest_at + 3] = bytes((lum, lum, lum))
+            else:
+                rgb[dest_at:dest_at + 3] = source[base:base + 3]
     _write_png(dest, out_w, out_h, bytes(rgb))
 
 
@@ -552,14 +569,18 @@ def _band_segments(width, rows, channels, thresh, y1, y2, gap: int):
     return [(x1, x2) for x1, x2 in segments if x2 - x1 >= 40]
 
 
-def visible_segment_rows(path: Path, tesseract: str):
+def visible_segment_rows(path: Path, tesseract: str, *, invert: bool = False):
     """OCR each light band segment by segment; coordinates in source pixels.
 
     Returns a list of per-segment word lists so a caller can match one
     segment as a whole without neighbouring controls on the same line.
+
+    ``invert`` re-reads each segment as dark-on-light grey. On the dark theme
+    a 13 px monospace table cell (file icon + name) read as noise in colour
+    but as ``@@@_GUI_DOWNLOAD_FIXTURE. bir`` inverted.
     """
     stat = path.stat()
-    key = (str(path), stat.st_mtime_ns, stat.st_size, "segments")
+    key = (str(path), stat.st_mtime_ns, stat.st_size, "segments", invert)
     cached = _PIXEL_CACHE.get(key)
     if cached is not None:
         return cached
@@ -580,7 +601,7 @@ def visible_segment_rows(path: Path, tesseract: str):
                 )
                 if box[2] - box[0] < 24:
                     continue
-                _upscaled_crop(rows, channels, box, 4, temporary)
+                _upscaled_crop(rows, channels, box, 4, temporary, invert=invert)
                 segments.append(_scaled_words(
                     _ocr_tsv(tesseract, temporary, "7"), (box[0], box[1]), 4,
                 ))
@@ -712,7 +733,34 @@ def locate_visible_label(
         if bounds is None:
             bounds = match_visible_segment(segments, label)
     if bounds is None:
-        raise RuntimeError(f"visible label not found in screenshot: {label}")
+        segments = visible_segment_rows(path, tesseract, invert=True)
+        if region is not None:
+            x1, y1, x2, y2 = region
+            segments = [
+                words for words in segments
+                if words and x1 <= words[-1][1] and words[0][1] <= x2
+                and y1 <= words[0][2] <= y2
+            ]
+        bounds = match_visible_label(
+            [word for words in segments for word in words], label,
+        )
+        if bounds is None:
+            bounds = match_visible_segment(segments, label)
+    if bounds is None:
+        seen = [row[0] for row in ocr_rows(path, tesseract, region)][:40]
+        segs = [
+            " ".join(word[0] for word in words)
+            for words in visible_segment_rows(path, tesseract, invert=True) if words
+        ][:40]
+        print(
+            f"OCR miss for {label!r} in {path} region={region}\n"
+            f"  words: {seen}\n  inverted segments: {segs}",
+            file=sys.stderr,
+        )
+        raise RuntimeError(
+            f"visible label not found in screenshot: {label} "
+            f"(screenshot: {path}, region={region})"
+        )
     return bounds
 
 
