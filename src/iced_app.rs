@@ -2764,6 +2764,10 @@ struct App {
     next_transfer_id: u64,
     next_remote_editor_id: u64,
     remote_editor_open_generation: u64,
+    /// Observation only. Unit panes have `terminal: None`, so a log next to
+    /// `process_command` never fires. Must not change write behaviour.
+    #[cfg(test)]
+    pty_write_log: Vec<(u64, Vec<u8>)>,
 }
 
 const FILES_PANELS: [dock::Panel; 3] = [
@@ -2899,6 +2903,8 @@ impl App {
             next_transfer_id: 1,
             next_remote_editor_id: 1,
             remote_editor_open_generation: 0,
+            #[cfg(test)]
+            pty_write_log: Vec::new(),
         }
     }
 
@@ -3150,6 +3156,12 @@ impl App {
     }
 
     fn command_terminal(&mut self, id: u64, command: terminal_core::BackendCommand) -> bool {
+        // Record the attempt before any early return. Unit tests have no PTY,
+        // so this is the only observation point; it does not change behaviour.
+        #[cfg(test)]
+        if let terminal_core::BackendCommand::Write(bytes) = &command {
+            self.pty_write_log.push((id, bytes.clone()));
+        }
         // Enforce the mode at the single PTY write boundary, including
         // synchronized input, delayed clipboard callbacks and tool commands.
         if (self.local_navigation.contains(&id) || self.free_type.contains_key(&id))
@@ -11021,5 +11033,161 @@ mod tests {
             ..Default::default()
         };
         assert!(zero.session().is_err());
+    }
+
+    fn arm_synced_pair(label: &str) -> (App, u64, u64) {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-{label}-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session {
+            name: "fake-disconnected-sync".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let first = app.new_terminal_pane(profile.clone());
+        let first_id = first.id;
+        app.tabs.push(Workspace::new(profile.clone(), first));
+        let second = app.new_terminal_pane(profile);
+        let second_id = second.id;
+        app.tabs[0].split(pane_grid::Axis::Vertical, second);
+        let _ = app.update(Message::Tool(tools::Action::SyncTarget(first_id, true)));
+        let _ = app.update(Message::Tool(tools::Action::SyncTarget(second_id, true)));
+        let _ = app.update(Message::Tool(tools::Action::SyncArm(true)));
+        assert!(app.tools.sync.armed(), "two selected panes must arm sync");
+        let focused_id = app.tabs[0]
+            .panes
+            .get(app.tabs[0].focus)
+            .map(|pane| pane.id)
+            .expect("focused pane");
+        assert!(
+            focused_id == first_id || focused_id == second_id,
+            "focused pane {focused_id} must be one of the synced panes"
+        );
+        (app, first_id, second_id)
+    }
+
+    /// `pressed_key` sets `text: None`. A plain character only becomes PTY
+    /// bytes when the event carries committed text (`terminal_key_bytes`).
+    fn pressed_char(ch: &str) -> Message {
+        let key = keyboard::Key::Character(ch.into());
+        Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::default(),
+            text: Some(ch.into()),
+            repeat: false,
+        }))
+    }
+
+    #[test]
+    fn enter_with_open_menu_writes_to_neither_source_nor_synced_pane() {
+        let (mut app, first_id, second_id) = arm_synced_pair("menu-enter");
+        let plain = keyboard::Modifiers::default();
+        for (open_menu, dock_menu) in [
+            (Some(menu::Menu::Session), None),
+            (None, Some(dock::Area::Bottom)),
+        ] {
+            app.open_menu = open_menu;
+            app.dock_menu = dock_menu;
+            app.pty_write_log.clear();
+            let _ = app.update(pressed_key(
+                keyboard::Key::Named(keyboard::key::Named::Enter),
+                plain,
+            ));
+            let _ = app.update(pressed_key(keyboard::Key::Character("x".into()), plain));
+            let _ = app.update(pressed_char("x"));
+            assert!(
+                app.pty_write_log.is_empty(),
+                "open menu must write to neither source nor synced pane, log={:?}",
+                app.pty_write_log
+            );
+            assert!(
+                app.open_menu.is_some() || app.dock_menu.is_some(),
+                "non-Escape keys must leave the menu open"
+            );
+            app.open_menu = None;
+            app.dock_menu = None;
+            app.pty_write_log.clear();
+            let _ = app.update(pressed_key(
+                keyboard::Key::Named(keyboard::key::Named::Enter),
+                plain,
+            ));
+            assert!(
+                app.pty_write_log.iter().any(|(id, _)| *id == first_id)
+                    && app.pty_write_log.iter().any(|(id, _)| *id == second_id),
+                "recorder must see Enter on both synced panes, log={:?}",
+                app.pty_write_log
+            );
+        }
+    }
+
+    #[test]
+    fn escape_in_sender_writes_nothing_and_releases_focus() {
+        let (mut app, _first_id, _second_id) = arm_synced_pair("sender-escape");
+        assert!(app.open_menu.is_none() && app.dock_menu.is_none());
+        app.sender_focused = true;
+        app.pty_write_log.clear();
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(
+            app.pty_write_log.is_empty(),
+            "Sender Escape must not reach any pane, log={:?}",
+            app.pty_write_log
+        );
+        assert!(
+            !app.sender_focused,
+            "Escape must release Sender focus locally"
+        );
+        app.pty_write_log.clear();
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(
+            app.pty_write_log
+                .iter()
+                .any(|(_, bytes)| bytes.contains(&0x1b)),
+            "Escape after releasing Sender must be logged as 0x1b, log={:?}",
+            app.pty_write_log
+        );
+    }
+
+    #[test]
+    fn ime_commit_and_paste_write_nothing_while_menu_open() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-menu-ime-paste-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session::default();
+        let pane = app.new_terminal_pane(profile.clone());
+        let id = pane.id;
+        app.tabs.push(Workspace::new(profile, pane));
+        app.open_menu = Some(menu::Menu::Session);
+        app.pty_write_log.clear();
+        let _ = app.update(Message::TerminalImeCommit(id, "x".into()));
+        let _ = app.update(Message::ClipboardRead(id, vec![id], Some("x".into())));
+        assert!(
+            app.pty_write_log.is_empty(),
+            "menu must drop IME commit and paste, log={:?}",
+            app.pty_write_log
+        );
+        assert!(app.open_menu.is_some(), "menu must stay open");
+        app.open_menu = None;
+        app.pty_write_log.clear();
+        let _ = app.update(Message::TerminalImeCommit(id, "x".into()));
+        assert!(
+            app.pty_write_log
+                .iter()
+                .any(|(pane, bytes)| *pane == id && bytes.as_slice() == b"x"),
+            "IME commit must be logged once the menu is closed, log={:?}",
+            app.pty_write_log
+        );
     }
 }
