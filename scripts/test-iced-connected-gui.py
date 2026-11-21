@@ -2482,6 +2482,8 @@ async def main() -> int:
                 # This is bounded protocol evidence, not a Vim usability claim.
                 command("xdotool", "mousemove", "--window", window,
                         "710", "300", "click", "1", env=env)
+                await asyncio.sleep(.3)
+                screenshot(window, destination / "connected-fullscreen-before.png", env)
                 command("xdotool", "type", "--clearmodifiers", "--delay", "25",
                         "screen-on", env=env)
                 command("xdotool", "key", "--clearmodifiers", "Return", env=env)
@@ -2489,8 +2491,23 @@ async def main() -> int:
                     lambda: "SCREEN_ON" in events.path.read_text(encoding="utf-8"),
                     "live SSH alternate-screen enter",
                 )
-                await asyncio.sleep(.5)
-                screenshot(window, destination / "connected-fullscreen-active.png", env)
+                # SCREEN_ON is a server event too: poll until the alternate
+                # screen is painted, or the "active" frame is the normal screen
+                # and the restore below diffs to nothing.
+                active_deadline = time.monotonic() + 10 * TIME_SCALE
+                while True:
+                    await asyncio.sleep(.5)
+                    screenshot(window, destination / "connected-fullscreen-active.png", env)
+                    active_pixels = diff(
+                        destination / "connected-fullscreen-before.png",
+                        destination / "connected-fullscreen-active.png", env,
+                    )
+                    if active_pixels >= 1500 or time.monotonic() >= active_deadline:
+                        break
+                if active_pixels < 1500:
+                    raise RuntimeError(
+                        f"alternate-screen enter changed only {active_pixels} pixels"
+                    )
                 command("xdotool", "type", "--clearmodifiers", "--delay", "25",
                         "screen-off", env=env)
                 command("xdotool", "key", "--clearmodifiers", "Return", env=env)
