@@ -7585,7 +7585,7 @@ impl App {
                             Message::Favorite(!self.form.favorite)
                         )
                         .style(if self.form.favorite {
-                            selected_button
+                            flat_selected
                         } else {
                             quiet
                         }),
@@ -7645,7 +7645,7 @@ impl App {
                                         Message::StrictHostKey(false)
                                     )
                                     .style(if !self.form.strict_host_key {
-                                        selected_button
+                                        flat_selected
                                     } else {
                                         quiet
                                     }),
@@ -7654,7 +7654,7 @@ impl App {
                                         Message::StrictHostKey(true)
                                     )
                                     .style(if self.form.strict_host_key {
-                                        selected_button
+                                        flat_selected
                                     } else {
                                         quiet
                                     }),
@@ -7715,7 +7715,7 @@ impl App {
                                         Message::ProxyKind(ProxyKind::None)
                                     )
                                     .style(if self.form.proxy_kind == ProxyKind::None {
-                                        selected_button
+                                        flat_selected
                                     } else {
                                         quiet
                                     }),
@@ -7724,7 +7724,7 @@ impl App {
                                         Message::ProxyKind(ProxyKind::HttpConnect)
                                     )
                                     .style(if self.form.proxy_kind == ProxyKind::HttpConnect {
-                                        selected_button
+                                        flat_selected
                                     } else {
                                         quiet
                                     }),
@@ -7733,7 +7733,7 @@ impl App {
                                         Message::ProxyKind(ProxyKind::Socks5)
                                     )
                                     .style(if self.form.proxy_kind == ProxyKind::Socks5 {
-                                        selected_button
+                                        flat_selected
                                     } else {
                                         quiet
                                     }),
@@ -7768,7 +7768,7 @@ impl App {
                                                 Message::ProxyAuth(ProxyAuth::None)
                                             )
                                             .style(if self.form.proxy_auth == ProxyAuth::None {
-                                                selected_button
+                                                flat_selected
                                             } else {
                                                 quiet
                                             }),
@@ -7777,7 +7777,7 @@ impl App {
                                                 Message::ProxyAuth(ProxyAuth::Environment)
                                             )
                                             .style(if self.form.proxy_auth == ProxyAuth::Environment {
-                                                selected_button
+                                                flat_selected
                                             } else {
                                                 quiet
                                             }),
@@ -8279,17 +8279,17 @@ fn policy_field<'a>(
         text(label).size(12).color(theme::palette().text),
         row![
             action("Inherit", message(None)).style(if value.is_none() {
-                selected_button
+                flat_selected
             } else {
                 quiet
             }),
             action("Enable", message(Some(true))).style(if value == Some(true) {
-                selected_button
+                flat_selected
             } else {
                 quiet
             }),
             action("Disable", message(Some(false))).style(if value == Some(false) {
-                selected_button
+                flat_selected
             } else {
                 quiet
             }),
@@ -8646,6 +8646,25 @@ fn dialog_frame<'a>(
     ])
     .padding(1)
     .style(dialog_window)
+}
+
+/// Flat WindTerm selection row: selected fill, no border, square corners.
+fn flat_selected(_: &Theme, status: button::Status) -> button::Style {
+    let p = theme::palette();
+    let background = match status {
+        button::Status::Hovered => p.hover,
+        _ => p.selected_row,
+    };
+    button::Style {
+        background: Some(background.into()),
+        text_color: p.text,
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    }
 }
 
 /// `(name, verb, DIRECTION, destination dir)` for a transfer block (spec 5.3).

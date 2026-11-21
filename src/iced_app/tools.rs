@@ -1177,7 +1177,7 @@ impl App {
             for panel in panels {
                 line = line.push(act(panel.name(), Action::Open(*panel)).style(
                     if *panel == self.tools.panel {
-                        selected_button
+                        flat_selected
                     } else {
                         quiet
                     },
@@ -1573,7 +1573,7 @@ impl App {
                     Action::PastePolicy(PastePolicy::ConfirmMultiline)
                 )
                 .style(if self.paste_policy == PastePolicy::ConfirmMultiline {
-                    selected_button
+                    flat_selected
                 } else {
                     quiet
                 }),
@@ -1582,7 +1582,7 @@ impl App {
                     Action::PastePolicy(PastePolicy::ConfirmAll)
                 )
                 .style(if self.paste_policy == PastePolicy::ConfirmAll {
-                    selected_button
+                    flat_selected
                 } else {
                     quiet
                 }),
