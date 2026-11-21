@@ -7302,10 +7302,16 @@ impl App {
                 _ if job.state == TransferJobState::Completed => 1.0,
                 _ => 0.0,
             };
-            let status_line = if job.error.is_empty() {
-                format!("{state} {progress}").trim().to_owned()
+            let detail_line = if job.error.is_empty() {
+                progress
             } else {
-                format!("{state}: {}", job.error)
+                format!(": {}", job.error)
+            };
+            let state_color = match job.state {
+                TransferJobState::Completed => green(),
+                TransferJobState::Failed => danger(),
+                TransferJobState::Running | TransferJobState::Queued => blue(),
+                TransferJobState::Cancelled => theme::palette().text_dock,
             };
             transfer_list = transfer_list.push(
                 column![
@@ -7318,15 +7324,12 @@ impl App {
                         .size(12),
                         space::horizontal(),
                         text(format!("{destination} {direction}"))
-                            .size(11)
-                            .color(muted()),
-                        text(status_line).size(11).color(
-                            if job.state == TransferJobState::Failed {
-                                danger()
-                            } else {
-                                muted()
-                            }
-                        ),
+                            .size(theme::metrics::UI_TEXT)
+                            .color(theme::palette().text_dock),
+                        text(state).size(theme::metrics::UI_TEXT).color(state_color),
+                        text(detail_line)
+                            .size(theme::metrics::UI_TEXT)
+                            .color(theme::palette().text_dock),
                         controls,
                     ]
                     .spacing(6)
@@ -8900,6 +8903,15 @@ fn flat_selected(_: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// A relative remote destination (`.`) qualified with the session target.
+fn relative_remote_destination(session: &Session) -> String {
+    match (session.user.trim(), session.host.trim()) {
+        (_, "") => ".".to_owned(),
+        ("", host) => format!("{host}:."),
+        (user, host) => format!("{user}@{host}:."),
+    }
+}
+
 /// `(name, verb, DIRECTION, destination dir)` for a transfer block (spec 5.3).
 fn transfer_job_summary(job: &TransferJob) -> (String, &'static str, &'static str, String) {
     let local_name = job
@@ -8922,8 +8934,8 @@ fn transfer_job_summary(job: &TransferJob) -> (String, &'static str, &'static st
                 .remote
                 .rsplit_once('/')
                 .map(|(dir, _)| if dir.is_empty() { "/" } else { dir })
-                .unwrap_or(".")
-                .to_owned();
+                .map(str::to_owned)
+                .unwrap_or_else(|| relative_remote_destination(&job.pending.session));
             (local_name, "uploaded", "UPLOAD", dir)
         }
         TransferDirection::Download => {
@@ -10094,6 +10106,18 @@ mod tests {
         app.active = 1;
         assert!(!app.active_session_matches(&first_key));
         assert!(app.active_session_matches(&second_key));
+    }
+
+    #[test]
+    fn escape_releases_sender_focus_only_without_menu_or_dialog() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-sender-escape-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.sender_focused = true;
+        let _ = app.update(Message::DismissModalKey);
+        assert!(!app.sender_focused);
     }
 
     #[test]
