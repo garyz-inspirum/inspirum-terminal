@@ -1589,6 +1589,8 @@ fn cmp_ignore_case(left: &str, right: &str) -> std::cmp::Ordering {
 /// `reference` is the client-local date captured when a remote listing
 /// arrived. Local rows ignore it. Date Modified keys are computed once per
 /// entry, not once per comparison.
+/// Test-only helper that applies `file_display_order` in place.
+#[cfg(test)]
 fn sort_file_entries<T: FileSortEntry>(
     entries: &mut [T],
     column: FileSortColumn,
@@ -1680,6 +1682,8 @@ fn non_date_ordering<T: FileSortEntry>(
 }
 
 /// `order[dest]` is the source index of the item that belongs at `dest`.
+/// Test-only helper that applies `file_display_order` in place.
+#[cfg(test)]
 fn apply_index_order<T>(items: &mut [T], mut order: Vec<usize>) {
     let mut index = 0;
     while index < order.len() {
