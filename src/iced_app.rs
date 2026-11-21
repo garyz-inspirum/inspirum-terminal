@@ -6540,6 +6540,18 @@ impl App {
         .align_y(iced::Center)
         .style(breadcrumb_field);
         let shell_open = tab.panes.iter().any(|(_, pane)| pane.auxiliary_shell);
+        // Single-pane tabs hide the pane header; its labels and controls live
+        // in the session toolbar so they stay reachable.
+        let single_pane_parts: Element<'_, Message> = match tab.panes.iter().next() {
+            Some((pane_id, pane)) if tab.panes.len() == 1 => {
+                let (labels, controls) = self.pane_header_parts(*pane_id, pane, false);
+                row![labels, controls]
+                    .spacing(6)
+                    .align_y(iced::Center)
+                    .into()
+            }
+            _ => space::horizontal().width(0).into(),
+        };
         let toolbar = column![
             row![
                 tool_icon(
@@ -6558,6 +6570,7 @@ impl App {
                     Message::ToggleAuxiliaryShell
                 ),
                 breadcrumb,
+                single_pane_parts,
                 compact_action("Paste", Message::RequestPaste),
                 compact_action(
                     if self
@@ -6622,37 +6635,101 @@ impl App {
         .into()
     }
 
+    /// Mode/state labels and per-pane controls shared by the pane header
+    /// (multi-pane tabs) and the session toolbar (single-pane tabs).
+    fn pane_header_parts<'a>(
+        &'a self,
+        id: pane_grid::Pane,
+        pane: &'a TerminalPane,
+        include_paste: bool,
+    ) -> (
+        iced::widget::Row<'a, Message>,
+        iced::widget::Row<'a, Message>,
+    ) {
+        let state = if pane.exited {
+            Some(("EXITED", muted()))
+        } else if pane.error.is_some() {
+            Some(("ERROR", danger()))
+        } else if pane.terminal.is_some() {
+            None
+        } else {
+            Some(("CONNECTING", blue()))
+        };
+        let mode = if self.free_type.contains_key(&pane.id) {
+            Some("FREE TYPE")
+        } else if self.local_navigation.contains(&pane.id) {
+            Some("LOCAL NAV")
+        } else if self.remote_keys.contains(&pane.id) {
+            Some("REMOTE KEYS")
+        } else if pane.auxiliary_shell {
+            Some("AUX SHELL")
+        } else {
+            None
+        };
+        let mut labels = row![].spacing(6).align_y(iced::Center);
+        if let Some(mode) = mode {
+            labels = labels.push(text(mode).size(10).color(blue()));
+        }
+        if let Some((label, color)) = state {
+            labels = labels.push(text(label).size(10).color(color));
+        }
+        let mut controls = row![
+            compact_action("Copy", Message::CopySelection(pane.id)),
+            compact_action(
+                if self.tools.sync.is_target(pane.id) {
+                    "SYNC"
+                } else {
+                    "Sync +"
+                },
+                Message::Tool(tools::Action::SyncTarget(
+                    pane.id,
+                    !self.tools.sync.is_target(pane.id),
+                )),
+            )
+            .style(if self.tools.sync.is_target(pane.id) {
+                selected_button
+            } else {
+                icon_button
+            }),
+            if self.free_type.contains_key(&pane.id) {
+                compact_action("Discard draft", Message::FreeTypeDiscard(pane.id))
+            } else {
+                compact_action("Free type", Message::ToggleFreeType(pane.id))
+            },
+            compact_action(
+                if self.remote_keys.contains(&pane.id) {
+                    "Exit keys"
+                } else {
+                    "Remote keys"
+                },
+                Message::ToggleRemoteKeys(pane.id),
+            ),
+        ]
+        .spacing(0)
+        .align_y(iced::Center);
+        if pane.exited || pane.error.is_some() {
+            controls = controls.push(compact_action("Reconnect", Message::Reconnect(id)));
+        } else if include_paste {
+            controls = controls.push(compact_action("Paste", Message::RequestPaste));
+        }
+        controls = controls.push(compact_action("x", Message::ClosePane(id)));
+        (labels, controls)
+    }
+
     fn terminals(&self) -> Element<'_, Message> {
         let tab = &self.tabs[self.active];
+        let multi_pane = tab.panes.len() > 1;
         let grid = pane_grid(&tab.panes, |id, pane, _| {
             let focused = tab.focus == id;
             let p = theme::palette();
-            let state = if pane.exited {
-                Some(("EXITED", muted()))
-            } else if pane.error.is_some() {
-                Some(("ERROR", danger()))
-            } else if pane.terminal.is_some() {
-                None
-            } else {
-                Some(("CONNECTING", blue()))
-            };
-            let mode = if self.free_type.contains_key(&pane.id) {
-                Some("FREE TYPE")
-            } else if self.local_navigation.contains(&pane.id) {
-                Some("LOCAL NAV")
-            } else if self.remote_keys.contains(&pane.id) {
-                Some("REMOTE KEYS")
-            } else if pane.auxiliary_shell {
-                Some("AUX SHELL")
-            } else {
-                None
-            };
-            let status: Element<'_, Message> = if state.is_none() {
+            let (labels, controls) = self.pane_header_parts(id, pane, true);
+            let live = !pane.exited && pane.error.is_none() && pane.terminal.is_some();
+            let status: Element<'_, Message> = if live {
                 icons::dot(p.magenta, 8.0)
             } else {
                 icons::icon(icons::Icon::CircleHollow, 8.0, p.muted)
             };
-            let mut header = row![
+            let header = row![
                 status,
                 text(
                     pane.terminal_title
@@ -6662,57 +6739,12 @@ impl App {
                 )
                 .size(12)
                 .color(p.text),
+                labels,
+                space::horizontal(),
+                controls,
             ]
             .spacing(6)
             .align_y(iced::Center);
-            if let Some(mode) = mode {
-                header = header.push(text(mode).size(10).color(blue()));
-            }
-            if let Some((label, color)) = state {
-                header = header.push(text(label).size(10).color(color));
-            }
-            let header = header.push(space::horizontal()).push(
-                row![
-                    compact_action("Copy", Message::CopySelection(pane.id)),
-                    compact_action(
-                        if self.tools.sync.is_target(pane.id) {
-                            "SYNC"
-                        } else {
-                            "Sync +"
-                        },
-                        Message::Tool(tools::Action::SyncTarget(
-                            pane.id,
-                            !self.tools.sync.is_target(pane.id),
-                        )),
-                    )
-                    .style(if self.tools.sync.is_target(pane.id) {
-                        selected_button
-                    } else {
-                        icon_button
-                    }),
-                    if self.free_type.contains_key(&pane.id) {
-                        compact_action("Discard draft", Message::FreeTypeDiscard(pane.id))
-                    } else {
-                        compact_action("Free type", Message::ToggleFreeType(pane.id))
-                    },
-                    compact_action(
-                        if self.remote_keys.contains(&pane.id) {
-                            "Exit keys"
-                        } else {
-                            "Remote keys"
-                        },
-                        Message::ToggleRemoteKeys(pane.id),
-                    ),
-                    if pane.exited || pane.error.is_some() {
-                        compact_action("Reconnect", Message::Reconnect(id))
-                    } else {
-                        compact_action("Paste", Message::RequestPaste)
-                    },
-                    compact_action("x", Message::ClosePane(id)),
-                ]
-                .spacing(0)
-                .align_y(iced::Center),
-            );
             let title = pane_grid::TitleBar::new(column![
                 container(space::horizontal())
                     .width(Fill)
@@ -6846,9 +6878,12 @@ impl App {
             } else {
                 terminal_view
             };
-            pane_grid::Content::new(body)
-            .title_bar(title)
-            .style(pane_body)
+            let content = pane_grid::Content::new(body).style(pane_body);
+            if multi_pane {
+                content.title_bar(title)
+            } else {
+                content
+            }
         })
         .spacing(1)
         .on_click(Message::Focus)
