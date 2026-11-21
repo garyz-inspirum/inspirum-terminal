@@ -6296,12 +6296,20 @@ impl App {
             );
         }
 
-        container(column![top, scrollable(list).width(Fill).height(Fill)].spacing(4))
-            .width(Fill)
-            .height(Fill)
-            .padding(6)
-            .style(session_panel)
-            .into()
+        container(
+            column![
+                container(top)
+                    .width(Fill)
+                    .style(|_: &Theme| fill_style(theme::palette().dock)),
+                scrollable(list).width(Fill).height(Fill)
+            ]
+            .spacing(4),
+        )
+        .width(Fill)
+        .height(Fill)
+        .padding(6)
+        .style(session_panel)
+        .into()
     }
 
     /// WindTerm session tree: group row (disclosure triangle + folder + name).
