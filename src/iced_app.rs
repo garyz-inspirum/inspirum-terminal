@@ -25,11 +25,12 @@ use crate::{
 };
 use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
 use iced::widget::{
-    button, canvas, center, column, container, mouse_area, opaque, operation, pane_grid,
-    progress_bar, row, scrollable, sensor, space, stack, text, text_editor, text_input,
+    Column, button, canvas, center, column, container, mouse_area, opaque, operation, pane_grid,
+    progress_bar, responsive, row, scrollable, sensor, space, stack, text, text_editor, text_input,
 };
 use iced::{
-    Border, Color, Element, Fill, Font, Subscription, Task, Theme, event, font, keyboard, mouse,
+    Border, Color, Element, Fill, Font, Length, Subscription, Task, Theme, event, font, keyboard,
+    mouse,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -1187,7 +1188,7 @@ fn display_leaf(value: &str) -> String {
 }
 
 const FILE_COL_NAME: f32 = 290.0;
-const FILE_COL_TIME: f32 = 148.0;
+const FILE_COL_TIME: f32 = 168.0;
 const FILE_COL_TYPE: f32 = 132.0;
 const FILE_COL_SIZE: f32 = 76.0;
 const FILE_COL_PERMS: f32 = 106.0;
@@ -1225,7 +1226,7 @@ fn file_listing_table_width() -> f32 {
         .sum()
 }
 
-fn file_cell<'a>(value: String, width: f32, right: bool) -> Element<'a, Message> {
+fn file_cell<'a>(value: String, width: impl Into<Length>, right: bool) -> Element<'a, Message> {
     let label = text(value)
         .size(theme::metrics::UI_TEXT)
         .font(Font::MONOSPACE)
@@ -1244,9 +1245,16 @@ fn file_cell<'a>(value: String, width: f32, right: bool) -> Element<'a, Message>
     }
 }
 
-fn file_listing_header<'a>() -> Element<'a, Message> {
+fn file_listing_header<'a>(table_width: f32) -> Element<'a, Message> {
     let mut header = row![];
-    for (label, width, right) in file_listing_columns() {
+    let columns = file_listing_columns();
+    let last = columns.len() - 1;
+    for (index, (label, width, right)) in columns.into_iter().enumerate() {
+        let width = if index == last {
+            Length::Fill
+        } else {
+            Length::Fixed(width)
+        };
         header = header.push(file_cell(label.into(), width, right)).push(
             container(text(""))
                 .width(1)
@@ -1256,10 +1264,10 @@ fn file_listing_header<'a>() -> Element<'a, Message> {
     }
     column![
         container(header.height(theme::metrics::TABLE_HEADER_HEIGHT))
-            .width(file_listing_table_width())
+            .width(table_width)
             .style(file_header),
         container(text(""))
-            .width(file_listing_table_width())
+            .width(table_width)
             .height(1)
             .style(file_divider),
     ]
@@ -1270,6 +1278,7 @@ fn file_listing_row<'a>(
     cells: FileListingCells,
     message: Message,
     selected: bool,
+    table_width: f32,
 ) -> Element<'a, Message> {
     let (glyph, color) = if cells.is_dir {
         let color = match theme::current() {
@@ -1305,13 +1314,13 @@ fn file_listing_row<'a>(
         file_cell(cells.size, FILE_COL_SIZE + 1.0, true),
         file_cell(cells.permissions, FILE_COL_PERMS + 1.0, false),
         file_cell(cells.owner, FILE_COL_OWNER + 1.0, false),
-        file_cell(cells.group, FILE_COL_GROUP + 1.0, false),
+        file_cell(cells.group, Length::Fill, false),
     ]
     .height(theme::metrics::ROW_HEIGHT);
     button(content)
         .on_press(message)
         .padding(0)
-        .width(file_listing_table_width())
+        .width(table_width)
         .style(if selected {
             file_row_selected
         } else {
@@ -1322,7 +1331,7 @@ fn file_listing_row<'a>(
 
 fn file_listing_footer<'a>(count: usize, total: u64) -> Element<'a, Message> {
     container(
-        text(format!("{count} items {}", windterm_size(total)))
+        text(file_listing_summary(count, total))
             .size(theme::metrics::UI_TEXT)
             .font(Font::MONOSPACE)
             .color(theme::palette().muted),
@@ -1330,6 +1339,12 @@ fn file_listing_footer<'a>(count: usize, total: u64) -> Element<'a, Message> {
     .height(16)
     .padding([0, FILE_CELL_PAD])
     .into()
+}
+
+/// Footer summary under a file table: `1 item 2.0 KB`, `3 items 6.0 KB`.
+fn file_listing_summary(count: usize, total: u64) -> String {
+    let noun = if count == 1 { "item" } else { "items" };
+    format!("{count} {noun} {}", windterm_size(total))
 }
 
 fn format_file_size(size: Option<u64>) -> String {
@@ -6893,8 +6908,9 @@ impl App {
         container(grid).height(Fill).style(border_fill).into()
     }
 
-    fn file_listing_panels(&self) -> (Element<'_, Message>, Element<'_, Message>) {
-        let mut local_list = column![file_listing_header()];
+    /// Local and remote file tables laid out `table_width` wide.
+    fn file_lists(&self, table_width: f32) -> (Column<'_, Message>, Column<'_, Message>) {
+        let mut local_list = column![file_listing_header(table_width)];
         if self.files.local_loading {
             local_list =
                 local_list.push(text("Loading local directory...").size(12).color(muted()));
@@ -6925,6 +6941,7 @@ impl App {
                         cells,
                         Message::FilesOpenLocal(entry.path.clone()),
                         false,
+                        table_width,
                     ));
                 } else {
                     let selected = self.files.selected_local.as_ref() == Some(&entry.path);
@@ -6932,6 +6949,7 @@ impl App {
                         cells,
                         Message::FilesSelectLocal(entry.path.clone()),
                         selected,
+                        table_width,
                     ));
                 }
             }
@@ -6950,7 +6968,7 @@ impl App {
             }
         }
 
-        let mut remote_list = column![file_listing_header()];
+        let mut remote_list = column![file_listing_header(table_width)];
         if self.files.remote_loading {
             remote_list =
                 remote_list.push(text("Loading remote directory...").size(12).color(muted()));
@@ -6987,6 +7005,7 @@ impl App {
                         cells,
                         Message::FilesOpenRemote(path),
                         false,
+                        table_width,
                     ));
                 } else {
                     let selected = self
@@ -6998,6 +7017,7 @@ impl App {
                         cells,
                         Message::FilesSelectRemote(entry.clone()),
                         selected,
+                        table_width,
                     ));
                 }
             }
@@ -7039,6 +7059,10 @@ impl App {
                 remote_list.push(file_listing_footer(self.files.remote_entries.len(), total));
         }
 
+        (local_list, remote_list)
+    }
+
+    fn file_listing_panels(&self) -> (Element<'_, Message>, Element<'_, Message>) {
         let local_panel = column![
             files_path_bar(
                 text_input("Local directory path", &self.files.local_path_input)
@@ -7051,12 +7075,18 @@ impl App {
                 action("Go", Message::FilesLocalPathSubmit),
                 Message::FilesLocalUp,
             ),
-            scrollable(local_list)
+            responsive(move |size| {
+                scrollable(
+                    self.file_lists(size.width.max(file_listing_table_width()))
+                        .0,
+                )
                 .direction(scrollable::Direction::Both {
                     vertical: scrollable::Scrollbar::default(),
                     horizontal: scrollable::Scrollbar::default(),
                 })
-                .height(Fill),
+                .height(Fill)
+                .into()
+            }),
         ]
         .width(Fill)
         .height(Fill);
@@ -7073,12 +7103,18 @@ impl App {
                 action("Go", Message::FilesRemotePathSubmit),
                 Message::FilesRemoteUp,
             ),
-            scrollable(remote_list)
+            responsive(move |size| {
+                scrollable(
+                    self.file_lists(size.width.max(file_listing_table_width()))
+                        .1,
+                )
                 .direction(scrollable::Direction::Both {
                     vertical: scrollable::Scrollbar::default(),
                     horizontal: scrollable::Scrollbar::default(),
                 })
-                .height(Fill),
+                .height(Fill)
+                .into()
+            }),
         ]
         .width(Fill)
         .height(Fill);
@@ -8971,6 +9007,16 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn file_listing_summary_uses_singular_for_one_item() {
+        assert_eq!(
+            file_listing_summary(1, 2048),
+            format!("1 item {}", windterm_size(2048))
+        );
+        assert!(file_listing_summary(0, 0).starts_with("0 items "));
+        assert!(file_listing_summary(3, 10).starts_with("3 items "));
+    }
 
     #[test]
     fn saved_session_sidebar_pages_reset_after_search_changes() {
