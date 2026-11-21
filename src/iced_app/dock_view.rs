@@ -26,11 +26,40 @@ fn split_portions(ratio: f32) -> (u16, u16) {
     (a, b)
 }
 
-fn vline<'a>() -> Element<'a, Message> {
-    container(space::horizontal())
-        .width(1)
-        .height(Fill)
-        .style(border_fill)
+/// WindTerm-style splitter: a 1px border line centred in a transparent
+/// `SPLITTER_GRAB`-wide (or high) grab zone with a resize cursor.
+fn splitter<'a>(area: Area) -> Element<'a, Message> {
+    let grab = dock::SPLITTER_GRAB;
+    let (zone, cursor) = if area == Area::Bottom {
+        (
+            container(
+                container(space::horizontal())
+                    .width(Fill)
+                    .height(1)
+                    .style(border_fill),
+            )
+            .width(Fill)
+            .height(grab)
+            .center_y(grab),
+            iced::mouse::Interaction::ResizingVertically,
+        )
+    } else {
+        (
+            container(
+                container(space::horizontal())
+                    .width(1)
+                    .height(Fill)
+                    .style(border_fill),
+            )
+            .width(grab)
+            .height(Fill)
+            .center_x(grab),
+            iced::mouse::Interaction::ResizingHorizontally,
+        )
+    };
+    mouse_area(zone)
+        .on_press(Message::DockDragStart(area))
+        .interaction(cursor)
         .into()
 }
 
@@ -223,12 +252,12 @@ impl App {
         if let Some(left) = self.dock_area(Area::Left) {
             middle = middle
                 .push(container(left).width(self.docks.left_width).height(Fill))
-                .push(vline());
+                .push(splitter(Area::Left));
         }
         middle = middle.push(container(self.workspace()).width(Fill).height(Fill));
         if let Some(right) = self.dock_area(Area::Right) {
             middle = middle
-                .push(vline())
+                .push(splitter(Area::Right))
                 .push(container(right).width(self.docks.right_width).height(Fill));
         }
         let Some(bottom) = self.dock_area(Area::Bottom) else {
@@ -242,7 +271,7 @@ impl App {
         } else {
             column![
                 middle.height(FillPortion(a)),
-                hline(),
+                splitter(Area::Bottom),
                 container(bottom).width(Fill).height(FillPortion(b)),
             ]
             .height(Fill)
@@ -320,7 +349,7 @@ impl App {
                 column![
                     space::vertical().height(theme::metrics::MENU_BAR_HEIGHT),
                     above,
-                    space::vertical().height(theme::metrics::STRIP_HEIGHT + 1.0),
+                    space::vertical().height(theme::metrics::STRIP_HEIGHT + dock::SPLITTER_GRAB),
                     container(menu).width(Fill).align_x(iced::Right),
                     below,
                 ]

@@ -339,8 +339,25 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
         ..Default::default()
     })
     .scale_factor(|app: &App| app.scale as f32)
-    .subscription(|_: &App| {
+    .subscription(|app: &App| {
+        let drag = if app.dock_drag.is_some() {
+            event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::DockDragMove(position))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                ))
+                | iced::Event::Mouse(iced::mouse::Event::CursorLeft)
+                | iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::DockDragEnd),
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
         Subscription::batch([
+            drag,
+            iced::window::resize_events().map(|(_, size)| Message::WindowResized(size)),
             event::listen_with(|event, status, _| match &event {
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if privacy_lock_chord(key, *modifiers) =>
@@ -1612,6 +1629,10 @@ enum Message {
     DockCollapse(dock::Area),
     DockMenu(dock::Area),
     DockPreset(bool),
+    DockDragStart(dock::Area),
+    DockDragMove(iced::Point),
+    DockDragEnd,
+    WindowResized(iced::Size),
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -2706,6 +2727,10 @@ struct App {
     editing_snippet: Option<String>,
     open_menu: Option<menu::Menu>,
     docks: dock::DockLayout,
+    /// Dock splitter currently being dragged (WindTerm-style resize).
+    dock_drag: Option<dock::Area>,
+    /// Logical window size, needed to turn cursor positions into dock sizes.
+    window_size: iced::Size,
     ui_state_path: Option<PathBuf>,
     dock_menu: Option<dock::Area>,
     privacy_locked: bool,
@@ -2834,6 +2859,8 @@ impl App {
             snippet_content: text_editor::Content::new(),
             editing_snippet: None,
             open_menu: None,
+            dock_drag: None,
+            window_size: iced::Size::new(1280.0, 800.0),
             docks: {
                 let mut docks = saved_ui.docks.take().unwrap_or_default();
                 docks.sanitize();
@@ -5905,6 +5932,7 @@ impl App {
                 let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.move_to(panel, area);
+                self.docks.widen_for_file_panel(panel, area);
                 if !self.docks.is_visible(dock::Panel::Sender) {
                     self.sender_focused = false;
                 }
@@ -5935,6 +5963,26 @@ impl App {
                 self.save_ui_state();
                 if !was_open && self.files_open() {
                     return self.files_became_visible();
+                }
+            }
+            Message::WindowResized(size) => self.window_size = size,
+            Message::DockDragStart(area) => {
+                self.dock_menu = None;
+                if self.dialog.is_none() {
+                    self.dock_drag = Some(area);
+                }
+            }
+            Message::DockDragMove(position) => {
+                if self.dialog.is_some() {
+                    self.dock_drag = None;
+                    self.save_ui_state();
+                } else if let Some(area) = self.dock_drag {
+                    self.docks.drag_splitter(area, position, self.window_size);
+                }
+            }
+            Message::DockDragEnd => {
+                if self.dock_drag.take().is_some() {
+                    self.save_ui_state();
                 }
             }
             Message::DockMenu(area) => {
@@ -9046,6 +9094,25 @@ mod tests {
         );
         assert!(file_listing_summary(0, 0).starts_with("0 items "));
         assert!(file_listing_summary(3, 10).starts_with("3 items "));
+    }
+
+    #[test]
+    fn dock_splitter_drag_resizes_right_dock() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-dock-drag-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.ui_state_path = None;
+        let _ = app.update(Message::DockMove(dock::Panel::Filer, dock::Area::Right));
+        assert!(app.docks.right_width >= dock::FILE_PANEL_MIN_WIDTH);
+        let w = app.window_size.width;
+        let _ = app.update(Message::DockDragStart(dock::Area::Right));
+        assert_eq!(app.dock_drag, Some(dock::Area::Right));
+        let _ = app.update(Message::DockDragMove(iced::Point::new(w - 500.0, 300.0)));
+        assert!((app.docks.right_width - 500.0).abs() <= 1.0);
+        let _ = app.update(Message::DockDragEnd);
+        assert_eq!(app.dock_drag, None);
     }
 
     #[test]

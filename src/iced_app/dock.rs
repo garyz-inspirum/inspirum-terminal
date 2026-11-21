@@ -6,14 +6,16 @@ use serde::{Deserialize, Serialize};
 use super::theme::marker;
 
 pub(super) const DEFAULT_SIDE_WIDTH: f32 = 214.0;
-#[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
 pub(super) const MIN_SIDE_WIDTH: f32 = 140.0;
-#[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
-pub(super) const MAX_SIDE_WIDTH: f32 = 600.0;
+pub(super) const MAX_SIDE_WIDTH: f32 = 900.0;
+/// The centre workspace keeps at least this width when a side dock is dragged.
+pub(super) const MIN_CENTRE_WIDTH: f32 = 320.0;
+/// File tables (Filer/Explorer) are unusable in a narrower side dock.
+pub(super) const FILE_PANEL_MIN_WIDTH: f32 = 420.0;
+/// Width of the invisible splitter grab zone around the 1px border line.
+pub(super) const SPLITTER_GRAB: f32 = 5.0;
 pub(super) const DEFAULT_BOTTOM_RATIO: f32 = 0.32;
-#[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
 pub(super) const MIN_BOTTOM_RATIO: f32 = 0.15;
-#[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
 pub(super) const MAX_BOTTOM_RATIO: f32 = 0.7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -141,7 +143,6 @@ impl Default for DockLayout {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
 fn clamp_or(value: f32, min: f32, max: f32, default: f32) -> f32 {
     if value.is_finite() {
         value.clamp(min, max)
@@ -253,7 +254,6 @@ impl DockLayout {
         state.collapsed = !state.collapsed;
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
     pub(super) fn set_width(&mut self, area: Area, width: f32) {
         let width = clamp_or(width, MIN_SIDE_WIDTH, MAX_SIDE_WIDTH, DEFAULT_SIDE_WIDTH);
         match area {
@@ -263,7 +263,58 @@ impl DockLayout {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
+    /// Ensure a side dock receiving a file panel is wide enough for its table.
+    pub(super) fn widen_for_file_panel(&mut self, panel: Panel, area: Area) {
+        if !matches!(panel, Panel::Filer | Panel::Explorer) {
+            return;
+        }
+        match area {
+            Area::Left if self.left_width < FILE_PANEL_MIN_WIDTH => {
+                self.set_width(Area::Left, FILE_PANEL_MIN_WIDTH)
+            }
+            Area::Right if self.right_width < FILE_PANEL_MIN_WIDTH => {
+                self.set_width(Area::Right, FILE_PANEL_MIN_WIDTH)
+            }
+            _ => {}
+        }
+    }
+
+    /// Apply a splitter drag: `position` is the cursor in logical window
+    /// coordinates, `window` the logical window size.
+    pub(super) fn drag_splitter(&mut self, area: Area, position: iced::Point, window: iced::Size) {
+        use super::theme::metrics::{MENU_BAR_HEIGHT, STATUS_BAR_HEIGHT};
+        match area {
+            Area::Left | Area::Right => {
+                let wanted = if area == Area::Left {
+                    position.x
+                } else {
+                    window.width - position.x
+                };
+                let other = if area == Area::Left {
+                    if self.right.panels.is_empty() {
+                        0.0
+                    } else {
+                        self.right_width
+                    }
+                } else if self.left.panels.is_empty() {
+                    0.0
+                } else {
+                    self.left_width
+                };
+                let room = (window.width - other - MIN_CENTRE_WIDTH).max(MIN_SIDE_WIDTH);
+                self.set_width(area, wanted.min(room));
+            }
+            Area::Bottom => {
+                let available = window.height - MENU_BAR_HEIGHT - STATUS_BAR_HEIGHT;
+                if available > 1.0 {
+                    self.set_bottom_ratio(
+                        (window.height - STATUS_BAR_HEIGHT - position.y) / available,
+                    );
+                }
+            }
+        }
+    }
+
     pub(super) fn set_bottom_ratio(&mut self, ratio: f32) {
         self.bottom_ratio = clamp_or(
             ratio,
@@ -334,12 +385,12 @@ impl DockLayout {
         self.set_bottom_ratio(self.bottom_ratio);
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests
     pub(super) fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests
     pub(super) fn from_json(json: &str) -> DockLayout {
         let mut layout: DockLayout = serde_json::from_str(json).unwrap_or_default();
         layout.sanitize();
@@ -467,6 +518,39 @@ mod tests {
         layout.activate(Panel::Outline);
         assert!(!layout.right.collapsed);
         assert!(layout.is_visible(Panel::Outline));
+    }
+
+    #[test]
+    fn file_panel_widens_side_dock() {
+        let mut layout = DockLayout::default();
+        layout.set_width(Area::Right, 214.0);
+        layout.widen_for_file_panel(Panel::Filer, Area::Right);
+        assert_eq!(layout.right_width, FILE_PANEL_MIN_WIDTH);
+        layout.set_width(Area::Left, 500.0);
+        layout.widen_for_file_panel(Panel::Explorer, Area::Left);
+        assert_eq!(layout.left_width, 500.0);
+        layout.set_width(Area::Left, 200.0);
+        layout.widen_for_file_panel(Panel::Sender, Area::Left);
+        assert_eq!(layout.left_width, 200.0);
+    }
+
+    #[test]
+    fn splitter_drag_clamps_to_keep_centre() {
+        let mut layout = DockLayout::default();
+        let win = iced::Size::new(1280.0, 800.0);
+        layout.drag_splitter(Area::Right, iced::Point::new(1280.0 - 500.0, 100.0), win);
+        assert!((layout.right_width - 500.0).abs() < 1.0);
+        layout.drag_splitter(Area::Right, iced::Point::new(0.0, 100.0), win);
+        let left = if layout.left.panels.is_empty() {
+            0.0
+        } else {
+            layout.left_width
+        };
+        assert!(layout.right_width <= 1280.0 - left - MIN_CENTRE_WIDTH + 0.5);
+        layout.drag_splitter(Area::Bottom, iced::Point::new(10.0, 0.0), win);
+        assert_eq!(layout.bottom_ratio, MAX_BOTTOM_RATIO);
+        layout.drag_splitter(Area::Bottom, iced::Point::new(10.0, 799.0), win);
+        assert_eq!(layout.bottom_ratio, MIN_BOTTOM_RATIO);
     }
 
     #[test]
