@@ -946,15 +946,45 @@ def dock_strip_region(width: int, height: int):
     return (0, int(height * .62), width, int(height * .76))
 
 
-def dock_body_region(width: int, height: int, *, right: bool = False):
+SIDE_FILE_DOCK_WIDTH = 420
+
+
+def dock_body_region(
+    width: int, height: int, *, right: bool = False, bottom_top: int | None = None,
+):
     """Dock body (file rows, Upload/Download, Transfer queue rows).
 
     Bottom dock: full width, lower third above the status bar. Right dock:
-    right 45% of the window below the 32px menu bar.
+    a file panel moved into a side dock widens it to 420px, so search
+    x = width - 420 - 4 .. width, from below the 32px menu bar down to the
+    top of the bottom dock (``bottom_top``, from the OCR-located bottom
+    strip when available, else 0.66 * height).
     """
     if right:
-        return (int(width * .55), 32, width, height - 22)
+        lower = bottom_top if bottom_top is not None else int(height * .66)
+        return (width - SIDE_FILE_DOCK_WIDTH - 4, 32, width, lower)
     return (0, int(height * .66), width, height - 22)
+
+
+async def drag_horizontal(
+    window: str, env: dict[str, str], start_x: int, end_x: int, y: int, *, steps: int = 6,
+) -> None:
+    """Native left-button drag: press at start, move in steps, release."""
+    command(
+        "xdotool", "mousemove", "--window", window, str(start_x), str(y), env=env,
+    )
+    await asyncio.sleep(.2)
+    command("xdotool", "mousedown", "1", env=env)
+    await asyncio.sleep(.2)
+    for i in range(1, steps + 1):
+        x = start_x + (end_x - start_x) * i // steps
+        command(
+            "xdotool", "mousemove", "--window", window, str(x), str(y), env=env,
+        )
+        await asyncio.sleep(.08)
+    await asyncio.sleep(.2)
+    command("xdotool", "mouseup", "1", env=env)
+    await asyncio.sleep(.6)
 
 
 def gear_menu_region(width: int, height: int):
@@ -1434,9 +1464,15 @@ async def main() -> int:
                     destination / "connected-files-side-dock.png", env,
                 ) < 3000:
                     raise RuntimeError("Move to Right did not visibly re-dock Filer")
+                # The bottom dock (Sender/Session/Transfer/Explorer) stays
+                # below the right dock; its strip top bounds the side dock.
+                bottom_top = max(32 + 100, filer_tab[1] - 8)
+                side_region = dock_body_region(
+                    width, height, right=True, bottom_top=bottom_top,
+                )
                 side_row = await locate_rendered_label(
                     window, destination / "connected-files-side-dock.png", third_name, env=env,
-                    region=dock_body_region(width, height, right=True), timeout=40,
+                    region=side_region, timeout=40,
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
@@ -1444,10 +1480,57 @@ async def main() -> int:
                 )
                 await asyncio.sleep(.4)
                 screenshot(window, destination / "connected-files-side-selected.png", env)
-                # The right dock's strip sits just under the 32px menu bar.
+
+                # The dock splitter is a 5px grab column centred at
+                # x = width - dock_width - 3. Drag it 200px left: the dock
+                # widens to ~620px and the file row moves with its edge.
+                await drag_horizontal(
+                    window, env, width - SIDE_FILE_DOCK_WIDTH - 3, width - 620, 300,
+                )
+                screenshot(window, destination / "connected-files-side-resized.png", env)
+                resized_pixels = diff(
+                    destination / "connected-files-side-selected.png",
+                    destination / "connected-files-side-resized.png", env,
+                )
+                if resized_pixels < 3000:
+                    raise RuntimeError(
+                        "dock splitter dragging did not resize the dock: "
+                        f"{resized_pixels} pixels changed after dragging x "
+                        f"{width - SIDE_FILE_DOCK_WIDTH - 3} -> {width - 620}"
+                    )
+                resized_row = await locate_rendered_label(
+                    window, destination / "connected-files-side-resized.png",
+                    third_name, env=env,
+                    region=(width - 660, 32, width, bottom_top), timeout=20,
+                )
+                if not (width - 640 <= resized_row[0] <= width - 560):
+                    raise RuntimeError(
+                        "dock splitter drag did not move the side dock edge: "
+                        f"file row left edge {resized_row[0]}, expected "
+                        f"{width - 640}..{width - 560}"
+                    )
+                # Drag back so later steps see the 420px side dock.
+                await drag_horizontal(
+                    window, env, width - 620 - 3, width - SIDE_FILE_DOCK_WIDTH, 300,
+                )
+                screenshot(window, destination / "connected-files-side-restored.png", env)
+
+                # The right dock's strip sits just under the 32px menu bar;
+                # the gear is at (width - 40, strip centre). Take the strip
+                # y from the OCR-located Filer tab when found, else 46.
+                gear_y = 46
+                try:
+                    side_tab = await asyncio.to_thread(
+                        locate_visible_label,
+                        destination / "connected-files-side-restored.png",
+                        "Filer", region=(width - 430, 32, width, 62),
+                    )
+                    gear_y = center(side_tab)[1]
+                except RuntimeError:
+                    pass
                 command(
                     "xdotool", "mousemove", "--window", window,
-                    str(width - 40), "46", "click", "1", env=env,
+                    str(width - 40), str(gear_y), "click", "1", env=env,
                 )
                 await asyncio.sleep(.5)
                 await click_label(
@@ -1456,6 +1539,9 @@ async def main() -> int:
                     region=gear_menu_region(width, height),
                 )
                 screenshot(window, destination / "connected-files-redocked-bottom.png", env)
+                # Move to Bottom appends Filer as the LAST bottom tab (Sender,
+                # Session, Transfer, Explorer, Filer) and activates it; locate
+                # the row in the dock body, never by Filer's old tab position.
                 redocked_row = await locate_rendered_label(
                     window, destination / "connected-files-redocked-bottom.png",
                     third_name, env=env,
