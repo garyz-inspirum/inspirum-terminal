@@ -6941,7 +6941,7 @@ impl App {
             // not the separate local draft editor below it.
             let terminal_view: Element<'_, Message> = sensor(
                 container(terminal_body)
-                    .padding(14)
+                    .padding(if pane.display.is_some() { 0 } else { 14 })
                     .width(Fill)
                     .height(Fill),
             )
@@ -7010,7 +7010,16 @@ impl App {
             } else {
                 terminal_view
             };
-            let content = pane_grid::Content::new(body).style(pane_body);
+            // Fill the pane edge to edge with the terminal's own background so
+            // no chrome colour shows around the canvas or while resizing.
+            let terminal_bg = pane.display.as_ref().map(|snapshot| {
+                let [r, g, b] = snapshot.background;
+                Color::from_rgb8(r, g, b)
+            });
+            let content = pane_grid::Content::new(body).style(move |theme: &Theme| match terminal_bg {
+                Some(color) => fill_style(color),
+                None => pane_body(theme),
+            });
             if multi_pane {
                 content.title_bar(title)
             } else {
@@ -7193,15 +7202,20 @@ impl App {
                 Message::FilesLocalUp,
             ),
             responsive(move |size| {
-                scrollable(
-                    self.file_lists(size.width.max(file_listing_table_width()))
-                        .0,
+                container(
+                    scrollable(
+                        self.file_lists(size.width.max(file_listing_table_width()))
+                            .0,
+                    )
+                    .direction(scrollable::Direction::Both {
+                        vertical: scrollable::Scrollbar::default(),
+                        horizontal: scrollable::Scrollbar::default(),
+                    })
+                    .height(Fill),
                 )
-                .direction(scrollable::Direction::Both {
-                    vertical: scrollable::Scrollbar::default(),
-                    horizontal: scrollable::Scrollbar::default(),
-                })
+                .width(Fill)
                 .height(Fill)
+                .style(list_area)
                 .into()
             }),
         ]
@@ -7221,15 +7235,20 @@ impl App {
                 Message::FilesRemoteUp,
             ),
             responsive(move |size| {
-                scrollable(
-                    self.file_lists(size.width.max(file_listing_table_width()))
-                        .1,
+                container(
+                    scrollable(
+                        self.file_lists(size.width.max(file_listing_table_width()))
+                            .1,
+                    )
+                    .direction(scrollable::Direction::Both {
+                        vertical: scrollable::Scrollbar::default(),
+                        horizontal: scrollable::Scrollbar::default(),
+                    })
+                    .height(Fill),
                 )
-                .direction(scrollable::Direction::Both {
-                    vertical: scrollable::Scrollbar::default(),
-                    horizontal: scrollable::Scrollbar::default(),
-                })
+                .width(Fill)
                 .height(Fill)
+                .style(list_area)
                 .into()
             }),
         ]
@@ -7389,7 +7408,11 @@ impl App {
             );
         }
 
-        scrollable(transfer_list).height(Fill).width(Fill).into()
+        container(scrollable(transfer_list).height(Fill).width(Fill))
+            .width(Fill)
+            .height(Fill)
+            .style(list_area)
+            .into()
     }
 
     fn remote_editor_section(&self) -> Element<'_, Message> {
