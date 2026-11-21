@@ -136,6 +136,7 @@ async def monitored_shell(
                         "echo:AFTER_MENU",
                         "echo:AFTER_SENDER_ESCAPE",
                         "echo:AFTER_GEAR",
+                        "echo:AFTER_EXIT_CANCEL",
                     ):
                         events.write(answer)
                     stdout.write(f"{answer}\r\n")
@@ -2296,6 +2297,80 @@ async def main() -> int:
                         )
                     ) from exc
 
+                # Session > Exit confirmation. Placed after the remote-key
+                # probe (line above: no menu or dialog is open, focus mode
+                # and remote-keys mode are off, the SSH session is still up)
+                # and before the event_log snapshot so an accidental confirm
+                # also fails the "unexpectedly exited" check. Do not click
+                # the dialog's Exit button: teardown still needs the process.
+                command("xdotool", "mousemove", "--window", window,
+                        "30", "16", "click", "1", env=env)
+                await asyncio.sleep(.3)
+                # Session dropdown hangs from the 32px menu bar at x=0 and is
+                # 240px wide. Exit is the last item: 7*24px rows + 4*1px
+                # separators put it near y=205..229. Search only that
+                # top-left band so the status bar, or a pane-toolbar
+                # "Exit focus" / "Exit keys", cannot match.
+                await click_label(
+                    window, destination / "connected-exit-menu.png",
+                    "Exit", env, region=(0, 140, 270, 280), settle=.6,
+                )
+                width, height = window_size(window, env)
+                # Confirmation body is one muted line in a 600px dialog
+                # centered on the window. "disconnect them" avoids the
+                # parentheses and the leading session count (0/O).
+                confirm_region = (
+                    max(0, width // 2 - 340),
+                    max(0, height // 2 - 180),
+                    min(width, width // 2 + 340),
+                    min(height, height // 2 + 180),
+                )
+                confirm = await locate_rendered_label(
+                    window, destination / "connected-exit-confirm.png",
+                    "disconnect them", env=env, region=confirm_region, timeout=15,
+                )
+                # "disconnect them" sits near the end of the sentence, ~250px
+                # into a left-aligned line. Cancel is the left of the two
+                # right-aligned buttons, one row below. The dialog is 600px,
+                # so the button can sit ~80-170px right of this phrase;
+                # +300px covers that. height-24 keeps the box off the status bar.
+                dialog_region = (
+                    max(0, confirm[0] - 280),
+                    max(0, confirm[1] - 56),
+                    min(width, confirm[2] + 300),
+                    min(height - 24, confirm[3] + 72),
+                )
+                if dialog_region[2] <= dialog_region[0] or dialog_region[3] <= dialog_region[1]:
+                    raise RuntimeError(
+                        "Exit confirmation dialog region collapsed from "
+                        f"{confirm}: {dialog_region}"
+                    )
+                await click_label(
+                    window, destination / "connected-exit-cancel.png",
+                    "Cancel", env, region=dialog_region, settle=.5,
+                )
+                try:
+                    command("xdotool", "getwindowgeometry", "--shell", window, env=env)
+                except subprocess.CalledProcessError as exc:
+                    raise RuntimeError("Exit Cancel closed the application window") from exc
+                screenshot(window, destination / "connected-after-exit-cancel.png", env)
+                # Cancel closes the dialog but, unlike Escape after the
+                # Session menu, does not restore terminal focus. Click the
+                # pane the alternate-screen probe used so this echo proves
+                # the session is still alive, not that focus came back.
+                command(
+                    "xdotool", "windowfocus", window, "mousemove", "--window", window,
+                    "710", "300", "click", "1", env=env,
+                )
+                await asyncio.sleep(.3)
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:AFTER_EXIT_CANCEL", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: "NATIVE_ECHO:AFTER_EXIT_CANCEL" in events.path.read_text(encoding="utf-8").splitlines(),
+                    "shell echo after cancelling Session Exit",
+                )
+
                 event_log = events.path.read_text(encoding="utf-8")
                 if "SHELL_PTY_RESIZE" not in event_log:
                     raise RuntimeError("connected SSH fixture never observed a live PTY resize")
@@ -2360,6 +2435,7 @@ async def main() -> int:
                     "PASS: shell answered AFTER_MENU, AFTER_SENDER_ESCAPE and AFTER_GEAR without terminal re-click\n"
                     "PASS: Ctrl+Shift+J under the Session and dock gear menus left the auxiliary SSH shell connected; it closed it after Escape\n"
                     "PASS: privacy-locked and free-type synthetic text never reached SSH\n"
+                    "PASS: Session Exit asked for confirmation and Cancel left the shell answering AFTER_EXIT_CANCEL\n"
                     "All keys generated in isolated temporary fixture; no real host or credential.\n",
                     encoding="utf-8",
                 )
