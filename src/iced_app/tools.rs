@@ -606,10 +606,10 @@ impl App {
                                 .min(self.tabs.len().saturating_sub(1));
                             self.prune_tool_panes();
                             self.dialog = None;
-                            if self.tabs.is_empty() && self.files_dock.is_some() {
+                            if self.tabs.is_empty() && self.files_open() {
                                 self.toggle_files();
                             }
-                            if self.files_dock.is_some() {
+                            if self.files_open() {
                                 return self.reload_files();
                             }
                         }
@@ -731,7 +731,7 @@ impl App {
                 if let Some(index) = self.tabs.iter().position(|t| Self::workspace_id(t) == id) {
                     self.activate_tab(index);
                     self.dialog = None;
-                    if self.files_dock.is_some() {
+                    if self.files_open() {
                         return self.reload_files();
                     }
                 }

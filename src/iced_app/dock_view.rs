@@ -10,7 +10,7 @@ const GEAR_MENU_WIDTH: f32 = 200.0;
 
 /// Panels that have a body in this stage. Later stages add Filer, Shell, ...
 pub(super) fn available_panels() -> Vec<dock::Panel> {
-    vec![Panel::Session]
+    vec![Panel::Session, Panel::Filer]
 }
 
 fn split_portions(ratio: f32) -> (u16, u16) {
@@ -41,12 +41,17 @@ impl App {
     pub(super) fn dock_panel_body(&self, panel: dock::Panel) -> Element<'_, Message> {
         match panel {
             Panel::Session => self.sidebar(),
-            Panel::Sender
-            | Panel::Outline
-            | Panel::Transfer
-            | Panel::Filer
-            | Panel::Explorer
-            | Panel::Shell => column![].into(),
+            Panel::Filer if !self.tabs.is_empty() => self.files(),
+            Panel::Filer => container(
+                text("Open a session to browse files")
+                    .size(13)
+                    .color(muted()),
+            )
+            .center(Fill)
+            .into(),
+            Panel::Sender | Panel::Outline | Panel::Transfer | Panel::Explorer | Panel::Shell => {
+                column![].into()
+            }
         }
     }
 

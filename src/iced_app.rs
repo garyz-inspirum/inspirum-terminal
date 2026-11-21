@@ -1346,12 +1346,6 @@ fn format_file_size(size: Option<u64>) -> String {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Dock {
-    Terminal,
-    Files,
-}
-
 #[derive(Clone)]
 enum FileNameAction {
     MkdirLocal(PathBuf),
@@ -1511,7 +1505,6 @@ enum Message {
     Resize(pane_grid::ResizeEvent),
     Drag(pane_grid::DragEvent),
     ClosePane(pane_grid::Pane),
-    DockResize(pane_grid::ResizeEvent),
     Name(String),
     Host(String),
     User(String),
@@ -2683,10 +2676,6 @@ struct App {
     query: String,
     tabs: Vec<Workspace>,
     active: usize,
-    dock: pane_grid::State<Dock>,
-    terminal_dock: pane_grid::Pane,
-    files_dock: Option<pane_grid::Pane>,
-    files_side_dock: bool,
     files: FilesState,
     remote_editor: Option<RemoteEditorState>,
     snippets_path: PathBuf,
@@ -2732,10 +2721,6 @@ struct App {
     next_transfer_id: u64,
     next_remote_editor_id: u64,
     remote_editor_open_generation: u64,
-}
-
-fn bottom_files_split_ratio() -> f32 {
-    0.38
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2797,7 +2782,6 @@ fn bottom_files_layout_policy() -> FilesLayoutPolicy {
 impl App {
     fn boot(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> Self {
         let _slow = SlowIcedScope::start("startup");
-        let (dock, terminal_dock) = pane_grid::State::new(Dock::Terminal);
         let (profiles, profiles_writable, mut load_error) = match load_sessions(&profiles_path) {
             Ok(profiles) => (profiles, true, None),
             Err(error) => (
@@ -2838,10 +2822,6 @@ impl App {
             query: String::new(),
             tabs: Vec::new(),
             active: 0,
-            dock,
-            terminal_dock,
-            files_dock: None,
-            files_side_dock: false,
             files: FilesState::new(),
             remote_editor: None,
             snippets_path,
@@ -3342,29 +3322,24 @@ impl App {
         self.dialog = None;
     }
 
+    fn files_open(&self) -> bool {
+        !self.tabs.is_empty() && self.docks.is_visible(dock::Panel::Filer)
+    }
+
+    fn files_in_side_dock(&self) -> bool {
+        self.docks.area_of(dock::Panel::Filer) != Some(dock::Area::Bottom)
+    }
+
+    /// Side effects of the Filer panel becoming visible: refresh listings.
+    fn files_became_visible(&mut self) -> Task<Message> {
+        self.reload_files()
+    }
+
     fn toggle_files(&mut self) {
-        if let Some(pane) = self.files_dock.take() {
-            self.dock.close(pane);
-        } else if !self.tabs.is_empty()
-            && let Some((pane, split)) = self.dock.split(
-                if self.files_side_dock {
-                    pane_grid::Axis::Vertical
-                } else {
-                    pane_grid::Axis::Horizontal
-                },
-                self.terminal_dock,
-                Dock::Files,
-            )
-        {
-            self.files_dock = Some(pane);
-            self.dock.resize(
-                split,
-                if self.files_side_dock {
-                    0.50
-                } else {
-                    bottom_files_split_ratio()
-                },
-            );
+        if self.files_open() {
+            self.docks.close(dock::Panel::Filer);
+        } else if !self.tabs.is_empty() {
+            self.docks.show(dock::Panel::Filer);
         }
     }
 
@@ -3662,13 +3637,14 @@ impl App {
                 ),
             ),
         };
+        let files_open = self.files_open();
         let Some(job) = self.files.transfers.iter_mut().find(|job| job.id == id) else {
             return false;
         };
         let active_session = self.files.session_key.clone();
         let refresh_active = terminal
             && active_session.as_deref() == Some(job.pending.session_key.as_str())
-            && self.files_dock.is_some();
+            && files_open;
 
         match event {
             TransferEvent::Started { total, .. } => {
@@ -3998,7 +3974,7 @@ impl App {
             }
             Message::Open(index) => {
                 self.open(index);
-                if self.files_dock.is_some() {
+                if self.files_open() {
                     return self.reload_files();
                 }
             }
@@ -4012,14 +3988,14 @@ impl App {
             }
             Message::SelectTab(index) => {
                 self.activate_tab(index);
-                if self.files_dock.is_some() {
+                if self.files_open() {
                     return self.reload_files();
                 }
             }
             Message::SelectNextTab => {
                 if !self.tabs.is_empty() {
                     self.activate_tab((self.active + 1) % self.tabs.len());
-                    if self.files_dock.is_some() {
+                    if self.files_open() {
                         return self.reload_files();
                     }
                 }
@@ -4027,7 +4003,7 @@ impl App {
             Message::SelectPreviousTab => {
                 if !self.tabs.is_empty() {
                     self.activate_tab((self.active + self.tabs.len() - 1) % self.tabs.len());
-                    if self.files_dock.is_some() {
+                    if self.files_open() {
                         return self.reload_files();
                     }
                 }
@@ -4509,11 +4485,11 @@ impl App {
                         self.refresh_workspace_displays(self.active);
                     }
                 }
-                if self.tabs.is_empty() && self.files_dock.is_some() {
+                if self.tabs.is_empty() && self.files_open() {
                     self.toggle_files();
                 }
                 self.dialog = None;
-                if self.files_dock.is_some() && !self.tabs.is_empty() {
+                if self.files_open() && !self.tabs.is_empty() {
                     return self.reload_files();
                 }
             }
@@ -4522,22 +4498,24 @@ impl App {
                     return Task::none();
                 }
                 self.dialog = None;
-                let opening = self.files_dock.is_none() && !self.tabs.is_empty();
+                let was_open = self.files_open();
                 self.toggle_files();
-                if opening && self.files_dock.is_some() {
-                    return self.reload_files();
+                if !was_open && self.files_open() {
+                    return self.files_became_visible();
                 }
             }
             Message::FilesToggleDockPosition => {
-                if self.files_dock.is_none() || self.dialog.is_some() || self.privacy_locked {
+                if !self.files_open() || self.dialog.is_some() || self.privacy_locked {
                     return Task::none();
                 }
-                // Only alter pane-grid chrome. The selected remote target,
+                // Only alter dock placement. The selected remote target,
                 // outstanding transfer jobs and any remote editor stay intact.
-                self.toggle_files();
-                self.files_side_dock = !self.files_side_dock;
-                self.toggle_files();
-                self.status = if self.files_side_dock {
+                if self.docks.area_of(dock::Panel::Filer) == Some(dock::Area::Bottom) {
+                    self.docks.move_to(dock::Panel::Filer, dock::Area::Right);
+                } else {
+                    self.docks.move_to(dock::Panel::Filer, dock::Area::Bottom);
+                }
+                self.status = if self.files_in_side_dock() {
                     "Files explorer docked on the right.".into()
                 } else {
                     "Files explorer docked at the bottom.".into()
@@ -4850,6 +4828,7 @@ impl App {
                 );
             }
             Message::RemoteEditorSaved { editor_id, result } => {
+                let files_open = self.files_open();
                 let Some(editor) = self.remote_editor.as_mut() else {
                     return Task::none();
                 };
@@ -4864,7 +4843,7 @@ impl App {
                         editor.error = None;
                         self.status =
                             format!("Saved {} through staged SFTP replacement.", editor.remote);
-                        if self.files_dock.is_some()
+                        if files_open
                             && self.files.session_key.as_deref()
                                 == Some(editor.session_key.as_str())
                         {
@@ -5046,9 +5025,7 @@ impl App {
                     Err(error) => self.status = format!("File operation failed: {error}"),
                 }
                 let active_session = self.files.session_key.as_deref();
-                if self.files_dock.is_some()
-                    && (!remote || session_key.as_deref() == active_session)
-                {
+                if self.files_open() && (!remote || session_key.as_deref() == active_session) {
                     return if remote {
                         self.reload_remote_files()
                     } else {
@@ -5155,9 +5132,7 @@ impl App {
                     }
                 }
                 let active_session = self.files.session_key.as_deref();
-                if self.files_dock.is_some()
-                    && (!remote || session_key.as_deref() == active_session)
-                {
+                if self.files_open() && (!remote || session_key.as_deref() == active_session) {
                     return if remote {
                         self.reload_remote_files()
                     } else {
@@ -5548,9 +5523,6 @@ impl App {
                 self.prune_tool_panes();
                 self.prune_free_type();
             }
-            Message::DockResize(event) => {
-                self.dock.resize(event.split, event.ratio.clamp(0.30, 0.75));
-            }
             Message::Name(value) => self.form.name = value,
             Message::Host(value) => self.form.host = value,
             Message::User(value) => self.form.user = value,
@@ -5739,7 +5711,7 @@ impl App {
             Message::Event(iced::Event::Window(iced::window::Event::FileDropped(path))) => {
                 if self.dialog.is_none()
                     && !self.focus_mode
-                    && self.files_dock.is_some()
+                    && self.files_open()
                     && !self.tabs.is_empty()
                 {
                     self.files.selected_local = Some(path);
@@ -5873,24 +5845,40 @@ impl App {
             }
             Message::Event(_) => {}
             Message::DockActivate(panel) => {
+                let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.activate(panel);
+                if !was_open && self.files_open() {
+                    return self.files_became_visible();
+                }
             }
             Message::DockClose(panel) => {
                 self.dock_menu = None;
                 self.docks.close(panel);
             }
             Message::DockMove(panel, area) => {
+                let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.move_to(panel, area);
+                if !was_open && self.files_open() {
+                    return self.files_became_visible();
+                }
             }
             Message::DockToggle(panel) => {
+                let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.toggle(panel);
+                if !was_open && self.files_open() {
+                    return self.files_became_visible();
+                }
             }
             Message::DockCollapse(area) => {
+                let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.toggle_collapsed(area);
+                if !was_open && self.files_open() {
+                    return self.files_became_visible();
+                }
             }
             Message::DockMenu(area) => {
                 self.dock_menu = if self.dock_menu == Some(area) {
@@ -5900,6 +5888,7 @@ impl App {
                 };
             }
             Message::DockPreset(windterm) => {
+                let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks = dock::DockLayout::preset(if windterm {
                     dock::Preset::WindTermDefault
@@ -5907,6 +5896,9 @@ impl App {
                     dock::Preset::BottomTabs
                 });
                 self.docks.retain_available(&available_panels());
+                if !was_open && self.files_open() {
+                    return self.files_became_visible();
+                }
             }
         }
         Task::none()
@@ -6571,7 +6563,7 @@ impl App {
                     icon_button
                 }),
                 compact_action(
-                    if self.files_dock.is_some() {
+                    if self.files_open() {
                         "Hide files"
                     } else {
                         "Files"
@@ -6586,15 +6578,7 @@ impl App {
             hline(),
         ];
 
-        let dock = pane_grid(&self.dock, |_, panel, _| {
-            pane_grid::Content::new(match panel {
-                Dock::Terminal => self.terminals(),
-                Dock::Files => self.files(),
-            })
-        })
-        .spacing(1)
-        .on_resize(8, Message::DockResize)
-        .height(Fill);
+        let dock = self.terminals();
 
         container(column![
             container(tab_strip).style(surface),
@@ -7065,7 +7049,7 @@ impl App {
         let (local_panel, remote_panel) = self.file_listing_panels();
         // The listings take every pixel the header, actions bar and bounded
         // transfer queue leave, so completed transfers cannot consume them.
-        let file_panels: Element<'_, Message> = if self.files_side_dock {
+        let file_panels: Element<'_, Message> = if self.files_in_side_dock() {
             column![local_panel, remote_panel]
                 .spacing(8)
                 .height(Fill)
@@ -7195,7 +7179,7 @@ impl App {
         .into();
 
         let queue_viewport_height =
-            files_queue_viewport_height(dock_height, self.files_side_dock, bottom_layout);
+            files_queue_viewport_height(dock_height, self.files_in_side_dock(), bottom_layout);
         let transfer_queue = match queue_viewport_height {
             Some(viewport) => container(
                 column![
@@ -7221,15 +7205,14 @@ impl App {
             .style(surface),
         };
 
-        let content_spacing = if self.files_side_dock { 8 } else { 4 };
+        let content_spacing = if self.files_in_side_dock() { 8 } else { 4 };
 
         let target_label = text(format!("Target: {target}")).size(12).color(blue());
-        let header: Element<'_, Message> = if self.files_side_dock {
+        let header: Element<'_, Message> = if self.files_in_side_dock() {
             // The narrow side dock cannot fit the target beside the controls
             // without wrapping the Dock button label; give it its own line.
             column![
                 row![
-                    text("Files").size(16),
                     text(activity).size(11).color(muted()),
                     space::horizontal(),
                     action("Refresh", Message::FilesRefresh),
@@ -7243,7 +7226,6 @@ impl App {
             .into()
         } else {
             row![
-                text("Files").size(16),
                 target_label,
                 text(activity).size(11).color(muted()),
                 space::horizontal(),
@@ -7352,7 +7334,7 @@ impl App {
             .spacing(content_spacing)
             .height(Fill),
         )
-        .padding(if self.files_side_dock { 10 } else { 6 })
+        .padding(if self.files_in_side_dock() { 10 } else { 6 })
         .height(Fill)
         .width(Fill)
         .style(card)
@@ -9863,22 +9845,31 @@ mod tests {
         app.files.session_key = Some("preserve-transfer-target".into());
         app.files.remote_dir = "/work/important".into();
         app.toggle_files();
-        assert!(app.files_dock.is_some());
-        assert!(!app.files_side_dock);
+        assert!(app.files_open());
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Filer),
+            Some(dock::Area::Bottom)
+        );
         let _ = app.update(Message::FilesToggleDockPosition);
-        assert!(app.files_side_dock);
-        assert!(app.files_dock.is_some());
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Filer),
+            Some(dock::Area::Right)
+        );
+        assert!(app.files_open());
         assert_eq!(app.files.remote_dir, "/work/important");
         assert_eq!(
             app.files.session_key.as_deref(),
             Some("preserve-transfer-target")
         );
         let _ = app.update(Message::FilesToggleDockPosition);
-        assert!(!app.files_side_dock);
-        assert!(app.files_dock.is_some());
+        assert!(!app.files_in_side_dock());
+        assert!(app.files_open());
         let _ = app.update(Message::TogglePrivacyLock);
         let _ = app.update(Message::FilesToggleDockPosition);
-        assert!(!app.files_side_dock, "privacy lock prevents re-docking");
+        assert!(
+            !app.files_in_side_dock(),
+            "privacy lock prevents re-docking"
+        );
     }
 
     #[test]
