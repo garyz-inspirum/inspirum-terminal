@@ -132,6 +132,8 @@ pub(super) struct DockLayout {
     pub left: AreaState,
     pub right: AreaState,
     pub bottom: AreaState,
+    /// Closed panels and the area to restore when they are shown again.
+    pub hidden: Vec<(Panel, Area)>,
     pub left_width: f32,
     pub right_width: f32,
     pub bottom_ratio: f32,
@@ -172,6 +174,7 @@ impl DockLayout {
             left,
             right,
             bottom,
+            hidden: Vec::new(),
             left_width: DEFAULT_SIDE_WIDTH,
             right_width: DEFAULT_SIDE_WIDTH,
             bottom_ratio: DEFAULT_BOTTOM_RATIO,
@@ -224,12 +227,22 @@ impl DockLayout {
 
     pub(super) fn show(&mut self, panel: Panel) {
         if self.area_of(panel).is_none() {
-            self.bottom.panels.push(panel);
+            let area = self
+                .hidden
+                .iter()
+                .position(|(p, _)| *p == panel)
+                .map(|index| self.hidden.remove(index).1)
+                .unwrap_or(Area::Bottom);
+            self.area_mut(area).panels.push(panel);
         }
         self.activate(panel);
     }
 
     pub(super) fn close(&mut self, panel: Panel) {
+        if let Some(area) = self.area_of(panel) {
+            self.hidden.retain(|(p, _)| *p != panel);
+            self.hidden.push((panel, area));
+        }
         for area in Area::ALL {
             self.area_mut(area).remove(panel);
         }
@@ -245,6 +258,7 @@ impl DockLayout {
 
     pub(super) fn move_to(&mut self, panel: Panel, target: Area) {
         self.close(panel);
+        self.hidden.retain(|(p, _)| *p != panel);
         self.area_mut(target).panels.push(panel);
         self.activate(panel);
     }
@@ -328,19 +342,21 @@ impl DockLayout {
     pub(super) fn retain_available(&mut self, available: &[Panel]) {
         for panel in Panel::ALL {
             if !available.contains(&panel) {
-                self.close(panel);
+                for area in Area::ALL {
+                    self.area_mut(area).remove(panel);
+                }
             }
         }
     }
 
-    /// Append available panels absent from every area to the bottom area,
-    /// keeping the active tab of every area unchanged.
+    /// Append panels absent from both the saved areas and closed-panel history
+    /// (new panels introduced since the layout was saved), without changing the active tab.
     pub(super) fn add_missing(&mut self, available: &[Panel]) {
         for panel in available {
             let present = Area::ALL
                 .iter()
-                .any(|area| self.area_mut(*area).panels.contains(panel));
-            if !present {
+                .any(|area| self.area(*area).panels.contains(panel));
+            if !present && !self.hidden.iter().any(|(p, _)| p == panel) {
                 let bottom = self.area_mut(Area::Bottom);
                 let active = bottom.active_panel();
                 bottom.panels.push(*panel);
@@ -370,6 +386,14 @@ impl DockLayout {
                 .unwrap_or(0);
             state.fix_active();
         }
+        self.hidden.retain(|(panel, _)| {
+            if seen.contains(panel) {
+                false
+            } else {
+                seen.push(*panel);
+                true
+            }
+        });
         self.left_width = clamp_or(
             self.left_width,
             MIN_SIDE_WIDTH,
@@ -580,6 +604,7 @@ mod tests {
                 collapsed: true,
             },
             bottom: AreaState::default(),
+            hidden: Vec::new(),
             left_width: f32::NAN,
             right_width: 1.0,
             bottom_ratio: 5.0,
@@ -637,12 +662,54 @@ mod tests {
         layout.activate(Panel::Session);
         layout.add_missing(&[Panel::Sender, Panel::Session, Panel::Filer]);
         assert_invariants(&layout);
-        assert_eq!(layout.area_of(Panel::Sender), Some(Area::Bottom));
-        assert_eq!(layout.bottom.panels.last(), Some(&Panel::Sender));
+        assert_eq!(
+            layout.area_of(Panel::Sender),
+            None,
+            "closed panels are not missing"
+        );
         assert_eq!(layout.bottom.active_panel(), Some(Panel::Session));
         let before = layout.clone();
         layout.add_missing(&[Panel::Sender]);
         assert_eq!(layout, before);
+    }
+
+    #[test]
+    fn dock_saved_hidden_panel_stays_hidden_and_reopens_in_last_area() {
+        use super::super::ui_state::{self, UiState};
+
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-dock-hidden-{}-ui-state.json",
+            std::process::id()
+        ));
+        let mut layout = DockLayout::default();
+        layout.move_to(Panel::Filer, Area::Right);
+        layout.close(Panel::Filer);
+        ui_state::save(
+            &path,
+            &UiState {
+                theme: String::new(),
+                docks: Some(layout),
+            },
+        )
+        .unwrap();
+        let mut restored = ui_state::load(&path).docks.unwrap();
+        std::fs::remove_file(&path).unwrap();
+        restored.sanitize();
+        restored.add_missing(&Panel::ALL);
+        assert_eq!(restored.area_of(Panel::Filer), None);
+        restored.show(Panel::Filer);
+        assert_eq!(restored.area_of(Panel::Filer), Some(Area::Right));
+        assert!(restored.is_visible(Panel::Filer));
+    }
+
+    #[test]
+    fn dock_legacy_layout_adds_new_sender() {
+        let mut old = DockLayout::default();
+        old.bottom.remove(Panel::Sender); // legacy snapshot predating Sender
+        let mut restored = DockLayout::from_json(&old.to_json());
+        restored.add_missing(&Panel::ALL);
+        assert_eq!(restored.area_of(Panel::Sender), Some(Area::Bottom));
+        assert_eq!(restored.active_panel(Area::Bottom), Some(Panel::Session));
     }
 
     #[test]
