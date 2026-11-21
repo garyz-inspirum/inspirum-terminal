@@ -1200,6 +1200,127 @@ def reserved_display() -> str:
     raise RuntimeError("no disposable Xvfb display number available")
 
 
+def request_window_close(window: str, env: dict[str, str]) -> None:
+    """Send the ICCCM close a window manager's close button sends.
+
+    ClientMessage type WM_PROTOCOLS, format 32, data.l[0] = WM_DELETE_WINDOW,
+    data.l[1] = CurrentTime, delivered to the window itself with
+    XSendEvent(display, window, False, NoEventMask, &event) then XFlush.
+
+    ctypes, not xdotool: the runners' xdotool is 3.20160805 (no windowquit;
+    windowclose and windowkill destroy the window instead of asking), and no
+    window manager runs under Xvfb so wmctrl cannot deliver this either.
+    """
+    import ctypes
+    import ctypes.util
+
+    try:
+        protocols = command("xprop", "-id", window, "WM_PROTOCOLS", env=env)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        raise RuntimeError(
+            f"xprop WM_PROTOCOLS failed for window {window}: {detail[:300]}"
+        ) from exc
+    if "WM_DELETE_WINDOW" not in protocols:
+        raise RuntimeError(
+            f"window {window} does not advertise WM_DELETE_WINDOW: {protocols!r}"
+        )
+    lib_name = ctypes.util.find_library("X11")
+    if not lib_name:
+        raise RuntimeError("libX11 not found; cannot send WM_DELETE_WINDOW")
+    x11 = ctypes.CDLL(lib_name)
+
+    class _XClientMessageData(ctypes.Union):
+        _fields_ = [
+            ("b", ctypes.c_char * 20),
+            ("s", ctypes.c_short * 10),
+            ("l", ctypes.c_long * 5),
+        ]
+
+    class _XClientMessageEvent(ctypes.Structure):
+        # LP64 layout: int, pad, ulong, int, pad, pointer, ulong, ulong, int,
+        # pad, then the 5-long data union. Window and Atom are unsigned long.
+        _fields_ = [
+            ("type", ctypes.c_int),
+            ("serial", ctypes.c_ulong),
+            ("send_event", ctypes.c_int),
+            ("display", ctypes.c_void_p),
+            ("window", ctypes.c_ulong),
+            ("message_type", ctypes.c_ulong),
+            ("format", ctypes.c_int),
+            ("data", _XClientMessageData),
+        ]
+
+    class _XEvent(ctypes.Union):
+        # XSendEvent copies sizeof(XEvent), which is 24 longs. A bare
+        # XClientMessageEvent is shorter; the pad makes the union that size.
+        _fields_ = [
+            ("xclient", _XClientMessageEvent),
+            ("pad", ctypes.c_long * 24),
+        ]
+
+    if ctypes.sizeof(_XEvent) != 24 * ctypes.sizeof(ctypes.c_long):
+        raise RuntimeError(
+            f"XEvent is {ctypes.sizeof(_XEvent)} bytes, expected 24 longs"
+        )
+
+    x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    x11.XOpenDisplay.restype = ctypes.c_void_p
+    x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    x11.XCloseDisplay.restype = ctypes.c_int
+    x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+    x11.XInternAtom.restype = ctypes.c_ulong
+    x11.XSendEvent.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_int,
+        ctypes.c_long,
+        ctypes.POINTER(_XEvent),
+    ]
+    x11.XSendEvent.restype = ctypes.c_int
+    x11.XFlush.argtypes = [ctypes.c_void_p]
+    x11.XFlush.restype = ctypes.c_int
+
+    display_name = env.get("DISPLAY")
+    if not display_name:
+        raise RuntimeError("DISPLAY is unset; cannot send WM_DELETE_WINDOW")
+    display = x11.XOpenDisplay(display_name.encode())
+    if not display:
+        raise RuntimeError(f"XOpenDisplay failed for {display_name!r}")
+    try:
+        wm_protocols = x11.XInternAtom(display, b"WM_PROTOCOLS", False)
+        wm_delete = x11.XInternAtom(display, b"WM_DELETE_WINDOW", False)
+        if not wm_protocols or not wm_delete:
+            raise RuntimeError(
+                "failed to intern WM_PROTOCOLS or WM_DELETE_WINDOW"
+            )
+        # Nested union assignment through a parent writes a temporary and
+        # would not reach XSendEvent. Build each value, then assign it whole.
+        data = _XClientMessageData()
+        data.l[0] = wm_delete
+        data.l[1] = 0  # CurrentTime
+        client = _XClientMessageEvent()
+        client.type = 33  # ClientMessage
+        client.window = int(window)
+        client.message_type = wm_protocols
+        client.format = 32
+        client.data = data
+        event = _XEvent()
+        event.xclient = client
+        # NoEventMask, propagate False: the creating client receives it.
+        # XSendEvent itself sets send_event, which is what a real WM does.
+        sent = x11.XSendEvent(
+            display, int(window), False, 0, ctypes.byref(event),
+        )
+        if sent == 0:
+            raise RuntimeError(
+                f"XSendEvent WM_DELETE_WINDOW to {window} returned 0"
+            )
+        x11.XFlush(display)
+    finally:
+        x11.XCloseDisplay(display)
+
+
 TOUR = os.environ.get("INSPIRUM_GUI_TOUR") == "1"
 
 
@@ -2412,8 +2533,9 @@ async def main() -> int:
                 # probe (line above: no menu or dialog is open, focus mode
                 # and remote-keys mode are off, the SSH session is still up)
                 # and before the event_log snapshot so an accidental confirm
-                # also fails the "unexpectedly exited" check. Do not click
-                # the dialog's Exit button: teardown still needs the process.
+                # also fails the "unexpectedly exited" check. This path clicks
+                # Cancel only. The confirming Exit click is the window-manager
+                # close step after that snapshot.
                 command("xdotool", "mousemove", "--window", window,
                         "30", "16", "click", "1", env=env)
                 await asyncio.sleep(.3)
@@ -2448,18 +2570,22 @@ async def main() -> int:
                 # bottom right of the 600px dialog, one row below) sits further
                 # right of confirm[2]. The old +300px covered an ~80-170px gap;
                 # +360px keeps that cover. height-24 keeps the box off the
-                # status bar.
-                dialog_region = (
-                    max(0, confirm[0] - 280),
-                    max(0, confirm[1] - 56),
-                    min(width, confirm[2] + 360),
-                    min(height - 24, confirm[3] + 72),
-                )
-                if dialog_region[2] <= dialog_region[0] or dialog_region[3] <= dialog_region[1]:
-                    raise RuntimeError(
-                        "Exit confirmation dialog region collapsed from "
-                        f"{confirm}: {dialog_region}"
+                # status bar. Both confirmation paths use this same cover.
+                def exit_dialog_region(phrase_bounds, win_width, win_height):
+                    region = (
+                        max(0, phrase_bounds[0] - 280),
+                        max(0, phrase_bounds[1] - 56),
+                        min(win_width, phrase_bounds[2] + 360),
+                        min(win_height - 24, phrase_bounds[3] + 72),
                     )
+                    if region[2] <= region[0] or region[3] <= region[1]:
+                        raise RuntimeError(
+                            "Exit confirmation dialog region collapsed from "
+                            f"{phrase_bounds}: {region}"
+                        )
+                    return region
+
+                dialog_region = exit_dialog_region(confirm, width, height)
                 await click_label(
                     window, destination / "connected-exit-cancel.png",
                     "Cancel", env, region=dialog_region, settle=.5,
@@ -2468,7 +2594,46 @@ async def main() -> int:
                     command("xdotool", "getwindowgeometry", "--shell", window, env=env)
                 except subprocess.CalledProcessError as exc:
                     raise RuntimeError("Exit Cancel closed the application window") from exc
-                screenshot(window, destination / "connected-after-exit-cancel.png", env)
+                # A backdrop click can dismiss the dialog too, so prove it is
+                # gone before the workspace click. Repaint can lag on a
+                # loaded host; a miss is slow, so each attempt is a region
+                # OCR with a small budget.
+                cancel_shot = destination / "connected-after-exit-cancel.png"
+                gone_deadline = time.monotonic() + 8 * TIME_SCALE
+                while True:
+                    await asyncio.to_thread(screenshot, window, cancel_shot, env)
+                    try:
+                        still = await asyncio.to_thread(
+                            locate_visible_label,
+                            cancel_shot,
+                            "Exit and disconnect",
+                            region=confirm_region,
+                            budget=1.0,
+                        )
+                    except RuntimeError:
+                        break
+                    if time.monotonic() >= gone_deadline:
+                        raise RuntimeError(
+                            "Exit confirmation still visible after Cancel "
+                            f"at {still} in {confirm_region}"
+                        )
+                    await asyncio.sleep(.4)
+                removed_pixels = await asyncio.to_thread(
+                    diff,
+                    destination / "connected-exit-confirm.png",
+                    cancel_shot,
+                    env,
+                )
+                print(
+                    f"Exit Cancel dialog removal: {removed_pixels} pixels "
+                    f"(threshold 5000)",
+                    flush=True,
+                )
+                if removed_pixels < 5000:
+                    raise RuntimeError(
+                        "Exit confirmation backdrop still present after Cancel: "
+                        f"{removed_pixels} pixels changed (need >= 5000)"
+                    )
                 # Cancel closes the dialog but, unlike Escape after the
                 # Session menu, does not restore terminal focus. Click the
                 # pane the alternate-screen probe used so this echo proves
@@ -2527,6 +2692,96 @@ async def main() -> int:
                     raise RuntimeError(
                         "three sessions (main, auxiliary, split) were not authenticated"
                     )
+                # Window-manager close. After the event-log snapshot so shells
+                # ending on exit do not trip the "unexpectedly exited" checks.
+                # Confirming Exit is the last click; the process must exit 0
+                # by itself before teardown.
+                if app.poll() is not None:
+                    raise RuntimeError(
+                        "application already exited before window-manager close "
+                        f"(code {app.returncode})"
+                    )
+                await asyncio.to_thread(
+                    screenshot,
+                    window,
+                    destination / "connected-before-wm-close.png",
+                    env,
+                )
+                await asyncio.to_thread(request_window_close, window, env)
+                try:
+                    close_confirm = await locate_rendered_label(
+                        window,
+                        destination / "connected-close-confirm.png",
+                        "Exit and disconnect",
+                        env=env,
+                        region=confirm_region,
+                        timeout=15,
+                    )
+                except RuntimeError:
+                    if app.poll() is not None:
+                        raise RuntimeError(
+                            "window-manager close exited without confirmation "
+                            f"(code {app.returncode})"
+                        ) from None
+                    raise
+                if app.poll() is not None:
+                    raise RuntimeError(
+                        "window-manager close exited without waiting for confirmation "
+                        f"(code {app.returncode})"
+                    )
+                close_dialog = exit_dialog_region(close_confirm, width, height)
+                cancel_bounds = await locate_rendered_label(
+                    window,
+                    destination / "connected-close-cancel.png",
+                    "Cancel",
+                    env=env,
+                    region=close_dialog,
+                    timeout=15,
+                )
+                cancel_top = cancel_bounds[1]
+                cancel_right = cancel_bounds[2]
+                cancel_bottom = cancel_bounds[3]
+                exit_box = (
+                    cancel_right + 8,
+                    cancel_top - 8,
+                    min(width, cancel_right + 200),
+                    cancel_bottom + 8,
+                )
+                if exit_box[2] <= exit_box[0] or exit_box[3] <= exit_box[1]:
+                    raise RuntimeError(
+                        "confirming Exit button box collapsed from "
+                        f"Cancel {cancel_bounds}: {exit_box}"
+                    )
+                await click_label(
+                    window,
+                    destination / "connected-close-exit.png",
+                    "Exit",
+                    env,
+                    region=exit_box,
+                    settle=.3,
+                )
+                close_started = time.monotonic()
+                close_deadline = close_started + 20 * TIME_SCALE
+                while app.poll() is None and time.monotonic() < close_deadline:
+                    await asyncio.sleep(.2)
+                close_elapsed = time.monotonic() - close_started
+                close_code = app.poll()
+                print(
+                    f"window-manager close: process "
+                    f"{'exited' if close_code is not None else 'still running'} "
+                    f"after {close_elapsed:.1f}s"
+                    + (f" code {close_code}" if close_code is not None else ""),
+                    flush=True,
+                )
+                if close_code is None:
+                    raise RuntimeError(
+                        "window-manager close: application still running "
+                        f"after {close_elapsed:.1f}s"
+                    )
+                if close_code != 0:
+                    raise RuntimeError(
+                        f"window-manager close: application exit code {close_code}"
+                    )
                 (destination / "connected-acceptance.txt").write_text(
                     "PASS: two authenticated independent OpenSSH PTYs through production Iced\n"
                     "PASS: native Files dock established actual isolated SSH SFTP subsystem\n"
@@ -2551,6 +2806,10 @@ async def main() -> int:
                     "PASS: Ctrl+Shift+J under the Session and dock gear menus left the auxiliary SSH shell connected; it closed it after Escape\n"
                     "PASS: privacy-locked and free-type synthetic text never reached SSH\n"
                     "PASS: Session Exit asked for confirmation and Cancel left the shell answering AFTER_EXIT_CANCEL\n"
+                    "PASS: Exit Cancel removed the confirmation before the workspace was clicked\n"
+                    "PASS: window-manager close request asked for confirmation; confirming Exit ended the process with exit code 0\n"
+                    f"Exit Cancel dialog removal: {removed_pixels} pixels\n"
+                    f"Window-manager close exit: {close_elapsed:.1f}s code {close_code}\n"
                     "All keys generated in isolated temporary fixture; no real host or credential.\n",
                     encoding="utf-8",
                 )
