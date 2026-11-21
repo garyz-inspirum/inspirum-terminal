@@ -42,18 +42,6 @@ use std::{
 const TERMINAL_ACCENT: Color = Color::from_rgb8(123, 176, 255);
 
 // Chrome colour lookups against the current WindTerm theme palette.
-fn bg() -> Color {
-    theme::palette().list
-}
-fn panel() -> Color {
-    theme::palette().dock
-}
-fn elevated() -> Color {
-    theme::palette().raised
-}
-fn line() -> Color {
-    theme::palette().border
-}
 fn fg() -> Color {
     theme::palette().text
 }
@@ -8109,7 +8097,7 @@ mod tests {
         assert_eq!(selected.text_color, super::fg());
         assert_eq!(
             super::primary(&theme, Status::Active).text_color,
-            Color::WHITE
+            iced::Color::WHITE
         );
     }
 
