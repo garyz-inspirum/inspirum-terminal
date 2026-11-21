@@ -922,6 +922,40 @@ async def wait_for(predicate, label: str, *, timeout: float = 22) -> None:
         await asyncio.sleep(.2)
 
 
+async def click_filer_refresh(
+    window: str, env: dict[str, str], shot_path: Path, *,
+    path_bar_y: int, completed, label: str, attempt_timeout: float = 6,
+) -> None:
+    """Click the Filer path bar's text-less refresh icon until ``completed``.
+
+    Switching between the Explorer and Filer dock tabs does NOT reload the
+    remote listing (panels only re-list when going hidden -> visible), so the
+    refresh icon must be clicked. Measured at 1280x800 with a bottom dock:
+    tab labels y~552, path bar y=567..598; at its right end 'Up' ~(1185,584),
+    refresh icon (1222,584) with a ~22x22 hit box, 'Go' (1256,584) spanning
+    x 1238..1274. So the icon is at x = width - 58, y = tab-label y + 32. The
+    path bar's right end stays at the window's right edge for a right dock
+    (strip y~46, so path bar y~78). Retry at x-8 then x+8 before raising.
+    """
+    width, _ = window_size(window, env)
+    base_x = width - 58
+    offsets = (0, -8, 8)
+    for index, offset in enumerate(offsets):
+        command(
+            "xdotool", "mousemove", "--window", window,
+            str(base_x + offset), str(path_bar_y), "click", "1", env=env,
+        )
+        await asyncio.sleep(.3)
+        screenshot(window, shot_path, env)
+        last = index == len(offsets) - 1
+        try:
+            await wait_for(completed, label, timeout=22 if last else attempt_timeout)
+            return
+        except RuntimeError:
+            if last:
+                raise
+
+
 async def click_transfer(
     *,
     window: str,
@@ -1233,25 +1267,24 @@ async def main() -> int:
                 # Two completed transfers must not consume the listings. Select
                 # another visibly rendered, distinct remote file through the
                 # production row control; its selection styling is the oracle.
-                # The text 'Refresh' button is gone (icon only); a panel
-                # re-lists when it becomes visible, so switch Explorer -> Filer.
+                # The text 'Refresh' button is gone (icon only) and switching
+                # Explorer <-> Filer tabs does not reload the listing; activate
+                # Filer, then click its path-bar refresh icon (see helper).
                 # Prefixes 111 < 444 < 999 are distinct and OCR-safe (no 0/O);
                 # the third file sorts first, so it stays visible at 960x640.
                 third_name = "111_GUI_THIRD_FIXTURE.bin"
                 third_bytes = b"GUI_THIRD_FIXTURE" + bytes(range(32))
                 (remote_root / third_name).write_bytes(third_bytes)
                 listings_before = events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY")
-                await click_label(
-                    window, destination / "connected-files-refresh-away.png",
-                    "Explorer", env, region=strip, settle=.6,
-                )
-                await click_label(
+                filer_tab = await click_label(
                     window, destination / "connected-files-refresh-back.png",
                     "Filer", env, region=strip, settle=.3,
                 )
-                await wait_for(
-                    lambda: events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY") > listings_before,
-                    "remote listing refresh after creating distinct fixture",
+                await click_filer_refresh(
+                    window, env, destination / "connected-files-refresh-clicked.png",
+                    path_bar_y=center(filer_tab)[1] + 32,
+                    completed=lambda: events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY") > listings_before,
+                    label="remote listing refresh after creating distinct fixture",
                 )
                 # The fixture event fires when the server answered the listing;
                 # the Iced view repaints afterwards. Poll the rendered window
