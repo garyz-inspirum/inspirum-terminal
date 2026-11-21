@@ -206,6 +206,11 @@ def _key(text: str) -> str:
     return "".join(ch for ch in text if ch.isalnum() or ch == ".")
 
 
+# Monospace dotted zeros in 13 px table cells are read as ``@``, which _key
+# would drop entirely. Map it back before the exact 3-char prefix check.
+_OCR_GLYPH_FIXES = str.maketrans({"@": "0"})
+
+
 def _near_key(text: str, label: str) -> bool:
     """Whole-line match tolerating a few single-glyph OCR confusions.
 
@@ -213,7 +218,7 @@ def _near_key(text: str, label: str) -> bool:
     ``GUI`` read as ``GUL`` or ``bin`` as ``bir`` cannot turn one fixture name
     into another; the digit prefix and length must still match exactly.
     """
-    got, want = _key(text), _key(label)
+    got, want = _key(text.translate(_OCR_GLYPH_FIXES)), _key(label)
     if len(want) < 12 or len(got) != len(want):
         return False
     if got[:3] != want[:3]:
@@ -224,6 +229,12 @@ def _near_key(text: str, label: str) -> bool:
 def match_visible_segment(segments, label: str):
     """Match a label against each OCR'd segment as a whole, with tolerance."""
     for words in segments:
+        if not words:
+            continue
+        # Drop leading icon glyphs (file icons read as ``)`` or ``*``) so the
+        # bounds and click centre sit on the name, not the icon.
+        while words and not _key(words[0][0].translate(_OCR_GLYPH_FIXES)):
+            words = words[1:]
         if not words:
             continue
         joined = "".join(word[0] for word in words)
@@ -287,7 +298,7 @@ def match_visible_label(rows, label: str):
     A match is either one OCR token (arrows may be glued on, as in
     ``Upload->``) or a left-to-right run of tokens on the same visible
     line whose normalized text equals the label. A proper prefix such as
-    ``000_GUI_DOWNLOAD`` is not a click target. Tokens on the next line
+    ``444_GUI_DOWNLOAD`` is not a click target. Tokens on the next line
     are not consumed.
     """
     target = _key(label)
@@ -456,7 +467,9 @@ def _scaled_words(tsv: str, origin, scale: int):
     return words
 
 
-def _upscaled_crop(rows, channels, box, scale: int, dest: Path) -> None:
+def _upscaled_crop(
+    rows, channels, box, scale: int, dest: Path, *, invert: bool = False,
+) -> None:
     left, top, right, bot = box
     width = right - left + 1
     height = bot - top + 1
@@ -468,7 +481,11 @@ def _upscaled_crop(rows, channels, box, scale: int, dest: Path) -> None:
         for x in range(out_w):
             base = (left + min(width - 1, x // scale)) * channels
             dest_at = (y * out_w + x) * 3
-            rgb[dest_at:dest_at + 3] = source[base:base + 3]
+            if invert:
+                lum = 255 - (source[base] + source[base + 1] + source[base + 2]) // 3
+                rgb[dest_at:dest_at + 3] = bytes((lum, lum, lum))
+            else:
+                rgb[dest_at:dest_at + 3] = source[base:base + 3]
     _write_png(dest, out_w, out_h, bytes(rgb))
 
 
@@ -552,14 +569,18 @@ def _band_segments(width, rows, channels, thresh, y1, y2, gap: int):
     return [(x1, x2) for x1, x2 in segments if x2 - x1 >= 40]
 
 
-def visible_segment_rows(path: Path, tesseract: str):
+def visible_segment_rows(path: Path, tesseract: str, *, invert: bool = False):
     """OCR each light band segment by segment; coordinates in source pixels.
 
     Returns a list of per-segment word lists so a caller can match one
     segment as a whole without neighbouring controls on the same line.
+
+    ``invert`` re-reads each segment as dark-on-light grey. On the dark theme
+    a 13 px monospace table cell (file icon + name) read as noise in colour
+    but as ``@@@_GUI_DOWNLOAD_FIXTURE. bir`` inverted.
     """
     stat = path.stat()
-    key = (str(path), stat.st_mtime_ns, stat.st_size, "segments")
+    key = (str(path), stat.st_mtime_ns, stat.st_size, "segments", invert)
     cached = _PIXEL_CACHE.get(key)
     if cached is not None:
         return cached
@@ -580,7 +601,7 @@ def visible_segment_rows(path: Path, tesseract: str):
                 )
                 if box[2] - box[0] < 24:
                     continue
-                _upscaled_crop(rows, channels, box, 4, temporary)
+                _upscaled_crop(rows, channels, box, 4, temporary, invert=invert)
                 segments.append(_scaled_words(
                     _ocr_tsv(tesseract, temporary, "7"), (box[0], box[1]), 4,
                 ))
@@ -668,11 +689,70 @@ def ocr_rows(path: Path, tesseract: str, region=None):
     return _scaled_words(tsv, offset, scale)
 
 
+# One locate attempt must fit well inside the caller's retry window
+# (click_label / locate_rendered_label retry with fresh screenshots).
+LOCATE_BUDGET_S = 12.0
+# Session toolbar + tab bar; the inverted stage never scans above it unless
+# the caller passes an explicit region.
+TOOLBAR_BOTTOM_Y = 90
+
+
+def _inverted_segment_search(path: Path, tesseract: str, label: str, region, deadline):
+    """Last resort: re-read light segments inverted (dark on light grey, x4).
+
+    Bounded: only segments inside ``region`` (or below the session toolbar
+    when no region is given) are OCR'd, the search stops at the first
+    matching segment, and it gives up at ``deadline``. Returns
+    ``(bounds_or_None, segments_read)``.
+    """
+    width, height, channels, rows = _read_png(path)
+    if region is not None:
+        rx1, ry1, rx2, ry2 = region
+    else:
+        rx1, ry1, rx2, ry2 = 0, TOOLBAR_BOTTOM_Y, width, height
+    thresh = _text_threshold(width, height, channels, rows)
+    segments = []
+    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    try:
+        for y1, y2 in _visible_bands(width, height, channels, rows, thresh):
+            if y2 < ry1 or y1 > ry2:
+                continue
+            for x1, x2 in _band_segments(width, rows, channels, thresh, y1, y2, 24):
+                if x2 < rx1 or x1 > rx2:
+                    continue
+                if time.monotonic() >= deadline:
+                    return None, segments
+                box = (
+                    min(width - 1, x1 + 3),
+                    max(0, y1 - 4),
+                    max(0, x2 - 3),
+                    min(height - 1, y2 + 4),
+                )
+                if box[2] - box[0] < 24:
+                    continue
+                _upscaled_crop(rows, channels, box, 4, temporary, invert=True)
+                words = _scaled_words(
+                    _ocr_tsv(tesseract, temporary, "7"), (box[0], box[1]), 4,
+                )
+                if not words:
+                    continue
+                segments.append(words)
+                bounds = match_visible_label(words, label)
+                if bounds is None:
+                    bounds = match_visible_segment([words], label)
+                if bounds is not None:
+                    return bounds, segments
+    finally:
+        temporary.unlink(missing_ok=True)
+    return None, segments
+
+
 def locate_visible_label(
     path: Path,
     label: str,
     *,
     region=None,
+    budget: float = LOCATE_BUDGET_S,
 ):
     """Return conservative interior bounds for one visibly rendered label.
 
@@ -686,8 +766,10 @@ def locate_visible_label(
     tesseract = shutil.which("tesseract")
     if tesseract is None:
         raise RuntimeError("visible label targeting requires tesseract")
+    started = time.monotonic()
+    deadline = started + budget
     bounds = match_visible_label(ocr_rows(path, tesseract, region), label)
-    if bounds is None:
+    if bounds is None and time.monotonic() < deadline:
         pixel_rows = visible_pixel_rows(path, tesseract, clusters=False)
         if region is not None:
             x1, y1, x2, y2 = region
@@ -701,18 +783,35 @@ def locate_visible_label(
             bounds = match_visible_label(inside, label)
         if bounds is None:
             bounds = match_visible_label(pixel_rows, label)
-    if bounds is None:
+    if bounds is None and time.monotonic() < deadline:
         bounds = match_visible_label(
             visible_pixel_rows(path, tesseract, clusters=True), label,
         )
-    if bounds is None:
+    if bounds is None and time.monotonic() < deadline:
         segments = visible_segment_rows(path, tesseract)
         flat = [word for words in segments for word in words]
         bounds = match_visible_label(flat, label)
         if bounds is None:
             bounds = match_visible_segment(segments, label)
+    if bounds is None and time.monotonic() < deadline:
+        bounds, inverted = _inverted_segment_search(
+            path, tesseract, label, region, deadline,
+        )
+    else:
+        inverted = []
     if bounds is None:
-        raise RuntimeError(f"visible label not found in screenshot: {label}")
+        seen = [row[0] for row in ocr_rows(path, tesseract, region)][:40]
+        segs = [" ".join(word[0] for word in words) for words in inverted][:20]
+        print(
+            f"OCR miss for {label!r} in {path} region={region} "
+            f"after {time.monotonic() - started:.1f}s\n"
+            f"  words: {seen}\n  inverted segments: {segs}",
+            file=sys.stderr,
+        )
+        raise RuntimeError(
+            f"visible label not found in screenshot: {label} "
+            f"(screenshot: {path}, region={region})"
+        )
     return bounds
 
 
@@ -732,6 +831,7 @@ def diff(first: Path, second: Path, env: dict[str, str]) -> int:
 
 async def locate_rendered_label(
     window: str, path: Path, label: str, *, env: dict[str, str], timeout: float = 22,
+    region=None,
 ):
     """Screenshot repeatedly until the label is rendered; return its bounds."""
     # OCR and screenshots block for seconds. The fixture SSH server shares
@@ -741,7 +841,9 @@ async def locate_rendered_label(
     while True:
         await asyncio.to_thread(screenshot, window, path, env)
         try:
-            return await asyncio.to_thread(locate_visible_label, path, label)
+            return await asyncio.to_thread(
+                locate_visible_label, path, label, region=region,
+            )
         except RuntimeError:
             if time.monotonic() >= deadline:
                 raise
@@ -794,6 +896,22 @@ def dock_strip_region(width: int, height: int):
     a tab label never matches the centre toolbar's 'Files' button.
     """
     return (0, int(height * .62), width, int(height * .76))
+
+
+def dock_body_region(width: int, height: int, *, right: bool = False):
+    """Dock body (file rows, Upload/Download, Transfer queue rows).
+
+    Bottom dock: full width, lower third above the status bar. Right dock:
+    right 45% of the window below the 32px menu bar.
+    """
+    if right:
+        return (int(width * .55), 32, width, height - 22)
+    return (0, int(height * .66), width, height - 22)
+
+
+def gear_menu_region(width: int, height: int):
+    """Dock gear menu rows (Move to Right / Move to Bottom): right 30%."""
+    return (int(width * .70), 0, width, height)
 
 
 async def wait_for(predicate, label: str, *, timeout: float = 22) -> None:
@@ -857,7 +975,7 @@ async def main() -> int:
         trusted = asyncssh.read_public_key(str(client) + ".pub")
         remote_root = root / "remote-sftp"
         remote_root.mkdir()
-        download_name = "000_GUI_DOWNLOAD_FIXTURE.bin"
+        download_name = "444_GUI_DOWNLOAD_FIXTURE.bin"
         download_bytes = b"GUI_DOWNLOAD_FIXTURE\x00\xff\r\n" + bytes(range(256)) * 8
         (remote_root / download_name).write_bytes(download_bytes)
         local_root = root / "local-files"
@@ -1032,11 +1150,13 @@ async def main() -> int:
 
                 width, height = window_size(window, env)
                 strip = dock_strip_region(width, height)
+                body = dock_body_region(width, height)
 
                 # Toggling Files activates the Filer (REMOTE) tab of the bottom
                 # dock. The remote fixture row must be visibly targetable.
                 bottom = destination / "connected-files-bottom-dock.png"
-                remote_row = await asyncio.to_thread(locate_visible_label, bottom, download_name)
+                remote_row = await asyncio.to_thread(locate_visible_label, bottom, download_name, region=body,
+                )
                 if remote_row[3] <= remote_row[1]:
                     raise RuntimeError("bottom-dock remote file row is not visibly targetable")
 
@@ -1045,10 +1165,11 @@ async def main() -> int:
                 await click_label(window, explorer_shot, "Explorer", env, region=strip, settle=.8)
                 local_row = await locate_rendered_label(
                     window, explorer_shot, upload_name, env=env,
+                    region=body, timeout=40,
                 )
                 upload_action = await asyncio.to_thread(
                     locate_visible_label, explorer_shot, "Upload",
-                    region=(0, int(height * .62), width, height),
+                    region=(0, int(height * .62), width, height - 22),
                 )
                 if local_row[3] <= local_row[1]:
                     raise RuntimeError("bottom-dock local file row is not visibly targetable")
@@ -1078,10 +1199,11 @@ async def main() -> int:
                 await click_label(window, filer_shot, "Filer", env, region=strip, settle=.8)
                 remote_row = await locate_rendered_label(
                     window, filer_shot, download_name, env=env,
+                    region=body, timeout=40,
                 )
                 download_action = await asyncio.to_thread(
                     locate_visible_label, filer_shot, "Download",
-                    region=(0, int(height * .62), width, height),
+                    region=(0, int(height * .62), width, height - 22),
                 )
                 downloaded = local_root / download_name
                 if downloaded.exists():
@@ -1113,6 +1235,8 @@ async def main() -> int:
                 # production row control; its selection styling is the oracle.
                 # The text 'Refresh' button is gone (icon only); a panel
                 # re-lists when it becomes visible, so switch Explorer -> Filer.
+                # Prefixes 111 < 444 < 999 are distinct and OCR-safe (no 0/O);
+                # the third file sorts first, so it stays visible at 960x640.
                 third_name = "111_GUI_THIRD_FIXTURE.bin"
                 third_bytes = b"GUI_THIRD_FIXTURE" + bytes(range(32))
                 (remote_root / third_name).write_bytes(third_bytes)
@@ -1134,7 +1258,7 @@ async def main() -> int:
                 # until the distinct filename is actually visible.
                 third_row = await locate_rendered_label(
                     window, destination / "connected-files-third-visible.png",
-                    third_name, env=env,
+                    third_name, env=env, region=body, timeout=40,
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
@@ -1155,8 +1279,11 @@ async def main() -> int:
                 await click_label(window, queue_shot, "Transfer", env, region=strip, settle=.8)
                 queue_bounds = await locate_rendered_label(
                     window, queue_shot, download_name, env=env,
+                    region=body, timeout=40,
                 )
-                await asyncio.to_thread(locate_visible_label, queue_shot, upload_name)
+                await asyncio.to_thread(
+                    locate_visible_label, queue_shot, upload_name, region=body,
+                )
                 command(
                     "xdotool", "mousemove", "--window", window,
                     str(queue_bounds[0] + 40), str(queue_bounds[3] + 24),
@@ -1170,7 +1297,7 @@ async def main() -> int:
                 )
                 await locate_rendered_label(
                     window, destination / "connected-files-filer-again.png",
-                    third_name, env=env,
+                    third_name, env=env, region=body, timeout=40,
                 )
 
                 # Minimum-size acceptance is interaction, not a screenshot-only
@@ -1189,6 +1316,7 @@ async def main() -> int:
                 minimum_row = await asyncio.to_thread(
                     locate_visible_label,
                     destination / "connected-files-min-window.png", third_name,
+                    region=dock_body_region(960, 640),
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
@@ -1217,6 +1345,7 @@ async def main() -> int:
                 await click_label(
                     window, destination / "connected-files-gear-menu.png",
                     "Move to Right", env, settle=.9,
+                    region=gear_menu_region(width, height),
                 )
                 screenshot(window, destination / "connected-files-side-dock.png", env)
                 if diff(
@@ -1226,6 +1355,7 @@ async def main() -> int:
                     raise RuntimeError("Move to Right did not visibly re-dock Filer")
                 side_row = await locate_rendered_label(
                     window, destination / "connected-files-side-dock.png", third_name, env=env,
+                    region=dock_body_region(width, height, right=True), timeout=40,
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
@@ -1242,11 +1372,13 @@ async def main() -> int:
                 await click_label(
                     window, destination / "connected-files-gear-menu-right.png",
                     "Move to Bottom", env, settle=.9,
+                    region=gear_menu_region(width, height),
                 )
                 screenshot(window, destination / "connected-files-redocked-bottom.png", env)
                 redocked_row = await locate_rendered_label(
                     window, destination / "connected-files-redocked-bottom.png",
                     third_name, env=env,
+                    region=dock_body_region(width, height), timeout=40,
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
