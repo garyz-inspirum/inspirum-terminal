@@ -7219,11 +7219,7 @@ impl App {
     }
 
     fn tunnels_view(&self) -> Element<'_, Message> {
-        let mut tunnel_list = column![
-            text("Tunnel").size(13),
-            text("Saved forwards").size(11).color(muted()),
-        ]
-        .spacing(8);
+        let mut tunnel_list = column![text("Saved forwards").size(11).color(muted()),].spacing(8);
 
         if self
             .profiles
@@ -7501,17 +7497,42 @@ impl App {
     }
 
     fn dialog_view<'a>(&'a self, dialog: &'a Dialog) -> Element<'a, Message> {
+        let title: &'static str = match dialog {
+            Dialog::Tools => "",
+            Dialog::Connection => {
+                if self.editing_profile.is_some() {
+                    "Edit SSH connection"
+                } else {
+                    "New SSH connection"
+                }
+            }
+            Dialog::Commands => "Command palette",
+            Dialog::Close(_) => "Close this session?",
+            Dialog::PasteConfirm { .. } => "Confirm terminal paste",
+            Dialog::FileOverwrite(_) => "Replace existing file?",
+            Dialog::FileDeleteLocal(_) => "Delete local file?",
+            Dialog::FileDeleteRemote { directory, .. } => {
+                if *directory {
+                    "Delete remote directory?"
+                } else {
+                    "Delete remote file?"
+                }
+            }
+            Dialog::FileName(file_action) => match file_action {
+                FileNameAction::MkdirLocal(_) => "New local folder",
+                FileNameAction::MkdirRemote { .. } => "New remote folder",
+                FileNameAction::RenameLocal(_) => "Rename local file",
+                FileNameAction::RenameRemote { .. } => "Rename remote file",
+            },
+            Dialog::ImportProfiles => "Import SSH profiles",
+            Dialog::Tunnels => "Tunnel",
+            Dialog::About => "Inspirum Terminal · Iced",
+        };
         let body: Element<'_, Message> = match dialog {
             Dialog::Tools => self.tools_view(),
             Dialog::Connection => {
                 let editing = self.editing_profile.is_some();
                 let mut form = column![
-                    text(if editing {
-                        "Edit SSH connection"
-                    } else {
-                        "New SSH connection"
-                    })
-                    .size(13),
                     text(if editing {
                         "Changes are saved to the existing profile. Live panes keep their current connection until reconnect."
                     } else {
@@ -7864,7 +7885,6 @@ impl App {
             Dialog::Commands => {
                 let items = iced_palette_items(&self.command_query, &self.snippets);
                 let mut palette = column![
-                    text("Command palette").size(13),
                     text("Application actions are [APP]. Snippets are [REMOTE TEXT] and only stage text; they never execute automatically.")
                         .size(12)
                         .color(muted()),
@@ -7968,7 +7988,6 @@ impl App {
                 .into()
             }
             Dialog::Close(index) => column![
-                text("Close this session?").size(13),
                 text("This disconnects the live SSH/PTY session and closes its Iced workspace tab.")
                     .color(muted()),
                 row![
@@ -7989,7 +8008,6 @@ impl App {
                 let preview = paste_preview_text(&prepared, 4000);
                 let line_count = prepared.lines().count().max(1);
                 column![
-                    text("Confirm terminal paste").size(13),
                     text(format!(
                         "Paste {} bytes across approximately {} line(s)?",
                         prepared.len(),
@@ -8043,7 +8061,6 @@ impl App {
                     TransferDirection::Download => pending.local.to_string_lossy().into_owned(),
                 };
                 column![
-                    text("Replace existing file?").size(13),
                     text(format!(
                         "A file already exists at the {direction} destination."
                     ))
@@ -8075,7 +8092,6 @@ impl App {
                 .into()
             }
             Dialog::FileDeleteLocal(path) => column![
-                text("Delete local file?").size(13),
                 text(path.to_string_lossy().into_owned())
                     .font(Font::MONOSPACE)
                     .size(12),
@@ -8092,12 +8108,6 @@ impl App {
             .spacing(8)
             .into(),
             Dialog::FileDeleteRemote { path, directory, .. } => column![
-                text(if *directory {
-                    "Delete remote directory?"
-                } else {
-                    "Delete remote file?"
-                })
-                .size(13),
                 text(path).font(Font::MONOSPACE).size(12),
                 text(if *directory {
                     "This action is permanent. Remote directories are removed only when empty."
@@ -8116,14 +8126,13 @@ impl App {
             .spacing(8)
             .into(),
             Dialog::FileName(file_action) => {
-                let (title, hint) = match file_action {
+                let (_title, hint) = match file_action {
                     FileNameAction::MkdirLocal(_) => ("New local folder", "Folder name"),
                     FileNameAction::MkdirRemote { .. } => ("New remote folder", "Folder name"),
                     FileNameAction::RenameLocal(_) => ("Rename local file", "New filename"),
                     FileNameAction::RenameRemote { .. } => ("Rename remote file", "New filename"),
                 };
                 column![
-                    text(title).size(13),
                     text_input(hint, &self.files.name_input)
 .style(flat_input)
                         .id("file-name")
@@ -8144,7 +8153,6 @@ impl App {
                 .into()
             }
             Dialog::ImportProfiles => column![
-                text("Import SSH profiles").size(13),
                 text("Merge a validated non-secret Inspirum profile JSON file into the current library. Existing profiles are never overwritten by import.")
                     .color(muted()),
                 column![
@@ -8171,7 +8179,6 @@ impl App {
             .into(),
             Dialog::Tunnels => self.tunnels_view(),
             Dialog::About => column![
-                text("Inspirum Terminal · Iced").size(13),
                 text("Inspirum Terminal uses Iced for the desktop interface and the shared OpenSSH/PTY backend for terminal sessions.\n\nTools includes profiles and startup, tabs and saved split workspaces, synchronized input, history and logging, terminal appearance and pointer preferences, SSH trust and multiplexing, forwarding, tmux, SCP, snippets and sanitized support reports.\n\nThe Files pane provides graphical SFTP transfers and remote editing. Clipboard and command sends retain explicit confirmation and terminal identity checks.")
                     .color(muted()),
                 action("Back to workspace", Message::CloseDialog).style(primary),
@@ -8180,7 +8187,7 @@ impl App {
             .into(),
         };
 
-        dialog_frame(container(scrollable(body)).padding(12))
+        dialog_frame(title, container(scrollable(body)).padding(12))
             .width(if matches!(dialog, Dialog::Tools) {
                 880
             } else {
@@ -8617,9 +8624,14 @@ fn dialog_window(_: &Theme) -> container::Style {
 }
 
 /// WindTerm-style dialog chrome: dock fill, 1px border, chrome title strip.
-fn dialog_frame<'a>(body: impl Into<Element<'a, Message>>) -> container::Container<'a, Message> {
+fn dialog_frame<'a>(
+    title: &'a str,
+    body: impl Into<Element<'a, Message>>,
+) -> container::Container<'a, Message> {
     container(column![
-        container(text(""))
+        container(text(title).size(13).color(theme::palette().text))
+            .padding([0, 8])
+            .align_y(iced::Center)
             .width(iced::Length::Fill)
             .height(theme::metrics::STRIP_HEIGHT)
             .style(dialog_strip),
