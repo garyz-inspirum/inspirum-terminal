@@ -367,23 +367,23 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if focus_mode_chord(key, *modifiers) =>
                 {
-                    Some(Message::ToggleFocusMode)
+                    Some(Message::KeyChord(KeyChord::FocusMode))
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if free_type_chord(key, *modifiers) =>
                 {
-                    Some(Message::ToggleFocusedFreeType)
+                    Some(Message::KeyChord(KeyChord::FreeType))
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if remote_keys_chord(key, *modifiers) =>
                 {
-                    Some(Message::ToggleFocusedRemoteKeys)
+                    Some(Message::KeyChord(KeyChord::RemoteKeys))
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if status == event::Status::Ignored
                         && local_navigation_chord(key, *modifiers) =>
                 {
-                    Some(Message::ToggleLocalNavigation)
+                    Some(Message::KeyChord(KeyChord::LocalNavigation))
                 }
                 // A focused text field can consume Escape. Route only this
                 // captured key to dialog dismissal; never leak it to SSH.
@@ -410,7 +410,7 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                         && modifiers.shift()
                         && matches!(key.as_ref(), keyboard::Key::Character("r" | "R")) =>
                 {
-                    Some(Message::Split(pane_grid::Axis::Vertical))
+                    Some(Message::KeyChord(KeyChord::SplitRight))
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if status == event::Status::Ignored
@@ -418,7 +418,7 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                         && modifiers.shift()
                         && matches!(key.as_ref(), keyboard::Key::Character("f" | "F")) =>
                 {
-                    Some(Message::ToggleFiles)
+                    Some(Message::KeyChord(KeyChord::ToggleFiles))
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if status == event::Status::Ignored
@@ -426,7 +426,7 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                         && modifiers.shift()
                         && matches!(key.as_ref(), keyboard::Key::Character("j" | "J")) =>
                 {
-                    Some(Message::ToggleAuxiliaryShell)
+                    Some(Message::KeyChord(KeyChord::AuxiliaryShell))
                 }
                 iced::Event::Window(iced::window::Event::FileDropped(_)) => {
                     Some(Message::Event(event))
@@ -3780,7 +3780,12 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         let _slow = SlowIcedScope::start("event_update");
         let message = match message {
-            Message::KeyChord(chord) => return self.update(chord.message()),
+            Message::KeyChord(chord) => {
+                if self.open_menu.is_some() || self.dock_menu.is_some() {
+                    return Task::none();
+                }
+                return self.update(chord.message());
+            }
             other => other,
         };
         if matches!(&message, Message::TogglePrivacyLock) {
