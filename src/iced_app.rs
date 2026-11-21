@@ -3314,9 +3314,9 @@ impl App {
                 self.activate_tab(self.tabs.len() - 1);
             }
             self.status = if self.pty_bridge.is_some() {
-                "SSH session opened through the production OpenSSH/PTY backend.".into()
+                "Session opened.".into()
             } else {
-                "SSH session queued until the terminal event bridge is ready.".into()
+                "Session queued.".into()
             };
         }
         self.dialog = None;
@@ -5637,7 +5637,7 @@ impl App {
                     }
                 }
                 self.status = if attempted == 0 {
-                    "Terminal event bridge ready.".into()
+                    "Ready".into()
                 } else {
                     format!(
                         "Terminal bridge ready: {started} of {attempted} pending session(s) started."
@@ -8280,7 +8280,7 @@ impl App {
                 text("Merge a validated non-secret Inspirum profile JSON file into the current library. Existing profiles are never overwritten by import.")
                     .color(muted()),
                 column![
-                    text("Import file").size(13).color(muted()),
+                    text("Import file").size(13).color(theme::palette().text),
                     text_input("/path/to/profiles.json", &self.import_path)
 .style(flat_input)
                         .id("import-path")
@@ -8376,15 +8376,16 @@ fn field<'a>(
         _ => "connection-name",
     };
     column![
-        text(label).size(13).color(muted()),
+        text(label).size(13).color(theme::palette().text),
         text_input(hint, value)
             .style(flat_input)
             .id(id)
             .on_input(message)
             .on_submit(Message::Submit)
-            .padding(8)
+            .size(13)
+            .padding([3, 6])
     ]
-    .spacing(7)
+    .spacing(4)
     .into()
 }
 
@@ -8394,7 +8395,7 @@ fn policy_field<'a>(
     message: fn(Option<bool>) -> Message,
 ) -> Element<'a, Message> {
     column![
-        text(label).size(12).color(muted()),
+        text(label).size(12).color(theme::palette().text),
         row![
             action("Inherit", message(None)).style(if value.is_none() {
                 selected_button
@@ -8669,7 +8670,7 @@ fn file_divider(_theme: &Theme) -> container::Style {
 }
 
 fn session_panel(_theme: &Theme) -> container::Style {
-    fill_style(theme::palette().dock)
+    fill_style(theme::palette().list)
 }
 
 /// Borderless WindTerm filter field; the underline is a separate hline.
