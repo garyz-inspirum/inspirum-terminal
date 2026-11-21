@@ -111,7 +111,8 @@ jobs:
             elif [[ "$first" =~ ^[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$ ]]; then
               awk -v v="$first" 'BEGIN{printf "%d", v}'
             else
-              printf '0'
+              echo "ae: unparsable ImageMagick compare output for $1 vs $2: $out" >&2
+              exit 1
             fi
           }
           mkdir -p preview-artifacts/screenshots
@@ -165,10 +166,10 @@ jobs:
           convert preview-artifacts/screenshots/production-search-typed.png -crop 225x30+5+570 +repage "$RUNNER_TEMP/search-typed.png"
           input_diff=$(ae "$RUNNER_TEMP/search-focused.png" "$RUNNER_TEMP/search-typed.png")
           echo "Native search text entry changed $input_diff pixels"
-          test "$input_diff" -gt 120 || { echo "Sidebar search field did not visibly respond to native typing"; exit 1; }
+          test "$input_diff" -gt 120 || { echo "Session Filter field did not visibly respond to native typing"; exit 1; }
           workspace_diff=$(ae preview-artifacts/screenshots/production-after-escape.png preview-artifacts/screenshots/production-search-typed.png)
           echo "Search interaction differs from empty workspace by $workspace_diff pixels"
-          test "$workspace_diff" -lt 50000 || { echo "Clicking sidebar search unexpectedly opened an overlay"; exit 1; }
+          test "$workspace_diff" -lt 50000 || { echo "Clicking the Session Filter field unexpectedly opened an overlay"; exit 1; }
           # The privacy lock replaces the entire production workspace with
           # an opaque view, even if a text field owns keyboard focus. Typing
           # while locked must not change the screen or reach terminal input.

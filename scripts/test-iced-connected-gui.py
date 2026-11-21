@@ -748,6 +748,54 @@ async def locate_rendered_label(
             await asyncio.sleep(.5)
 
 
+async def click_label(
+    window: str, shot_path: Path, label: str, env: dict[str, str], *,
+    region=None, timeout: float = 22, settle: float = .5,
+):
+    """Screenshot until ``label`` is rendered (optionally inside ``region``),
+    click its centre with a native pointer event and return its bounds.
+
+    Screenshot and OCR run off the event loop (the fixture SSH server shares
+    it), exactly like ``locate_rendered_label``.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        await asyncio.to_thread(screenshot, window, shot_path, env)
+        try:
+            bounds = await asyncio.to_thread(
+                locate_visible_label, shot_path, label, region=region,
+            )
+            break
+        except RuntimeError:
+            if time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(.5)
+    command(
+        "xdotool", "mousemove", "--window", window,
+        *map(str, center(bounds)), "click", "1", env=env,
+    )
+    await asyncio.sleep(settle)
+    return bounds
+
+
+def window_size(window: str, env: dict[str, str]) -> tuple[int, int]:
+    geometry = command("xdotool", "getwindowgeometry", "--shell", window, env=env)
+    fields = dict(
+        line.split("=", 1) for line in geometry.splitlines() if "=" in line
+    )
+    return int(fields["WIDTH"]), int(fields["HEIGHT"])
+
+
+def dock_strip_region(width: int, height: int):
+    """Bottom dock tab strip (Session/Transfer/Filer/Explorer) search box.
+
+    The bottom dock occupies roughly the lower 30% of the window; its strip
+    sits at y~538..567 for an 800px window. Search a generous band so OCR of
+    a tab label never matches the centre toolbar's 'Files' button.
+    """
+    return (0, int(height * .62), width, int(height * .76))
+
+
 async def wait_for(predicate, label: str, *, timeout: float = 22) -> None:
     deadline = time.monotonic() + timeout
     while not predicate():
@@ -859,6 +907,10 @@ async def main() -> int:
             DISPLAY=reserved_display(),
             XDG_RUNTIME_DIR=str(runtime),
             INSPIRUM_CI_REMOTE_KEY_TRACE="1",
+            # The WindTerm-style chrome defaults to a LIGHT theme. The OCR
+            # band/threshold helpers (_visible_bands, _text_threshold) assume
+            # light text on a dark background, so force the dark chrome.
+            INSPIRUM_THEME="dark",
         )
         xvfb = subprocess.Popen(
             ["Xvfb", env["DISPLAY"], "-screen", "0", "1440x1000x24", "-nolisten", "tcp"],
@@ -901,18 +953,28 @@ async def main() -> int:
                 await asyncio.sleep(2)
                 screenshot(window, destination / "connected-before-open.png", env)
 
-                # First item appears after the session search and 'Ungrouped'
-                # label. Try bounded points in the *saved session list*, never
-                # the destructive dialogs or global desktop. Authentication,
-                # rather than a screenshot delta alone, proves the click worked.
-                for y in (235, 255, 275, 295, 315, 335, 355, 375):
-                    command("xdotool", "mousemove", "--window", window, "110", str(y), "click", "1", env=env)
-                    await asyncio.sleep(1.5)
-                    if "SESSION_STARTED" in events.path.read_text(encoding="utf-8"):
-                        break
-                    # A CI screenshot coordinate may land on a nonterminal
-                    # affordance; dismiss its dialog before trying next row.
-                    command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                # Saved sessions are listed in the bottom Session dock panel
+                # (Filter row, 'Sessions' group row, then one flat 23px row per
+                # profile). Locate the profile name by OCR and single-click
+                # it; fall back to bounded points in the session list rows,
+                # never destructive dialogs. Authentication, rather than a
+                # screenshot delta alone, proves the click worked.
+                try:
+                    await click_label(
+                        window, destination / "connected-session-list.png",
+                        "CI connected fixture", env, timeout=8, settle=1.5,
+                    )
+                except RuntimeError:
+                    pass
+                if "SESSION_STARTED" not in events.path.read_text(encoding="utf-8"):
+                    for y in (630, 653, 612, 676, 699):
+                        command("xdotool", "mousemove", "--window", window, "200", str(y), "click", "1", env=env)
+                        await asyncio.sleep(1.5)
+                        if "SESSION_STARTED" in events.path.read_text(encoding="utf-8"):
+                            break
+                        # A coordinate may land on a nonterminal affordance;
+                        # dismiss any dialog before trying the next row.
+                        command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
                 if "SESSION_STARTED" not in events.path.read_text(encoding="utf-8"):
                     raise RuntimeError(
                         "clicking the saved profile never started a real SSH session. "
@@ -968,17 +1030,28 @@ async def main() -> int:
                     )
                 screenshot(window, destination / "connected-files-bottom-dock.png", env)
 
+                width, height = window_size(window, env)
+                strip = dock_strip_region(width, height)
+
+                # Toggling Files activates the Filer (REMOTE) tab of the bottom
+                # dock. The remote fixture row must be visibly targetable.
                 bottom = destination / "connected-files-bottom-dock.png"
-                local_row = locate_visible_label(bottom, upload_name)
-                remote_row = locate_visible_label(bottom, download_name)
-                upload_action = locate_visible_label(
-                    bottom, "Upload", region=(280, 520, 470, 585),
+                remote_row = await asyncio.to_thread(locate_visible_label, bottom, download_name)
+                if remote_row[3] <= remote_row[1]:
+                    raise RuntimeError("bottom-dock remote file row is not visibly targetable")
+
+                # Explorer tab = LOCAL listing with the 'Upload ->' action.
+                explorer_shot = destination / "connected-files-explorer.png"
+                await click_label(window, explorer_shot, "Explorer", env, region=strip, settle=.8)
+                local_row = await locate_rendered_label(
+                    window, explorer_shot, upload_name, env=env,
                 )
-                download_action = locate_visible_label(
-                    bottom, "Download", region=(380, 520, 700, 585),
+                upload_action = await asyncio.to_thread(
+                    locate_visible_label, explorer_shot, "Upload",
+                    region=(0, int(height * .62), width, height),
                 )
-                if local_row[3] <= local_row[1] or remote_row[3] <= remote_row[1]:
-                    raise RuntimeError("bottom-dock file rows are not visibly targetable")
+                if local_row[3] <= local_row[1]:
+                    raise RuntimeError("bottom-dock local file row is not visibly targetable")
 
                 # Select the only local fixture row and activate Upload through
                 # native Iced pointer events. Filesystem bytes are the transfer
@@ -997,10 +1070,19 @@ async def main() -> int:
                 await asyncio.sleep(.7)
                 screenshot(window, destination / "connected-files-uploaded.png", env)
 
-                # The remote fixture name sorts first, so the first REMOTE row
-                # is deterministic even after upload refresh. Activate Download
-                # through the production button and verify the exact binary
-                # payload landed in the visible local browser directory.
+                # Back to the Filer tab (REMOTE). The remote fixture name sorts
+                # first, so the first row is deterministic even after the
+                # upload refresh. Activate '<- Download' and verify the exact
+                # binary payload landed in the Explorer's local directory.
+                filer_shot = destination / "connected-files-filer.png"
+                await click_label(window, filer_shot, "Filer", env, region=strip, settle=.8)
+                remote_row = await locate_rendered_label(
+                    window, filer_shot, download_name, env=env,
+                )
+                download_action = await asyncio.to_thread(
+                    locate_visible_label, filer_shot, "Download",
+                    region=(0, int(height * .62), width, height),
+                )
                 downloaded = local_root / download_name
                 if downloaded.exists():
                     raise RuntimeError(
@@ -1029,16 +1111,19 @@ async def main() -> int:
                 # Two completed transfers must not consume the listings. Select
                 # another visibly rendered, distinct remote file through the
                 # production row control; its selection styling is the oracle.
+                # The text 'Refresh' button is gone (icon only); a panel
+                # re-lists when it becomes visible, so switch Explorer -> Filer.
                 third_name = "111_GUI_THIRD_FIXTURE.bin"
                 third_bytes = b"GUI_THIRD_FIXTURE" + bytes(range(32))
                 (remote_root / third_name).write_bytes(third_bytes)
-                refresh_bounds = await asyncio.to_thread(
-                    locate_visible_label, destination / "connected-files-downloaded.png", "Refresh",
-                )
                 listings_before = events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY")
-                command(
-                    "xdotool", "mousemove", "--window", window,
-                    *map(str, center(refresh_bounds)), "click", "1", env=env,
+                await click_label(
+                    window, destination / "connected-files-refresh-away.png",
+                    "Explorer", env, region=strip, settle=.6,
+                )
+                await click_label(
+                    window, destination / "connected-files-refresh-back.png",
+                    "Filer", env, region=strip, settle=.3,
                 )
                 await wait_for(
                     lambda: events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY") > listings_before,
@@ -1063,11 +1148,15 @@ async def main() -> int:
                 ) < 20:
                     raise RuntimeError("distinct post-transfer file row was not visibly selected")
 
-                # The populated queue is a bounded viewport. Scroll its visible
-                # interior and retain the resulting production screenshot.
-                queue_bounds = locate_visible_label(
-                    destination / "connected-files-third-selected.png", "TRANSFER QUEUE",
+                # The populated queue lives in the Transfer tab. Both completed
+                # jobs must be listed; scroll its visible interior and retain
+                # the resulting production screenshot.
+                queue_shot = destination / "connected-files-queue.png"
+                await click_label(window, queue_shot, "Transfer", env, region=strip, settle=.8)
+                queue_bounds = await locate_rendered_label(
+                    window, queue_shot, download_name, env=env,
                 )
+                await asyncio.to_thread(locate_visible_label, queue_shot, upload_name)
                 command(
                     "xdotool", "mousemove", "--window", window,
                     str(queue_bounds[0] + 40), str(queue_bounds[3] + 24),
@@ -1075,6 +1164,14 @@ async def main() -> int:
                 )
                 await asyncio.sleep(.4)
                 screenshot(window, destination / "connected-files-queue-scrolled.png", env)
+                await click_label(
+                    window, destination / "connected-files-filer-again.png",
+                    "Filer", env, region=strip, settle=.8,
+                )
+                await locate_rendered_label(
+                    window, destination / "connected-files-filer-again.png",
+                    third_name, env=env,
+                )
 
                 # Minimum-size acceptance is interaction, not a screenshot-only
                 # artifact. The same distinct row must remain visibly targetable.
@@ -1089,7 +1186,8 @@ async def main() -> int:
                         f"geometry was {minimum_geometry!r}"
                     )
                 screenshot(window, destination / "connected-files-min-window.png", env)
-                minimum_row = locate_visible_label(
+                minimum_row = await asyncio.to_thread(
+                    locate_visible_label,
                     destination / "connected-files-min-window.png", third_name,
                 )
                 command(
@@ -1102,34 +1200,53 @@ async def main() -> int:
                 await asyncio.sleep(.7)
                 screenshot(window, destination / "connected-files-restored.png", env)
 
-                # Exercise the actual bottom -> right -> bottom controls and
-                # prove a listing remains targetable after returning.
-                dock_right = locate_visible_label(
-                    destination / "connected-files-restored.png", "Dock right",
-                    region=(1050, 380, 1270, 450),
+                # Exercise the dock gear menu bottom -> right -> bottom on the
+                # active Filer panel and prove a listing remains targetable.
+                # The gear is a text-less icon at (right edge - 40, strip
+                # centre); derive its y from the OCR-located Filer tab.
+                width, height = window_size(window, env)
+                filer_tab = await asyncio.to_thread(
+                    locate_visible_label, destination / "connected-files-restored.png",
+                    "Filer", region=dock_strip_region(width, height),
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
-                    *map(str, center(dock_right)), "click", "1", env=env,
+                    str(width - 40), str(center(filer_tab)[1]), "click", "1", env=env,
                 )
-                await asyncio.sleep(.7)
+                await asyncio.sleep(.5)
+                await click_label(
+                    window, destination / "connected-files-gear-menu.png",
+                    "Move to Right", env, settle=.9,
+                )
                 screenshot(window, destination / "connected-files-side-dock.png", env)
                 if diff(
                     destination / "connected-files-restored.png",
                     destination / "connected-files-side-dock.png", env,
                 ) < 3000:
-                    raise RuntimeError("Dock right did not visibly re-dock Files")
-                dock_bottom = locate_visible_label(
-                    destination / "connected-files-side-dock.png", "Dock bottom",
+                    raise RuntimeError("Move to Right did not visibly re-dock Filer")
+                side_row = await locate_rendered_label(
+                    window, destination / "connected-files-side-dock.png", third_name, env=env,
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
-                    *map(str, center(dock_bottom)), "click", "1", env=env,
+                    *map(str, center(side_row)), "click", "1", env=env,
                 )
-                await asyncio.sleep(.7)
+                await asyncio.sleep(.4)
+                screenshot(window, destination / "connected-files-side-selected.png", env)
+                # The right dock's strip sits just under the 32px menu bar.
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    str(width - 40), "46", "click", "1", env=env,
+                )
+                await asyncio.sleep(.5)
+                await click_label(
+                    window, destination / "connected-files-gear-menu-right.png",
+                    "Move to Bottom", env, settle=.9,
+                )
                 screenshot(window, destination / "connected-files-redocked-bottom.png", env)
-                redocked_row = locate_visible_label(
-                    destination / "connected-files-redocked-bottom.png", third_name,
+                redocked_row = await locate_rendered_label(
+                    window, destination / "connected-files-redocked-bottom.png",
+                    third_name, env=env,
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
