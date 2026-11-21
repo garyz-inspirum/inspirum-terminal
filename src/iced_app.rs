@@ -1262,22 +1262,44 @@ fn file_cell<'a>(value: String, width: impl Into<Length>, right: bool) -> Elemen
     }
 }
 
-fn file_listing_header<'a>(table_width: f32) -> Element<'a, Message> {
+fn file_listing_header<'a>(
+    table_width: f32,
+    remote: bool,
+    sort_column: FileSortColumn,
+    ascending: bool,
+) -> Element<'a, Message> {
     let mut header = row![];
     let columns = file_listing_columns();
     let last = columns.len() - 1;
-    for (index, (label, width, right)) in columns.into_iter().enumerate() {
+    debug_assert_eq!(columns.len(), FileSortColumn::COLUMNS.len());
+    for (index, ((label, width, right), column)) in
+        columns.into_iter().zip(FileSortColumn::COLUMNS).enumerate()
+    {
         let width = if index == last {
             Length::Fill
         } else {
             Length::Fixed(width)
         };
-        header = header.push(file_cell(label.into(), width, right)).push(
-            container(text(""))
-                .width(1)
-                .height(Fill)
-                .style(file_divider),
-        );
+        let message = if remote {
+            Message::FilesSortRemote(column)
+        } else {
+            Message::FilesSortLocal(column)
+        };
+        header = header
+            .push(file_header_cell(
+                label,
+                width,
+                right,
+                column == sort_column,
+                ascending,
+                message,
+            ))
+            .push(
+                container(text(""))
+                    .width(1)
+                    .height(Fill)
+                    .style(file_divider),
+            );
     }
     column![
         container(header.height(theme::metrics::TABLE_HEADER_HEIGHT))
@@ -1289,6 +1311,274 @@ fn file_listing_header<'a>(table_width: f32) -> Element<'a, Message> {
             .style(file_divider),
     ]
     .into()
+}
+
+const FILE_SORT_MARK: f32 = 8.0;
+
+/// Flat header cell. Same width, font and padding as the previous label; a
+/// press sorts that column. The sorted column draws a canvas triangle on its
+/// right edge (up = ascending).
+fn file_header_cell<'a>(
+    label: &'static str,
+    width: Length,
+    right: bool,
+    sorted: bool,
+    ascending: bool,
+    message: Message,
+) -> Element<'a, Message> {
+    let label = text(label)
+        .size(theme::metrics::UI_TEXT)
+        .font(Font::MONOSPACE)
+        .color(theme::palette().text_dock)
+        .wrapping(text::Wrapping::None);
+    let label = container(label)
+        .width(Fill)
+        .height(Fill)
+        .align_y(iced::Center)
+        .align_x(if right { iced::Right } else { iced::Left })
+        .clip(true);
+    let mut content = row![label].align_y(iced::Center).width(Fill).height(Fill);
+    if sorted {
+        let glyph = if ascending {
+            icons::Icon::TriangleUp
+        } else {
+            icons::Icon::TriangleDown
+        };
+        content = content.push(icons::icon(
+            glyph,
+            FILE_SORT_MARK,
+            theme::palette().text_dock,
+        ));
+    }
+    button(content)
+        .on_press(message)
+        .padding(if sorted {
+            iced::Padding {
+                top: 0.0,
+                right: 1.0,
+                bottom: 0.0,
+                left: f32::from(FILE_CELL_PAD),
+            }
+        } else {
+            iced::Padding::from([0, FILE_CELL_PAD])
+        })
+        .width(width)
+        .height(Fill)
+        .clip(true)
+        .style(file_header_button)
+        .into()
+}
+
+fn file_header_button(_theme: &Theme, status: button::Status) -> button::Style {
+    let palette = theme::palette();
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => palette.hover,
+        _ => palette.header,
+    };
+    button::Style {
+        background: Some(background.into()),
+        text_color: palette.text_dock,
+        border: Border::default(),
+        ..button::Style::default()
+    }
+}
+
+/// Column a Filer or Explorer table is ordered by. Header order matches
+/// [`file_listing_columns`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileSortColumn {
+    Name,
+    DateModified,
+    Type,
+    Size,
+    Permissions,
+    Owner,
+    Group,
+}
+
+impl FileSortColumn {
+    const COLUMNS: [Self; 7] = [
+        Self::Name,
+        Self::DateModified,
+        Self::Type,
+        Self::Size,
+        Self::Permissions,
+        Self::Owner,
+        Self::Group,
+    ];
+}
+
+/// A new column starts ascending; clicking the active column reverses it.
+fn next_file_sort(
+    current: FileSortColumn,
+    ascending: bool,
+    clicked: FileSortColumn,
+) -> (FileSortColumn, bool) {
+    if current == clicked {
+        (current, !ascending)
+    } else {
+        (clicked, true)
+    }
+}
+
+/// Values a file-table row can be ordered by.
+///
+/// `ModifiedKey` is the timestamp or string the entry already stores. Local
+/// rows use `SystemTime`. Remote rows use the raw `ls -l` string, not the
+/// formatted `YYYY/MM/DD` display and not a parsed date.
+trait FileSortEntry {
+    type ModifiedKey: Ord;
+
+    fn file_is_dir(&self) -> bool;
+    fn file_name(&self) -> &str;
+    fn file_size(&self) -> Option<u64>;
+    fn file_type_key(&self) -> String;
+    fn file_permissions(&self) -> &str;
+    fn file_owner(&self) -> &str;
+    fn file_group(&self) -> &str;
+    fn file_modified_key(&self) -> Self::ModifiedKey;
+}
+
+impl FileSortEntry for LocalFileEntry {
+    type ModifiedKey = Option<std::time::SystemTime>;
+
+    fn file_is_dir(&self) -> bool {
+        self.is_dir
+    }
+
+    fn file_name(&self) -> &str {
+        &self.name
+    }
+
+    fn file_size(&self) -> Option<u64> {
+        self.size
+    }
+
+    fn file_type_key(&self) -> String {
+        windterm_type(&self.name, self.is_dir)
+    }
+
+    fn file_permissions(&self) -> &str {
+        &self.permissions
+    }
+
+    fn file_owner(&self) -> &str {
+        &self.owner
+    }
+
+    fn file_group(&self) -> &str {
+        &self.group
+    }
+
+    fn file_modified_key(&self) -> Self::ModifiedKey {
+        self.modified
+    }
+}
+
+impl FileSortEntry for sftp::RemoteEntry {
+    type ModifiedKey = Option<String>;
+
+    fn file_is_dir(&self) -> bool {
+        self.is_dir
+    }
+
+    fn file_name(&self) -> &str {
+        &self.name
+    }
+
+    fn file_size(&self) -> Option<u64> {
+        self.size
+    }
+
+    fn file_type_key(&self) -> String {
+        windterm_type(&self.name, self.is_dir)
+    }
+
+    fn file_permissions(&self) -> &str {
+        self.permissions.as_deref().unwrap_or("")
+    }
+
+    fn file_owner(&self) -> &str {
+        self.owner.as_deref().unwrap_or("")
+    }
+
+    fn file_group(&self) -> &str {
+        self.group.as_deref().unwrap_or("")
+    }
+
+    fn file_modified_key(&self) -> Self::ModifiedKey {
+        self.modified.clone()
+    }
+}
+
+impl<T: FileSortEntry + ?Sized> FileSortEntry for &T {
+    type ModifiedKey = T::ModifiedKey;
+
+    fn file_is_dir(&self) -> bool {
+        T::file_is_dir(*self)
+    }
+
+    fn file_name(&self) -> &str {
+        T::file_name(*self)
+    }
+
+    fn file_size(&self) -> Option<u64> {
+        T::file_size(*self)
+    }
+
+    fn file_type_key(&self) -> String {
+        T::file_type_key(*self)
+    }
+
+    fn file_permissions(&self) -> &str {
+        T::file_permissions(*self)
+    }
+
+    fn file_owner(&self) -> &str {
+        T::file_owner(*self)
+    }
+
+    fn file_group(&self) -> &str {
+        T::file_group(*self)
+    }
+
+    fn file_modified_key(&self) -> Self::ModifiedKey {
+        T::file_modified_key(*self)
+    }
+}
+
+fn cmp_ignore_case(left: &str, right: &str) -> std::cmp::Ordering {
+    left.to_lowercase().cmp(&right.to_lowercase())
+}
+
+/// Directories stay before files in every sort. `ascending` applies only to
+/// `column`; ties break by lowercase name and do not reverse.
+fn sort_file_entries<T: FileSortEntry>(entries: &mut [T], column: FileSortColumn, ascending: bool) {
+    entries.sort_by(|left, right| {
+        let directories = right.file_is_dir().cmp(&left.file_is_dir());
+        if directories != std::cmp::Ordering::Equal {
+            return directories;
+        }
+        let primary = match column {
+            FileSortColumn::Name => cmp_ignore_case(left.file_name(), right.file_name()),
+            FileSortColumn::DateModified => {
+                left.file_modified_key().cmp(&right.file_modified_key())
+            }
+            FileSortColumn::Type => cmp_ignore_case(&left.file_type_key(), &right.file_type_key()),
+            FileSortColumn::Size => left.file_size().cmp(&right.file_size()),
+            FileSortColumn::Permissions => {
+                cmp_ignore_case(left.file_permissions(), right.file_permissions())
+            }
+            FileSortColumn::Owner => cmp_ignore_case(left.file_owner(), right.file_owner()),
+            FileSortColumn::Group => cmp_ignore_case(left.file_group(), right.file_group()),
+        };
+        let primary = if ascending {
+            primary
+        } else {
+            primary.reverse()
+        };
+        primary.then_with(|| cmp_ignore_case(left.file_name(), right.file_name()))
+    });
 }
 
 fn file_listing_row<'a>(
@@ -1659,6 +1949,8 @@ enum Message {
     DockDragEnd,
     WindowResized(iced::Size),
     KeyChord(KeyChord),
+    FilesSortLocal(FileSortColumn),
+    FilesSortRemote(FileSortColumn),
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -2794,6 +3086,12 @@ struct App {
     /// `process_command` never fires. Must not change write behaviour.
     #[cfg(test)]
     pty_write_log: Vec<(u64, Vec<u8>)>,
+    /// Explorer (local) column. Independent of the Filer sort.
+    local_file_sort: FileSortColumn,
+    local_file_sort_ascending: bool,
+    /// Filer (remote) column. Independent of the Explorer sort.
+    remote_file_sort: FileSortColumn,
+    remote_file_sort_ascending: bool,
 }
 
 const FILES_PANELS: [dock::Panel; 3] = [
@@ -2931,6 +3229,10 @@ impl App {
             remote_editor_open_generation: 0,
             #[cfg(test)]
             pty_write_log: Vec::new(),
+            local_file_sort: FileSortColumn::Name,
+            local_file_sort_ascending: true,
+            remote_file_sort: FileSortColumn::Name,
+            remote_file_sort_ascending: true,
         }
     }
 
@@ -6084,6 +6386,21 @@ impl App {
                     return self.files_became_visible();
                 }
             }
+            Message::FilesSortLocal(column) => {
+                let (column, ascending) =
+                    next_file_sort(self.local_file_sort, self.local_file_sort_ascending, column);
+                self.local_file_sort = column;
+                self.local_file_sort_ascending = ascending;
+            }
+            Message::FilesSortRemote(column) => {
+                let (column, ascending) = next_file_sort(
+                    self.remote_file_sort,
+                    self.remote_file_sort_ascending,
+                    column,
+                );
+                self.remote_file_sort = column;
+                self.remote_file_sort_ascending = ascending;
+            }
         }
         Task::none()
     }
@@ -7112,7 +7429,12 @@ impl App {
 
     /// Local and remote file tables laid out `table_width` wide.
     fn file_lists(&self, table_width: f32) -> (Column<'_, Message>, Column<'_, Message>) {
-        let mut local_list = column![file_listing_header(table_width)];
+        let mut local_list = column![file_listing_header(
+            table_width,
+            false,
+            self.local_file_sort,
+            self.local_file_sort_ascending,
+        )];
         if self.files.local_loading {
             local_list =
                 local_list.push(text("Loading local directory...").size(12).color(muted()));
@@ -7122,7 +7444,11 @@ impl App {
             local_list = local_list.push(text("Directory is empty.").size(12).color(muted()));
         } else {
             let mut sorted: Vec<&LocalFileEntry> = self.files.local_entries.iter().collect();
-            sorted.sort_by_cached_key(|entry| (!entry.is_dir, entry.name.to_lowercase()));
+            sort_file_entries(
+                &mut sorted,
+                self.local_file_sort,
+                self.local_file_sort_ascending,
+            );
             for entry in sorted.into_iter().take(self.files.local_visible) {
                 let cells = FileListingCells {
                     name: display_leaf(&entry.name),
@@ -7170,7 +7496,12 @@ impl App {
             }
         }
 
-        let mut remote_list = column![file_listing_header(table_width)];
+        let mut remote_list = column![file_listing_header(
+            table_width,
+            true,
+            self.remote_file_sort,
+            self.remote_file_sort_ascending,
+        )];
         if self.files.remote_loading {
             remote_list =
                 remote_list.push(text("Loading remote directory...").size(12).color(muted()));
@@ -7181,7 +7512,11 @@ impl App {
         } else {
             let today = chrono::Local::now().date_naive();
             let mut sorted: Vec<&sftp::RemoteEntry> = self.files.remote_entries.iter().collect();
-            sorted.sort_by_cached_key(|entry| (!entry.is_dir, entry.name.to_lowercase()));
+            sort_file_entries(
+                &mut sorted,
+                self.remote_file_sort,
+                self.remote_file_sort_ascending,
+            );
             for entry in sorted.into_iter().take(self.files.remote_visible) {
                 let cells = FileListingCells {
                     name: display_leaf(&entry.name),
@@ -11348,5 +11683,162 @@ mod tests {
         let _ = app.update(Message::TogglePrivacyLock);
         assert!(app.privacy_locked);
         assert_eq!(app.open_menu, Some(menu::Menu::Session));
+    }
+
+    fn listing_entry(
+        name: &str,
+        is_dir: bool,
+        size: Option<u64>,
+        modified: Option<std::time::SystemTime>,
+    ) -> LocalFileEntry {
+        LocalFileEntry {
+            path: std::path::PathBuf::from(name),
+            name: name.to_owned(),
+            is_dir,
+            size,
+            permissions: "-rw-r--r--".into(),
+            owner: "owner".into(),
+            group: "group".into(),
+            modified,
+        }
+    }
+
+    fn listing_names(entries: &[LocalFileEntry]) -> Vec<&str> {
+        entries.iter().map(|entry| entry.name.as_str()).collect()
+    }
+
+    #[test]
+    fn file_sort_default_is_directories_then_name_ascending() {
+        let mut entries = vec![
+            listing_entry("b", false, Some(3), None),
+            listing_entry("a", true, None, None),
+            listing_entry("A", false, Some(1), None),
+            listing_entry("B", true, None, None),
+        ];
+        sort_file_entries(&mut entries, FileSortColumn::Name, true);
+        assert_eq!(listing_names(&entries), ["a", "B", "A", "b"]);
+        assert!(entries.iter().take(2).all(|entry| entry.is_dir));
+        assert!(entries.iter().skip(2).all(|entry| !entry.is_dir));
+    }
+
+    #[test]
+    fn file_sort_size_descending_keeps_directories_first() {
+        let mut entries = vec![
+            listing_entry("small-dir", true, Some(1), None),
+            listing_entry("huge", false, Some(100), None),
+            listing_entry("big-dir", true, Some(50), None),
+            listing_entry("tiny", false, Some(2), None),
+        ];
+        sort_file_entries(&mut entries, FileSortColumn::Size, false);
+        assert_eq!(
+            listing_names(&entries),
+            ["big-dir", "small-dir", "huge", "tiny"]
+        );
+        assert!(entries.iter().take(2).all(|entry| entry.is_dir));
+        assert!(entries.iter().skip(2).all(|entry| !entry.is_dir));
+    }
+
+    #[test]
+    fn clicking_the_same_column_twice_reverses_sort() {
+        let once = next_file_sort(FileSortColumn::Name, true, FileSortColumn::Size);
+        assert_eq!(once, (FileSortColumn::Size, true));
+        let twice = next_file_sort(once.0, once.1, FileSortColumn::Size);
+        assert_eq!(twice, (FileSortColumn::Size, false));
+        let third = next_file_sort(twice.0, twice.1, FileSortColumn::Size);
+        assert_eq!(third, (FileSortColumn::Size, true));
+
+        let mut ascending = vec![
+            listing_entry("c", false, Some(3), None),
+            listing_entry("a", false, Some(1), None),
+            listing_entry("b", false, Some(2), None),
+        ];
+        let mut descending = ascending.clone();
+        sort_file_entries(&mut ascending, once.0, once.1);
+        sort_file_entries(&mut descending, twice.0, twice.1);
+        assert_eq!(listing_names(&ascending), ["a", "b", "c"]);
+        assert_eq!(listing_names(&descending), ["c", "b", "a"]);
+    }
+
+    #[test]
+    fn file_sort_breaks_size_ties_by_lowercase_name() {
+        let mut entries = vec![
+            listing_entry("b.txt", false, Some(5), None),
+            listing_entry("A.txt", false, Some(5), None),
+            listing_entry("c.txt", false, Some(9), None),
+        ];
+        sort_file_entries(&mut entries, FileSortColumn::Size, true);
+        assert_eq!(listing_names(&entries), ["A.txt", "b.txt", "c.txt"]);
+
+        // Descending size still breaks the equal-size tie by lowercase name,
+        // not by reversed name.
+        sort_file_entries(&mut entries, FileSortColumn::Size, false);
+        assert_eq!(listing_names(&entries), ["c.txt", "A.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn file_sort_dates_use_stored_timestamp_or_raw_ls_string() {
+        let earlier = std::time::SystemTime::UNIX_EPOCH;
+        let later = earlier + std::time::Duration::from_secs(60);
+        let mut local = vec![
+            listing_entry("later", false, Some(1), Some(later)),
+            listing_entry("earlier", false, Some(1), Some(earlier)),
+        ];
+        sort_file_entries(&mut local, FileSortColumn::DateModified, true);
+        assert_eq!(listing_names(&local), ["earlier", "later"]);
+
+        // Remote dates are the raw `ls -l` strings. "Dec" < "Jan"
+        // lexicographically, which is not chronological.
+        let mut remote = vec![
+            {
+                let mut entry = sftp::RemoteEntry::new("jan", false, Some(1));
+                entry.modified = Some("Jan 15 10:00".into());
+                entry
+            },
+            {
+                let mut entry = sftp::RemoteEntry::new("dec", false, Some(1));
+                entry.modified = Some("Dec 01 2020".into());
+                entry
+            },
+        ];
+        sort_file_entries(&mut remote, FileSortColumn::DateModified, true);
+        assert_eq!(
+            remote
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["dec", "jan"]
+        );
+    }
+
+    #[test]
+    fn file_column_click_reverses_only_that_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+        std::fs::write(&path, b"[]").unwrap();
+        let mut app = App::boot(path, None);
+        assert_eq!(app.local_file_sort, FileSortColumn::Name);
+        assert!(app.local_file_sort_ascending);
+        assert_eq!(app.remote_file_sort, FileSortColumn::Name);
+        assert!(app.remote_file_sort_ascending);
+
+        let _ = app.update(Message::FilesSortLocal(FileSortColumn::Size));
+        assert_eq!(
+            (app.local_file_sort, app.local_file_sort_ascending),
+            (FileSortColumn::Size, true)
+        );
+        assert_eq!(
+            (app.remote_file_sort, app.remote_file_sort_ascending),
+            (FileSortColumn::Name, true)
+        );
+
+        let _ = app.update(Message::FilesSortLocal(FileSortColumn::Size));
+        assert!(!app.local_file_sort_ascending);
+        assert!(app.remote_file_sort_ascending);
+
+        let _ = app.update(Message::FilesSortRemote(FileSortColumn::Owner));
+        assert_eq!(app.remote_file_sort, FileSortColumn::Owner);
+        assert!(app.remote_file_sort_ascending);
+        assert_eq!(app.local_file_sort, FileSortColumn::Size);
+        assert!(!app.local_file_sort_ascending);
     }
 }
