@@ -66,7 +66,7 @@ impl Menu {
             Menu::Edit => vec![
                 item("Paste", "", Paste),
                 Entry::Separator,
-                item("Command Palette", "", CommandPalette),
+                item("Command Palette", "", Palette),
                 item("Snippets", "", Tool(Panel::Snippets)),
             ],
             Menu::View => vec![
@@ -127,7 +127,7 @@ pub(super) enum Command {
     Tunnels,
     LockScreen,
     Paste,
-    CommandPalette,
+    Palette,
     ThemeLight,
     ThemeDark,
     ZoomIn,

@@ -4217,7 +4217,7 @@ impl App {
                     C::Tunnels => Message::Tunnels,
                     C::LockScreen => Message::TogglePrivacyLock,
                     C::Paste => Message::RequestPaste,
-                    C::CommandPalette => Message::Commands,
+                    C::Palette => Message::Commands,
                     C::ThemeLight => {
                         theme::set(theme::ChromeTheme::Light);
                         return Task::none();
@@ -6138,7 +6138,7 @@ impl App {
             ]
             .into()
         } else {
-            body.into()
+            body
         }
     }
 

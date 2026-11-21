@@ -3,6 +3,8 @@
 
 use super::*;
 use dock::{Area, Panel};
+use iced::Length::FillPortion;
+use iced::widget::{column, row};
 
 const GEAR_MENU_WIDTH: f32 = 200.0;
 
