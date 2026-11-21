@@ -4,6 +4,7 @@
 //! The frontend uses the live PTY backend and preserves
 //! host-key, argv, paste, process-lifecycle, or transfer safeguards.
 mod icons;
+mod menu;
 mod terminal_ime;
 mod theme;
 mod tools;
