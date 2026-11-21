@@ -3,6 +3,7 @@
 //! This module intentionally reuses the existing validated Session/profile model.
 //! The frontend uses the live PTY backend and preserves
 //! host-key, argv, paste, process-lifecycle, or transfer safeguards.
+mod icons;
 mod terminal_ime;
 mod tools;
 
