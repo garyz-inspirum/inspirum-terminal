@@ -11995,10 +11995,7 @@ mod tests {
                 entry.modified = Some("Mar 3 2024".into());
                 entry
             },
-            {
-                let mut entry = sftp::RemoteEntry::new("missing", false, Some(1));
-                entry
-            },
+            sftp::RemoteEntry::new("missing", false, Some(1)),
             {
                 let mut entry = sftp::RemoteEntry::new("garbage", false, Some(1));
                 entry.modified = Some("not-a-date".into());
