@@ -7399,7 +7399,7 @@ impl App {
 
     fn tunnels_view(&self) -> Element<'_, Message> {
         let mut tunnel_list = column![
-            text("Tunnel").size(16),
+            text("Tunnel").size(13),
             text("Saved forwards").size(11).color(muted()),
         ]
         .spacing(8);
@@ -7547,28 +7547,30 @@ impl App {
                         column![
                             text("Host").size(11).color(muted()),
                             text_input("10.1.10.10", &edit.draft.destination_host)
+                                .style(flat_input)
                                 .on_input(Message::TunnelDraftDestinationHost)
-                                .padding(10)
+                                .padding(8)
                         ]
                         .spacing(3)
                         .width(Fill),
                         column![
                             text("Port").size(11).color(muted()),
                             text_input("8000", &edit.draft.destination_port)
+                                .style(flat_input)
                                 .on_input(Message::TunnelDraftDestinationPort)
-                                .padding(10)
+                                .padding(8)
                         ]
                         .spacing(3)
                         .width(120),
                     ]
-                    .spacing(10)
+                    .spacing(8)
                 ]
                 .spacing(5)
             };
 
             container(
                 column![
-                    text(title).size(20),
+                    text(title).size(13),
                     text("WindTerm-style structured tunnel editor")
                         .size(11)
                         .color(muted()),
@@ -7577,8 +7579,9 @@ impl App {
                     column![
                         text("Label").size(11).color(muted()),
                         text_input("e.g. database", &edit.draft.label)
+                            .style(flat_input)
                             .on_input(Message::TunnelDraftLabel)
-                            .padding(10)
+                            .padding(8)
                     ]
                     .spacing(3),
                     text("Listen").size(13),
@@ -7586,21 +7589,23 @@ impl App {
                         column![
                             text("Bind address").size(11).color(muted()),
                             text_input("127.0.0.1", &edit.draft.bind_address)
+                                .style(flat_input)
                                 .on_input(Message::TunnelDraftBind)
-                                .padding(10)
+                                .padding(8)
                         ]
                         .spacing(3)
                         .width(Fill),
                         column![
                             text("Port").size(11).color(muted()),
                             text_input("2000", &edit.draft.listen_port)
+                                .style(flat_input)
                                 .on_input(Message::TunnelDraftListenPort)
-                                .padding(10)
+                                .padding(8)
                         ]
                         .spacing(3)
                         .width(120),
                     ]
-                    .spacing(10),
+                    .spacing(8),
                     iced::widget::checkbox(true)
                         .label("Check requested listener is available before reporting Running"),
                     destination,
@@ -7622,16 +7627,16 @@ impl App {
                     .spacing(8)
                     .align_y(iced::Center),
                 ]
-                .spacing(12),
+                .spacing(8),
             )
-            .padding(16)
+            .padding(8)
             .width(Fill)
             .style(card)
             .into()
         } else {
             container(
                 column![
-                    text("Tunnel").size(20),
+                    text("Tunnel").size(13),
                     text("Choose a tunnel on the left, or press + beside a profile to add one.")
                         .size(13)
                         .color(muted()),
@@ -7641,7 +7646,7 @@ impl App {
                 ]
                 .spacing(8),
             )
-            .padding(18)
+            .padding(8)
             .width(Fill)
             .style(card)
             .into()
@@ -7649,7 +7654,7 @@ impl App {
 
         let body = column![
             row![
-                text("Tunnel Manager").size(24),
+                text("Tunnel Manager").size(13),
                 space::horizontal(),
                 action("Refresh", Message::TunnelRefresh),
                 action("Close", Message::CloseDialog).style(primary),
@@ -7661,15 +7666,15 @@ impl App {
                 .color(muted()),
             row![
                 container(scrollable(tunnel_list).height(430))
-                    .padding(10)
+                    .padding(8)
                     .width(300)
                     .style(card),
                 editor,
             ]
-            .spacing(12)
+            .spacing(8)
             .height(Fill),
         ]
-        .spacing(10);
+        .spacing(8);
 
         container(body).padding(6).width(Fill).height(Fill).into()
     }
@@ -7685,7 +7690,7 @@ impl App {
                     } else {
                         "New SSH connection"
                     })
-                    .size(24),
+                    .size(13),
                     text(if editing {
                         "Changes are saved to the existing profile. Live panes keep their current connection until reconnect."
                     } else {
@@ -7719,7 +7724,7 @@ impl App {
                         ))
                         .width(140)
                     ]
-                    .spacing(14),
+                    .spacing(8),
                     field(
                         "Folder",
                         "Optional group",
@@ -7738,16 +7743,17 @@ impl App {
                             quiet
                         }),
                     ]
-                    .spacing(10)
+                    .spacing(8)
                     .align_y(iced::Center),
                     column![
                         text("Tags").size(13).color(muted()),
                         row![
                             text_input("Add profile tag", &self.form.tag_input)
+.style(flat_input)
                                 .id("connection-tag")
                                 .on_input(Message::TagInput)
                                 .on_submit(Message::AddTag)
-                                .padding(11),
+                                .padding(8),
                             action("Add", Message::AddTag),
                         ]
                         .spacing(8),
@@ -7778,7 +7784,7 @@ impl App {
                         Message::Advanced
                     ),
                 ]
-                .spacing(16);
+                .spacing(8);
 
                 if self.form.advanced {
                     form = form.push(
@@ -7904,7 +7910,7 @@ impl App {
                                             ))
                                             .width(140)
                                         ]
-                                        .spacing(14),
+                                        .spacing(8),
                                         row![
                                             text("Proxy authentication")
                                                 .size(12)
@@ -7934,7 +7940,7 @@ impl App {
                                             .size(11)
                                             .color(muted()),
                                     ]
-                                    .spacing(10)
+                                    .spacing(8)
                                     .into()
                                 },
                                 text("Algorithm policy · leave empty to inherit OpenSSH defaults")
@@ -7978,7 +7984,7 @@ impl App {
                                         Message::Keepalive
                                     )
                                 ]
-                                .spacing(14),
+                                .spacing(8),
                                 field(
                                     "Remote command",
                                     "Optional command after authentication",
@@ -8010,9 +8016,9 @@ impl App {
                                     .size(12)
                                     .color(muted()),
                             ]
-                            .spacing(14)
+                            .spacing(8)
                         )
-                        .padding(14)
+                        .padding(8)
                         .style(card),
                     );
                 }
@@ -8030,21 +8036,22 @@ impl App {
                         )
                         .style(primary)
                     ]
-                    .spacing(10),
+                    .spacing(8),
                 )
                 .into()
             }
             Dialog::Commands => {
                 let items = iced_palette_items(&self.command_query, &self.snippets);
                 let mut palette = column![
-                    text("Command palette").size(24),
+                    text("Command palette").size(13),
                     text("Application actions are [APP]. Snippets are [REMOTE TEXT] and only stage text; they never execute automatically.")
                         .size(12)
                         .color(muted()),
                     text_input("Search actions or snippets", &self.command_query)
+.style(flat_input)
                         .id("command-query")
                         .on_input(Message::CommandQuery)
-                        .padding(11),
+                        .padding(8),
                 ]
                 .spacing(8);
 
@@ -8066,6 +8073,7 @@ impl App {
                 let mut snippets = column![
                     text("REUSABLE SNIPPETS").size(11).color(muted()),
                     text_input("Snippet name", &self.snippet_name)
+.style(flat_input)
                         .on_input(Message::SnippetName)
                         .padding(9),
                     text_editor(&self.snippet_content)
@@ -8110,21 +8118,21 @@ impl App {
                                 .placeholder("Remote-shell text to stage")
                                 .on_action(Message::CommandEdit)
                                 .height(120)
-                                .padding(10),
+                                .padding(8),
                             row![
                                 action("Send explicitly", Message::CommandSend).style(primary),
                                 text("Multiline payloads still require the terminal paste confirmation.")
                                     .size(11)
                                     .color(muted()),
                             ]
-                            .spacing(10)
+                            .spacing(8)
                             .align_y(iced::Center),
                         ]
                         .spacing(8)
                     )
-                    .padding(10)
+                    .padding(8)
                     .style(card),
-                    container(snippets).padding(10).style(card),
+                    container(snippets).padding(8).style(card),
                     row![
                         action("New connection", Message::New),
                         action("Next tab", Message::SelectNextTab),
@@ -8135,11 +8143,11 @@ impl App {
                     ]
                     .spacing(7),
                 ]
-                .spacing(12)
+                .spacing(8)
                 .into()
             }
             Dialog::Close(index) => column![
-                text("Close this session?").size(24),
+                text("Close this session?").size(13),
                 text("This disconnects the live SSH/PTY session and closes its Iced workspace tab.")
                     .color(muted()),
                 row![
@@ -8147,9 +8155,9 @@ impl App {
                     action("Cancel", Message::CloseDialog),
                     action("Close session", Message::ConfirmClose(*index)).style(button::danger)
                 ]
-                .spacing(10),
+                .spacing(8),
             ]
-            .spacing(20)
+            .spacing(8)
             .into(),
             Dialog::PasteConfirm {
                 text: paste,
@@ -8160,7 +8168,7 @@ impl App {
                 let preview = paste_preview_text(&prepared, 4000);
                 let line_count = prepared.lines().count().max(1);
                 column![
-                    text("Confirm terminal paste").size(24),
+                    text("Confirm terminal paste").size(13),
                     text(format!(
                         "Paste {} bytes across approximately {} line(s)?",
                         prepared.len(),
@@ -8184,7 +8192,7 @@ impl App {
                         scrollable(text(preview).font(Font::MONOSPACE).size(13))
                             .height(220)
                     )
-                    .padding(12)
+                    .padding(8)
                     .width(Fill)
                     .style(card),
                     row![
@@ -8192,12 +8200,12 @@ impl App {
                         action("Cancel", Message::CloseDialog),
                         action("Paste now", Message::ConfirmPaste).style(primary)
                     ]
-                    .spacing(10),
+                    .spacing(8),
                     text("Keyboard: Enter confirms; Escape cancels.")
                         .size(12)
                         .color(muted()),
                 ]
-                .spacing(16)
+                .spacing(8)
                 .into()
             }
             Dialog::FileOverwrite(pending) => {
@@ -8214,7 +8222,7 @@ impl App {
                     TransferDirection::Download => pending.local.to_string_lossy().into_owned(),
                 };
                 column![
-                    text("Replace existing file?").size(24),
+                    text("Replace existing file?").size(13),
                     text(format!(
                         "A file already exists at the {direction} destination."
                     ))
@@ -8228,7 +8236,7 @@ impl App {
                         ]
                         .spacing(6)
                     )
-                    .padding(12)
+                    .padding(8)
                     .width(Fill)
                     .style(card),
                     text("Replacing is explicit. The transfer still uses the existing validated SFTP path and verification/resume policy.")
@@ -8240,13 +8248,13 @@ impl App {
                         action("Replace and transfer", Message::ConfirmFileOverwrite)
                             .style(button::danger)
                     ]
-                    .spacing(10),
+                    .spacing(8),
                 ]
-                .spacing(16)
+                .spacing(8)
                 .into()
             }
             Dialog::FileDeleteLocal(path) => column![
-                text("Delete local file?").size(24),
+                text("Delete local file?").size(13),
                 text(path.to_string_lossy().into_owned())
                     .font(Font::MONOSPACE)
                     .size(12),
@@ -8258,9 +8266,9 @@ impl App {
                     action("Cancel", Message::CloseDialog),
                     action("Delete", Message::ConfirmFileDelete).style(button::danger)
                 ]
-                .spacing(10),
+                .spacing(8),
             ]
-            .spacing(16)
+            .spacing(8)
             .into(),
             Dialog::FileDeleteRemote { path, directory, .. } => column![
                 text(if *directory {
@@ -8268,7 +8276,7 @@ impl App {
                 } else {
                     "Delete remote file?"
                 })
-                .size(24),
+                .size(13),
                 text(path).font(Font::MONOSPACE).size(12),
                 text(if *directory {
                     "This action is permanent. Remote directories are removed only when empty."
@@ -8282,9 +8290,9 @@ impl App {
                     action("Cancel", Message::CloseDialog),
                     action("Delete", Message::ConfirmFileDelete).style(button::danger)
                 ]
-                .spacing(10),
+                .spacing(8),
             ]
-            .spacing(16)
+            .spacing(8)
             .into(),
             Dialog::FileName(file_action) => {
                 let (title, hint) = match file_action {
@@ -8294,12 +8302,13 @@ impl App {
                     FileNameAction::RenameRemote { .. } => ("Rename remote file", "New filename"),
                 };
                 column![
-                    text(title).size(24),
+                    text(title).size(13),
                     text_input(hint, &self.files.name_input)
+.style(flat_input)
                         .id("file-name")
                         .on_input(Message::FilesNameChanged)
                         .on_submit(Message::ConfirmFileNameAction)
-                        .padding(11),
+                        .padding(8),
                     text("Names are validated by the existing SFTP/local-file policy before any operation is executed.")
                         .size(12)
                         .color(muted()),
@@ -8308,22 +8317,23 @@ impl App {
                         action("Cancel", Message::CloseDialog),
                         action("Apply", Message::ConfirmFileNameAction).style(primary)
                     ]
-                    .spacing(10),
+                    .spacing(8),
                 ]
-                .spacing(16)
+                .spacing(8)
                 .into()
             }
             Dialog::ImportProfiles => column![
-                text("Import SSH profiles").size(24),
+                text("Import SSH profiles").size(13),
                 text("Merge a validated non-secret Inspirum profile JSON file into the current library. Existing profiles are never overwritten by import.")
                     .color(muted()),
                 column![
                     text("Import file").size(13).color(muted()),
                     text_input("/path/to/profiles.json", &self.import_path)
+.style(flat_input)
                         .id("import-path")
                         .on_input(Message::ImportPath)
                         .on_submit(Message::ConfirmImportProfiles)
-                        .padding(11)
+                        .padding(8)
                 ]
                 .spacing(7),
                 text("Conflicting folder/name entries, invalid SSH policy, secret-bearing unsupported fields, oversized files, and malformed JSON are rejected before the active profile store is changed.")
@@ -8336,28 +8346,26 @@ impl App {
                 ]
                 .spacing(8),
             ]
-            .spacing(14)
+            .spacing(8)
             .into(),
             Dialog::Tunnels => self.tunnels_view(),
             Dialog::About => column![
-                text("Inspirum Terminal · Iced").size(24),
+                text("Inspirum Terminal · Iced").size(13),
                 text("Inspirum Terminal uses Iced for the desktop interface and the shared OpenSSH/PTY backend for terminal sessions.\n\nTools includes profiles and startup, tabs and saved split workspaces, synchronized input, history and logging, terminal appearance and pointer preferences, SSH trust and multiplexing, forwarding, tmux, SCP, snippets and sanitized support reports.\n\nThe Files pane provides graphical SFTP transfers and remote editing. Clipboard and command sends retain explicit confirmation and terminal identity checks.")
                     .color(muted()),
                 action("Back to workspace", Message::CloseDialog).style(primary),
             ]
-            .spacing(20)
+            .spacing(8)
             .into(),
         };
 
-        container(scrollable(body))
+        dialog_frame(container(scrollable(body)).padding(12))
             .width(if matches!(dialog, Dialog::Tools) {
                 880
             } else {
                 600
             })
             .max_height(720)
-            .padding(28)
-            .style(active_card)
             .into()
     }
 }
@@ -8381,9 +8389,10 @@ fn forward_editor<'a>(
     column![
         text(label).size(13).color(muted()),
         text_input(hint, value)
+            .style(flat_input)
             .on_input(message)
-            .padding(11)
-            .size(14),
+            .padding(8)
+            .size(13),
     ]
     .spacing(4)
     .into()
@@ -8416,10 +8425,11 @@ fn field<'a>(
     column![
         text(label).size(13).color(muted()),
         text_input(hint, value)
+            .style(flat_input)
             .id(id)
             .on_input(message)
             .on_submit(Message::Submit)
-            .padding(11)
+            .padding(8)
     ]
     .spacing(7)
     .into()
@@ -8456,8 +8466,8 @@ fn policy_field<'a>(
 }
 
 fn action<'a>(label: impl Into<String>, message: Message) -> button::Button<'a, Message> {
-    button(text(label.into()).size(14))
-        .padding([8, 12])
+    button(text(label.into()).size(13))
+        .padding([3, 10])
         .style(quiet)
         .on_press(message)
 }
@@ -8747,6 +8757,55 @@ fn session_row_open(_theme: &Theme, _status: button::Status) -> button::Style {
         border: Border::default(),
         ..button::Style::default()
     }
+}
+
+fn flat_input(_: &Theme, status: text_input::Status) -> text_input::Style {
+    let p = theme::palette();
+    let focused = matches!(status, text_input::Status::Focused { .. });
+    text_input::Style {
+        background: p.list.into(),
+        border: Border {
+            color: if focused { p.accent } else { p.border },
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        icon: p.muted,
+        placeholder: p.muted,
+        value: p.text,
+        selection: p.selected_row,
+    }
+}
+
+fn dialog_strip(_: &Theme) -> container::Style {
+    container::Style::default().background(theme::palette().chrome)
+}
+
+fn dialog_window(_: &Theme) -> container::Style {
+    let p = theme::palette();
+    container::Style {
+        background: Some(p.dock.into()),
+        text_color: Some(p.text),
+        border: Border {
+            color: p.border,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// WindTerm-style dialog chrome: dock fill, 1px border, chrome title strip.
+fn dialog_frame<'a>(body: impl Into<Element<'a, Message>>) -> container::Container<'a, Message> {
+    container(column![
+        container(text(""))
+            .width(iced::Length::Fill)
+            .height(theme::metrics::STRIP_HEIGHT)
+            .style(dialog_strip),
+        hline(),
+        body.into(),
+    ])
+    .padding(1)
+    .style(dialog_window)
 }
 
 #[cfg(test)]
