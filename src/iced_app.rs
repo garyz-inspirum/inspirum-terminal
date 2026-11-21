@@ -12305,4 +12305,153 @@ mod tests {
         assert!(matches!(app.dialog, Some(Dialog::About)));
         assert_eq!(app.tabs.len(), 1);
     }
+
+    fn boot_sort_app(name: &str) -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!("{name}.json"));
+        std::fs::write(&path, b"[]").unwrap();
+        (dir, App::boot(path, None))
+    }
+
+    #[test]
+    fn view_and_unrelated_updates_do_not_resort_file_lists() {
+        let (_dir, mut app) = boot_sort_app("sort-cache-view");
+        push_open_session(&mut app, "sort-cache");
+        let pane_id = app.tabs[0].panes.iter().next().unwrap().1.id;
+
+        let _ = app.update(Message::FilesLocalLoaded(
+            0,
+            Ok(vec![
+                listing_entry("b", false, Some(2), None),
+                listing_entry("a", true, None, None),
+            ]),
+        ));
+        let mut january = sftp::RemoteEntry::new("january", false, Some(1));
+        january.modified = Some("Jan 02 09:00".into());
+        let mut december = sftp::RemoteEntry::new("december", false, Some(1));
+        december.modified = Some("Dec 30 10:00".into());
+        let _ = app.update(Message::FilesRemoteLoaded(0, Ok(vec![january, december])));
+
+        let local_runs = app.files.local_sort_runs;
+        let remote_runs = app.files.remote_sort_runs;
+        let local_order = app.files.local_order.clone();
+        let remote_order = app.files.remote_order.clone();
+
+        let _ = app.view();
+        let _ = app.file_lists(800.0);
+        let _ = app.view();
+        let _ = app.file_lists(800.0);
+        let _ = app.file_lists(1200.0);
+        let _ = app.update(Message::TerminalFrame);
+        let _ = app.update(Message::PtyEvent(pane_id, terminal_core::PtyEvent::Wakeup));
+        let _ = app.update(Message::PtyEvent(pane_id, terminal_core::PtyEvent::Bell));
+        let _ = app.update(Message::TerminalFrame);
+        let _ = app.view();
+        let _ = app.file_lists(800.0);
+
+        assert_eq!(app.files.local_sort_runs, local_runs);
+        assert_eq!(app.files.remote_sort_runs, remote_runs);
+        assert_eq!(app.files.local_order, local_order);
+        assert_eq!(app.files.remote_order, remote_order);
+    }
+
+    #[test]
+    fn sort_click_resorts_only_that_side_once() {
+        let (_dir, mut app) = boot_sort_app("sort-cache-click");
+        let _ = app.update(Message::FilesLocalLoaded(
+            0,
+            Ok(vec![
+                listing_entry("local-b", false, Some(2), None),
+                listing_entry("local-a", false, Some(8), None),
+            ]),
+        ));
+        let _ = app.update(Message::FilesRemoteLoaded(
+            0,
+            Ok(vec![
+                sftp::RemoteEntry::new("small", false, Some(1)),
+                sftp::RemoteEntry::new("large", false, Some(9)),
+                sftp::RemoteEntry::new("mid", false, Some(4)),
+            ]),
+        ));
+        let local_runs = app.files.local_sort_runs;
+        let remote_runs = app.files.remote_sort_runs;
+
+        let _ = app.update(Message::FilesSortRemote(FileSortColumn::Size));
+
+        assert_eq!(app.files.remote_sort_runs, remote_runs + 1);
+        assert_eq!(app.files.local_sort_runs, local_runs);
+        assert_eq!(app.files.remote_order.len(), app.files.remote_entries.len());
+
+        let cached: Vec<String> = app
+            .files
+            .remote_order
+            .iter()
+            .map(|&index| app.files.remote_entries[index].name.clone())
+            .collect();
+        let mut sorted = app.files.remote_entries.clone();
+        sort_file_entries(
+            &mut sorted,
+            app.remote_file_sort,
+            app.remote_file_sort_ascending,
+            app.files.remote_sort_reference,
+        );
+        let expected: Vec<String> = sorted.into_iter().map(|entry| entry.name).collect();
+        assert_eq!(cached, expected);
+    }
+
+    #[test]
+    fn new_listing_resorts_once_and_order_matches_entry_count() {
+        let (_dir, mut app) = boot_sort_app("sort-cache-listing");
+        let _ = app.update(Message::FilesLocalLoaded(
+            0,
+            Ok(vec![
+                listing_entry("a", false, Some(1), None),
+                listing_entry("b", true, None, None),
+            ]),
+        ));
+        assert_eq!(app.files.local_sort_runs, 1);
+        assert_eq!(app.files.local_order.len(), app.files.local_entries.len());
+
+        let _ = app.update(Message::FilesRemoteLoaded(
+            0,
+            Ok(vec![
+                sftp::RemoteEntry::new("r", false, Some(1)),
+                sftp::RemoteEntry::new("d", true, None),
+            ]),
+        ));
+        assert_eq!(app.files.remote_sort_runs, 1);
+        assert_eq!(app.files.remote_order.len(), app.files.remote_entries.len());
+
+        let _ = app.update(Message::FilesLocalLoaded(0, Err("gone".into())));
+        assert_eq!(app.files.local_sort_runs, 2);
+        assert!(app.files.local_entries.is_empty());
+        assert_eq!(app.files.local_order.len(), app.files.local_entries.len());
+
+        let _ = app.update(Message::FilesRemoteLoaded(0, Err("gone".into())));
+        assert_eq!(app.files.remote_sort_runs, 2);
+        assert!(app.files.remote_entries.is_empty());
+        assert_eq!(app.files.remote_order.len(), app.files.remote_entries.len());
+    }
+
+    #[test]
+    fn remote_date_sort_uses_stored_reference_date() {
+        let (_dir, mut app) = boot_sort_app("sort-cache-reference");
+        let mut january = sftp::RemoteEntry::new("january", false, Some(1));
+        january.modified = Some("Jan 02 09:00".into());
+        let mut december = sftp::RemoteEntry::new("december", false, Some(1));
+        december.modified = Some("Dec 30 10:00".into());
+        app.files.remote_entries = vec![january, december];
+        app.files.remote_sort_reference = chrono::NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        app.remote_file_sort = FileSortColumn::DateModified;
+        app.remote_file_sort_ascending = true;
+        app.resort_remote_files();
+
+        let names: Vec<&str> = app
+            .files
+            .remote_order
+            .iter()
+            .map(|&index| app.files.remote_entries[index].name.as_str())
+            .collect();
+        assert_eq!(names, ["december", "january"]);
+    }
 }
