@@ -6191,36 +6191,35 @@ impl App {
             .into();
         }
 
-        let mut list = column![
-            row![
-                text("SESSIONS").size(12).color(muted()),
-                space::horizontal(),
-                text(self.profiles.len().to_string())
-                    .size(12)
-                    .color(muted()),
-                action("<<", Message::ToggleSidebar),
-            ]
-            .spacing(6)
-            .align_y(iced::Center),
-            row![
-                action("+  New connection", Message::New)
-                    .style(primary)
-                    .width(Fill),
-                action("Import", Message::ImportProfiles),
-            ]
-            .spacing(6),
-            text_input("Search sessions...", &self.query)
+        let p = theme::palette();
+        let filter = column![
+            text_input("Filter", &self.query)
                 .id("session-search")
                 .on_input_maybe(self.dialog.is_none().then_some(Message::Search))
-                // Enter belongs to the search box, never to the active SSH PTY.
+                // Enter belongs to the filter box, never to the active SSH PTY.
                 .on_submit(Message::Search(self.query.clone()))
-                .padding(10),
-            space::vertical().height(6),
+                .size(theme::metrics::UI_TEXT)
+                .padding([4, 2])
+                .style(session_filter),
+            hline(),
         ]
-        .spacing(12);
+        .width(Fill);
+        let top = row![
+            filter,
+            tool_icon(icons::Icon::Plus, "New Session", Message::New),
+            tool_icon(
+                icons::Icon::Download,
+                "Import Profiles",
+                Message::ImportProfiles
+            ),
+        ]
+        .spacing(2)
+        .height(30)
+        .align_y(iced::Center);
 
+        let mut list = column![].spacing(0).width(Fill);
         let matches = self.profile_matches.len();
-        let mut current_group = String::new();
+        let mut current_group: Option<String> = None;
         let mut count = 0;
         for (index, profile) in self
             .profile_matches
@@ -6229,79 +6228,126 @@ impl App {
             .filter_map(|&index| self.profiles.get(index).map(|profile| (index, profile)))
         {
             let group = if profile.folder.trim().is_empty() {
-                "Ungrouped"
+                "Sessions"
             } else {
                 profile.folder.as_str()
             };
-            if current_group != group {
-                list = list.push(
-                    container(text(group.to_owned()).size(12).color(muted())).padding([8, 2]),
-                );
-                current_group = group.to_owned();
+            if current_group.as_deref() != Some(group) {
+                list = list.push(Self::session_group_row(group));
+                current_group = Some(group.to_owned());
             }
-
-            let selected = self.tabs.get(self.active).is_some_and(|tab| {
-                session_profile_key(&tab.profile) == session_profile_key(profile)
-            });
-            let destination = if profile.user.is_empty() {
-                profile.host.clone()
-            } else {
-                format!("{}@{}", profile.user, profile.host)
-            };
-            let item = button(
-                column![
-                    row![
-                        text(profile.name.clone()).size(14),
-                        space::horizontal(),
-                        if profile.favorite {
-                            text("PIN").size(10).color(green())
-                        } else {
-                            text("SSH").size(10).color(blue())
-                        }
-                    ]
-                    .spacing(4),
-                    text(destination).size(12).color(muted()),
-                ]
-                .spacing(5),
-            )
-            .padding(10)
-            .width(Fill)
-            .on_press(Message::Open(index))
-            .style(if selected { selected_button } else { quiet });
-            list = list.push(
-                row![item, action("Edit", Message::EditProfile(index))]
-                    .spacing(4)
-                    .align_y(iced::Center),
-            );
+            let open = self
+                .tabs
+                .iter()
+                .any(|tab| session_profile_key(&tab.profile) == session_profile_key(profile));
+            list = list.push(Self::session_tree_row(index, profile, open));
             count += 1;
         }
 
         if count == 0 {
-            list = list.push(text("No matching saved sessions").color(muted()));
+            let empty = if self.query.trim().is_empty() {
+                "No sessions"
+            } else {
+                "No matching sessions"
+            };
+            list = list.push(
+                container(
+                    text(empty)
+                        .size(theme::metrics::UI_TEXT)
+                        .font(iced::Font::MONOSPACE)
+                        .color(p.muted),
+                )
+                .padding([4, 8]),
+            );
         } else if count < matches {
             list = list.push(
-                action(
-                    format!("Show more sessions ({count} of {matches})"),
-                    Message::ShowMoreProfiles,
+                button(
+                    text(format!("Show more sessions ({count} of {matches})"))
+                        .size(theme::metrics::UI_TEXT)
+                        .font(iced::Font::MONOSPACE)
+                        .color(p.muted),
                 )
-                .width(Fill),
+                .width(Fill)
+                .height(theme::metrics::ROW_HEIGHT)
+                .padding([2, 8])
+                .style(icon_button)
+                .on_press(Message::ShowMoreProfiles),
             );
         }
 
+        container(column![top, scrollable(list).width(Fill).height(Fill)].spacing(4))
+            .width(Fill)
+            .height(Fill)
+            .padding(6)
+            .style(session_panel)
+            .into()
+    }
+
+    /// WindTerm session tree: group row (disclosure triangle + folder + name).
+    fn session_group_row<'a>(group: &str) -> Element<'a, Message> {
+        let p = theme::palette();
         container(
-            column![
-                scrollable(list).height(Fill),
-                text("Saved profiles are read from the existing Inspirum profile store.")
-                    .size(12)
-                    .color(muted())
+            row![
+                icons::icon(icons::Icon::TriangleDown, 8.0, p.muted),
+                icons::icon(icons::Icon::Folder, 13.0, Color::from_rgb8(230, 200, 110)),
+                text(group.to_owned())
+                    .size(theme::metrics::UI_TEXT)
+                    .font(iced::Font::MONOSPACE)
+                    .color(p.text_dock),
             ]
-            .spacing(16),
+            .spacing(5)
+            .align_y(iced::Center),
         )
-        .width(270)
-        .height(Fill)
-        .padding(16)
-        .style(surface)
+        .width(Fill)
+        .height(theme::metrics::ROW_HEIGHT)
+        .padding([0, 4])
+        .align_y(iced::Center)
         .into()
+    }
+
+    /// WindTerm session tree: flat full-width session row with a marker dot.
+    fn session_tree_row<'a>(index: usize, profile: &Session, open: bool) -> Element<'a, Message> {
+        let p = theme::palette();
+        let destination = if profile.user.is_empty() {
+            profile.host.clone()
+        } else {
+            format!("{}@{}", profile.user, profile.host)
+        };
+        let mut suffix = format!(" {destination}");
+        if profile.favorite {
+            suffix.push_str(" *");
+        }
+        for tag in &profile.tags {
+            suffix.push_str(" #");
+            suffix.push_str(tag);
+        }
+        let label = row![
+            icons::dot(p.magenta, 7.0),
+            text(profile.name.clone())
+                .size(theme::metrics::UI_TEXT)
+                .font(iced::Font::MONOSPACE)
+                .color(p.text_dock),
+            text(suffix)
+                .size(theme::metrics::UI_TEXT)
+                .font(iced::Font::MONOSPACE)
+                .color(p.muted)
+                .wrapping(iced::widget::text::Wrapping::None),
+            space::horizontal(),
+        ]
+        .spacing(6)
+        .align_y(iced::Center);
+        let item = button(label)
+            .width(Fill)
+            .height(theme::metrics::ROW_HEIGHT)
+            .padding(iced::Padding::new(0.0).left(24.0).right(4.0))
+            .on_press(Message::Open(index))
+            .style(if open { session_row_open } else { session_row });
+        let edit = button(icons::icon(icons::Icon::Edit, 11.0, p.muted))
+            .height(theme::metrics::ROW_HEIGHT)
+            .padding([0, 5])
+            .style(if open { session_row_open } else { session_row })
+            .on_press(Message::EditProfile(index));
+        row![item, edit].width(Fill).spacing(0).into()
     }
 
     fn workspace(&self) -> Element<'_, Message> {
@@ -8599,6 +8645,50 @@ fn file_header(_theme: &Theme) -> container::Style {
 
 fn file_divider(_theme: &Theme) -> container::Style {
     container::Style::default().background(theme::palette().border)
+}
+
+fn session_panel(_theme: &Theme) -> container::Style {
+    fill_style(theme::palette().dock)
+}
+
+/// Borderless WindTerm filter field; the underline is a separate hline.
+fn session_filter(_theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let p = theme::palette();
+    text_input::Style {
+        background: Color::TRANSPARENT.into(),
+        border: Border::default(),
+        icon: p.muted,
+        placeholder: p.muted,
+        value: p.text_dock,
+        selection: match status {
+            text_input::Status::Disabled => p.hover,
+            _ => p.selected_row,
+        },
+    }
+}
+
+fn session_row(_theme: &Theme, status: button::Status) -> button::Style {
+    let p = theme::palette();
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => Some(p.hover.into()),
+        _ => None,
+    };
+    button::Style {
+        background,
+        text_color: p.text_dock,
+        border: Border::default(),
+        ..button::Style::default()
+    }
+}
+
+fn session_row_open(_theme: &Theme, _status: button::Status) -> button::Style {
+    let p = theme::palette();
+    button::Style {
+        background: Some(p.selected_row.into()),
+        text_color: p.text_dock,
+        border: Border::default(),
+        ..button::Style::default()
+    }
 }
 
 #[cfg(test)]
