@@ -6,10 +6,14 @@ use serde::{Deserialize, Serialize};
 use super::theme::marker;
 
 pub(super) const DEFAULT_SIDE_WIDTH: f32 = 214.0;
+#[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
 pub(super) const MIN_SIDE_WIDTH: f32 = 140.0;
+#[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
 pub(super) const MAX_SIDE_WIDTH: f32 = 600.0;
 pub(super) const DEFAULT_BOTTOM_RATIO: f32 = 0.32;
+#[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
 pub(super) const MIN_BOTTOM_RATIO: f32 = 0.15;
+#[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
 pub(super) const MAX_BOTTOM_RATIO: f32 = 0.7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -137,6 +141,7 @@ impl Default for DockLayout {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
 fn clamp_or(value: f32, min: f32, max: f32, default: f32) -> f32 {
     if value.is_finite() {
         value.clamp(min, max)
@@ -248,6 +253,7 @@ impl DockLayout {
         state.collapsed = !state.collapsed;
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
     pub(super) fn set_width(&mut self, area: Area, width: f32) {
         let width = clamp_or(width, MIN_SIDE_WIDTH, MAX_SIDE_WIDTH, DEFAULT_SIDE_WIDTH);
         match area {
@@ -257,6 +263,7 @@ impl DockLayout {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
     pub(super) fn set_bottom_ratio(&mut self, ratio: f32) {
         self.bottom_ratio = clamp_or(
             ratio,
@@ -276,6 +283,7 @@ impl DockLayout {
     }
 
     /// Enforce invariants after deserialising untrusted input.
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
     pub(super) fn sanitize(&mut self) {
         let mut seen: Vec<Panel> = Vec::new();
         for area in Area::ALL {
@@ -309,10 +317,12 @@ impl DockLayout {
         self.set_bottom_ratio(self.bottom_ratio);
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
     pub(super) fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
     pub(super) fn from_json(json: &str) -> DockLayout {
         let mut layout: DockLayout = serde_json::from_str(json).unwrap_or_default();
         layout.sanitize();
