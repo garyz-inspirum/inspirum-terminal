@@ -2316,9 +2316,10 @@ async def main() -> int:
                     "Exit", env, region=(0, 140, 270, 280), settle=.6,
                 )
                 width, height = window_size(window, env)
-                # Confirmation body is one muted line in a 600px dialog
-                # centered on the window. "disconnect them" avoids the
-                # parentheses and the leading session count (0/O).
+                # Confirmation body is one line in a 600px dialog centered
+                # on the window. "Exit and disconnect" matches both the
+                # singular and plural wording and avoids the leading session
+                # count (0/O).
                 confirm_region = (
                     max(0, width // 2 - 340),
                     max(0, height // 2 - 180),
@@ -2327,17 +2328,20 @@ async def main() -> int:
                 )
                 confirm = await locate_rendered_label(
                     window, destination / "connected-exit-confirm.png",
-                    "disconnect them", env=env, region=confirm_region, timeout=15,
+                    "Exit and disconnect", env=env, region=confirm_region, timeout=15,
                 )
-                # "disconnect them" sits near the end of the sentence, ~250px
-                # into a left-aligned line. Cancel is the left of the two
-                # right-aligned buttons, one row below. The dialog is 600px,
-                # so the button can sit ~80-170px right of this phrase;
-                # +300px covers that. height-24 keeps the box off the status bar.
+                # The matched phrase starts further left than "disconnect them"
+                # did; the existing -280px left expansion already covers the
+                # dialog, so it is not widened. The phrase ends ~5 characters
+                # earlier, so Cancel (left of the two right-aligned buttons,
+                # bottom right of the 600px dialog, one row below) sits further
+                # right of confirm[2]. The old +300px covered an ~80-170px gap;
+                # +360px keeps that cover. height-24 keeps the box off the
+                # status bar.
                 dialog_region = (
                     max(0, confirm[0] - 280),
                     max(0, confirm[1] - 56),
-                    min(width, confirm[2] + 300),
+                    min(width, confirm[2] + 360),
                     min(height - 24, confirm[3] + 72),
                 )
                 if dialog_region[2] <= dialog_region[0] or dialog_region[3] <= dialog_region[1]:
