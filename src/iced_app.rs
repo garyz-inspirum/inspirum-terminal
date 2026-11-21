@@ -4600,6 +4600,7 @@ impl App {
                 self.dialog = None;
                 let was_open = self.files_open();
                 self.toggle_files();
+                self.save_ui_state();
                 if !was_open && self.files_open() {
                     return self.files_became_visible();
                 }
@@ -10333,6 +10334,49 @@ mod tests {
         app.sender_focused = true;
         let _ = app.update(Message::SelectTab(0));
         assert!(!app.sender_focused);
+    }
+
+    #[test]
+    fn dock_controls_persist_close_toggle_and_files_shortcut() {
+        let profiles = std::env::temp_dir().join(format!(
+            "inspirum-dock-controls-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let state_path = std::env::temp_dir().join(format!(
+            "inspirum-dock-controls-{}-ui-state.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(profiles, None);
+        app.ui_state_path = Some(state_path.clone());
+        let _ = app.update(Message::DockMove(dock::Panel::Filer, dock::Area::Right));
+        let _ = app.update(Message::DockClose(dock::Panel::Filer));
+        assert_eq!(
+            ui_state::load(&state_path)
+                .docks
+                .unwrap()
+                .area_of(dock::Panel::Filer),
+            None
+        );
+        let _ = app.update(Message::DockToggle(dock::Panel::Filer));
+        assert_eq!(
+            ui_state::load(&state_path)
+                .docks
+                .unwrap()
+                .area_of(dock::Panel::Filer),
+            Some(dock::Area::Right)
+        );
+
+        let profile = Session {
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        app.tabs.push(Workspace::new(profile, pane));
+        let _ = app.update(Message::ToggleFiles);
+        assert_eq!(ui_state::load(&state_path).docks.unwrap(), app.docks);
+        let _ = app.update(Message::ToggleFiles);
+        assert_eq!(ui_state::load(&state_path).docks.unwrap(), app.docks);
+        std::fs::remove_file(state_path).unwrap();
     }
 
     #[test]
