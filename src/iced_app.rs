@@ -12075,7 +12075,12 @@ mod tests {
             listing_entry("later", false, Some(1), Some(later)),
             listing_entry("earlier", false, Some(1), Some(earlier)),
         ];
-        sort_file_entries(&mut local, FileSortColumn::DateModified, true, sort_reference());
+        sort_file_entries(
+            &mut local,
+            FileSortColumn::DateModified,
+            true,
+            sort_reference(),
+        );
         assert_eq!(listing_names(&local), ["earlier", "later"]);
 
         // "Jan" < "Oct" as text, but January 2024 is after October 2023.
@@ -12091,7 +12096,12 @@ mod tests {
                 entry
             },
         ];
-        sort_file_entries(&mut remote, FileSortColumn::DateModified, true, sort_reference());
+        sort_file_entries(
+            &mut remote,
+            FileSortColumn::DateModified,
+            true,
+            sort_reference(),
+        );
         assert_eq!(
             remote
                 .iter()
@@ -12159,7 +12169,12 @@ mod tests {
                 entry
             },
         ];
-        sort_file_entries(&mut remote, FileSortColumn::DateModified, true, sort_reference());
+        sort_file_entries(
+            &mut remote,
+            FileSortColumn::DateModified,
+            true,
+            sort_reference(),
+        );
         assert_eq!(
             remote
                 .iter()
