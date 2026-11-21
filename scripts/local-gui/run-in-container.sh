@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs INSIDE the inspirum-gui-test container.
 #   /src  = source tree (read-only)   /app/inspirum-terminal = release binary   /out = artifacts
-# Usage: run-in-container.sh smoke|connected|all
+# Usage: run-in-container.sh smoke|connected|all|tour   (all = smoke + connected)
 set -euo pipefail
 mode=${1:-all}
 export HOME=${HOME:-/tmp/home}
@@ -21,6 +21,16 @@ run_connected() {
   export INSPIRUM_GUI_TIME_SCALE=${INSPIRUM_GUI_TIME_SCALE:-4}
   set +e
   python3 -B /src/scripts/test-iced-connected-gui.py /app/inspirum-terminal /out/connected 2>&1 | tee /out/connected.log
+  local rc=${PIPESTATUS[0]}
+  set -e
+  return "$rc"
+}
+
+run_tour() {
+  local w=/tmp/work-tour; rm -rf "$w"; mkdir -p "$w"; cd "$w"
+  export INSPIRUM_GUI_TIME_SCALE=${INSPIRUM_GUI_TIME_SCALE:-4}
+  set +e
+  INSPIRUM_GUI_TOUR=1 python3 -B /src/scripts/test-iced-connected-gui.py /app/inspirum-terminal /out/connected 2>&1 | tee /out/tour.log
   local rc=${PIPESTATUS[0]}
   set -e
   return "$rc"
@@ -49,9 +59,9 @@ PY
 declare -A res
 fail=0
 case "$mode" in
-  smoke|connected) todo=("$mode") ;;
+  smoke|connected|tour) todo=("$mode") ;;
   all) todo=(smoke connected) ;;
-  *) echo "usage: $0 smoke|connected|all" >&2; exit 2 ;;
+  *) echo "usage: $0 smoke|connected|all|tour" >&2; exit 2 ;;
 esac
 for m in "${todo[@]}"; do
   if "run_$m"; then res[$m]=0; else res[$m]=$?; fail=1; fi

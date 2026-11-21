@@ -1066,6 +1066,148 @@ def reserved_display() -> str:
     raise RuntimeError("no disposable Xvfb display number available")
 
 
+TOUR = os.environ.get("INSPIRUM_GUI_TOUR") == "1"
+
+
+async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app_log: Path) -> int:
+    """Best-effort LIGHT-theme screenshot tour (INSPIRUM_GUI_TOUR=1).
+
+    Only the window and a real SSH session are asserted; every other step
+    logs a warning and continues. Coordinates assume the 1280x800 layout.
+    """
+    tour_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+
+    def log_text() -> str:
+        return events.path.read_text(encoding="utf-8")
+
+    def key(*keys: str) -> None:
+        command("xdotool", "windowfocus", window, "key", "--clearmodifiers", *keys, env=env)
+
+    def click(x: int, y: int) -> None:
+        command("xdotool", "mousemove", "--window", window, str(x), str(y), "click", "1", env=env)
+
+    def shot(name: str) -> None:
+        path = tour_dir / name
+        screenshot(window, path, env)
+        written.append(path)
+        print(f"tour: wrote {path}", flush=True)
+
+    async def step(label: str, coro_fn) -> None:
+        try:
+            await coro_fn()
+        except Exception as error:  # best-effort tour
+            print(f"tour: WARNING step {label!r} failed: {error}", flush=True)
+
+    width, height = 1280, 800
+    try:
+        width, height = window_size(window, env)
+    except Exception as error:
+        print(f"tour: WARNING window_size failed ({error}); assuming 1280x800", flush=True)
+    strip_y = 552
+
+    await asyncio.sleep(2)
+
+    async def s01():
+        shot("tour-01-start.png")
+    await step("start", s01)
+
+    async def s02():
+        click(30, 16)
+        await asyncio.sleep(1)
+        shot("tour-02-menu-session.png")
+        key("Escape")
+        await asyncio.sleep(.5)
+    await step("menu-session", s02)
+
+    async def s03():
+        # Session(7)=71, Edit(4)=47.2, View starts ~118, width ~47 -> centre ~142.
+        click(142, 16)
+        await asyncio.sleep(1)
+        shot("tour-03-menu-view.png")
+        key("Escape")
+        await asyncio.sleep(.5)
+    await step("menu-view", s03)
+
+    async def s04():
+        key("ctrl+n")
+        await asyncio.sleep(1.5)
+        shot("tour-04-new-connection.png")
+        key("Escape")
+        await asyncio.sleep(.5)
+    await step("new-connection", s04)
+
+    # Steps 4-5 are mandatory: a real SSH session must start.
+    if "SESSION_STARTED" not in log_text():
+        for y in (630, 653, 612, 676, 699):
+            click(200, y)
+            await asyncio.sleep(1.5)
+            if "SESSION_STARTED" in log_text():
+                break
+            key("Escape")
+    if "SESSION_STARTED" not in log_text():
+        print(
+            "tour: FAILED clicking the saved profile never started a real SSH session. "
+            "SSH events: " + repr(log_text()[-800:])
+            + "; application log tail: " + app_log.read_text(encoding="utf-8")[-1800:],
+            flush=True,
+        )
+        return 1
+    await asyncio.sleep(2)
+    shot("tour-05-terminal.png")
+    command("xdotool", "windowfocus", window, env=env)
+    command("xdotool", "type", "--delay", "20", "echo WindTerm layout tour", env=env)
+    key("Return")
+    await asyncio.sleep(1)
+    shot("tour-06-terminal-output.png")
+
+    async def s07():
+        key("ctrl+shift+r")
+        await asyncio.sleep(2)
+        shot("tour-07-split.png")
+    await step("split", s07)
+
+    async def s08():
+        key("ctrl+shift+f")
+        await wait_for(lambda: "SFTP_LIST_READY" in log_text(), "remote SFTP listing")
+        await asyncio.sleep(1.5)
+        shot("tour-08-filer.png")
+    await step("filer", s08)
+
+    # Bottom dock tab centres (Sender 6-88, Session 92-182, Transfer 186-283,
+    # Filer ~287-361, Explorer ~365-463).
+    for x, name in ((414, "tour-09-explorer.png"), (234, "tour-10-transfer.png"),
+                    (47, "tour-11-sender.png"), (137, "tour-12-session.png"),
+                    (324, None)):
+        async def tab(x=x, name=name):
+            click(x, strip_y)
+            await asyncio.sleep(1.5)
+            if name:
+                shot(name)
+        await step(name or "filer-again", tab)
+
+    async def s13():
+        click(width - 40, strip_y)
+        await asyncio.sleep(1)
+        shot("tour-13-gear-menu.png")
+        key("Escape")
+        await asyncio.sleep(.5)
+    await step("gear-menu", s13)
+
+    async def s14():
+        key("ctrl+comma")
+        await asyncio.sleep(1.5)
+        shot("tour-14-tools.png")
+        key("Escape")
+        await asyncio.sleep(.5)
+    await step("tools", s14)
+
+    print(f"tour: {len(written)} screenshots written:", flush=True)
+    for path in written:
+        print(f"  {path}", flush=True)
+    return 0
+
+
 async def main() -> int:
     if sys.platform != "linux":
         raise RuntimeError("Linux-only native GUI fixture")
@@ -1140,7 +1282,8 @@ async def main() -> int:
             # The WindTerm-style chrome defaults to a LIGHT theme. The OCR
             # band/threshold helpers (_visible_bands, _text_threshold) assume
             # light text on a dark background, so force the dark chrome.
-            INSPIRUM_THEME="dark",
+            # The tour (INSPIRUM_GUI_TOUR=1) captures the default LIGHT chrome.
+            INSPIRUM_THEME="light" if TOUR else "dark",
         )
         xvfb = subprocess.Popen(
             ["Xvfb", env["DISPLAY"], "-screen", "0", "1440x1000x24", "-nolisten", "tcp"],
@@ -1178,6 +1321,12 @@ async def main() -> int:
                     raise RuntimeError("production connected Iced window never appeared")
 
                 command("xdotool", "windowfocus", window, env=env)
+                if TOUR:
+                    # Screenshot tour instead of the acceptance sequence; the
+                    # surrounding finally block performs the usual teardown.
+                    return await run_tour(
+                        window, destination.parent / "tour", env, events, app_log,
+                    )
                 # The native graphics stack may still be initializing after
                 # the X11 window first appears, especially on shared runners.
                 await asyncio.sleep(2)

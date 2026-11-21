@@ -13,4 +13,8 @@ It mirrors CI; the single source of truth stays `.github/workflows/iced-design.y
       -v $PWD:/src:ro -v $PWD/target/release/inspirum-terminal:/app/inspirum-terminal:ro \
       -v $PWD/gui-out:/out inspirum-gui-test bash /src/scripts/local-gui/run-in-container.sh all
 
-Modes: `smoke`, `connected`, `all`. Artifacts (logs, screenshots) land in the `/out` mount.
+Modes: `smoke`, `connected`, `all` (= smoke + connected), `tour`. Artifacts (logs, screenshots) land in the `/out` mount.
+
+`tour` (`it-remote.sh gui tour`) re-runs the connected fixture with `INSPIRUM_GUI_TOUR=1` and the default LIGHT theme,
+writing best-effort screenshots `tour-01-start.png` … `tour-14-tools.png` to `/out/tour` (log: `/out/tour.log`).
+Only the window and a real SSH session are asserted; other steps warn and continue (fixed 1280x800 coordinates).
