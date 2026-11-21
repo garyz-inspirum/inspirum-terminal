@@ -48,9 +48,15 @@ impl App {
     pub(super) fn sender_panel(&self) -> Element<'_, Message> {
         let header = row![
             action("Send explicitly", Message::CommandSend).style(primary),
-            text("COMMAND SENDER · FOCUSED PANE")
-                .size(12)
-                .color(muted()),
+            if self.tools.sender_sync {
+                text("SYNC TARGETS · sends to every selected pane in this tab")
+                    .size(12)
+                    .color(danger())
+            } else {
+                text("COMMAND SENDER · FOCUSED PANE")
+                    .size(12)
+                    .color(muted())
+            },
             space::horizontal(),
             button(text("Command palette").size(12))
                 .padding([2, 6])

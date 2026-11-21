@@ -3253,6 +3253,7 @@ impl App {
     }
 
     fn activate_tab(&mut self, index: usize) {
+        self.sender_focused = false;
         if index < self.tabs.len() {
             if self.active != index {
                 self.tools.sync.set_armed(false);
@@ -5884,6 +5885,9 @@ impl App {
                 let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.activate(panel);
+                if !self.docks.is_visible(dock::Panel::Sender) {
+                    self.sender_focused = false;
+                }
                 self.save_ui_state();
                 if !was_open && self.files_open() {
                     return self.files_became_visible();
@@ -5892,12 +5896,18 @@ impl App {
             Message::DockClose(panel) => {
                 self.dock_menu = None;
                 self.docks.close(panel);
+                if !self.docks.is_visible(dock::Panel::Sender) {
+                    self.sender_focused = false;
+                }
                 self.save_ui_state();
             }
             Message::DockMove(panel, area) => {
                 let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.move_to(panel, area);
+                if !self.docks.is_visible(dock::Panel::Sender) {
+                    self.sender_focused = false;
+                }
                 self.save_ui_state();
                 if !was_open && self.files_open() {
                     return self.files_became_visible();
@@ -5907,6 +5917,9 @@ impl App {
                 let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.toggle(panel);
+                if !self.docks.is_visible(dock::Panel::Sender) {
+                    self.sender_focused = false;
+                }
                 self.save_ui_state();
                 if !was_open && self.files_open() {
                     return self.files_became_visible();
@@ -5916,6 +5929,9 @@ impl App {
                 let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.toggle_collapsed(area);
+                if !self.docks.is_visible(dock::Panel::Sender) {
+                    self.sender_focused = false;
+                }
                 self.save_ui_state();
                 if !was_open && self.files_open() {
                     return self.files_became_visible();
@@ -5937,6 +5953,10 @@ impl App {
                     dock::Preset::BottomTabs
                 });
                 self.docks.retain_available(&available_panels());
+                self.docks.add_missing(&available_panels());
+                if !self.docks.is_visible(dock::Panel::Sender) {
+                    self.sender_focused = false;
+                }
                 self.save_ui_state();
                 if !was_open && self.files_open() {
                     return self.files_became_visible();
@@ -10007,6 +10027,46 @@ mod tests {
         app.active = 1;
         assert!(!app.active_session_matches(&first_key));
         assert!(app.active_session_matches(&second_key));
+    }
+
+    #[test]
+    fn fresh_app_bottom_dock_has_sender_and_keeps_it_after_files_toggle() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-sender-dock-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        assert_eq!(
+            app.docks.area(dock::Area::Bottom).panels,
+            vec![
+                dock::Panel::Sender,
+                dock::Panel::Session,
+                dock::Panel::Transfer,
+                dock::Panel::Filer,
+                dock::Panel::Explorer,
+            ]
+        );
+        assert!(app.docks.is_visible(dock::Panel::Session));
+        let profile = Session {
+            host: "example.invalid".into(),
+            name: "sender fixture".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        app.tabs.push(Workspace::new(profile, pane));
+        app.toggle_files();
+        app.toggle_files();
+        app.toggle_files();
+        assert!(app.docks.area_of(dock::Panel::Sender).is_some());
+        assert!(app.docks.area_of(dock::Panel::Session).is_some());
+        app.sender_focused = true;
+        let _ = app.update(Message::DockActivate(dock::Panel::Sender));
+        assert!(app.sender_focused);
+        let _ = app.update(Message::DockActivate(dock::Panel::Session));
+        assert!(!app.sender_focused);
+        app.sender_focused = true;
+        let _ = app.update(Message::SelectTab(0));
+        assert!(!app.sender_focused);
     }
 
     #[test]
