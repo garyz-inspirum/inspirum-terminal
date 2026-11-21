@@ -338,6 +338,8 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
         min_size: Some(iced::Size::new(960.0, 640.0)),
         ..Default::default()
     })
+    // OS close must take the same guarded Exit path as Session > Exit.
+    .exit_on_close_request(false)
     .scale_factor(|app: &App| app.scale as f32)
     .subscription(|app: &App| {
         let drag = if app.dock_drag.is_some() {
@@ -358,6 +360,7 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
         Subscription::batch([
             drag,
             iced::window::resize_events().map(|(_, size)| Message::WindowResized(size)),
+            iced::window::close_requests().map(|_| Message::Exit),
             event::listen_with(|event, status, _| match &event {
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if privacy_lock_chord(key, *modifiers) =>
@@ -1419,6 +1422,7 @@ enum Dialog {
     FileName(FileNameAction),
     ImportProfiles,
     About,
+    Exit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1659,6 +1663,8 @@ enum Message {
     DockDragEnd,
     WindowResized(iced::Size),
     KeyChord(KeyChord),
+    Exit,
+    ConfirmExit,
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -3843,6 +3849,19 @@ impl App {
                     )
             )
         {
+            // Exit confirmation can sit on the curtain. Escape dismisses it;
+            // every other locked input stays dropped.
+            if matches!(self.dialog, Some(Dialog::Exit))
+                && matches!(
+                    &message,
+                    Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                        key,
+                        ..
+                    })) if key.as_ref() == keyboard::Key::Named(keyboard::key::Named::Escape)
+                )
+            {
+                return self.update(Message::CloseDialog);
+            }
             return Task::none();
         }
         // An open menu owns keyboard input, including queued IME and paste
@@ -4288,6 +4307,13 @@ impl App {
             }
             Message::MenuClose => self.open_menu = None,
             Message::MenuCommand(command) => {
+                // The menu is not shown under the privacy curtain or a modal.
+                // A queued Exit must not close the window or replace that modal.
+                if matches!(command, menu::Command::Exit)
+                    && (self.privacy_locked || self.dialog.is_some())
+                {
+                    return Task::none();
+                }
                 self.open_menu = None;
                 use menu::Command as C;
                 let message = match command {
@@ -4362,6 +4388,7 @@ impl App {
                     C::PreviousTab => Message::SelectPreviousTab,
                     C::Tool(panel) => Message::Tool(tools::Action::Open(panel)),
                     C::About => Message::About,
+                    C::Exit => Message::Exit,
                 };
                 return self.update(message);
             }
@@ -6084,6 +6111,20 @@ impl App {
                     return self.files_became_visible();
                 }
             }
+            Message::Exit => {
+                self.open_menu = None;
+                self.dock_menu = None;
+                if self.tabs.is_empty() {
+                    return iced::exit();
+                }
+                self.dialog = Some(Dialog::Exit);
+            }
+            Message::ConfirmExit => {
+                if !matches!(self.dialog, Some(Dialog::Exit)) {
+                    return Task::none();
+                }
+                return iced::exit();
+            }
         }
         Task::none()
     }
@@ -6093,7 +6134,7 @@ impl App {
             // Do not render the sensitive workspace behind a translucent
             // modal: the entire view must be replaced, including tabs, host
             // labels, SFTP paths and terminal scrollback.
-            return center(
+            let curtain: Element<'_, Message> = center(
                 column![
                     text("Workspace hidden").size(30).color(fg()),
                     text("SSH connections and transfers continue while this window is hidden.")
@@ -6114,6 +6155,9 @@ impl App {
             .width(Fill)
             .height(Fill)
             .into();
+            // Keep the workspace hidden. Only the exit confirmation may sit
+            // on the curtain, and only after the OS close button asked.
+            return self.cover_with_exit_confirmation(curtain);
         }
         let target = if self.dialog.is_none()
             && self.remote_editor.is_none()
@@ -6142,7 +6186,7 @@ impl App {
             // Do not mutate the underlying dock/grid state. In focus mode the
             // workspace is reduced to the live terminal split panes, with an
             // always-visible exit action and synchronized-input warning.
-            return container(
+            let focused: Element<'_, Message> = container(
                 column![
                     row![
                         text("FOCUS MODE · Alt+Enter to exit")
@@ -6171,6 +6215,7 @@ impl App {
             .height(Fill)
             .style(surface)
             .into();
+            return self.cover_with_exit_confirmation(focused);
         }
         let active_transfers = self
             .files
@@ -7906,6 +7951,7 @@ impl App {
             Dialog::ImportProfiles => "Import SSH profiles",
             Dialog::Tunnels => "Tunnel",
             Dialog::About => "Inspirum Terminal · Iced",
+            Dialog::Exit => "Exit",
         };
         let body: Element<'_, Message> = match dialog {
             Dialog::Tools => self.tools_view(),
@@ -8565,6 +8611,17 @@ impl App {
             ]
             .spacing(8)
             .into(),
+            Dialog::Exit => column![
+                text(exit_confirm_body(self.tabs.len())).color(muted()),
+                row![
+                    space::horizontal(),
+                    action("Cancel", Message::CloseDialog),
+                    action("Exit", Message::ConfirmExit).style(button::danger),
+                ]
+                .spacing(8),
+            ]
+            .spacing(8)
+            .into(),
         };
 
         dialog_frame(title, container(scrollable(body)).padding(12))
@@ -8576,6 +8633,36 @@ impl App {
             .max_height(720)
             .into()
     }
+
+    /// Exit confirmation on views that otherwise hide dialogs (privacy curtain,
+    /// focus mode). The workspace underneath is not the normal chrome.
+    fn cover_with_exit_confirmation<'a>(
+        &'a self,
+        under: Element<'a, Message>,
+    ) -> Element<'a, Message> {
+        let Some(dialog) = &self.dialog else {
+            return under;
+        };
+        if !matches!(dialog, Dialog::Exit) {
+            return under;
+        }
+        let content = self.dialog_view(dialog);
+        stack![
+            under,
+            opaque(
+                mouse_area(center(opaque(content)).style(|_| container::Style {
+                    background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.35).into()),
+                    ..Default::default()
+                }))
+                .on_press(Message::CloseDialog)
+            ),
+        ]
+        .into()
+    }
+}
+
+fn exit_confirm_body(open_sessions: usize) -> String {
+    format!("{open_sessions} session(s) are open. Exit and disconnect them?")
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -11348,5 +11435,98 @@ mod tests {
         let _ = app.update(Message::TogglePrivacyLock);
         assert!(app.privacy_locked);
         assert_eq!(app.open_menu, Some(menu::Menu::Session));
+    }
+
+    fn push_open_session(app: &mut App, name: &str) {
+        let profile = Session {
+            name: name.into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        app.tabs.push(Workspace::new(profile, pane));
+    }
+
+    #[test]
+    fn exit_with_open_tab_opens_confirmation_and_keeps_tabs() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-exit-open-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        push_open_session(&mut app, "exit-open");
+        let _ = app.update(Message::MenuCommand(menu::Command::Exit));
+        assert!(matches!(app.dialog, Some(Dialog::Exit)));
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(
+            exit_confirm_body(1),
+            "1 session(s) are open. Exit and disconnect them?"
+        );
+        assert_eq!(
+            exit_confirm_body(2),
+            "2 session(s) are open. Exit and disconnect them?"
+        );
+    }
+
+    #[test]
+    fn exit_cancel_leaves_tabs_intact_and_dialog_closed() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-exit-cancel-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        push_open_session(&mut app, "exit-cancel");
+        let _ = app.update(Message::Exit);
+        assert!(matches!(app.dialog, Some(Dialog::Exit)));
+        let _ = app.update(Message::CloseDialog);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.tabs.len(), 1);
+        let _ = app.update(Message::Exit);
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(app.dialog.is_none());
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn exit_with_no_tabs_opens_no_dialog() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-exit-empty-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        assert!(app.tabs.is_empty());
+        // Close task is iced::exit(); this test asserts state only.
+        let _ = app.update(Message::Exit);
+        assert!(app.dialog.is_none());
+        assert!(app.tabs.is_empty());
+        let _ = app.update(Message::MenuCommand(menu::Command::Exit));
+        assert!(app.dialog.is_none());
+        assert!(app.tabs.is_empty());
+    }
+
+    #[test]
+    fn menu_exit_does_not_bypass_privacy_lock_or_modal() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-exit-gated-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        push_open_session(&mut app, "exit-gated");
+        app.privacy_locked = true;
+        app.open_menu = Some(menu::Menu::Session);
+        let _ = app.update(Message::MenuCommand(menu::Command::Exit));
+        assert!(app.dialog.is_none());
+        assert!(app.privacy_locked);
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.open_menu, Some(menu::Menu::Session));
+
+        app.privacy_locked = false;
+        app.dialog = Some(Dialog::About);
+        let _ = app.update(Message::MenuCommand(menu::Command::Exit));
+        assert!(matches!(app.dialog, Some(Dialog::About)));
+        assert_eq!(app.tabs.len(), 1);
     }
 }
