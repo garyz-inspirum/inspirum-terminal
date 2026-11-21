@@ -443,7 +443,7 @@ def _ocr_tsv(tesseract: str, image: Path, psm: str) -> str:
     try:
         result = subprocess.run(
             [tesseract, str(image), "stdout", "--psm", psm, "tsv"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=15 * TIME_SCALE,
         )
     except subprocess.TimeoutExpired:
         return ""
@@ -662,36 +662,63 @@ def visible_pixel_rows(path: Path, tesseract: str, *, clusters: bool = False):
     return words
 
 
-def ocr_rows(path: Path, tesseract: str, region=None):
-    source = path
-    offset = (0, 0)
-    scale = 1
-    temporary = None
-    if region is not None:
-        temporary = path.with_suffix(".crop.png")
-        x1, y1, x2, y2 = region
-        result = subprocess.run(
-            ["convert", str(path), "-crop", f"{x2 - x1}x{y2 - y1}+{x1}+{y1}",
-             "+repage", "-resize", "300%", "-colorspace", "Gray",
-             "-contrast-stretch", "5%x5%", str(temporary)],
-            capture_output=True, text=True, timeout=15,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"visible label crop failed: {result.stderr[:200]}")
-        source = temporary
-        offset = (x1, y1)
-        scale = 3
+def _region_crop_upscaled(path: Path, region, scale: int, dest: Path, *, invert: bool = False):
+    """Crop ``region`` from ``path`` and write it upscaled (nearest) as grey.
+
+    Pure python (no ImageMagick): grey conversion once per source pixel, then
+    whole rows are repeated with bytes multiplication, so a 1280x250 crop at
+    x3 stays well under a second even on a loaded host. Returns the clamped
+    crop origin.
+    """
+    width, height, channels, rows = _read_png(path)
+    x1, y1, x2, y2 = region
+    x1 = max(0, min(width - 1, x1))
+    y1 = max(0, min(height - 1, y1))
+    x2 = max(x1 + 1, min(width, x2))
+    y2 = max(y1 + 1, min(height, y2))
+    out_rows = []
+    for y in range(y1, y2):
+        row = rows[y]
+        line = bytearray()
+        for x in range(x1, x2):
+            base = x * channels
+            lum = (row[base] + row[base + 1] + row[base + 2]) // 3
+            if invert:
+                lum = 255 - lum
+            line += bytes((lum, lum, lum)) * scale
+        out_rows.append(bytes(line) * scale)
+    _write_png(dest, (x2 - x1) * scale, (y2 - y1) * scale, b"".join(out_rows))
+    return x1, y1
+
+
+def region_upscaled_rows(path: Path, tesseract: str, region, *, psm: str = "6",
+                         scale: int = 3, invert: bool = False):
+    """OCR an upscaled crop of ``region``; word boxes in window coordinates."""
+    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
     try:
-        tsv = _ocr_tsv(tesseract, source, "6" if region is not None else "11")
+        origin = _region_crop_upscaled(path, region, scale, temporary, invert=invert)
+        tsv = _ocr_tsv(tesseract, temporary, psm)
     finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-    return _scaled_words(tsv, offset, scale)
+        temporary.unlink(missing_ok=True)
+    return _scaled_words(tsv, origin, scale)
+
+
+def ocr_rows(path: Path, tesseract: str, region=None):
+    if region is not None:
+        return region_upscaled_rows(path, tesseract, region, psm="6")
+    return _scaled_words(_ocr_tsv(tesseract, path, "11"), (0, 0), 1)
 
 
 # One locate attempt must fit well inside the caller's retry window
 # (click_label / locate_rendered_label retry with fresh screenshots).
-LOCATE_BUDGET_S = 12.0
+# Slow/loaded hosts (local docker runs) raise it via INSPIRUM_GUI_OCR_BUDGET.
+# The budget gates only the expensive whole-window stages; the region crop
+# stages and the bounded inverted segment search always get their turn.
+LOCATE_BUDGET_S = float(os.environ.get("INSPIRUM_GUI_OCR_BUDGET", "12"))
+# Multiplier for waits that wrap screenshots + OCR (not protocol events).
+TIME_SCALE = float(os.environ.get("INSPIRUM_GUI_TIME_SCALE", "1.0"))
+# Last-resort inverted stage gets at least this long even after slow stages.
+INVERTED_MIN_S = 10.0 * TIME_SCALE
 # Session toolbar + tab bar; the inverted stage never scans above it unless
 # the caller passes an explicit region.
 TOOLBAR_BOTTOM_Y = 90
@@ -768,7 +795,25 @@ def locate_visible_label(
         raise RuntimeError("visible label targeting requires tesseract")
     started = time.monotonic()
     deadline = started + budget
-    bounds = match_visible_label(ocr_rows(path, tesseract, region), label)
+    bounds = None
+    first_words = []
+    if region is not None:
+        # Small monospace text reads far better upscaled; a crop is cheap.
+        # Never skipped by the budget.
+        for psm, invert in (("6", False), ("11", False), ("6", True)):
+            words = region_upscaled_rows(
+                path, tesseract, region, psm=psm, invert=invert,
+            )
+            if not first_words:
+                first_words = words
+            bounds = match_visible_label(words, label)
+            if bounds is None:
+                bounds = match_visible_segment([words], label)
+            if bounds is not None:
+                break
+    else:
+        first_words = ocr_rows(path, tesseract, None)
+        bounds = match_visible_label(first_words, label)
     if bounds is None and time.monotonic() < deadline:
         pixel_rows = visible_pixel_rows(path, tesseract, clusters=False)
         if region is not None:
@@ -793,14 +838,15 @@ def locate_visible_label(
         bounds = match_visible_label(flat, label)
         if bounds is None:
             bounds = match_visible_segment(segments, label)
-    if bounds is None and time.monotonic() < deadline:
+    if bounds is None:
         bounds, inverted = _inverted_segment_search(
-            path, tesseract, label, region, deadline,
+            path, tesseract, label, region,
+            max(deadline, time.monotonic() + INVERTED_MIN_S),
         )
     else:
         inverted = []
     if bounds is None:
-        seen = [row[0] for row in ocr_rows(path, tesseract, region)][:40]
+        seen = [row[0] for row in first_words][:40]
         segs = [" ".join(word[0] for word in words) for words in inverted][:20]
         print(
             f"OCR miss for {label!r} in {path} region={region} "
@@ -834,6 +880,7 @@ async def locate_rendered_label(
     region=None,
 ):
     """Screenshot repeatedly until the label is rendered; return its bounds."""
+    timeout *= TIME_SCALE
     # OCR and screenshots block for seconds. The fixture SSH server shares
     # this event loop, so run them off-loop or the GUI's sftp connections
     # time out during banner exchange while we are looking at the screen.
@@ -860,6 +907,7 @@ async def click_label(
     Screenshot and OCR run off the event loop (the fixture SSH server shares
     it), exactly like ``locate_rendered_label``.
     """
+    timeout *= TIME_SCALE
     deadline = time.monotonic() + timeout
     while True:
         await asyncio.to_thread(screenshot, window, shot_path, env)

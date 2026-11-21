@@ -16,6 +16,9 @@ fi
 
 run_connected() {
   local w=/tmp/work-connected; rm -rf "$w"; mkdir -p "$w"; cd "$w"
+  # Loaded build host: OCR is several times slower than on GitHub runners.
+  export INSPIRUM_GUI_OCR_BUDGET=${INSPIRUM_GUI_OCR_BUDGET:-90}
+  export INSPIRUM_GUI_TIME_SCALE=${INSPIRUM_GUI_TIME_SCALE:-4}
   set +e
   python3 -B /src/scripts/test-iced-connected-gui.py /app/inspirum-terminal /out/connected 2>&1 | tee /out/connected.log
   local rc=${PIPESTATUS[0]}
