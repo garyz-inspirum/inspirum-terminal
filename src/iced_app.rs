@@ -1267,6 +1267,10 @@ enum Message {
     About,
     CloseDialog,
     DismissModalKey,
+    MenuOpen(menu::Menu),
+    MenuHover(menu::Menu),
+    MenuClose,
+    MenuCommand(menu::Command),
     AskClose(usize),
     ConfirmClose(usize),
     ToggleFiles,
@@ -2534,6 +2538,7 @@ struct App {
     snippet_content: text_editor::Content,
     editing_snippet: Option<String>,
     sidebar_collapsed: bool,
+    open_menu: Option<menu::Menu>,
     privacy_locked: bool,
     focus_mode: bool,
     local_navigation: HashSet<u64>,
@@ -2687,6 +2692,7 @@ impl App {
             snippet_content: text_editor::Content::new(),
             editing_snippet: None,
             sidebar_collapsed: false,
+            open_menu: None,
             privacy_locked: false,
             focus_mode: false,
             local_navigation: HashSet::new(),
@@ -4019,6 +4025,55 @@ impl App {
                 }
             }
             Message::About => self.dialog = Some(Dialog::About),
+            Message::MenuOpen(menu) => {
+                self.open_menu = if self.open_menu == Some(menu) {
+                    None
+                } else {
+                    Some(menu)
+                };
+            }
+            Message::MenuHover(menu) => {
+                if self.open_menu.is_some() {
+                    self.open_menu = Some(menu);
+                }
+            }
+            Message::MenuClose => self.open_menu = None,
+            Message::MenuCommand(command) => {
+                self.open_menu = None;
+                use menu::Command as C;
+                let message = match command {
+                    C::NewSession => Message::New,
+                    C::ImportProfiles => Message::ImportProfiles,
+                    C::Tunnels => Message::Tunnels,
+                    C::LockScreen => Message::TogglePrivacyLock,
+                    C::Paste => Message::RequestPaste,
+                    C::CommandPalette => Message::Commands,
+                    C::ThemeLight => {
+                        theme::set(theme::ChromeTheme::Light);
+                        return Task::none();
+                    }
+                    C::ThemeDark => {
+                        theme::set(theme::ChromeTheme::Dark);
+                        return Task::none();
+                    }
+                    C::ZoomIn => Message::Scale(0.1),
+                    C::ZoomOut => Message::Scale(-0.1),
+                    C::FocusMode => Message::ToggleFocusMode,
+                    C::ToggleSessions => Message::ToggleSidebar,
+                    C::ToggleFiles => Message::ToggleFiles,
+                    C::ToggleShell => Message::ToggleAuxiliaryShell,
+                    C::LocalMode => Message::ToggleLocalNavigation,
+                    C::FreeType => Message::ToggleFocusedFreeType,
+                    C::RemoteKeys => Message::ToggleFocusedRemoteKeys,
+                    C::SplitRight => Message::Split(pane_grid::Axis::Vertical),
+                    C::SplitDown => Message::Split(pane_grid::Axis::Horizontal),
+                    C::NextTab => Message::SelectNextTab,
+                    C::PreviousTab => Message::SelectPreviousTab,
+                    C::Tool(panel) => Message::Tool(tools::Action::Open(panel)),
+                    C::About => Message::About,
+                };
+                return self.update(message);
+            }
             Message::Tunnels => {
                 self.refresh_tunnel_status();
                 self.dialog = Some(Dialog::Tunnels);
@@ -4228,6 +4283,9 @@ impl App {
                 self.files.name_input.clear();
             }
             Message::DismissModalKey => {
+                if self.open_menu.take().is_some() {
+                    return Task::none();
+                }
                 if self.dialog.is_some() {
                     return self.update(Message::CloseDialog);
                 }
@@ -5533,6 +5591,10 @@ impl App {
             })) => {
                 use keyboard::key::Named;
 
+                if self.open_menu.is_some() && key.as_ref() == keyboard::Key::Named(Named::Escape) {
+                    self.open_menu = None;
+                    return Task::none();
+                }
                 if modifiers.command()
                     && key.as_ref() == keyboard::Key::Character(",")
                     && (self.dialog.is_none() || matches!(self.dialog, Some(Dialog::Tools)))
@@ -5742,75 +5804,79 @@ impl App {
             .filter(|status| status.is_running())
             .count();
 
-        let header = container(
-            row![
-                container(text(">_").size(21).color(blue()))
-                    .padding([3, 8])
-                    .style(card),
-                text("Inspirum").size(19),
-                text("Native SSH workspace").size(12).color(muted()),
-                space::horizontal(),
-                action(
-                    "Tools",
-                    Message::Tool(tools::Action::Open(tools::Panel::Profiles))
-                ),
-                action("Commands", Message::Commands),
-                action("Tunnels", Message::Tunnels),
-                action("Lock", Message::TogglePrivacyLock),
-                action("Focus", Message::ToggleFocusMode),
-                action("A-", Message::Scale(-0.1)),
-                action("A+", Message::Scale(0.1)),
-                action("About", Message::About),
-            ]
-            .spacing(12)
-            .align_y(iced::Center),
-        )
-        .padding([10, 16])
-        .style(surface);
+        let header = self.menu_bar();
 
+        let mode = if self
+            .focused_terminal_id()
+            .is_some_and(|id| self.local_navigation.contains(&id))
+        {
+            "Local Mode"
+        } else {
+            "Remote Mode"
+        };
+        let status_text = |value: String| {
+            text(value)
+                .size(theme::metrics::STATUS_TEXT)
+                .color(theme::palette().status_text)
+        };
+        let mut right = row![
+            text(mode)
+                .size(theme::metrics::STATUS_TEXT)
+                .color(theme::palette().status_text)
+                .font(iced::Font {
+                    weight: iced::font::Weight::Bold,
+                    ..iced::Font::MONOSPACE
+                }),
+            container(space::horizontal().width(1))
+                .width(1)
+                .height(12)
+                .style(|_| container::Style {
+                    background: Some(theme::palette().status_text.into()),
+                    ..Default::default()
+                }),
+        ]
+        .spacing(16)
+        .align_y(iced::Center);
+        if active_transfers > 0 {
+            right = right.push(status_text(format!("{active_transfers} transfers")));
+        }
+        if running_tunnels > 0 {
+            right = right.push(status_text(format!("{running_tunnels} tunnels")));
+        }
+        right = right
+            .push(status_text(format!(
+                "{} saved profiles",
+                self.profiles.len()
+            )))
+            .push(status_text(
+                chrono::Local::now().format("%Y/%m/%d %H:%M").to_string(),
+            ));
+        let mut left = row![status_text(if self.status.is_empty() {
+            "Ready".to_string()
+        } else {
+            self.status.clone()
+        })]
+        .spacing(16)
+        .align_y(iced::Center);
+        if self.tools.sync.armed() {
+            left = left.push(status_text(format!(
+                "SYNC ARMED - {} panes",
+                self.tools.sync.selected_count()
+            )));
+        }
         let footer = container(
-            row![
-                text("ICED").size(12).color(blue()),
-                text(if self.tools.sync.armed() {
-                    format!("SYNC ARMED · {} panes", self.tools.sync.selected_count())
-                } else {
-                    String::new()
-                })
-                .size(12)
-                .color(danger()),
-                text(&self.status).size(12).color(muted()),
-                space::horizontal(),
-                if active_transfers > 0 {
-                    text(format!("{active_transfers} active transfer(s)"))
-                        .size(12)
-                        .color(blue())
-                } else {
-                    text("").size(12)
-                },
-                if running_tunnels > 0 {
-                    text(format!("{running_tunnels} tunnel session(s)"))
-                        .size(12)
-                        .color(green())
-                } else {
-                    text("").size(12)
-                },
-                text(format!(
-                    "{} saved profiles{}",
-                    self.profiles.len(),
-                    if self.ssh_config.is_some() {
-                        "  /  custom SSH config"
-                    } else {
-                        ""
-                    }
-                ))
-                .size(12)
-                .color(muted()),
-            ]
-            .spacing(12)
-            .align_y(iced::Center),
+            row![left, space::horizontal(), right]
+                .spacing(16)
+                .align_y(iced::Center),
         )
-        .padding([9, 16])
-        .style(surface);
+        .padding([0, 10])
+        .height(theme::metrics::STATUS_BAR_HEIGHT)
+        .width(Fill)
+        .align_y(iced::Center)
+        .style(|_| container::Style {
+            background: Some(theme::palette().status_bg.into()),
+            ..Default::default()
+        });
 
         let mut body = column![
             header,
@@ -5828,6 +5894,25 @@ impl App {
             );
         }
 
+        let body: Element<'_, Message> = if let Some(open) = self.open_menu {
+            stack![
+                body,
+                mouse_area(container(space::horizontal()).width(Fill).height(Fill))
+                    .on_press(Message::MenuClose),
+                container(self.menu_dropdown(open))
+                    .padding(iced::Padding {
+                        top: theme::metrics::MENU_BAR_HEIGHT,
+                        left: open.offset(),
+                        ..iced::Padding::ZERO
+                    })
+                    .width(Fill)
+                    .height(Fill),
+            ]
+            .into()
+        } else {
+            body.into()
+        };
+
         if let Some(dialog) = &self.dialog {
             let content = self.dialog_view(dialog);
             stack![
@@ -5844,6 +5929,90 @@ impl App {
         } else {
             body.into()
         }
+    }
+
+    fn menu_bar(&self) -> Element<'_, Message> {
+        let mut titles = row![].align_y(iced::Center);
+        for menu in menu::Menu::ALL {
+            let open = self.open_menu == Some(menu);
+            titles = titles.push(
+                mouse_area(
+                    button(
+                        text(menu.title())
+                            .size(theme::metrics::UI_TEXT)
+                            .color(theme::palette().text),
+                    )
+                    .padding([4, 8])
+                    .width(menu.title_width())
+                    .style(move |theme, status| menu_title(theme, status, open))
+                    .on_press(Message::MenuOpen(menu)),
+                )
+                .on_enter(Message::MenuHover(menu)),
+            );
+        }
+        container(titles)
+            .height(theme::metrics::MENU_BAR_HEIGHT)
+            .width(Fill)
+            .align_y(iced::Center)
+            .style(|_| container::Style {
+                background: Some(theme::palette().chrome.into()),
+                border: Border {
+                    color: theme::palette().border,
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
+    }
+
+    fn menu_dropdown(&self, open: menu::Menu) -> Element<'_, Message> {
+        let mut rows = column![].width(240);
+        for entry in open.entries() {
+            rows = match entry {
+                menu::Entry::Separator => rows.push(
+                    container(space::horizontal())
+                        .width(Fill)
+                        .height(1)
+                        .style(|_| container::Style {
+                            background: Some(theme::palette().border.into()),
+                            ..Default::default()
+                        }),
+                ),
+                menu::Entry::Item {
+                    label,
+                    shortcut,
+                    command,
+                } => rows.push(
+                    button(
+                        row![
+                            text(label)
+                                .size(theme::metrics::UI_TEXT)
+                                .color(theme::palette().text),
+                            space::horizontal(),
+                            text(shortcut)
+                                .size(theme::metrics::UI_TEXT)
+                                .color(theme::palette().muted),
+                        ]
+                        .align_y(iced::Center),
+                    )
+                    .width(Fill)
+                    .height(24)
+                    .padding([3, 10])
+                    .style(menu_item)
+                    .on_press(Message::MenuCommand(command)),
+                ),
+            };
+        }
+        opaque(container(rows).padding(1).style(|_| container::Style {
+            background: Some(theme::palette().list.into()),
+            border: Border {
+                color: theme::palette().border,
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        }))
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
@@ -8027,6 +8196,30 @@ fn active_card(theme: &Theme) -> container::Style {
 
 /// Flat WindTerm text button: `list` fill with a 1px `border` outline at rest,
 /// so a control still reads as clickable before the pointer reaches it.
+fn menu_title(_: &Theme, status: button::Status, open: bool) -> button::Style {
+    let p = theme::palette();
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => Some(p.hover.into()),
+        _ if open => Some(p.hover.into()),
+        _ => None,
+    };
+    button::Style {
+        background,
+        text_color: p.text,
+        ..Default::default()
+    }
+}
+
+fn menu_item(_: &Theme, status: button::Status) -> button::Style {
+    let p = theme::palette();
+    button::Style {
+        background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+            .then(|| p.hover.into()),
+        text_color: p.text,
+        ..Default::default()
+    }
+}
+
 fn quiet(_: &Theme, status: button::Status) -> button::Style {
     let p = theme::palette();
     let (background, border_color, text_color) = match status {
