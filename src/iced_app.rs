@@ -11,6 +11,7 @@ mod menu;
 mod terminal_ime;
 mod theme;
 mod tools;
+mod ui_state;
 
 use crate::{
     ProxyAuth, ProxyKind, Session, SessionImportMode,
@@ -2688,6 +2689,7 @@ struct App {
     editing_snippet: Option<String>,
     open_menu: Option<menu::Menu>,
     docks: dock::DockLayout,
+    ui_state_path: Option<PathBuf>,
     dock_menu: Option<dock::Area>,
     privacy_locked: bool,
     focus_mode: bool,
@@ -2729,6 +2731,19 @@ const FILES_PANELS: [dock::Panel; 3] = [
 ];
 
 impl App {
+    fn save_ui_state(&mut self) {
+        let Some(path) = self.ui_state_path.as_deref() else {
+            return;
+        };
+        let state = ui_state::UiState {
+            theme: theme::current().as_str().to_string(),
+            docks: Some(self.docks.clone()),
+        };
+        if let Err(error) = ui_state::save(path, &state) {
+            self.status = format!("Could not save UI layout: {error}");
+        }
+    }
+
     fn boot(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> Self {
         let _slow = SlowIcedScope::start("startup");
         let (profiles, profiles_writable, mut load_error) = match load_sessions(&profiles_path) {
@@ -2754,6 +2769,24 @@ impl App {
                 SnippetLibrary::default()
             }
         };
+        let ui_state_path = if cfg!(test) {
+            None
+        } else {
+            Some(ui_state::path_for(&profiles_path))
+        };
+        let mut saved_ui = ui_state_path
+            .as_deref()
+            .map(ui_state::load)
+            .unwrap_or_default();
+        let env_theme = std::env::var("INSPIRUM_THEME")
+            .ok()
+            .as_deref()
+            .and_then(theme::ChromeTheme::parse);
+        if env_theme.is_none() && ui_state_path.is_some() {
+            theme::set(
+                theme::ChromeTheme::parse(&saved_ui.theme).unwrap_or(theme::ChromeTheme::Light),
+            );
+        }
         let mut tools = tools::State::load(&profiles_path);
         for message in &tools.load_errors {
             tools.errors.record(message);
@@ -2784,10 +2817,12 @@ impl App {
             editing_snippet: None,
             open_menu: None,
             docks: {
-                let mut docks = dock::DockLayout::default();
+                let mut docks = saved_ui.docks.take().unwrap_or_default();
+                docks.sanitize();
                 docks.retain_available(&available_panels());
                 docks
             },
+            ui_state_path,
             dock_menu: None,
             privacy_locked: false,
             focus_mode: false,
@@ -4150,10 +4185,12 @@ impl App {
                     C::Palette => Message::Commands,
                     C::ThemeLight => {
                         theme::set(theme::ChromeTheme::Light);
+                        self.save_ui_state();
                         return Task::none();
                     }
                     C::ThemeDark => {
                         theme::set(theme::ChromeTheme::Dark);
+                        self.save_ui_state();
                         return Task::none();
                     }
                     C::ZoomIn => Message::Scale(0.1),
@@ -5788,6 +5825,7 @@ impl App {
                 let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.activate(panel);
+                self.save_ui_state();
                 if !was_open && self.files_open() {
                     return self.files_became_visible();
                 }
@@ -5795,11 +5833,13 @@ impl App {
             Message::DockClose(panel) => {
                 self.dock_menu = None;
                 self.docks.close(panel);
+                self.save_ui_state();
             }
             Message::DockMove(panel, area) => {
                 let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.move_to(panel, area);
+                self.save_ui_state();
                 if !was_open && self.files_open() {
                     return self.files_became_visible();
                 }
@@ -5808,6 +5848,7 @@ impl App {
                 let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.toggle(panel);
+                self.save_ui_state();
                 if !was_open && self.files_open() {
                     return self.files_became_visible();
                 }
@@ -5816,6 +5857,7 @@ impl App {
                 let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.toggle_collapsed(area);
+                self.save_ui_state();
                 if !was_open && self.files_open() {
                     return self.files_became_visible();
                 }
@@ -5836,6 +5878,7 @@ impl App {
                     dock::Preset::BottomTabs
                 });
                 self.docks.retain_available(&available_panels());
+                self.save_ui_state();
                 if !was_open && self.files_open() {
                     return self.files_became_visible();
                 }

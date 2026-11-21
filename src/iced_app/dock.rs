@@ -283,7 +283,6 @@ impl DockLayout {
     }
 
     /// Enforce invariants after deserialising untrusted input.
-    #[cfg_attr(not(test), allow(dead_code))] // used by tests; UI wiring (resize/persist) lands later
     pub(super) fn sanitize(&mut self) {
         let mut seen: Vec<Panel> = Vec::new();
         for area in Area::ALL {
