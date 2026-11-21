@@ -1421,6 +1421,31 @@ enum Dialog {
     About,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyChord {
+    FocusMode,
+    FreeType,
+    RemoteKeys,
+    LocalNavigation,
+    SplitRight,
+    ToggleFiles,
+    AuxiliaryShell,
+}
+
+impl KeyChord {
+    fn message(self) -> Message {
+        match self {
+            KeyChord::FocusMode => Message::ToggleFocusMode,
+            KeyChord::FreeType => Message::ToggleFocusedFreeType,
+            KeyChord::RemoteKeys => Message::ToggleFocusedRemoteKeys,
+            KeyChord::LocalNavigation => Message::ToggleLocalNavigation,
+            KeyChord::SplitRight => Message::Split(pane_grid::Axis::Vertical),
+            KeyChord::ToggleFiles => Message::ToggleFiles,
+            KeyChord::AuxiliaryShell => Message::ToggleAuxiliaryShell,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 enum Message {
     Tool(tools::Action),
@@ -1633,6 +1658,7 @@ enum Message {
     DockDragMove(iced::Point),
     DockDragEnd,
     WindowResized(iced::Size),
+    KeyChord(KeyChord),
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -3753,6 +3779,10 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         let _slow = SlowIcedScope::start("event_update");
+        let message = match message {
+            Message::KeyChord(chord) => return self.update(chord.message()),
+            other => other,
+        };
         if matches!(&message, Message::TogglePrivacyLock) {
             self.privacy_locked = !self.privacy_locked;
             self.ime_cursor = None;
@@ -3902,6 +3932,7 @@ impl App {
             }
             Message::TerminalImeCursor(..) | Message::TerminalImeCommit(..) => {}
             Message::TogglePrivacyLock => unreachable!("privacy lock handled before match"),
+            Message::KeyChord(_) => unreachable!("key chord handled before match"),
             Message::ToggleFocusMode => unreachable!("focus mode handled before match"),
             Message::ToggleLocalNavigation => {
                 unreachable!("local navigation handled before match")
@@ -11189,5 +11220,128 @@ mod tests {
             "IME commit must be logged once the menu is closed, log={:?}",
             app.pty_write_log
         );
+    }
+
+    fn app_with_one_pane_and_auxiliary_shell(label: &str) -> App {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-{label}-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session {
+            name: "chord fixture".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        app.tabs.push(Workspace::new(profile, pane));
+        let _ = app.update(Message::ToggleAuxiliaryShell);
+        let tab = &app.tabs[0];
+        assert_eq!(tab.panes.len(), 2);
+        assert!(
+            tab.panes.iter().any(|(_, pane)| pane.auxiliary_shell),
+            "auxiliary SSH pane created"
+        );
+        app
+    }
+
+    fn every_key_chord() -> [KeyChord; 7] {
+        [
+            KeyChord::FocusMode,
+            KeyChord::FreeType,
+            KeyChord::RemoteKeys,
+            KeyChord::LocalNavigation,
+            KeyChord::SplitRight,
+            KeyChord::ToggleFiles,
+            KeyChord::AuxiliaryShell,
+        ]
+    }
+
+    #[test]
+    fn key_chords_do_nothing_while_a_menu_is_open() {
+        let mut app = app_with_one_pane_and_auxiliary_shell("chord-menu-blocks");
+        let focus_mode = app.focus_mode;
+        let files_open = app.files_open();
+        for (open_menu, dock_menu) in [
+            (Some(menu::Menu::Session), None),
+            (None, Some(dock::Area::Bottom)),
+        ] {
+            app.open_menu = open_menu;
+            app.dock_menu = dock_menu;
+            for chord in every_key_chord() {
+                let _ = app.update(Message::KeyChord(chord));
+                assert_eq!(
+                    app.tabs[0].panes.len(),
+                    2,
+                    "{chord:?} changed pane count while a menu was open"
+                );
+                assert!(
+                    app.tabs[0]
+                        .panes
+                        .iter()
+                        .any(|(_, pane)| pane.auxiliary_shell),
+                    "{chord:?} removed the auxiliary shell while a menu was open"
+                );
+                assert_eq!(
+                    app.focus_mode, focus_mode,
+                    "{chord:?} changed focus mode while a menu was open"
+                );
+                assert!(
+                    app.free_type.is_empty(),
+                    "{chord:?} opened free type while a menu was open"
+                );
+                assert!(
+                    app.remote_keys.is_empty(),
+                    "{chord:?} enabled remote keys while a menu was open"
+                );
+                assert!(
+                    app.local_navigation.is_empty(),
+                    "{chord:?} enabled local navigation while a menu was open"
+                );
+                assert_eq!(
+                    app.files_open(),
+                    files_open,
+                    "{chord:?} changed the files dock while a menu was open"
+                );
+                assert!(
+                    app.open_menu.is_some() || app.dock_menu.is_some(),
+                    "{chord:?} closed the menu"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn key_chords_work_again_after_the_menu_closes() {
+        let mut app = app_with_one_pane_and_auxiliary_shell("chord-menu-closed");
+        app.open_menu = Some(menu::Menu::Session);
+        app.dock_menu = Some(dock::Area::Bottom);
+        app.open_menu = None;
+        app.dock_menu = None;
+        assert!(!app.focus_mode);
+        let _ = app.update(Message::KeyChord(KeyChord::AuxiliaryShell));
+        assert_eq!(app.tabs[0].panes.len(), 1);
+        assert!(
+            !app.tabs[0]
+                .panes
+                .iter()
+                .any(|(_, pane)| pane.auxiliary_shell),
+            "auxiliary shell chord must close the shell once the menu is gone"
+        );
+        let _ = app.update(Message::KeyChord(KeyChord::FocusMode));
+        assert!(
+            app.focus_mode,
+            "focus-mode chord must toggle once the menu is gone"
+        );
+    }
+
+    #[test]
+    fn privacy_lock_still_toggles_while_a_menu_is_open() {
+        let mut app = app_with_one_pane_and_auxiliary_shell("privacy-lock-menu");
+        app.open_menu = Some(menu::Menu::Session);
+        assert!(!app.privacy_locked);
+        let _ = app.update(Message::TogglePrivacyLock);
+        assert!(app.privacy_locked);
+        assert_eq!(app.open_menu, Some(menu::Menu::Session));
     }
 }
