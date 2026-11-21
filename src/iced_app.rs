@@ -5437,11 +5437,11 @@ impl App {
                         *pane = replacement;
                         tab.focus = pane_id;
                         self.status = if connected {
-                            "Reconnected through the production OpenSSH/PTY backend.".into()
+                            "Reconnected.".into()
                         } else if failed {
                             "Reconnect attempt failed; review the pane error.".into()
                         } else {
-                            "Reconnect queued until the terminal event bridge is ready.".into()
+                            "Reconnect queued.".into()
                         };
                     }
                 }
@@ -5654,9 +5654,7 @@ impl App {
                 self.status = if attempted == 0 {
                     "Ready".into()
                 } else {
-                    format!(
-                        "Terminal bridge ready: {started} of {attempted} pending session(s) started."
-                    )
+                    format!("Started {started} of {attempted} pending session(s).")
                 };
             }
             Message::PtyEvent(id, event) => {
@@ -6054,20 +6052,25 @@ impl App {
         ]
         .spacing(16)
         .align_y(iced::Center);
+        if let Some(tab) = self.tabs.get(self.active) {
+            if let Some((columns, rows)) = tab
+                .panes
+                .get(tab.focus)
+                .and_then(|pane| pane.terminal_grid_size)
+            {
+                right = right.push(status_text(format!("{columns}x{rows}")));
+            }
+            right = right.push(status_text("ssh".to_string()));
+        }
         if active_transfers > 0 {
             right = right.push(status_text(format!("{active_transfers} transfers")));
         }
         if running_tunnels > 0 {
             right = right.push(status_text(format!("{running_tunnels} tunnels")));
         }
-        right = right
-            .push(status_text(format!(
-                "{} saved profiles",
-                self.profiles.len()
-            )))
-            .push(status_text(
-                chrono::Local::now().format("%Y/%m/%d %H:%M").to_string(),
-            ));
+        right = right.push(status_text(
+            chrono::Local::now().format("%Y/%m/%d %H:%M").to_string(),
+        ));
         let mut left = row![status_text(if self.status.is_empty() {
             "Ready".to_string()
         } else {
@@ -7584,7 +7587,7 @@ impl App {
 
     fn dialog_view<'a>(&'a self, dialog: &'a Dialog) -> Element<'a, Message> {
         let title: &'static str = match dialog {
-            Dialog::Tools => "",
+            Dialog::Tools => "Tools",
             Dialog::Connection => {
                 if self.editing_profile.is_some() {
                     "Edit SSH connection"
