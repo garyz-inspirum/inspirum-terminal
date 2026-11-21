@@ -11,6 +11,7 @@ const GEAR_MENU_WIDTH: f32 = 200.0;
 /// Panels that have a body in this stage. Later stages add Filer, Shell, ...
 pub(super) fn available_panels() -> Vec<dock::Panel> {
     vec![
+        Panel::Sender,
         Panel::Session,
         Panel::Transfer,
         Panel::Filer,
@@ -42,6 +43,49 @@ fn strip_icon(icon: icons::Icon, message: Message) -> Element<'static, Message> 
 }
 
 impl App {
+    /// WindTerm "Sender": compose text and send it with the same
+    /// `CommandSend` path (and safety gates) as the Commands dialog.
+    pub(super) fn sender_panel(&self) -> Element<'_, Message> {
+        let header = row![
+            action("Send explicitly", Message::CommandSend).style(primary),
+            text("COMMAND SENDER · FOCUSED PANE")
+                .size(12)
+                .color(muted()),
+            space::horizontal(),
+            button(text("Command palette").size(12))
+                .padding([2, 6])
+                .style(icon_button)
+                .on_press(Message::Commands),
+        ]
+        .spacing(8)
+        .height(28)
+        .align_y(iced::Center);
+        let editor = text_editor(&self.command_content)
+            .placeholder("Remote-shell text to stage")
+            .on_action(Message::CommandEdit)
+            .font(iced::Font::MONOSPACE)
+            .size(13)
+            .height(Fill)
+            .padding(8)
+            .style(|theme: &Theme, status| {
+                let palette = theme::palette();
+                let mut style = text_editor::default(theme, status);
+                style.background = iced::Background::Color(palette.list);
+                style.border = iced::Border {
+                    width: 1.0,
+                    color: palette.border,
+                    radius: 0.0.into(),
+                };
+                style
+            });
+        column![header, editor]
+            .spacing(4)
+            .padding(4)
+            .width(Fill)
+            .height(Fill)
+            .into()
+    }
+
     /// Body of a dock panel. Add new panel bodies here as they move into docks.
     pub(super) fn dock_panel_body(&self, panel: dock::Panel) -> Element<'_, Message> {
         match panel {
@@ -49,7 +93,8 @@ impl App {
             Panel::Filer => self.filer_panel(),
             Panel::Explorer => self.explorer_panel(),
             Panel::Transfer => self.transfer_panel(),
-            Panel::Sender | Panel::Outline | Panel::Shell => column![].into(),
+            Panel::Sender => self.sender_panel(),
+            Panel::Outline | Panel::Shell => column![].into(),
         }
     }
 

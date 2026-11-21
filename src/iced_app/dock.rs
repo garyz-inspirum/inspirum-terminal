@@ -282,6 +282,24 @@ impl DockLayout {
         }
     }
 
+    /// Append available panels absent from every area to the bottom area,
+    /// keeping the active tab of every area unchanged.
+    pub(super) fn add_missing(&mut self, available: &[Panel]) {
+        for panel in available {
+            let present = Area::ALL
+                .iter()
+                .any(|area| self.area_mut(*area).panels.contains(panel));
+            if !present {
+                let bottom = self.area_mut(Area::Bottom);
+                let active = bottom.active_panel();
+                bottom.panels.push(*panel);
+                bottom.active = active
+                    .and_then(|a| bottom.panels.iter().position(|p| *p == a))
+                    .unwrap_or(0);
+            }
+        }
+    }
+
     /// Enforce invariants after deserialising untrusted input.
     pub(super) fn sanitize(&mut self) {
         let mut seen: Vec<Panel> = Vec::new();
@@ -526,5 +544,27 @@ mod tests {
         assert_invariants(&layout);
         assert_eq!(layout.area_of(Panel::Outline), None);
         assert_eq!(layout.right.panels, vec![Panel::Session]);
+    }
+
+    #[test]
+    fn dock_add_missing_appends_without_changing_active() {
+        let mut layout = DockLayout::preset(Preset::BottomTabs);
+        layout.close(Panel::Sender);
+        layout.activate(Panel::Session);
+        layout.add_missing(&[Panel::Sender, Panel::Session, Panel::Filer]);
+        assert_invariants(&layout);
+        assert_eq!(layout.area_of(Panel::Sender), Some(Area::Bottom));
+        assert_eq!(layout.bottom.panels.last(), Some(&Panel::Sender));
+        assert_eq!(layout.bottom.active_panel(), Some(Panel::Session));
+        let before = layout.clone();
+        layout.add_missing(&[Panel::Sender]);
+        assert_eq!(layout, before);
+    }
+
+    #[test]
+    fn dock_retain_available_keeps_active_panel() {
+        let mut layout = DockLayout::preset(Preset::BottomTabs);
+        layout.retain_available(&[Panel::Sender, Panel::Session, Panel::Filer]);
+        assert_eq!(layout.bottom.active_panel(), Some(Panel::Session));
     }
 }

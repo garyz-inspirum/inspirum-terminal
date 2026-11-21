@@ -2693,6 +2693,8 @@ struct App {
     active: usize,
     files: FilesState,
     remote_editor: Option<RemoteEditorState>,
+    /// True while the Sender dock editor owns keyboard input (cleared on pane focus).
+    sender_focused: bool,
     snippets_path: PathBuf,
     snippets: SnippetLibrary,
     command_query: String,
@@ -2821,6 +2823,7 @@ impl App {
             active: 0,
             files: FilesState::new(),
             remote_editor: None,
+            sender_focused: false,
             snippets_path,
             snippets,
             command_query: String::new(),
@@ -2835,6 +2838,7 @@ impl App {
                 let mut docks = saved_ui.docks.take().unwrap_or_default();
                 docks.sanitize();
                 docks.retain_available(&available_panels());
+                docks.add_missing(&available_panels());
                 docks
             },
             ui_state_path,
@@ -3084,6 +3088,7 @@ impl App {
         if self.privacy_locked
             || self.dialog.is_some()
             || self.remote_editor.is_some()
+            || self.sender_focused
             || !self.remote_keys.contains(&id)
             || !self.focused_pane_matches(id)
             || self.local_navigation.contains(&id)
@@ -3831,6 +3836,7 @@ impl App {
                 if self.focused_pane_matches(id)
                     && self.dialog.is_none()
                     && self.remote_editor.is_none()
+                    && !self.sender_focused
                     && !self.free_type.contains_key(&id)
                     && !self.remote_keys.contains(&id) =>
             {
@@ -4064,6 +4070,7 @@ impl App {
             }
             Message::CommandQuery(value) => self.command_query = value,
             Message::CommandEdit(action) => {
+                self.sender_focused = self.dialog.is_none();
                 self.command_content.perform(action);
                 self.command_sender = self.command_content.text();
             }
@@ -5526,6 +5533,7 @@ impl App {
                 self.status = "Independent auxiliary SSH shell opened in a right-hand pane (Ctrl/Cmd+Shift+J).".into();
             }
             Message::Focus(pane) => {
+                self.sender_focused = false;
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.focus = pane;
                 }
@@ -5965,15 +5973,16 @@ impl App {
             .height(Fill)
             .into();
         }
-        let target = if self.dialog.is_none() && self.remote_editor.is_none() {
-            self.focused_terminal_id().filter(|id| {
-                !self.local_navigation.contains(id)
-                    && !self.free_type.contains_key(id)
-                    && !self.remote_keys.contains(id)
-            })
-        } else {
-            None
-        };
+        let target =
+            if self.dialog.is_none() && self.remote_editor.is_none() && !self.sender_focused {
+                self.focused_terminal_id().filter(|id| {
+                    !self.local_navigation.contains(id)
+                        && !self.free_type.contains_key(id)
+                        && !self.remote_keys.contains(id)
+                })
+            } else {
+                None
+            };
         let cursor = self
             .ime_cursor
             .filter(|(id, _)| Some(*id) == target)
@@ -6790,7 +6799,8 @@ impl App {
                 canvas(TerminalCanvas {
                     focused: self.focused_terminal_id() == Some(pane.id)
                         && self.dialog.is_none()
-                        && self.remote_editor.is_none(),
+                        && self.remote_editor.is_none()
+                        && !self.sender_focused,
                     remote_key_mode: self.remote_keys.contains(&pane.id),
                     pane: id,
                     id: pane.id,
