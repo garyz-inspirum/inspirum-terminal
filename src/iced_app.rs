@@ -3798,6 +3798,22 @@ impl App {
         {
             return Task::none();
         }
+        // An open menu owns keyboard input, including queued IME and paste
+        // messages from before the overlay appeared.
+        if (self.open_menu.is_some() || self.dock_menu.is_some())
+            && matches!(
+                &message,
+                Message::TerminalImeCursor(..)
+                    | Message::TerminalImeCommit(..)
+                    | Message::RequestPaste
+                    | Message::ClipboardRead(..)
+                    | Message::ConfirmPaste
+                    | Message::PanePaste(..)
+                    | Message::RemoteCursorPress(..)
+            )
+        {
+            return Task::none();
+        }
         if matches!(&message, Message::ToggleLocalNavigation) {
             if self.dialog.is_some() || self.remote_editor.is_some() {
                 return Task::none();
@@ -5794,11 +5810,18 @@ impl App {
             })) => {
                 use keyboard::key::Named;
 
-                if (self.open_menu.is_some() || self.dock_menu.is_some())
+                if self.open_menu.is_some() || self.dock_menu.is_some() {
+                    if key.as_ref() == keyboard::Key::Named(Named::Escape) {
+                        self.open_menu = None;
+                        self.dock_menu = None;
+                    }
+                    return Task::none();
+                }
+                if self.sender_focused
+                    && self.dialog.is_none()
                     && key.as_ref() == keyboard::Key::Named(Named::Escape)
                 {
-                    self.open_menu = None;
-                    self.dock_menu = None;
+                    self.sender_focused = false;
                     return Task::none();
                 }
                 if modifiers.command()
@@ -6044,7 +6067,12 @@ impl App {
             .into();
         }
         let target =
-            if self.dialog.is_none() && self.remote_editor.is_none() && !self.sender_focused {
+            if self.dialog.is_none()
+                && self.remote_editor.is_none()
+                && !self.sender_focused
+                && self.open_menu.is_none()
+                && self.dock_menu.is_none()
+            {
                 self.focused_terminal_id().filter(|id| {
                     !self.local_navigation.contains(id)
                         && !self.free_type.contains_key(id)
@@ -10175,6 +10203,84 @@ mod tests {
         app.active = 1;
         assert!(!app.active_session_matches(&first_key));
         assert!(app.active_session_matches(&second_key));
+    }
+
+    fn pressed_key(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Message {
+        Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        }))
+    }
+
+    #[test]
+    fn menus_block_shortcuts_and_paste_without_dismissing_the_overlay() {
+        for dock in [false, true] {
+            let path = std::env::temp_dir().join(format!(
+                "inspirum-menu-keys-{}-{dock}-nonexistent.json",
+                std::process::id()
+            ));
+            let mut app = App::boot(path, None);
+            if dock {
+                app.dock_menu = Some(dock::Area::Bottom);
+            } else {
+                app.open_menu = Some(menu::Menu::Session);
+            }
+            let _ = app.update(pressed_key(
+                keyboard::Key::Character("n".into()),
+                keyboard::Modifiers::CTRL,
+            ));
+            assert!(app.dialog.is_none(), "menu must block application shortcuts");
+            let status = app.status.clone();
+            let _ = app.update(pressed_key(
+                keyboard::Key::Character("v".into()),
+                keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT,
+            ));
+            assert_eq!(app.status, status, "menu must block terminal paste");
+            assert_eq!(app.open_menu.is_some() || app.dock_menu.is_some(), true);
+            let _ = app.update(pressed_key(
+                keyboard::Key::Named(keyboard::key::Named::Escape),
+                keyboard::Modifiers::default(),
+            ));
+            assert!(app.open_menu.is_none() && app.dock_menu.is_none());
+        }
+    }
+
+    #[test]
+    fn menu_blocks_terminal_ime_cursor_updates() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-menu-ime-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session::default();
+        let pane = app.new_terminal_pane(profile.clone());
+        let id = pane.id;
+        app.tabs.push(Workspace::new(profile, pane));
+        app.open_menu = Some(menu::Menu::Edit);
+        let _ = app.update(Message::TerminalImeCursor(id, iced::Rectangle::default()));
+        assert!(app.ime_cursor.is_none(), "IME target must be disabled under a menu");
+    }
+
+    #[test]
+    fn ignored_escape_releases_sender_without_forwarding_or_erasing_draft() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-sender-ignored-escape-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.stage_command("keep this draft".into());
+        app.sender_focused = true;
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(!app.sender_focused, "Escape must release Sender focus locally");
+        assert_eq!(app.command_sender, "keep this draft");
     }
 
     #[test]
