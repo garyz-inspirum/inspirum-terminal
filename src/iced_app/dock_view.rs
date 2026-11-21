@@ -145,7 +145,8 @@ impl App {
                     icons::marker(panel.marker(), 11.0),
                     text(panel.title())
                         .size(theme::metrics::UI_TEXT)
-                        .color(p.text_dock),
+                        .color(p.text_dock)
+                        .wrapping(iced::widget::text::Wrapping::None),
                 ]
                 .spacing(6)
                 .align_y(iced::Center),
@@ -158,7 +159,8 @@ impl App {
                         icons::marker(panel.marker(), 11.0),
                         text(panel.title())
                             .size(theme::metrics::UI_TEXT)
-                            .color(p.text_dock),
+                            .color(p.text_dock)
+                            .wrapping(iced::widget::text::Wrapping::None),
                     ]
                     .spacing(6)
                     .align_y(iced::Center),
@@ -219,6 +221,7 @@ impl App {
             .padding([0, 6])
             .width(Fill)
             .height(theme::metrics::STRIP_HEIGHT)
+            .clip(true)
             .align_y(iced::Center)
             .style(|_| fill_style(theme::palette().chrome))
             .into()
