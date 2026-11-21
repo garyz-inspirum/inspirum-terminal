@@ -6067,21 +6067,20 @@ impl App {
             .height(Fill)
             .into();
         }
-        let target =
-            if self.dialog.is_none()
-                && self.remote_editor.is_none()
-                && !self.sender_focused
-                && self.open_menu.is_none()
-                && self.dock_menu.is_none()
-            {
-                self.focused_terminal_id().filter(|id| {
-                    !self.local_navigation.contains(id)
-                        && !self.free_type.contains_key(id)
-                        && !self.remote_keys.contains(id)
-                })
-            } else {
-                None
-            };
+        let target = if self.dialog.is_none()
+            && self.remote_editor.is_none()
+            && !self.sender_focused
+            && self.open_menu.is_none()
+            && self.dock_menu.is_none()
+        {
+            self.focused_terminal_id().filter(|id| {
+                !self.local_navigation.contains(id)
+                    && !self.free_type.contains_key(id)
+                    && !self.remote_keys.contains(id)
+            })
+        } else {
+            None
+        };
         let cursor = self
             .ime_cursor
             .filter(|(id, _)| Some(*id) == target)
@@ -10235,14 +10234,20 @@ mod tests {
                 keyboard::Key::Character("n".into()),
                 keyboard::Modifiers::CTRL,
             ));
-            assert!(app.dialog.is_none(), "menu must block application shortcuts");
+            assert!(
+                app.dialog.is_none(),
+                "menu must block application shortcuts"
+            );
             let status = app.status.clone();
             let _ = app.update(pressed_key(
                 keyboard::Key::Character("v".into()),
                 keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT,
             ));
             assert_eq!(app.status, status, "menu must block terminal paste");
-            assert_eq!(app.open_menu.is_some() || app.dock_menu.is_some(), true);
+            assert!(
+                app.open_menu.is_some() || app.dock_menu.is_some(),
+                "non-Escape keys must not dismiss the menu"
+            );
             let _ = app.update(pressed_key(
                 keyboard::Key::Named(keyboard::key::Named::Escape),
                 keyboard::Modifiers::default(),
@@ -10264,7 +10269,10 @@ mod tests {
         app.tabs.push(Workspace::new(profile, pane));
         app.open_menu = Some(menu::Menu::Edit);
         let _ = app.update(Message::TerminalImeCursor(id, iced::Rectangle::default()));
-        assert!(app.ime_cursor.is_none(), "IME target must be disabled under a menu");
+        assert!(
+            app.ime_cursor.is_none(),
+            "IME target must be disabled under a menu"
+        );
     }
 
     #[test]
@@ -10280,7 +10288,10 @@ mod tests {
             keyboard::Key::Named(keyboard::key::Named::Escape),
             keyboard::Modifiers::default(),
         ));
-        assert!(!app.sender_focused, "Escape must release Sender focus locally");
+        assert!(
+            !app.sender_focused,
+            "Escape must release Sender focus locally"
+        );
         assert_eq!(app.command_sender, "keep this draft");
     }
 
