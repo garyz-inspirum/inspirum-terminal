@@ -10,7 +10,7 @@ The graphical workflow uses OpenSSH batch commands for machine-readable operatio
 
 ## Browsing and remote operations
 
-The Files view shows local and remote directories side by side. Double-click folders to enter them, or use Up and Refresh. Remote operations include:
+Remote directories are shown in the **Filer** dock panel and local directories in the **Explorer** dock panel; the transfer queue is the **Transfer** panel. By default all three are tabs in the bottom dock. Each panel's gear menu moves it to the Left, Right or Bottom dock area; there are no Dock right / Dock bottom buttons. Double-click folders to enter them, or use Up and Refresh. Remote operations include:
 
 - create directory;
 - rename the selected entry;
@@ -92,6 +92,6 @@ The editor never executes the edited file and never launches it as a local proce
 
 ## WindTerm-style Files pane
 
-The graphical SFTP surface follows the same compact workspace language as the main terminal shell. Local and Remote are presented as side-by-side explorer panes with compact path bars and small parent/refresh controls. Low-frequency create/rename/delete forms are hidden under **Local actions** and **Remote actions** rather than occupying the primary workspace.
+Since the WindTerm layout rebuild (issue #140) the graphical SFTP surface is split into dock panels: **Filer** (remote files of the active session), **Explorer** (local files) and **Transfer** (queue). They can be shown or hidden from the View menu and moved between the Left, Right and Bottom dock areas with each panel's gear menu (Move to Left, Move to Right, Move to Bottom, Close). Dock areas are resized with their splitters. The `Window > Layout: Bottom tabs` preset (default) places them as bottom tabs; `Window > Layout: WindTerm default` places Filer and Explorer in the left dock and Transfer in the bottom dock.
 
-Upload, Download and Edit are grouped in a small transfer toolbar between the explorers and the optional editor. The remote editor uses a compact file header with modified/saved state plus explicit Save and Close controls. The transfer queue is only shown when jobs exist and is collapsible, keeping the normal file-browsing surface focused on the two file lists.
+File tables use the columns Name, Date Modified, Type, Size, Permissions, Owner and Group. The layout is described in [the WindTerm UI specification](design/windterm-ui-spec.md); its implementation status is in section 11 there.
