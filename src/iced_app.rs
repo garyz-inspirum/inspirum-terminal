@@ -1113,9 +1113,9 @@ struct FilesState {
     /// listing or the Filer sort changes, never during view construction.
     remote_order: Vec<usize>,
     /// Client-local date captured once when the current remote listing was
-    /// stored. Year inference for `ls` dates that omit a year is an
-    /// approximation against this date, not against the clock at each
-    /// comparison.
+    /// stored. Drives both the Date Modified sort key and the displayed date.
+    /// Year inference for `ls` dates that omit a year is an approximation
+    /// against this date, not against the clock at each comparison.
     remote_sort_reference: chrono::NaiveDate,
     /// Cheap instrumentation incremented each time local display order is
     /// recomputed. Tests read this to prove view construction does not re-sort.
@@ -1160,6 +1160,17 @@ impl FilesState {
             name_input: String::new(),
             transfers: Vec::new(),
         }
+    }
+
+    /// The visible date uses the same listing-time reference as the sort key,
+    /// so the label cannot change year between repaints while the row keeps
+    /// its sorted position.
+    fn remote_modified_label(&self, entry: &sftp::RemoteEntry) -> String {
+        entry
+            .modified
+            .as_deref()
+            .map(|raw| windterm_remote_date(raw, self.remote_sort_reference))
+            .unwrap_or_default()
     }
 }
 
@@ -7755,7 +7766,6 @@ impl App {
         } else if self.files.remote_entries.is_empty() {
             remote_list = remote_list.push(text("Directory is empty.").size(12).color(muted()));
         } else {
-            let today = chrono::Local::now().date_naive();
             let order = &self.files.remote_order;
             let entries = &self.files.remote_entries;
             let visible = self.files.remote_visible;
@@ -7767,11 +7777,7 @@ impl App {
                 let cells = FileListingCells {
                     name: display_leaf(&entry.name),
                     is_dir: entry.is_dir,
-                    modified: entry
-                        .modified
-                        .as_deref()
-                        .map(|raw| windterm_remote_date(raw, today))
-                        .unwrap_or_default(),
+                    modified: self.files.remote_modified_label(entry),
                     kind: windterm_type(&entry.name, entry.is_dir),
                     size: entry
                         .size
@@ -12472,5 +12478,34 @@ mod tests {
             .map(|&index| app.files.remote_entries[index].name.as_str())
             .collect();
         assert_eq!(names, ["december", "january"]);
+    }
+
+    #[test]
+    fn remote_date_label_and_sort_key_share_the_listing_reference() {
+        let (_dir, mut app) = boot_sort_app("date-label-reference");
+        let mut entry = sftp::RemoteEntry::new("rollover", false, Some(1));
+        entry.modified = Some("Nov 22 00:01".into());
+
+        let before_midnight = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        app.files.remote_sort_reference = before_midnight;
+        let label = app.files.remote_modified_label(&entry);
+        let again = app.files.remote_modified_label(&entry);
+        let key_year = ls_modified_sort_key("Nov 22 00:01", before_midnight)
+            .unwrap()
+            .0;
+        assert_eq!(label, "2025/11/22 00:01");
+        assert_eq!(label, again);
+        assert_eq!(key_year, 2025);
+        assert!(label.starts_with(&format!("{key_year:04}/")));
+
+        let after_midnight = chrono::NaiveDate::from_ymd_opt(2026, 11, 22).unwrap();
+        app.files.remote_sort_reference = after_midnight;
+        let label = app.files.remote_modified_label(&entry);
+        let key_year = ls_modified_sort_key("Nov 22 00:01", after_midnight)
+            .unwrap()
+            .0;
+        assert_eq!(label, "2026/11/22 00:01");
+        assert_eq!(key_year, 2026);
+        assert!(label.starts_with(&format!("{key_year:04}/")));
     }
 }
