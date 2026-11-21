@@ -73,30 +73,52 @@ impl App {
         } else {
             for &panel in &state.panels {
                 let is_active = Some(panel) == active;
-                let tab = button(
-                    container(
-                        row![
-                            icons::marker(panel.marker(), 11.0),
-                            text(panel.title())
-                                .size(theme::metrics::UI_TEXT)
-                                .color(p.text_dock),
-                        ]
-                        .spacing(6)
-                        .align_y(iced::Center),
-                    )
-                    .padding([2, 8])
-                    .style(if is_active {
-                        tab_active_fill
-                    } else {
-                        tab_inactive_fill
-                    }),
+                let label = container(
+                    row![
+                        icons::marker(panel.marker(), 11.0),
+                        text(panel.title())
+                            .size(theme::metrics::UI_TEXT)
+                            .color(p.text_dock),
+                    ]
+                    .spacing(6)
+                    .align_y(iced::Center),
                 )
-                .padding(1)
-                .style(|_: &Theme, _| button::Style {
-                    background: Some(theme::palette().border.into()),
-                    ..Default::default()
-                })
-                .on_press(Message::DockActivate(panel));
+                .padding([2, 8])
+                .style(if is_active {
+                    tab_active_fill
+                } else {
+                    tab_inactive_fill
+                });
+                // Active dock tab: lighter fill, 2px accent top line (as the
+                // session tabs) and no bottom border so it merges with the body.
+                let label: Element<'_, Message> = if is_active {
+                    stack![
+                        label,
+                        container(space::horizontal())
+                            .width(Fill)
+                            .height(2)
+                            .style(accent_fill)
+                    ]
+                    .into()
+                } else {
+                    label.into()
+                };
+                let tab = button(label)
+                    .padding(if is_active {
+                        iced::Padding {
+                            top: 1.0,
+                            right: 1.0,
+                            bottom: 0.0,
+                            left: 1.0,
+                        }
+                    } else {
+                        iced::Padding::new(1.0)
+                    })
+                    .style(|_: &Theme, _| button::Style {
+                        background: Some(theme::palette().border.into()),
+                        ..Default::default()
+                    })
+                    .on_press(Message::DockActivate(panel));
                 strip = strip.push(tab);
             }
         }
