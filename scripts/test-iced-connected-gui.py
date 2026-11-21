@@ -64,12 +64,17 @@ class MonitoredServer(fixture.NativeServer):
         return MonitoredSession(self.events)
 
 
+# Exists only to prove the tour fails when the echo is missing.
+# Must not suppress any other echo.
+TOUR_WITHHOLD_ECHO = os.environ.get("INSPIRUM_GUI_TOUR_WITHHOLD_ECHO") == "1"
+
 
 async def monitored_shell(
     stdin: asyncssh.SSHReader[str],
     stdout: asyncssh.SSHWriter[str],
     stderr: asyncssh.SSHWriter[str],
     events: fixture.EventLog,
+    probe_state: dict[str, str | None],
 ) -> None:
     # AsyncSSH dispatches all sessions through SSHServerStreamSession when
     # sftp_factory is configured. In that mode SSHServer.session_requested()
@@ -92,6 +97,10 @@ async def monitored_shell(
             if not chunk:
                 events.write("SHELL_STREAM_EOF")
                 return
+            # Observe *any* PTY bytes while a chrome control owns focus,
+            # including incomplete lines and a bare Escape. Never log input.
+            if probe_state["phase"] is not None:
+                events.write(f"UNEXPECTED_{probe_state['phase']}_PTY_INPUT")
             buffer += chunk.replace("\r\n", "\n").replace("\r", "\n")
             # Cursor-key escape sequences are unbuffered PTY input, not
             # newline-terminated shell commands. Detect them as bytes arrive;
@@ -118,7 +127,18 @@ async def monitored_shell(
                     events.write("REMOTE_CURSOR_LEFT")
                     stdout.write("NATIVE_REMOTE_CURSOR_LEFT\r\n")
                 elif line.startswith("echo:"):
-                    stdout.write(f"NATIVE_ECHO:{line[5:]}\r\n")
+                    if line == "echo:TOUR_PROBE" and TOUR_WITHHOLD_ECHO:
+                        continue
+                    answer = f"NATIVE_ECHO:{line[5:]}"
+                    if line in (
+                        "echo:TOUR_PROBE",
+                        "echo:TERMINAL_OWNED",
+                        "echo:AFTER_MENU",
+                        "echo:AFTER_SENDER_ESCAPE",
+                        "echo:AFTER_GEAR",
+                    ):
+                        events.write(answer)
+                    stdout.write(f"{answer}\r\n")
                 elif line == "exit":
                     events.write("SESSION_EXIT_REQUEST")
                     return
@@ -206,6 +226,11 @@ def _key(text: str) -> str:
     return "".join(ch for ch in text if ch.isalnum() or ch == ".")
 
 
+# Monospace dotted zeros in 13 px table cells are read as ``@``, which _key
+# would drop entirely. Map it back before the exact 3-char prefix check.
+_OCR_GLYPH_FIXES = str.maketrans({"@": "0"})
+
+
 def _near_key(text: str, label: str) -> bool:
     """Whole-line match tolerating a few single-glyph OCR confusions.
 
@@ -213,7 +238,7 @@ def _near_key(text: str, label: str) -> bool:
     ``GUI`` read as ``GUL`` or ``bin`` as ``bir`` cannot turn one fixture name
     into another; the digit prefix and length must still match exactly.
     """
-    got, want = _key(text), _key(label)
+    got, want = _key(text.translate(_OCR_GLYPH_FIXES)), _key(label)
     if len(want) < 12 or len(got) != len(want):
         return False
     if got[:3] != want[:3]:
@@ -224,6 +249,12 @@ def _near_key(text: str, label: str) -> bool:
 def match_visible_segment(segments, label: str):
     """Match a label against each OCR'd segment as a whole, with tolerance."""
     for words in segments:
+        if not words:
+            continue
+        # Drop leading icon glyphs (file icons read as ``)`` or ``*``) so the
+        # bounds and click centre sit on the name, not the icon.
+        while words and not _key(words[0][0].translate(_OCR_GLYPH_FIXES)):
+            words = words[1:]
         if not words:
             continue
         joined = "".join(word[0] for word in words)
@@ -287,7 +318,7 @@ def match_visible_label(rows, label: str):
     A match is either one OCR token (arrows may be glued on, as in
     ``Upload->``) or a left-to-right run of tokens on the same visible
     line whose normalized text equals the label. A proper prefix such as
-    ``000_GUI_DOWNLOAD`` is not a click target. Tokens on the next line
+    ``444_GUI_DOWNLOAD`` is not a click target. Tokens on the next line
     are not consumed.
     """
     target = _key(label)
@@ -432,7 +463,7 @@ def _ocr_tsv(tesseract: str, image: Path, psm: str) -> str:
     try:
         result = subprocess.run(
             [tesseract, str(image), "stdout", "--psm", psm, "tsv"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=15 * TIME_SCALE,
         )
     except subprocess.TimeoutExpired:
         return ""
@@ -456,7 +487,9 @@ def _scaled_words(tsv: str, origin, scale: int):
     return words
 
 
-def _upscaled_crop(rows, channels, box, scale: int, dest: Path) -> None:
+def _upscaled_crop(
+    rows, channels, box, scale: int, dest: Path, *, invert: bool = False,
+) -> None:
     left, top, right, bot = box
     width = right - left + 1
     height = bot - top + 1
@@ -468,7 +501,11 @@ def _upscaled_crop(rows, channels, box, scale: int, dest: Path) -> None:
         for x in range(out_w):
             base = (left + min(width - 1, x // scale)) * channels
             dest_at = (y * out_w + x) * 3
-            rgb[dest_at:dest_at + 3] = source[base:base + 3]
+            if invert:
+                lum = 255 - (source[base] + source[base + 1] + source[base + 2]) // 3
+                rgb[dest_at:dest_at + 3] = bytes((lum, lum, lum))
+            else:
+                rgb[dest_at:dest_at + 3] = source[base:base + 3]
     _write_png(dest, out_w, out_h, bytes(rgb))
 
 
@@ -552,14 +589,18 @@ def _band_segments(width, rows, channels, thresh, y1, y2, gap: int):
     return [(x1, x2) for x1, x2 in segments if x2 - x1 >= 40]
 
 
-def visible_segment_rows(path: Path, tesseract: str):
+def visible_segment_rows(path: Path, tesseract: str, *, invert: bool = False):
     """OCR each light band segment by segment; coordinates in source pixels.
 
     Returns a list of per-segment word lists so a caller can match one
     segment as a whole without neighbouring controls on the same line.
+
+    ``invert`` re-reads each segment as dark-on-light grey. On the dark theme
+    a 13 px monospace table cell (file icon + name) read as noise in colour
+    but as ``@@@_GUI_DOWNLOAD_FIXTURE. bir`` inverted.
     """
     stat = path.stat()
-    key = (str(path), stat.st_mtime_ns, stat.st_size, "segments")
+    key = (str(path), stat.st_mtime_ns, stat.st_size, "segments", invert)
     cached = _PIXEL_CACHE.get(key)
     if cached is not None:
         return cached
@@ -580,7 +621,7 @@ def visible_segment_rows(path: Path, tesseract: str):
                 )
                 if box[2] - box[0] < 24:
                     continue
-                _upscaled_crop(rows, channels, box, 4, temporary)
+                _upscaled_crop(rows, channels, box, 4, temporary, invert=invert)
                 segments.append(_scaled_words(
                     _ocr_tsv(tesseract, temporary, "7"), (box[0], box[1]), 4,
                 ))
@@ -641,31 +682,116 @@ def visible_pixel_rows(path: Path, tesseract: str, *, clusters: bool = False):
     return words
 
 
-def ocr_rows(path: Path, tesseract: str, region=None):
-    source = path
-    offset = (0, 0)
-    scale = 1
-    temporary = None
-    if region is not None:
-        temporary = path.with_suffix(".crop.png")
-        x1, y1, x2, y2 = region
-        result = subprocess.run(
-            ["convert", str(path), "-crop", f"{x2 - x1}x{y2 - y1}+{x1}+{y1}",
-             "+repage", "-resize", "300%", "-colorspace", "Gray",
-             "-contrast-stretch", "5%x5%", str(temporary)],
-            capture_output=True, text=True, timeout=15,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"visible label crop failed: {result.stderr[:200]}")
-        source = temporary
-        offset = (x1, y1)
-        scale = 3
+def _region_crop_upscaled(path: Path, region, scale: int, dest: Path, *, invert: bool = False):
+    """Crop ``region`` from ``path`` and write it upscaled (nearest) as grey.
+
+    Pure python (no ImageMagick): grey conversion once per source pixel, then
+    whole rows are repeated with bytes multiplication, so a 1280x250 crop at
+    x3 stays well under a second even on a loaded host. Returns the clamped
+    crop origin.
+    """
+    width, height, channels, rows = _read_png(path)
+    x1, y1, x2, y2 = region
+    x1 = max(0, min(width - 1, x1))
+    y1 = max(0, min(height - 1, y1))
+    x2 = max(x1 + 1, min(width, x2))
+    y2 = max(y1 + 1, min(height, y2))
+    out_rows = []
+    for y in range(y1, y2):
+        row = rows[y]
+        line = bytearray()
+        for x in range(x1, x2):
+            base = x * channels
+            lum = (row[base] + row[base + 1] + row[base + 2]) // 3
+            if invert:
+                lum = 255 - lum
+            line += bytes((lum, lum, lum)) * scale
+        out_rows.append(bytes(line) * scale)
+    _write_png(dest, (x2 - x1) * scale, (y2 - y1) * scale, b"".join(out_rows))
+    return x1, y1
+
+
+def region_upscaled_rows(path: Path, tesseract: str, region, *, psm: str = "6",
+                         scale: int = 3, invert: bool = False):
+    """OCR an upscaled crop of ``region``; word boxes in window coordinates."""
+    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
     try:
-        tsv = _ocr_tsv(tesseract, source, "6" if region is not None else "11")
+        origin = _region_crop_upscaled(path, region, scale, temporary, invert=invert)
+        tsv = _ocr_tsv(tesseract, temporary, psm)
     finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-    return _scaled_words(tsv, offset, scale)
+        temporary.unlink(missing_ok=True)
+    return _scaled_words(tsv, origin, scale)
+
+
+def ocr_rows(path: Path, tesseract: str, region=None):
+    if region is not None:
+        return region_upscaled_rows(path, tesseract, region, psm="6")
+    return _scaled_words(_ocr_tsv(tesseract, path, "11"), (0, 0), 1)
+
+
+# One locate attempt must fit well inside the caller's retry window
+# (click_label / locate_rendered_label retry with fresh screenshots).
+# Slow/loaded hosts (local docker runs) raise it via INSPIRUM_GUI_OCR_BUDGET.
+# The budget gates only the expensive whole-window stages; the region crop
+# stages and the bounded inverted segment search always get their turn.
+LOCATE_BUDGET_S = float(os.environ.get("INSPIRUM_GUI_OCR_BUDGET", "12"))
+# Multiplier for waits that wrap screenshots + OCR (not protocol events).
+TIME_SCALE = float(os.environ.get("INSPIRUM_GUI_TIME_SCALE", "1.0"))
+# Last-resort inverted stage gets at least this long even after slow stages.
+INVERTED_MIN_S = 10.0 * TIME_SCALE
+# Session toolbar + tab bar; the inverted stage never scans above it unless
+# the caller passes an explicit region.
+TOOLBAR_BOTTOM_Y = 90
+
+
+def _inverted_segment_search(path: Path, tesseract: str, label: str, region, deadline):
+    """Last resort: re-read light segments inverted (dark on light grey, x4).
+
+    Bounded: only segments inside ``region`` (or below the session toolbar
+    when no region is given) are OCR'd, the search stops at the first
+    matching segment, and it gives up at ``deadline``. Returns
+    ``(bounds_or_None, segments_read)``.
+    """
+    width, height, channels, rows = _read_png(path)
+    if region is not None:
+        rx1, ry1, rx2, ry2 = region
+    else:
+        rx1, ry1, rx2, ry2 = 0, TOOLBAR_BOTTOM_Y, width, height
+    thresh = _text_threshold(width, height, channels, rows)
+    segments = []
+    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    try:
+        for y1, y2 in _visible_bands(width, height, channels, rows, thresh):
+            if y2 < ry1 or y1 > ry2:
+                continue
+            for x1, x2 in _band_segments(width, rows, channels, thresh, y1, y2, 24):
+                if x2 < rx1 or x1 > rx2:
+                    continue
+                if time.monotonic() >= deadline:
+                    return None, segments
+                box = (
+                    min(width - 1, x1 + 3),
+                    max(0, y1 - 4),
+                    max(0, x2 - 3),
+                    min(height - 1, y2 + 4),
+                )
+                if box[2] - box[0] < 24:
+                    continue
+                _upscaled_crop(rows, channels, box, 4, temporary, invert=True)
+                words = _scaled_words(
+                    _ocr_tsv(tesseract, temporary, "7"), (box[0], box[1]), 4,
+                )
+                if not words:
+                    continue
+                segments.append(words)
+                bounds = match_visible_label(words, label)
+                if bounds is None:
+                    bounds = match_visible_segment([words], label)
+                if bounds is not None:
+                    return bounds, segments
+    finally:
+        temporary.unlink(missing_ok=True)
+    return None, segments
 
 
 def locate_visible_label(
@@ -673,6 +799,7 @@ def locate_visible_label(
     label: str,
     *,
     region=None,
+    budget: float = LOCATE_BUDGET_S,
 ):
     """Return conservative interior bounds for one visibly rendered label.
 
@@ -686,8 +813,28 @@ def locate_visible_label(
     tesseract = shutil.which("tesseract")
     if tesseract is None:
         raise RuntimeError("visible label targeting requires tesseract")
-    bounds = match_visible_label(ocr_rows(path, tesseract, region), label)
-    if bounds is None:
+    started = time.monotonic()
+    deadline = started + budget
+    bounds = None
+    first_words = []
+    if region is not None:
+        # Small monospace text reads far better upscaled; a crop is cheap.
+        # Never skipped by the budget.
+        for psm, invert in (("6", False), ("11", False), ("6", True)):
+            words = region_upscaled_rows(
+                path, tesseract, region, psm=psm, invert=invert,
+            )
+            if not first_words:
+                first_words = words
+            bounds = match_visible_label(words, label)
+            if bounds is None:
+                bounds = match_visible_segment([words], label)
+            if bounds is not None:
+                break
+    else:
+        first_words = ocr_rows(path, tesseract, None)
+        bounds = match_visible_label(first_words, label)
+    if bounds is None and time.monotonic() < deadline:
         pixel_rows = visible_pixel_rows(path, tesseract, clusters=False)
         if region is not None:
             x1, y1, x2, y2 = region
@@ -701,18 +848,36 @@ def locate_visible_label(
             bounds = match_visible_label(inside, label)
         if bounds is None:
             bounds = match_visible_label(pixel_rows, label)
-    if bounds is None:
+    if bounds is None and time.monotonic() < deadline:
         bounds = match_visible_label(
             visible_pixel_rows(path, tesseract, clusters=True), label,
         )
-    if bounds is None:
+    if bounds is None and time.monotonic() < deadline:
         segments = visible_segment_rows(path, tesseract)
         flat = [word for words in segments for word in words]
         bounds = match_visible_label(flat, label)
         if bounds is None:
             bounds = match_visible_segment(segments, label)
     if bounds is None:
-        raise RuntimeError(f"visible label not found in screenshot: {label}")
+        bounds, inverted = _inverted_segment_search(
+            path, tesseract, label, region,
+            max(deadline, time.monotonic() + INVERTED_MIN_S),
+        )
+    else:
+        inverted = []
+    if bounds is None:
+        seen = [row[0] for row in first_words][:40]
+        segs = [" ".join(word[0] for word in words) for words in inverted][:20]
+        print(
+            f"OCR miss for {label!r} in {path} region={region} "
+            f"after {time.monotonic() - started:.1f}s\n"
+            f"  words: {seen}\n  inverted segments: {segs}",
+            file=sys.stderr,
+        )
+        raise RuntimeError(
+            f"visible label not found in screenshot: {label} "
+            f"(screenshot: {path}, region={region})"
+        )
     return bounds
 
 
@@ -732,8 +897,10 @@ def diff(first: Path, second: Path, env: dict[str, str]) -> int:
 
 async def locate_rendered_label(
     window: str, path: Path, label: str, *, env: dict[str, str], timeout: float = 22,
+    region=None,
 ):
     """Screenshot repeatedly until the label is rendered; return its bounds."""
+    timeout *= TIME_SCALE
     # OCR and screenshots block for seconds. The fixture SSH server shares
     # this event loop, so run them off-loop or the GUI's sftp connections
     # time out during banner exchange while we are looking at the screen.
@@ -741,11 +908,108 @@ async def locate_rendered_label(
     while True:
         await asyncio.to_thread(screenshot, window, path, env)
         try:
-            return await asyncio.to_thread(locate_visible_label, path, label)
+            return await asyncio.to_thread(
+                locate_visible_label, path, label, region=region,
+            )
         except RuntimeError:
             if time.monotonic() >= deadline:
                 raise
             await asyncio.sleep(.5)
+
+
+async def click_label(
+    window: str, shot_path: Path, label: str, env: dict[str, str], *,
+    region=None, timeout: float = 22, settle: float = .5,
+):
+    """Screenshot until ``label`` is rendered (optionally inside ``region``),
+    click its centre with a native pointer event and return its bounds.
+
+    Screenshot and OCR run off the event loop (the fixture SSH server shares
+    it), exactly like ``locate_rendered_label``.
+    """
+    timeout *= TIME_SCALE
+    deadline = time.monotonic() + timeout
+    while True:
+        await asyncio.to_thread(screenshot, window, shot_path, env)
+        try:
+            bounds = await asyncio.to_thread(
+                locate_visible_label, shot_path, label, region=region,
+            )
+            break
+        except RuntimeError:
+            if time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(.5)
+    command(
+        "xdotool", "mousemove", "--window", window,
+        *map(str, center(bounds)), "click", "1", env=env,
+    )
+    await asyncio.sleep(settle)
+    return bounds
+
+
+def window_size(window: str, env: dict[str, str]) -> tuple[int, int]:
+    geometry = command("xdotool", "getwindowgeometry", "--shell", window, env=env)
+    fields = dict(
+        line.split("=", 1) for line in geometry.splitlines() if "=" in line
+    )
+    return int(fields["WIDTH"]), int(fields["HEIGHT"])
+
+
+def dock_strip_region(width: int, height: int):
+    """Bottom dock tab strip (Session/Transfer/Filer/Explorer) search box.
+
+    The bottom dock occupies roughly the lower 30% of the window; its strip
+    sits at y~538..567 for an 800px window. Search a generous band so OCR of
+    a tab label never matches the centre toolbar's 'Files' button.
+    """
+    return (0, int(height * .62), width, int(height * .76))
+
+
+SIDE_FILE_DOCK_WIDTH = 420
+
+
+def dock_body_region(
+    width: int, height: int, *, right: bool = False, bottom_top: int | None = None,
+):
+    """Dock body (file rows, Upload/Download, Transfer queue rows).
+
+    Bottom dock: full width, lower third above the status bar. Right dock:
+    a file panel moved into a side dock widens it to 420px, so search
+    x = width - 420 - 4 .. width, from below the 32px menu bar down to the
+    top of the bottom dock (``bottom_top``, from the OCR-located bottom
+    strip when available, else 0.66 * height).
+    """
+    if right:
+        lower = bottom_top if bottom_top is not None else int(height * .66)
+        return (width - SIDE_FILE_DOCK_WIDTH - 4, 32, width, lower)
+    return (0, int(height * .66), width, height - 22)
+
+
+async def drag_horizontal(
+    window: str, env: dict[str, str], start_x: int, end_x: int, y: int, *, steps: int = 6,
+) -> None:
+    """Native left-button drag: press at start, move in steps, release."""
+    command(
+        "xdotool", "mousemove", "--window", window, str(start_x), str(y), env=env,
+    )
+    await asyncio.sleep(.2)
+    command("xdotool", "mousedown", "1", env=env)
+    await asyncio.sleep(.2)
+    for i in range(1, steps + 1):
+        x = start_x + (end_x - start_x) * i // steps
+        command(
+            "xdotool", "mousemove", "--window", window, str(x), str(y), env=env,
+        )
+        await asyncio.sleep(.08)
+    await asyncio.sleep(.2)
+    command("xdotool", "mouseup", "1", env=env)
+    await asyncio.sleep(.6)
+
+
+def gear_menu_region(width: int, height: int):
+    """Dock gear menu rows (Move to Right / Move to Bottom): right 30%."""
+    return (int(width * .70), 0, width, height)
 
 
 async def wait_for(predicate, label: str, *, timeout: float = 22) -> None:
@@ -754,6 +1018,40 @@ async def wait_for(predicate, label: str, *, timeout: float = 22) -> None:
         if time.monotonic() >= deadline:
             raise RuntimeError(f"timeout waiting for {label}")
         await asyncio.sleep(.2)
+
+
+async def click_filer_refresh(
+    window: str, env: dict[str, str], shot_path: Path, *,
+    path_bar_y: int, completed, label: str, attempt_timeout: float = 6,
+) -> None:
+    """Click the Filer path bar's text-less refresh icon until ``completed``.
+
+    Switching between the Explorer and Filer dock tabs does NOT reload the
+    remote listing (panels only re-list when going hidden -> visible), so the
+    refresh icon must be clicked. Measured at 1280x800 with a bottom dock:
+    tab labels y~552, path bar y=567..598; at its right end 'Up' ~(1185,584),
+    refresh icon (1222,584) with a ~22x22 hit box, 'Go' (1256,584) spanning
+    x 1238..1274. So the icon is at x = width - 58, y = tab-label y + 32. The
+    path bar's right end stays at the window's right edge for a right dock
+    (strip y~46, so path bar y~78). Retry at x-8 then x+8 before raising.
+    """
+    width, _ = window_size(window, env)
+    base_x = width - 58
+    offsets = (0, -8, 8)
+    for index, offset in enumerate(offsets):
+        command(
+            "xdotool", "mousemove", "--window", window,
+            str(base_x + offset), str(path_bar_y), "click", "1", env=env,
+        )
+        await asyncio.sleep(.3)
+        screenshot(window, shot_path, env)
+        last = index == len(offsets) - 1
+        try:
+            await wait_for(completed, label, timeout=22 if last else attempt_timeout)
+            return
+        except RuntimeError:
+            if last:
+                raise
 
 
 async def click_transfer(
@@ -788,6 +1086,174 @@ def reserved_display() -> str:
     raise RuntimeError("no disposable Xvfb display number available")
 
 
+TOUR = os.environ.get("INSPIRUM_GUI_TOUR") == "1"
+
+
+async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app_log: Path) -> int:
+    """LIGHT-theme screenshot tour (INSPIRUM_GUI_TOUR=1).
+
+    The window, a real SSH session, and the terminal echo probe are required.
+    Every other step logs a warning and continues. Coordinates assume the
+    1280x800 layout.
+    """
+    tour_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+
+    def log_text() -> str:
+        return events.path.read_text(encoding="utf-8")
+
+    def key(*keys: str) -> None:
+        command("xdotool", "windowfocus", window, "key", "--clearmodifiers", *keys, env=env)
+
+    def click(x: int, y: int) -> None:
+        command("xdotool", "mousemove", "--window", window, str(x), str(y), "click", "1", env=env)
+
+    def shot(name: str) -> None:
+        path = tour_dir / name
+        screenshot(window, path, env)
+        written.append(path)
+        print(f"tour: wrote {path}", flush=True)
+
+    async def step(label: str, coro_fn) -> None:
+        try:
+            await coro_fn()
+        except Exception as error:  # best-effort tour
+            print(f"tour: WARNING step {label!r} failed: {error}", flush=True)
+
+    width, height = 1280, 800
+    try:
+        width, height = window_size(window, env)
+    except Exception as error:
+        print(f"tour: WARNING window_size failed ({error}); assuming 1280x800", flush=True)
+    strip_y = 552
+
+    await asyncio.sleep(2)
+
+    async def s01():
+        shot("tour-01-start.png")
+    await step("start", s01)
+
+    async def s02():
+        click(30, 16)
+        await asyncio.sleep(1)
+        shot("tour-02-menu-session.png")
+        key("Escape")
+        await asyncio.sleep(.5)
+    await step("menu-session", s02)
+
+    async def s03():
+        # Session(7)=71, Edit(4)=47.2, View starts ~118, width ~47 -> centre ~142.
+        click(142, 16)
+        await asyncio.sleep(1)
+        shot("tour-03-menu-view.png")
+        key("Escape")
+        await asyncio.sleep(.5)
+    await step("menu-view", s03)
+
+    async def s04():
+        key("ctrl+n")
+        await asyncio.sleep(1.5)
+        shot("tour-04-new-connection.png")
+        key("Escape")
+        await asyncio.sleep(.5)
+    await step("new-connection", s04)
+
+    # Steps 4-5 are mandatory: a real SSH session must start.
+    if "SESSION_STARTED" not in log_text():
+        for y in (630, 653, 612, 676, 699):
+            click(200, y)
+            await asyncio.sleep(1.5)
+            if "SESSION_STARTED" in log_text():
+                break
+            key("Escape")
+    if "SESSION_STARTED" not in log_text():
+        print(
+            "tour: FAILED clicking the saved profile never started a real SSH session. "
+            "SSH events: " + repr(log_text()[-800:])
+            + "; application log tail: " + app_log.read_text(encoding="utf-8")[-1800:],
+            flush=True,
+        )
+        return 1
+    await asyncio.sleep(2)
+    shot("tour-05-terminal.png")
+
+    # Required: a missed echo fails the tour. INSPIRUM_GUI_TOUR_WITHHOLD_ECHO=1
+    # makes the fixture stay silent so this path can be proven.
+    command("xdotool", "windowfocus", window, env=env)
+    probe_typed_at = time.time()
+    command("xdotool", "type", "--delay", "20", "echo:TOUR_PROBE", env=env)
+    key("Return")
+    try:
+        await wait_for(
+            lambda: "NATIVE_ECHO:TOUR_PROBE" in log_text().splitlines(),
+            "tour shell answered NATIVE_ECHO:TOUR_PROBE",
+        )
+    except RuntimeError:
+        print(
+            "tour: FAILED terminal did not answer echo:TOUR_PROBE "
+            + log_text()[-800:],
+            flush=True,
+        )
+        return 1
+    await asyncio.sleep(1)
+    echo_shot = tour_dir / "tour-06-terminal-output.png"
+    if echo_shot.exists():
+        echo_shot.unlink()
+    shot("tour-06-terminal-output.png")
+    if not echo_shot.is_file() or echo_shot.stat().st_mtime <= probe_typed_at:
+        print(
+            "tour: FAILED tour-06-terminal-output.png missing or not newer than the echo probe",
+            flush=True,
+        )
+        return 1
+
+    async def s07():
+        key("ctrl+shift+r")
+        await asyncio.sleep(2)
+        shot("tour-07-split.png")
+    await step("split", s07)
+
+    async def s08():
+        key("ctrl+shift+f")
+        await wait_for(lambda: "SFTP_LIST_READY" in log_text(), "remote SFTP listing")
+        await asyncio.sleep(1.5)
+        shot("tour-08-filer.png")
+    await step("filer", s08)
+
+    # Bottom dock tab centres (Sender 6-88, Session 92-182, Transfer 186-283,
+    # Filer ~287-361, Explorer ~365-463).
+    for x, name in ((414, "tour-09-explorer.png"), (234, "tour-10-transfer.png"),
+                    (47, "tour-11-sender.png"), (137, "tour-12-session.png"),
+                    (324, None)):
+        async def tab(x=x, name=name):
+            click(x, strip_y)
+            await asyncio.sleep(1.5)
+            if name:
+                shot(name)
+        await step(name or "filer-again", tab)
+
+    async def s13():
+        click(width - 40, strip_y)
+        await asyncio.sleep(1)
+        shot("tour-13-gear-menu.png")
+        key("Escape")
+        await asyncio.sleep(.5)
+    await step("gear-menu", s13)
+
+    async def s14():
+        key("ctrl+comma")
+        await asyncio.sleep(1.5)
+        shot("tour-14-tools.png")
+        key("Escape")
+        await asyncio.sleep(.5)
+    await step("tools", s14)
+
+    print(f"tour: {len(written)} screenshots written:", flush=True)
+    for path in written:
+        print(f"  {path}", flush=True)
+    return 0
+
+
 async def main() -> int:
     if sys.platform != "linux":
         raise RuntimeError("Linux-only native GUI fixture")
@@ -804,12 +1270,13 @@ async def main() -> int:
         root = Path(temp)
         events = fixture.EventLog(root / "ssh-events.log")
         events.path.write_text("", encoding="utf-8")
+        probe_state: dict[str, str | None] = {"phase": None}
         host = fixture.generate_key(root, "host")
         client = fixture.generate_key(root, "client")
         trusted = asyncssh.read_public_key(str(client) + ".pub")
         remote_root = root / "remote-sftp"
         remote_root.mkdir()
-        download_name = "000_GUI_DOWNLOAD_FIXTURE.bin"
+        download_name = "444_GUI_DOWNLOAD_FIXTURE.bin"
         download_bytes = b"GUI_DOWNLOAD_FIXTURE\x00\xff\r\n" + bytes(range(256)) * 8
         (remote_root / download_name).write_bytes(download_bytes)
         local_root = root / "local-files"
@@ -827,7 +1294,7 @@ async def main() -> int:
             line_editor=False,
             sftp_factory=lambda chan: isolated_sftp_server(chan, remote_root, events),
             session_factory=lambda stdin, stdout, stderr: monitored_shell(
-                stdin, stdout, stderr, events
+                stdin, stdout, stderr, events, probe_state
             ),
         )
         port = server.get_port()
@@ -859,6 +1326,11 @@ async def main() -> int:
             DISPLAY=reserved_display(),
             XDG_RUNTIME_DIR=str(runtime),
             INSPIRUM_CI_REMOTE_KEY_TRACE="1",
+            # The WindTerm-style chrome defaults to a LIGHT theme. The OCR
+            # band/threshold helpers (_visible_bands, _text_threshold) assume
+            # light text on a dark background, so force the dark chrome.
+            # The tour (INSPIRUM_GUI_TOUR=1) captures the default LIGHT chrome.
+            INSPIRUM_THEME="light" if TOUR else "dark",
         )
         xvfb = subprocess.Popen(
             ["Xvfb", env["DISPLAY"], "-screen", "0", "1440x1000x24", "-nolisten", "tcp"],
@@ -896,23 +1368,52 @@ async def main() -> int:
                     raise RuntimeError("production connected Iced window never appeared")
 
                 command("xdotool", "windowfocus", window, env=env)
+                if TOUR:
+                    # Screenshot tour instead of the acceptance sequence; the
+                    # surrounding finally block performs the usual teardown.
+                    return await run_tour(
+                        window, destination.parent / "tour", env, events, app_log,
+                    )
                 # The native graphics stack may still be initializing after
                 # the X11 window first appears, especially on shared runners.
+                # A fixed 2 s wait is still blank on a loaded host; screenshot()
+                # rejects that as "empty GUI screenshot". Retry only that miss.
+                first_frame_deadline = time.monotonic() + 20 * TIME_SCALE
                 await asyncio.sleep(2)
-                screenshot(window, destination / "connected-before-open.png", env)
-
-                # First item appears after the session search and 'Ungrouped'
-                # label. Try bounded points in the *saved session list*, never
-                # the destructive dialogs or global desktop. Authentication,
-                # rather than a screenshot delta alone, proves the click worked.
-                for y in (235, 255, 275, 295, 315, 335, 355, 375):
-                    command("xdotool", "mousemove", "--window", window, "110", str(y), "click", "1", env=env)
-                    await asyncio.sleep(1.5)
-                    if "SESSION_STARTED" in events.path.read_text(encoding="utf-8"):
+                first_frame = destination / "connected-before-open.png"
+                while True:
+                    try:
+                        screenshot(window, first_frame, env)
                         break
-                    # A CI screenshot coordinate may land on a nonterminal
-                    # affordance; dismiss its dialog before trying next row.
-                    command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                    except RuntimeError as error:
+                        if "empty GUI screenshot" not in str(error):
+                            raise
+                        if first_frame_deadline - time.monotonic() < 1:
+                            raise
+                        await asyncio.sleep(1)
+
+                # Saved sessions are listed in the bottom Session dock panel
+                # (Filter row, 'Sessions' group row, then one flat 23px row per
+                # profile). Locate the profile name by OCR and single-click
+                # it; fall back to bounded points in the session list rows,
+                # never destructive dialogs. Authentication, rather than a
+                # screenshot delta alone, proves the click worked.
+                try:
+                    await click_label(
+                        window, destination / "connected-session-list.png",
+                        "CI connected fixture", env, timeout=8, settle=1.5,
+                    )
+                except RuntimeError:
+                    pass
+                if "SESSION_STARTED" not in events.path.read_text(encoding="utf-8"):
+                    for y in (630, 653, 612, 676, 699):
+                        command("xdotool", "mousemove", "--window", window, "200", str(y), "click", "1", env=env)
+                        await asyncio.sleep(1.5)
+                        if "SESSION_STARTED" in events.path.read_text(encoding="utf-8"):
+                            break
+                        # A coordinate may land on a nonterminal affordance;
+                        # dismiss any dialog before trying the next row.
+                        command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
                 if "SESSION_STARTED" not in events.path.read_text(encoding="utf-8"):
                     raise RuntimeError(
                         "clicking the saved profile never started a real SSH session. "
@@ -922,11 +1423,208 @@ async def main() -> int:
                 await asyncio.sleep(1)
                 screenshot(window, destination / "connected-terminal.png", env)
 
+                # The session-list click that started SSH does not prove the
+                # focused pane owns the keyboard: the dock filter is a text
+                # input, and a button click is not the terminal. Click the
+                # pane and require an echo before any negative PTY assertion,
+                # or a chrome control that never had the keys would pass.
+                command(
+                    "xdotool", "windowfocus", window, "mousemove", "--window", window,
+                    "640", "280", "click", "1", env=env,
+                )
+                await asyncio.sleep(.3)
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:TERMINAL_OWNED", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: "NATIVE_ECHO:TERMINAL_OWNED" in events.path.read_text(encoding="utf-8").splitlines(),
+                    "terminal owns keyboard before chrome menu probes",
+                )
+
+                # Session menu, Sender editor and bottom-dock gear must own
+                # keyboard input locally. Arm the PTY watch only after the
+                # opening click settles: that click can resize the PTY, and
+                # resize is not keyboard input. Watch raw chunks, not just
+                # completed commands, so a stray Escape or unterminated
+                # sentinel fails. Do not select a gear/menu row from the
+                # keyboard; legitimate menu choices stay mouse-only later.
+                command("xdotool", "mousemove", "--window", window,
+                        "30", "16", "click", "1", env=env)
+                await asyncio.sleep(.3)
+                probe_state["phase"] = "MENU"
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "MENU_LOCAL_SENTINEL", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                await asyncio.sleep(.6)
+                if "UNEXPECTED_MENU_PTY_INPUT" in events.path.read_text(encoding="utf-8"):
+                    raise RuntimeError("Session menu forwarded typing, Return, or Escape to SSH")
+                probe_state["phase"] = None
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:AFTER_MENU", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: "NATIVE_ECHO:AFTER_MENU" in events.path.read_text(encoding="utf-8").splitlines(),
+                    "shell echo after dismissing Session menu",
+                )
+
+                # DockActivate on the tab does not focus the text_editor.
+                # Click the editor body (below the 28px header) or typed
+                # keys still belong to the terminal and the probe is vacuous.
+                command("xdotool", "mousemove", "--window", window,
+                        "47", "552", "click", "1", env=env)
+                await asyncio.sleep(.3)
+                command("xdotool", "mousemove", "--window", window,
+                        "240", "680", "click", "1", env=env)
+                await asyncio.sleep(.3)
+                probe_state["phase"] = "SENDER"
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "SENDER_LOCAL_SENTINEL", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                await asyncio.sleep(.6)
+                if "UNEXPECTED_SENDER_PTY_INPUT" in events.path.read_text(encoding="utf-8"):
+                    raise RuntimeError("Sender dock forwarded typing, Return, or Escape to SSH")
+                probe_state["phase"] = None
+                # Do not click the terminal: Escape itself must restore focus.
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:AFTER_SENDER_ESCAPE", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: "NATIVE_ECHO:AFTER_SENDER_ESCAPE" in events.path.read_text(encoding="utf-8").splitlines(),
+                    "shell echo after Sender Escape without terminal click",
+                )
+
+                # Bottom-dock gear at the tour coordinate (width-40, strip
+                # centre 552 on the 1280x800 window). Open with the mouse,
+                # then watch only the following keys. Do not click a row.
+                gear_width, _gear_height = window_size(window, env)
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    str(gear_width - 40), "552", "click", "1", env=env,
+                )
+                await asyncio.sleep(.3)
+                probe_state["phase"] = "GEAR"
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "GEAR_LOCAL_SENTINEL", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                await asyncio.sleep(.6)
+                if "UNEXPECTED_GEAR_PTY_INPUT" in events.path.read_text(encoding="utf-8"):
+                    raise RuntimeError("dock gear menu forwarded typing, Return, or Escape to SSH")
+                probe_state["phase"] = None
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:AFTER_GEAR", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: "NATIVE_ECHO:AFTER_GEAR" in events.path.read_text(encoding="utf-8").splitlines(),
+                    "shell echo after dismissing dock gear menu",
+                )
+                if any(
+                    marker in events.path.read_text(encoding="utf-8")
+                    for marker in (
+                        "UNEXPECTED_MENU_PTY_INPUT",
+                        "UNEXPECTED_SENDER_PTY_INPUT",
+                        "UNEXPECTED_GEAR_PTY_INPUT",
+                    )
+                ):
+                    raise RuntimeError("menu, Sender or dock gear input leaked into SSH PTY")
+
+                # Ctrl+Shift+J toggles an auxiliary shell: a second independent
+                # SSH pane for the same profile. With a menu open the chord must
+                # not close or reopen it; Escape alone must restore the chord
+                # (do not click the terminal before the closing press). Leave
+                # probe_state["phase"] as None: the auxiliary session's own
+                # startup output is not keyboard leakage. Fails while a menu-open
+                # chord still disconnects the shell.
+                def count(marker: str) -> int:
+                    return sum(
+                        1
+                        for line in events.path.read_text(encoding="utf-8").splitlines()
+                        if line == marker
+                    )
+
+                def press_ctrl_shift_j() -> None:
+                    command(
+                        "xdotool", "windowfocus", window, "key",
+                        "--clearmodifiers", "ctrl+shift+j", env=env,
+                    )
+
+                command(
+                    "xdotool", "windowfocus", window, "mousemove", "--window", window,
+                    "640", "280", "click", "1", env=env,
+                )
+                await asyncio.sleep(.3)
+                started0 = count("SESSION_STARTED")
+                closed0 = count("SESSION_CLOSED:clean")
+                press_ctrl_shift_j()
+                await wait_for(
+                    lambda: count("SESSION_STARTED") == started0 + 1,
+                    "auxiliary shell opened by Ctrl+Shift+J",
+                )
+                await asyncio.sleep(1)
+                screenshot(window, destination / "connected-aux-shell-open.png", env)
+
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    "30", "16", "click", "1", env=env,
+                )
+                await asyncio.sleep(.4)
+                press_ctrl_shift_j()
+                await asyncio.sleep(min(8, 2 * TIME_SCALE))
+                if (
+                    count("SESSION_CLOSED:clean") != closed0
+                    or count("SESSION_STARTED") != started0 + 1
+                ):
+                    raise RuntimeError(
+                        "Ctrl+Shift+J under the Session menu closed or reopened the auxiliary shell"
+                    )
+                screenshot(
+                    window, destination / "connected-aux-shell-session-menu.png", env,
+                )
+                command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                await asyncio.sleep(.4)
+
+                # Opening the auxiliary shell splits the workspace, but the
+                # bottom dock is unchanged: the gear probe's point still hits.
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    str(gear_width - 40), "552", "click", "1", env=env,
+                )
+                await asyncio.sleep(.4)
+                press_ctrl_shift_j()
+                await asyncio.sleep(min(8, 2 * TIME_SCALE))
+                if (
+                    count("SESSION_CLOSED:clean") != closed0
+                    or count("SESSION_STARTED") != started0 + 1
+                ):
+                    raise RuntimeError(
+                        "Ctrl+Shift+J under the dock gear menu closed or reopened the auxiliary shell"
+                    )
+                screenshot(
+                    window, destination / "connected-aux-shell-gear-menu.png", env,
+                )
+                command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                await asyncio.sleep(.4)
+
+                # No terminal click: the shortcut must work again after Escape.
+                press_ctrl_shift_j()
+                await wait_for(
+                    lambda: count("SESSION_CLOSED:clean") == closed0 + 1,
+                    "auxiliary shell closed by Ctrl+Shift+J after the menu was dismissed",
+                )
+                await asyncio.sleep(1)
+
                 # These shortcuts are intentionally exercised through native
                 # Iced keyboard events, never a direct Rust state transition.
+                # The auxiliary shell already added one SESSION_STARTED and one
+                # clean close, so later lifetime counts are relative to here.
+                started_before_split = count("SESSION_STARTED")
+                shells_ended_before_split = count("SHELL_HANDLER_ENDED")
+                shell_eof_before_split = count("SHELL_STREAM_EOF")
                 command("xdotool", "windowfocus", window, "key", "--clearmodifiers", "ctrl+shift+r", env=env)
                 await wait_for(
-                    lambda: events.path.read_text(encoding="utf-8").count("SESSION_STARTED") >= 2,
+                    lambda: count("SESSION_STARTED") >= started_before_split + 1,
                     "second real SSH pane via Ctrl+Shift+R",
                 )
                 await asyncio.sleep(1)
@@ -968,17 +1666,31 @@ async def main() -> int:
                     )
                 screenshot(window, destination / "connected-files-bottom-dock.png", env)
 
+                width, height = window_size(window, env)
+                strip = dock_strip_region(width, height)
+                body = dock_body_region(width, height)
+
+                # Toggling Files activates the Filer (REMOTE) tab of the bottom
+                # dock. The remote fixture row must be visibly targetable.
                 bottom = destination / "connected-files-bottom-dock.png"
-                local_row = locate_visible_label(bottom, upload_name)
-                remote_row = locate_visible_label(bottom, download_name)
-                upload_action = locate_visible_label(
-                    bottom, "Upload", region=(280, 520, 470, 585),
+                remote_row = await asyncio.to_thread(locate_visible_label, bottom, download_name, region=body,
                 )
-                download_action = locate_visible_label(
-                    bottom, "Download", region=(380, 520, 700, 585),
+                if remote_row[3] <= remote_row[1]:
+                    raise RuntimeError("bottom-dock remote file row is not visibly targetable")
+
+                # Explorer tab = LOCAL listing with the 'Upload ->' action.
+                explorer_shot = destination / "connected-files-explorer.png"
+                await click_label(window, explorer_shot, "Explorer", env, region=strip, settle=.8)
+                local_row = await locate_rendered_label(
+                    window, explorer_shot, upload_name, env=env,
+                    region=body, timeout=40,
                 )
-                if local_row[3] <= local_row[1] or remote_row[3] <= remote_row[1]:
-                    raise RuntimeError("bottom-dock file rows are not visibly targetable")
+                upload_action = await asyncio.to_thread(
+                    locate_visible_label, explorer_shot, "Upload",
+                    region=(0, int(height * .62), width, height - 22),
+                )
+                if local_row[3] <= local_row[1]:
+                    raise RuntimeError("bottom-dock local file row is not visibly targetable")
 
                 # Select the only local fixture row and activate Upload through
                 # native Iced pointer events. Filesystem bytes are the transfer
@@ -997,10 +1709,20 @@ async def main() -> int:
                 await asyncio.sleep(.7)
                 screenshot(window, destination / "connected-files-uploaded.png", env)
 
-                # The remote fixture name sorts first, so the first REMOTE row
-                # is deterministic even after upload refresh. Activate Download
-                # through the production button and verify the exact binary
-                # payload landed in the visible local browser directory.
+                # Back to the Filer tab (REMOTE). The remote fixture name sorts
+                # first, so the first row is deterministic even after the
+                # upload refresh. Activate '<- Download' and verify the exact
+                # binary payload landed in the Explorer's local directory.
+                filer_shot = destination / "connected-files-filer.png"
+                await click_label(window, filer_shot, "Filer", env, region=strip, settle=.8)
+                remote_row = await locate_rendered_label(
+                    window, filer_shot, download_name, env=env,
+                    region=body, timeout=40,
+                )
+                download_action = await asyncio.to_thread(
+                    locate_visible_label, filer_shot, "Download",
+                    region=(0, int(height * .62), width, height - 22),
+                )
                 downloaded = local_root / download_name
                 if downloaded.exists():
                     raise RuntimeError(
@@ -1029,27 +1751,31 @@ async def main() -> int:
                 # Two completed transfers must not consume the listings. Select
                 # another visibly rendered, distinct remote file through the
                 # production row control; its selection styling is the oracle.
+                # The text 'Refresh' button is gone (icon only) and switching
+                # Explorer <-> Filer tabs does not reload the listing; activate
+                # Filer, then click its path-bar refresh icon (see helper).
+                # Prefixes 111 < 444 < 999 are distinct and OCR-safe (no 0/O);
+                # the third file sorts first, so it stays visible at 960x640.
                 third_name = "111_GUI_THIRD_FIXTURE.bin"
                 third_bytes = b"GUI_THIRD_FIXTURE" + bytes(range(32))
                 (remote_root / third_name).write_bytes(third_bytes)
-                refresh_bounds = await asyncio.to_thread(
-                    locate_visible_label, destination / "connected-files-downloaded.png", "Refresh",
-                )
                 listings_before = events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY")
-                command(
-                    "xdotool", "mousemove", "--window", window,
-                    *map(str, center(refresh_bounds)), "click", "1", env=env,
+                filer_tab = await click_label(
+                    window, destination / "connected-files-refresh-back.png",
+                    "Filer", env, region=strip, settle=.3,
                 )
-                await wait_for(
-                    lambda: events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY") > listings_before,
-                    "remote listing refresh after creating distinct fixture",
+                await click_filer_refresh(
+                    window, env, destination / "connected-files-refresh-clicked.png",
+                    path_bar_y=center(filer_tab)[1] + 32,
+                    completed=lambda: events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY") > listings_before,
+                    label="remote listing refresh after creating distinct fixture",
                 )
                 # The fixture event fires when the server answered the listing;
                 # the Iced view repaints afterwards. Poll the rendered window
                 # until the distinct filename is actually visible.
                 third_row = await locate_rendered_label(
                     window, destination / "connected-files-third-visible.png",
-                    third_name, env=env,
+                    third_name, env=env, region=body, timeout=40,
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
@@ -1063,10 +1789,17 @@ async def main() -> int:
                 ) < 20:
                     raise RuntimeError("distinct post-transfer file row was not visibly selected")
 
-                # The populated queue is a bounded viewport. Scroll its visible
-                # interior and retain the resulting production screenshot.
-                queue_bounds = locate_visible_label(
-                    destination / "connected-files-third-selected.png", "TRANSFER QUEUE",
+                # The populated queue lives in the Transfer tab. Both completed
+                # jobs must be listed; scroll its visible interior and retain
+                # the resulting production screenshot.
+                queue_shot = destination / "connected-files-queue.png"
+                await click_label(window, queue_shot, "Transfer", env, region=strip, settle=.8)
+                queue_bounds = await locate_rendered_label(
+                    window, queue_shot, download_name, env=env,
+                    region=body, timeout=40,
+                )
+                await asyncio.to_thread(
+                    locate_visible_label, queue_shot, upload_name, region=body,
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
@@ -1075,6 +1808,14 @@ async def main() -> int:
                 )
                 await asyncio.sleep(.4)
                 screenshot(window, destination / "connected-files-queue-scrolled.png", env)
+                await click_label(
+                    window, destination / "connected-files-filer-again.png",
+                    "Filer", env, region=strip, settle=.8,
+                )
+                await locate_rendered_label(
+                    window, destination / "connected-files-filer-again.png",
+                    third_name, env=env, region=body, timeout=40,
+                )
 
                 # Minimum-size acceptance is interaction, not a screenshot-only
                 # artifact. The same distinct row must remain visibly targetable.
@@ -1089,8 +1830,10 @@ async def main() -> int:
                         f"geometry was {minimum_geometry!r}"
                     )
                 screenshot(window, destination / "connected-files-min-window.png", env)
-                minimum_row = locate_visible_label(
+                minimum_row = await asyncio.to_thread(
+                    locate_visible_label,
                     destination / "connected-files-min-window.png", third_name,
+                    region=dock_body_region(960, 640),
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
@@ -1102,34 +1845,113 @@ async def main() -> int:
                 await asyncio.sleep(.7)
                 screenshot(window, destination / "connected-files-restored.png", env)
 
-                # Exercise the actual bottom -> right -> bottom controls and
-                # prove a listing remains targetable after returning.
-                dock_right = locate_visible_label(
-                    destination / "connected-files-restored.png", "Dock right",
-                    region=(1050, 380, 1270, 450),
+                # Exercise the dock gear menu bottom -> right -> bottom on the
+                # active Filer panel and prove a listing remains targetable.
+                # The gear is a text-less icon at (right edge - 40, strip
+                # centre); derive its y from the OCR-located Filer tab.
+                width, height = window_size(window, env)
+                filer_tab = await asyncio.to_thread(
+                    locate_visible_label, destination / "connected-files-restored.png",
+                    "Filer", region=dock_strip_region(width, height),
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
-                    *map(str, center(dock_right)), "click", "1", env=env,
+                    str(width - 40), str(center(filer_tab)[1]), "click", "1", env=env,
                 )
-                await asyncio.sleep(.7)
+                await asyncio.sleep(.5)
+                await click_label(
+                    window, destination / "connected-files-gear-menu.png",
+                    "Move to Right", env, settle=.9,
+                    region=gear_menu_region(width, height),
+                )
                 screenshot(window, destination / "connected-files-side-dock.png", env)
                 if diff(
                     destination / "connected-files-restored.png",
                     destination / "connected-files-side-dock.png", env,
                 ) < 3000:
-                    raise RuntimeError("Dock right did not visibly re-dock Files")
-                dock_bottom = locate_visible_label(
-                    destination / "connected-files-side-dock.png", "Dock bottom",
+                    raise RuntimeError("Move to Right did not visibly re-dock Filer")
+                # The bottom dock (Sender/Session/Transfer/Explorer) stays
+                # below the right dock; its strip top bounds the side dock.
+                bottom_top = max(32 + 100, filer_tab[1] - 8)
+                side_region = dock_body_region(
+                    width, height, right=True, bottom_top=bottom_top,
+                )
+                side_row = await locate_rendered_label(
+                    window, destination / "connected-files-side-dock.png", third_name, env=env,
+                    region=side_region, timeout=40,
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
-                    *map(str, center(dock_bottom)), "click", "1", env=env,
+                    *map(str, center(side_row)), "click", "1", env=env,
                 )
-                await asyncio.sleep(.7)
+                await asyncio.sleep(.4)
+                screenshot(window, destination / "connected-files-side-selected.png", env)
+
+                # The dock splitter is a 5px grab column centred at
+                # x = width - dock_width - 3. Drag it 200px left: the dock
+                # widens to ~620px and the file row moves with its edge.
+                await drag_horizontal(
+                    window, env, width - SIDE_FILE_DOCK_WIDTH - 3, width - 620, 300,
+                )
+                screenshot(window, destination / "connected-files-side-resized.png", env)
+                resized_pixels = diff(
+                    destination / "connected-files-side-selected.png",
+                    destination / "connected-files-side-resized.png", env,
+                )
+                if resized_pixels < 3000:
+                    raise RuntimeError(
+                        "dock splitter dragging did not resize the dock: "
+                        f"{resized_pixels} pixels changed after dragging x "
+                        f"{width - SIDE_FILE_DOCK_WIDTH - 3} -> {width - 620}"
+                    )
+                resized_row = await locate_rendered_label(
+                    window, destination / "connected-files-side-resized.png",
+                    third_name, env=env,
+                    region=(width - 660, 32, width, bottom_top), timeout=20,
+                )
+                if not (width - 640 <= resized_row[0] <= width - 560):
+                    raise RuntimeError(
+                        "dock splitter drag did not move the side dock edge: "
+                        f"file row left edge {resized_row[0]}, expected "
+                        f"{width - 640}..{width - 560}"
+                    )
+                # Drag back so later steps see the 420px side dock.
+                await drag_horizontal(
+                    window, env, width - 620 - 3, width - SIDE_FILE_DOCK_WIDTH, 300,
+                )
+                screenshot(window, destination / "connected-files-side-restored.png", env)
+
+                # The right dock's strip sits just under the 32px menu bar;
+                # the gear is at (width - 40, strip centre). Take the strip
+                # y from the OCR-located Filer tab when found, else 46.
+                gear_y = 46
+                try:
+                    side_tab = await asyncio.to_thread(
+                        locate_visible_label,
+                        destination / "connected-files-side-restored.png",
+                        "Filer", region=(width - 430, 32, width, 62),
+                    )
+                    gear_y = center(side_tab)[1]
+                except RuntimeError:
+                    pass
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    str(width - 40), str(gear_y), "click", "1", env=env,
+                )
+                await asyncio.sleep(.5)
+                await click_label(
+                    window, destination / "connected-files-gear-menu-right.png",
+                    "Move to Bottom", env, settle=.9,
+                    region=gear_menu_region(width, height),
+                )
                 screenshot(window, destination / "connected-files-redocked-bottom.png", env)
-                redocked_row = locate_visible_label(
-                    destination / "connected-files-redocked-bottom.png", third_name,
+                # Move to Bottom appends Filer as the LAST bottom tab (Sender,
+                # Session, Transfer, Explorer, Filer) and activates it; locate
+                # the row in the dock body, never by Filer's old tab position.
+                redocked_row = await locate_rendered_label(
+                    window, destination / "connected-files-redocked-bottom.png",
+                    third_name, env=env,
+                    region=dock_body_region(width, height), timeout=40,
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
@@ -1265,12 +2087,19 @@ async def main() -> int:
                     lambda: "SCREEN_OFF" in events.path.read_text(encoding="utf-8"),
                     "live SSH alternate-screen leave",
                 )
-                await asyncio.sleep(.5)
-                screenshot(window, destination / "connected-fullscreen-restored.png", env)
-                fullscreen_pixels = diff(
-                    destination / "connected-fullscreen-active.png",
-                    destination / "connected-fullscreen-restored.png", env,
-                )
+                # SCREEN_OFF is a server event, not a repaint: on a loaded
+                # host the canvas can still show the alternate screen half a
+                # second later. Poll until the restore is visible.
+                restore_deadline = time.monotonic() + 10 * TIME_SCALE
+                while True:
+                    await asyncio.sleep(.5)
+                    screenshot(window, destination / "connected-fullscreen-restored.png", env)
+                    fullscreen_pixels = diff(
+                        destination / "connected-fullscreen-active.png",
+                        destination / "connected-fullscreen-restored.png", env,
+                    )
+                    if fullscreen_pixels >= 1500 or time.monotonic() >= restore_deadline:
+                        break
                 if fullscreen_pixels < 1500:
                     raise RuntimeError(
                         f"alternate-screen restore changed only {fullscreen_pixels} pixels"
@@ -1323,7 +2152,14 @@ async def main() -> int:
                 event_log = events.path.read_text(encoding="utf-8")
                 if "SHELL_PTY_RESIZE" not in event_log:
                     raise RuntimeError("connected SSH fixture never observed a live PTY resize")
-                if "SHELL_HANDLER_ENDED" in event_log or "SHELL_STREAM_EOF" in event_log:
+                # The auxiliary-shell probe closes one shell on purpose. Anything
+                # beyond that baseline is an unexpected exit during the rest.
+                if (
+                    sum(line == "SHELL_HANDLER_ENDED" for line in event_log.splitlines())
+                    > shells_ended_before_split
+                    or sum(line == "SHELL_STREAM_EOF" for line in event_log.splitlines())
+                    > shell_eof_before_split
+                ):
                     raise RuntimeError(
                         "SSH terminal unexpectedly exited during split/dock/focus acceptance: "
                         + repr(event_log[-900:])
@@ -1332,8 +2168,19 @@ async def main() -> int:
                     raise RuntimeError("privacy curtain forwarded synthetic keyboard input to SSH")
                 if "UNEXPECTED_FREE_TYPE_PTY_INPUT" in event_log:
                     raise RuntimeError("free-type editing leaked synthetic input to remote SSH PTY")
-                if event_log.count("AUTH_ACCEPT:native-smoke") < 2:
-                    raise RuntimeError("two distinct SSH panes were not authenticated")
+                if any(
+                    marker in event_log
+                    for marker in (
+                        "UNEXPECTED_MENU_PTY_INPUT",
+                        "UNEXPECTED_SENDER_PTY_INPUT",
+                        "UNEXPECTED_GEAR_PTY_INPUT",
+                    )
+                ):
+                    raise RuntimeError("Session menu, Sender or dock gear keyboard input leaked to SSH")
+                if event_log.count("AUTH_ACCEPT:native-smoke") < 3:
+                    raise RuntimeError(
+                        "three sessions (main, auxiliary, split) were not authenticated"
+                    )
                 (destination / "connected-acceptance.txt").write_text(
                     "PASS: two authenticated independent OpenSSH PTYs through production Iced\n"
                     "PASS: native Files dock established actual isolated SSH SFTP subsystem\n"
@@ -1351,6 +2198,10 @@ async def main() -> int:
                     f"Alternate-screen screenshot change: {fullscreen_pixels} pixels\n"
                     f"Remote-key mode screenshot change: {remote_keys_pixels} pixels\n"
                     "PASS: real remote-key Left arrow reached the isolated SFTP-capable SSH shell\n"
+                    "PASS: terminal owned the keyboard before chrome menu probes\n"
+                    "PASS: Session menu, Sender and dock gear consumed typing, Return and Escape without SSH input\n"
+                    "PASS: shell answered AFTER_MENU, AFTER_SENDER_ESCAPE and AFTER_GEAR without terminal re-click\n"
+                    "PASS: Ctrl+Shift+J under the Session and dock gear menus left the auxiliary SSH shell connected; it closed it after Escape\n"
                     "PASS: privacy-locked and free-type synthetic text never reached SSH\n"
                     "All keys generated in isolated temporary fixture; no real host or credential.\n",
                     encoding="utf-8",

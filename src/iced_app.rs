@@ -3,8 +3,15 @@
 //! This module intentionally reuses the existing validated Session/profile model.
 //! The frontend uses the live PTY backend and preserves
 //! host-key, argv, paste, process-lifecycle, or transfer safeguards.
+mod dock;
+mod dock_view;
+use dock_view::available_panels;
+mod icons;
+mod menu;
 mod terminal_ime;
+mod theme;
 mod tools;
+mod ui_state;
 
 use crate::{
     ProxyAuth, ProxyKind, Session, SessionImportMode,
@@ -18,11 +25,12 @@ use crate::{
 };
 use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
 use iced::widget::{
-    button, canvas, center, column, container, mouse_area, opaque, operation, pane_grid,
-    responsive, row, scrollable, sensor, space, stack, text, text_editor, text_input,
+    Column, button, canvas, center, column, container, mouse_area, opaque, operation, pane_grid,
+    progress_bar, responsive, row, scrollable, sensor, space, stack, text, text_editor, text_input,
 };
 use iced::{
-    Border, Color, Element, Fill, Font, Subscription, Task, Theme, event, font, keyboard, mouse,
+    Border, Color, Element, Fill, Font, Length, Subscription, Task, Theme, event, font, keyboard,
+    mouse,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -36,15 +44,27 @@ use std::{
     time::{Duration, Instant},
 };
 
-const BG: Color = Color::from_rgb8(14, 18, 25);
-const PANEL: Color = Color::from_rgb8(22, 29, 40);
-const ELEVATED: Color = Color::from_rgb8(30, 40, 55);
-const LINE: Color = Color::from_rgb8(48, 62, 81);
-const FG: Color = Color::from_rgb8(231, 237, 247);
-const MUTED: Color = Color::from_rgb8(163, 177, 196);
-const BLUE: Color = Color::from_rgb8(123, 176, 255);
-const GREEN: Color = Color::from_rgb8(113, 217, 171);
-const DANGER: Color = Color::from_rgb8(255, 138, 151);
+/// Fixed accent for marks drawn on the terminal canvas (link/IME underlines).
+/// The terminal keeps its own dark palette, independent of the chrome theme.
+const TERMINAL_ACCENT: Color = Color::from_rgb8(123, 176, 255);
+
+// Chrome colour lookups against the current WindTerm theme palette.
+fn fg() -> Color {
+    theme::palette().text
+}
+fn muted() -> Color {
+    theme::palette().muted
+}
+fn blue() -> Color {
+    theme::palette().accent
+}
+fn green() -> Color {
+    theme::palette().success
+}
+fn danger() -> Color {
+    theme::palette().danger
+}
+
 const TERMINAL_CELL_WIDTH: f32 = 8.4;
 const TERMINAL_CELL_HEIGHT: f32 = 18.0;
 const FILES_PAGE_SIZE: usize = 200;
@@ -300,27 +320,17 @@ fn local_navigation_scroll(key: &keyboard::Key, modifiers: keyboard::Modifiers) 
 }
 
 pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result {
+    theme::init_from_env();
     iced::application(
         move || App::boot(profiles_path.clone(), ssh_config.clone()),
         App::update,
         App::view,
     )
     .title("Inspirum Terminal")
-    .theme(|_: &App| {
-        Theme::custom(
-            "Inspirum",
-            iced::theme::Palette {
-                background: BG,
-                text: FG,
-                primary: BLUE,
-                success: GREEN,
-                warning: Color::from_rgb8(240, 190, 100),
-                danger: DANGER,
-            },
-        )
-    })
+    .theme(|_: &App| theme::iced_theme())
     .settings(iced::Settings {
-        default_text_size: iced::Pixels(14.0),
+        default_font: Font::MONOSPACE,
+        default_text_size: iced::Pixels(theme::metrics::UI_TEXT),
         ..Default::default()
     })
     .window(iced::window::Settings {
@@ -329,8 +339,25 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
         ..Default::default()
     })
     .scale_factor(|app: &App| app.scale as f32)
-    .subscription(|_: &App| {
+    .subscription(|app: &App| {
+        let drag = if app.dock_drag.is_some() {
+            event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::DockDragMove(position))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                ))
+                | iced::Event::Mouse(iced::mouse::Event::CursorLeft)
+                | iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::DockDragEnd),
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
         Subscription::batch([
+            drag,
+            iced::window::resize_events().map(|(_, size)| Message::WindowResized(size)),
             event::listen_with(|event, status, _| match &event {
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if privacy_lock_chord(key, *modifiers) =>
@@ -340,23 +367,23 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if focus_mode_chord(key, *modifiers) =>
                 {
-                    Some(Message::ToggleFocusMode)
+                    Some(Message::KeyChord(KeyChord::FocusMode))
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if free_type_chord(key, *modifiers) =>
                 {
-                    Some(Message::ToggleFocusedFreeType)
+                    Some(Message::KeyChord(KeyChord::FreeType))
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if remote_keys_chord(key, *modifiers) =>
                 {
-                    Some(Message::ToggleFocusedRemoteKeys)
+                    Some(Message::KeyChord(KeyChord::RemoteKeys))
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if status == event::Status::Ignored
                         && local_navigation_chord(key, *modifiers) =>
                 {
-                    Some(Message::ToggleLocalNavigation)
+                    Some(Message::KeyChord(KeyChord::LocalNavigation))
                 }
                 // A focused text field can consume Escape. Route only this
                 // captured key to dialog dismissal; never leak it to SSH.
@@ -383,7 +410,7 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                         && modifiers.shift()
                         && matches!(key.as_ref(), keyboard::Key::Character("r" | "R")) =>
                 {
-                    Some(Message::Split(pane_grid::Axis::Vertical))
+                    Some(Message::KeyChord(KeyChord::SplitRight))
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if status == event::Status::Ignored
@@ -391,7 +418,7 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                         && modifiers.shift()
                         && matches!(key.as_ref(), keyboard::Key::Character("f" | "F")) =>
                 {
-                    Some(Message::ToggleFiles)
+                    Some(Message::KeyChord(KeyChord::ToggleFiles))
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if status == event::Status::Ignored
@@ -399,7 +426,7 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                         && modifiers.shift()
                         && matches!(key.as_ref(), keyboard::Key::Character("j" | "J")) =>
                 {
-                    Some(Message::ToggleAuxiliaryShell)
+                    Some(Message::KeyChord(KeyChord::AuxiliaryShell))
                 }
                 iced::Event::Window(iced::window::Event::FileDropped(_)) => {
                     Some(Message::Event(event))
@@ -835,8 +862,8 @@ struct LocalFileEntry {
     size: Option<u64>,
     permissions: String,
     owner: String,
+    group: String,
     modified: Option<std::time::SystemTime>,
-    created: Option<std::time::SystemTime>,
 }
 
 impl LocalFileEntry {
@@ -855,16 +882,10 @@ impl LocalFileEntry {
             .as_ref()
             .map(local_permissions)
             .unwrap_or_else(|| "-".into());
-        let owner = metadata
-            .as_ref()
-            .map(local_owner)
-            .unwrap_or_else(|| "-".into());
+        let (owner, group) = metadata.as_ref().map(local_owner).unwrap_or_default();
         let modified = metadata
             .as_ref()
             .and_then(|metadata| metadata.modified().ok());
-        let created = metadata
-            .as_ref()
-            .and_then(|metadata| metadata.created().ok());
         Self {
             path,
             name,
@@ -872,8 +893,8 @@ impl LocalFileEntry {
             size,
             permissions,
             owner,
+            group,
             modified,
-            created,
         }
     }
 }
@@ -929,24 +950,125 @@ fn unix_mode_string(kind: char, mode: u32) -> String {
     out
 }
 
+/// Parses an `/etc/passwd`- or `/etc/group`-style file into an id -> name map.
 #[cfg(unix)]
-fn local_owner(metadata: &std::fs::Metadata) -> String {
+fn parse_id_names(contents: &str) -> std::collections::HashMap<u32, String> {
+    contents
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split(':');
+            let name = fields.next()?;
+            let id = fields.nth(1)?.parse().ok()?;
+            (!name.is_empty()).then(|| (id, name.to_owned()))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn cached_id_names(
+    cell: &'static std::sync::OnceLock<std::collections::HashMap<u32, String>>,
+    path: &str,
+) -> &'static std::collections::HashMap<u32, String> {
+    cell.get_or_init(|| {
+        std::fs::read_to_string(path)
+            .map(|contents| parse_id_names(&contents))
+            .unwrap_or_default()
+    })
+}
+
+#[cfg(unix)]
+fn local_owner(metadata: &std::fs::Metadata) -> (String, String) {
     use std::os::unix::fs::MetadataExt;
-    format!("{}:{}", metadata.uid(), metadata.gid())
+    static USERS: std::sync::OnceLock<std::collections::HashMap<u32, String>> =
+        std::sync::OnceLock::new();
+    static GROUPS: std::sync::OnceLock<std::collections::HashMap<u32, String>> =
+        std::sync::OnceLock::new();
+    let name = |map: &std::collections::HashMap<u32, String>, id: u32| {
+        map.get(&id).cloned().unwrap_or_else(|| id.to_string())
+    };
+    (
+        name(cached_id_names(&USERS, "/etc/passwd"), metadata.uid()),
+        name(cached_id_names(&GROUPS, "/etc/group"), metadata.gid()),
+    )
 }
 
 #[cfg(not(unix))]
-fn local_owner(_metadata: &std::fs::Metadata) -> String {
-    "-".into()
+fn local_owner(_metadata: &std::fs::Metadata) -> (String, String) {
+    (String::new(), String::new())
 }
 
 fn format_local_time(time: Option<std::time::SystemTime>) -> String {
     time.map(|time| {
         chrono::DateTime::<chrono::Local>::from(time)
-            .format("%Y-%m-%d %H:%M:%S")
+            .format("%Y/%m/%d %H:%M:%S")
             .to_string()
     })
-    .unwrap_or_else(|| "-".into())
+    .unwrap_or_default()
+}
+
+/// WindTerm-style size: `1 Byte`, `18 Bytes`, `8.0 KB`, `139.3 MB`, `5.1 GB`.
+fn windterm_size(bytes: u64) -> String {
+    const UNITS: [(u64, &str); 4] = [
+        (1 << 40, "TB"),
+        (1 << 30, "GB"),
+        (1 << 20, "MB"),
+        (1 << 10, "KB"),
+    ];
+    UNITS
+        .iter()
+        .find(|(scale, _)| bytes >= *scale)
+        .map(|(scale, unit)| format!("{:.1} {unit}", bytes as f64 / *scale as f64))
+        .unwrap_or_else(|| {
+            if bytes == 1 {
+                "1 Byte".into()
+            } else {
+                format!("{bytes} Bytes")
+            }
+        })
+}
+
+/// WindTerm-style type column: `Directory`, `TOML File`, `BASH_HISTORY File`.
+fn windterm_type(name: &str, is_dir: bool) -> String {
+    if is_dir {
+        return "Directory".into();
+    }
+    let kind = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() && !extension.is_empty() => extension,
+        Some(("", rest)) if !rest.is_empty() => rest,
+        _ => return "File".into(),
+    };
+    format!("{} File", kind.to_ascii_uppercase())
+}
+
+/// Converts an `ls -l` time (`Mon DD HH:MM` or `Mon DD YYYY`) into
+/// `YYYY/MM/DD HH:MM` / `YYYY/MM/DD`; falls back to the raw text.
+fn windterm_remote_date(raw: &str, today: chrono::NaiveDate) -> String {
+    use chrono::Datelike;
+    let fields: Vec<&str> = raw.split_whitespace().collect();
+    let parsed = (|| {
+        let [month, day, last] = fields.as_slice() else {
+            return None;
+        };
+        let month = chrono::NaiveDate::parse_from_str(&format!("2000 {month} 1"), "%Y %b %d")
+            .ok()?
+            .month();
+        let day: u32 = day.parse().ok()?;
+        if let Some((hour, minute)) = last.split_once(':') {
+            let mut year = today.year();
+            let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+            if date > today {
+                year -= 1;
+            }
+            Some(format!(
+                "{year:04}/{month:02}/{day:02} {hour:0>2}:{minute:0>2}"
+            ))
+        } else {
+            let year: i32 = last.parse().ok()?;
+            chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+            Some(format!("{year:04}/{month:02}/{day:02}"))
+        }
+    })();
+    parsed.unwrap_or_else(|| raw.to_owned())
 }
 
 fn expand_local_path(input: &str) -> Option<PathBuf> {
@@ -1082,54 +1204,90 @@ fn display_leaf(value: &str) -> String {
         .collect()
 }
 
-const FILE_COL_NAME: f32 = 260.0;
-const FILE_COL_SIZE: f32 = 80.0;
-const FILE_COL_TYPE: f32 = 60.0;
-const FILE_COL_PERMS: f32 = 90.0;
-const FILE_COL_OWNER: f32 = 90.0;
-const FILE_COL_TIME: f32 = 140.0;
+const FILE_COL_NAME: f32 = 290.0;
+const FILE_COL_TIME: f32 = 168.0;
+const FILE_COL_TYPE: f32 = 132.0;
+const FILE_COL_SIZE: f32 = 76.0;
+const FILE_COL_PERMS: f32 = 106.0;
+const FILE_COL_OWNER: f32 = 62.0;
+const FILE_COL_GROUP: f32 = 80.0;
+const FILE_CELL_PAD: u16 = 6;
 
 struct FileListingCells {
     name: String,
-    size: String,
+    is_dir: bool,
+    modified: String,
     kind: String,
+    size: String,
     permissions: String,
     owner: String,
-    modified: String,
-    created: String,
+    group: String,
 }
 
-fn file_kind_label(is_dir: bool, name: &str) -> String {
-    if is_dir {
-        return "<DIR>".into();
-    }
-    match name.rsplit_once('.') {
-        Some((stem, extension)) if !stem.is_empty() && !extension.is_empty() => {
-            extension.to_ascii_uppercase()
-        }
-        _ => "File".into(),
-    }
-}
-
-fn file_listing_header<'a>() -> Element<'a, Message> {
-    let cell = |label: &'a str, width: f32| {
-        text(label)
-            .size(11)
-            .color(MUTED)
-            .font(Font::MONOSPACE)
-            .width(width)
-    };
-    row![
-        cell("Name", FILE_COL_NAME),
-        cell("Size", FILE_COL_SIZE),
-        cell("Type", FILE_COL_TYPE),
-        cell("Permissions", FILE_COL_PERMS),
-        cell("Owner", FILE_COL_OWNER),
-        cell("Modified", FILE_COL_TIME),
-        cell("Created", FILE_COL_TIME),
+fn file_listing_columns() -> [(&'static str, f32, bool); 7] {
+    [
+        ("Name", FILE_COL_NAME, false),
+        ("Date Modified", FILE_COL_TIME, false),
+        ("Type", FILE_COL_TYPE, false),
+        ("Size", FILE_COL_SIZE, true),
+        ("Permissions", FILE_COL_PERMS, false),
+        ("Owner", FILE_COL_OWNER, false),
+        ("Group", FILE_COL_GROUP, false),
     ]
-    .spacing(8)
-    .padding([0, 8])
+}
+
+fn file_listing_table_width() -> f32 {
+    file_listing_columns()
+        .iter()
+        .map(|(_, width, _)| width + 1.0)
+        .sum()
+}
+
+fn file_cell<'a>(value: String, width: impl Into<Length>, right: bool) -> Element<'a, Message> {
+    let label = text(value)
+        .size(theme::metrics::UI_TEXT)
+        .font(Font::MONOSPACE)
+        .color(theme::palette().text_dock)
+        .wrapping(text::Wrapping::None);
+    let cell = container(label)
+        .width(width)
+        .height(Fill)
+        .padding([0, FILE_CELL_PAD])
+        .align_y(iced::Center)
+        .clip(true);
+    if right {
+        cell.align_x(iced::Right).into()
+    } else {
+        cell.into()
+    }
+}
+
+fn file_listing_header<'a>(table_width: f32) -> Element<'a, Message> {
+    let mut header = row![];
+    let columns = file_listing_columns();
+    let last = columns.len() - 1;
+    for (index, (label, width, right)) in columns.into_iter().enumerate() {
+        let width = if index == last {
+            Length::Fill
+        } else {
+            Length::Fixed(width)
+        };
+        header = header.push(file_cell(label.into(), width, right)).push(
+            container(text(""))
+                .width(1)
+                .height(Fill)
+                .style(file_divider),
+        );
+    }
+    column![
+        container(header.height(theme::metrics::TABLE_HEADER_HEIGHT))
+            .width(table_width)
+            .style(file_header),
+        container(text(""))
+            .width(table_width)
+            .height(1)
+            .style(file_divider),
+    ]
     .into()
 }
 
@@ -1137,38 +1295,73 @@ fn file_listing_row<'a>(
     cells: FileListingCells,
     message: Message,
     selected: bool,
+    table_width: f32,
 ) -> Element<'a, Message> {
-    let cell = |value: String, width: f32| {
-        text(value)
-            .size(12)
-            .font(Font::MONOSPACE)
-            .width(width)
-            .wrapping(text::Wrapping::None)
+    let (glyph, color) = if cells.is_dir {
+        let color = match theme::current() {
+            theme::ChromeTheme::Dark => Color::from_rgb8(0xF6, 0xD5, 0x6F),
+            _ => Color::from_rgb8(0x12, 0xBF, 0xE5),
+        };
+        (icons::Icon::Folder, color)
+    } else {
+        (icons::Icon::File, theme::palette().muted)
     };
-    // The name keeps the proportional UI font: it is the click target users
-    // read first, and the OCR-driven GUI acceptance tests expect it.
-    let name = text(cells.name)
-        .size(14)
-        .width(FILE_COL_NAME)
-        .wrapping(text::Wrapping::None);
+    // The name stays one unbroken text in the main dock text colour: the
+    // OCR-driven GUI acceptance tests click it.
+    let name = row![
+        icons::icon(glyph, 14.0, color),
+        text(cells.name)
+            .size(theme::metrics::UI_TEXT)
+            .font(Font::MONOSPACE)
+            .color(theme::palette().text_dock)
+            .wrapping(text::Wrapping::None),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
+    let name = container(name)
+        .width(FILE_COL_NAME + 1.0)
+        .height(Fill)
+        .padding([0, FILE_CELL_PAD])
+        .align_y(iced::Center)
+        .clip(true);
     let content = row![
         name,
-        cell(cells.size, FILE_COL_SIZE),
-        cell(cells.kind, FILE_COL_TYPE),
-        cell(cells.permissions, FILE_COL_PERMS),
-        cell(cells.owner, FILE_COL_OWNER),
-        cell(cells.modified, FILE_COL_TIME),
-        cell(cells.created, FILE_COL_TIME),
+        file_cell(cells.modified, FILE_COL_TIME + 1.0, false),
+        file_cell(cells.kind, FILE_COL_TYPE + 1.0, false),
+        file_cell(cells.size, FILE_COL_SIZE + 1.0, true),
+        file_cell(cells.permissions, FILE_COL_PERMS + 1.0, false),
+        file_cell(cells.owner, FILE_COL_OWNER + 1.0, false),
+        file_cell(cells.group, Length::Fill, false),
     ]
-    .spacing(8);
-    let mut button = button(content)
+    .height(theme::metrics::ROW_HEIGHT);
+    button(content)
         .on_press(message)
-        .padding([4, 8])
-        .style(quiet);
-    if selected {
-        button = button.style(selected_button);
-    }
-    button.into()
+        .padding(0)
+        .width(table_width)
+        .style(if selected {
+            file_row_selected
+        } else {
+            file_row
+        })
+        .into()
+}
+
+fn file_listing_footer<'a>(count: usize, total: u64) -> Element<'a, Message> {
+    container(
+        text(file_listing_summary(count, total))
+            .size(theme::metrics::UI_TEXT)
+            .font(Font::MONOSPACE)
+            .color(theme::palette().muted),
+    )
+    .height(16)
+    .padding([0, FILE_CELL_PAD])
+    .into()
+}
+
+/// Footer summary under a file table: `1 item 2.0 KB`, `3 items 6.0 KB`.
+fn file_listing_summary(count: usize, total: u64) -> String {
+    let noun = if count == 1 { "item" } else { "items" };
+    format!("{count} {noun} {}", windterm_size(total))
 }
 
 fn format_file_size(size: Option<u64>) -> String {
@@ -1184,12 +1377,6 @@ fn format_file_size(size: Option<u64>) -> String {
     } else {
         format!("{size} B")
     }
-}
-
-#[derive(Clone, Copy)]
-enum Dock {
-    Terminal,
-    Files,
 }
 
 #[derive(Clone)]
@@ -1234,6 +1421,31 @@ enum Dialog {
     About,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyChord {
+    FocusMode,
+    FreeType,
+    RemoteKeys,
+    LocalNavigation,
+    SplitRight,
+    ToggleFiles,
+    AuxiliaryShell,
+}
+
+impl KeyChord {
+    fn message(self) -> Message {
+        match self {
+            KeyChord::FocusMode => Message::ToggleFocusMode,
+            KeyChord::FreeType => Message::ToggleFocusedFreeType,
+            KeyChord::RemoteKeys => Message::ToggleFocusedRemoteKeys,
+            KeyChord::LocalNavigation => Message::ToggleLocalNavigation,
+            KeyChord::SplitRight => Message::Split(pane_grid::Axis::Vertical),
+            KeyChord::ToggleFiles => Message::ToggleFiles,
+            KeyChord::AuxiliaryShell => Message::ToggleAuxiliaryShell,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 enum Message {
     Tool(tools::Action),
@@ -1262,10 +1474,13 @@ enum Message {
     About,
     CloseDialog,
     DismissModalKey,
+    MenuOpen(menu::Menu),
+    MenuHover(menu::Menu),
+    MenuClose,
+    MenuCommand(menu::Command),
     AskClose(usize),
     ConfirmClose(usize),
     ToggleFiles,
-    FilesToggleDockPosition,
     ToggleAuxiliaryShell,
     FilesRefresh,
     FilesLocalUp,
@@ -1326,7 +1541,6 @@ enum Message {
     ResumeTransfer(u64),
     FilesLocalLoaded(u64, Result<Vec<LocalFileEntry>, String>),
     FilesRemoteLoaded(u64, Result<Vec<sftp::RemoteEntry>, String>),
-    ToggleSidebar,
     TogglePrivacyLock,
     ToggleFocusMode,
     ToggleLocalNavigation,
@@ -1348,7 +1562,6 @@ enum Message {
     Resize(pane_grid::ResizeEvent),
     Drag(pane_grid::DragEvent),
     ClosePane(pane_grid::Pane),
-    DockResize(pane_grid::ResizeEvent),
     Name(String),
     Host(String),
     User(String),
@@ -1434,6 +1647,18 @@ enum Message {
     TerminalScroll(u64, i32),
     CopySelection(u64),
     Event(iced::Event),
+    DockActivate(dock::Panel),
+    DockClose(dock::Panel),
+    DockMove(dock::Panel, dock::Area),
+    DockToggle(dock::Panel),
+    DockCollapse(dock::Area),
+    DockMenu(dock::Area),
+    DockPreset(bool),
+    DockDragStart(dock::Area),
+    DockDragMove(iced::Point),
+    DockDragEnd,
+    WindowResized(iced::Size),
+    KeyChord(KeyChord),
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -1474,8 +1699,8 @@ fn matched_delimiters(snapshot: &terminal_core::DisplaySnapshot) -> Option<(usiz
     };
     let mut depth = 0_usize;
     if forward {
-        for index in cursor..snapshot.cells.len() {
-            let ch = snapshot.cells[index].character;
+        for (index, cell) in snapshot.cells.iter().enumerate().skip(cursor) {
+            let ch = cell.character;
             if ch == opening {
                 depth += 1;
             } else if ch == closing {
@@ -2114,7 +2339,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                                 iced::Point::new(x, y + cell_height - 4.0),
                                 iced::Size::new(cell_width, 1.0),
                             ),
-                            BLUE,
+                            TERMINAL_ACCENT,
                         );
                     }
                     if cell.strikeout {
@@ -2138,7 +2363,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                                 iced::Point::new(x, y + cell_height - 3.0),
                                 iced::Size::new(cell_width, 2.0),
                             ),
-                            BLUE,
+                            TERMINAL_ACCENT,
                         );
                     }
                 }
@@ -2513,12 +2738,10 @@ struct App {
     query: String,
     tabs: Vec<Workspace>,
     active: usize,
-    dock: pane_grid::State<Dock>,
-    terminal_dock: pane_grid::Pane,
-    files_dock: Option<pane_grid::Pane>,
-    files_side_dock: bool,
     files: FilesState,
     remote_editor: Option<RemoteEditorState>,
+    /// True while the Sender dock editor owns keyboard input (cleared on pane focus).
+    sender_focused: bool,
     snippets_path: PathBuf,
     snippets: SnippetLibrary,
     command_query: String,
@@ -2528,7 +2751,14 @@ struct App {
     snippet_body: String,
     snippet_content: text_editor::Content,
     editing_snippet: Option<String>,
-    sidebar_collapsed: bool,
+    open_menu: Option<menu::Menu>,
+    docks: dock::DockLayout,
+    /// Dock splitter currently being dragged (WindTerm-style resize).
+    dock_drag: Option<dock::Area>,
+    /// Logical window size, needed to turn cursor positions into dock sizes.
+    window_size: iced::Size,
+    ui_state_path: Option<PathBuf>,
+    dock_menu: Option<dock::Area>,
     privacy_locked: bool,
     focus_mode: bool,
     local_navigation: HashSet<u64>,
@@ -2560,72 +2790,34 @@ struct App {
     next_transfer_id: u64,
     next_remote_editor_id: u64,
     remote_editor_open_generation: u64,
+    /// Observation only. Unit panes have `terminal: None`, so a log next to
+    /// `process_command` never fires. Must not change write behaviour.
+    #[cfg(test)]
+    pty_write_log: Vec<(u64, Vec<u8>)>,
 }
 
-fn bottom_files_split_ratio() -> f32 {
-    0.38
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct FilesLayoutPolicy {
-    list_min_height: f32,
-    queue_viewport_height: f32,
-    compact_actions: bool,
-}
-
-/// Fixed vertical space in the bottom Files dock outside the listings and the
-/// transfer queue viewport, measured on the 1280x800 Linux acceptance
-/// screenshots: panel padding, header row, actions bar with its scrollbar,
-/// column spacing, and the queue's own label and padding.
-const BOTTOM_FILES_CHROME: f32 = 154.0;
-const BOTTOM_QUEUE_MIN_VIEWPORT: f32 = 24.0;
-
-/// Extra chrome in the side dock: a second header line for the target and
-/// wider spacing, plus the second stacked listing.
-const SIDE_FILES_EXTRA_CHROME: f32 = 30.0;
-const SIDE_QUEUE_MAX_VIEWPORT: f32 = 144.0;
-
-/// Transfer-queue viewport for a dock of `dock_height` pixels, or `None`
-/// when the queue must collapse to a single summary line so the listings
-/// keep at least `list_min_height` each.
-fn files_queue_viewport_height(
-    dock_height: f32,
-    side_dock: bool,
-    policy: FilesLayoutPolicy,
-) -> Option<f32> {
-    let (chrome, listings, max_viewport) = if side_dock {
-        (
-            BOTTOM_FILES_CHROME + SIDE_FILES_EXTRA_CHROME,
-            2.0 * policy.list_min_height + 8.0,
-            SIDE_QUEUE_MAX_VIEWPORT,
-        )
-    } else {
-        (
-            BOTTOM_FILES_CHROME,
-            policy.list_min_height,
-            policy.queue_viewport_height,
-        )
-    };
-    let spare = dock_height - chrome - listings;
-    (spare >= BOTTOM_QUEUE_MIN_VIEWPORT).then(|| spare.min(max_viewport))
-}
-
-fn bottom_files_layout_policy() -> FilesLayoutPolicy {
-    FilesLayoutPolicy {
-        // Enough for the pane header and one complete file-row hit target at
-        // the supported minimum window size. The surrounding column uses
-        // fixed-height overflow regions so this space cannot be consumed by
-        // transfer history.
-        list_min_height: 110.0,
-        queue_viewport_height: 44.0,
-        compact_actions: true,
-    }
-}
+const FILES_PANELS: [dock::Panel; 3] = [
+    dock::Panel::Filer,
+    dock::Panel::Explorer,
+    dock::Panel::Transfer,
+];
 
 impl App {
+    fn save_ui_state(&mut self) {
+        let Some(path) = self.ui_state_path.as_deref() else {
+            return;
+        };
+        let state = ui_state::UiState {
+            theme: theme::current().as_str().to_string(),
+            docks: Some(self.docks.clone()),
+        };
+        if let Err(error) = ui_state::save(path, &state) {
+            self.status = format!("Could not save UI layout: {error}");
+        }
+    }
+
     fn boot(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> Self {
         let _slow = SlowIcedScope::start("startup");
-        let (dock, terminal_dock) = pane_grid::State::new(Dock::Terminal);
         let (profiles, profiles_writable, mut load_error) = match load_sessions(&profiles_path) {
             Ok(profiles) => (profiles, true, None),
             Err(error) => (
@@ -2649,6 +2841,24 @@ impl App {
                 SnippetLibrary::default()
             }
         };
+        let ui_state_path = if cfg!(test) {
+            None
+        } else {
+            Some(ui_state::path_for(&profiles_path))
+        };
+        let mut saved_ui = ui_state_path
+            .as_deref()
+            .map(ui_state::load)
+            .unwrap_or_default();
+        let env_theme = std::env::var("INSPIRUM_THEME")
+            .ok()
+            .as_deref()
+            .and_then(theme::ChromeTheme::parse);
+        if env_theme.is_none() && ui_state_path.is_some() {
+            theme::set(
+                theme::ChromeTheme::parse(&saved_ui.theme).unwrap_or(theme::ChromeTheme::Light),
+            );
+        }
         let mut tools = tools::State::load(&profiles_path);
         for message in &tools.load_errors {
             tools.errors.record(message);
@@ -2666,12 +2876,9 @@ impl App {
             query: String::new(),
             tabs: Vec::new(),
             active: 0,
-            dock,
-            terminal_dock,
-            files_dock: None,
-            files_side_dock: false,
             files: FilesState::new(),
             remote_editor: None,
+            sender_focused: false,
             snippets_path,
             snippets,
             command_query: String::new(),
@@ -2681,7 +2888,18 @@ impl App {
             snippet_body: String::new(),
             snippet_content: text_editor::Content::new(),
             editing_snippet: None,
-            sidebar_collapsed: false,
+            open_menu: None,
+            dock_drag: None,
+            window_size: iced::Size::new(1280.0, 800.0),
+            docks: {
+                let mut docks = saved_ui.docks.take().unwrap_or_default();
+                docks.sanitize();
+                docks.retain_available(&available_panels());
+                docks.add_missing(&available_panels());
+                docks
+            },
+            ui_state_path,
+            dock_menu: None,
             privacy_locked: false,
             focus_mode: false,
             local_navigation: HashSet::new(),
@@ -2711,6 +2929,8 @@ impl App {
             next_transfer_id: 1,
             next_remote_editor_id: 1,
             remote_editor_open_generation: 0,
+            #[cfg(test)]
+            pty_write_log: Vec::new(),
         }
     }
 
@@ -2927,6 +3147,7 @@ impl App {
         if self.privacy_locked
             || self.dialog.is_some()
             || self.remote_editor.is_some()
+            || self.sender_focused
             || !self.remote_keys.contains(&id)
             || !self.focused_pane_matches(id)
             || self.local_navigation.contains(&id)
@@ -2961,6 +3182,12 @@ impl App {
     }
 
     fn command_terminal(&mut self, id: u64, command: terminal_core::BackendCommand) -> bool {
+        // Record the attempt before any early return. Unit tests have no PTY,
+        // so this is the only observation point; it does not change behaviour.
+        #[cfg(test)]
+        if let terminal_core::BackendCommand::Write(bytes) = &command {
+            self.pty_write_log.push((id, bytes.clone()));
+        }
         // Enforce the mode at the single PTY write boundary, including
         // synchronized input, delayed clipboard callbacks and tool commands.
         if (self.local_navigation.contains(&id) || self.free_type.contains_key(&id))
@@ -3091,6 +3318,7 @@ impl App {
     }
 
     fn activate_tab(&mut self, index: usize) {
+        self.sender_focused = false;
         if index < self.tabs.len() {
             if self.active != index {
                 self.tools.sync.set_armed(false);
@@ -3156,37 +3384,40 @@ impl App {
                 self.activate_tab(self.tabs.len() - 1);
             }
             self.status = if self.pty_bridge.is_some() {
-                "SSH session opened through the production OpenSSH/PTY backend.".into()
+                "Session opened.".into()
             } else {
-                "SSH session queued until the terminal event bridge is ready.".into()
+                "Session queued.".into()
             };
         }
         self.dialog = None;
     }
 
+    fn files_open(&self) -> bool {
+        !self.tabs.is_empty()
+            && FILES_PANELS
+                .iter()
+                .any(|&panel| self.docks.is_visible(panel))
+    }
+
+    /// Side effects of the Filer panel becoming visible: refresh listings.
+    fn files_became_visible(&mut self) -> Task<Message> {
+        self.reload_files()
+    }
+
     fn toggle_files(&mut self) {
-        if let Some(pane) = self.files_dock.take() {
-            self.dock.close(pane);
-        } else if !self.tabs.is_empty()
-            && let Some((pane, split)) = self.dock.split(
-                if self.files_side_dock {
-                    pane_grid::Axis::Vertical
-                } else {
-                    pane_grid::Axis::Horizontal
-                },
-                self.terminal_dock,
-                Dock::Files,
-            )
-        {
-            self.files_dock = Some(pane);
-            self.dock.resize(
-                split,
-                if self.files_side_dock {
-                    0.50
-                } else {
-                    bottom_files_split_ratio()
-                },
-            );
+        if self.files_open() {
+            for panel in FILES_PANELS {
+                self.docks.close(panel);
+            }
+        } else if !self.tabs.is_empty() {
+            // Filer last so it ends up the active panel of its area.
+            for panel in [
+                dock::Panel::Transfer,
+                dock::Panel::Explorer,
+                dock::Panel::Filer,
+            ] {
+                self.docks.show(panel);
+            }
         }
     }
 
@@ -3484,13 +3715,14 @@ impl App {
                 ),
             ),
         };
+        let files_open = self.files_open();
         let Some(job) = self.files.transfers.iter_mut().find(|job| job.id == id) else {
             return false;
         };
         let active_session = self.files.session_key.clone();
         let refresh_active = terminal
             && active_session.as_deref() == Some(job.pending.session_key.as_str())
-            && self.files_dock.is_some();
+            && files_open;
 
         match event {
             TransferEvent::Started { total, .. } => {
@@ -3547,6 +3779,15 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         let _slow = SlowIcedScope::start("event_update");
+        let message = match message {
+            Message::KeyChord(chord) => {
+                if self.open_menu.is_some() || self.dock_menu.is_some() {
+                    return Task::none();
+                }
+                return self.update(chord.message());
+            }
+            other => other,
+        };
         if matches!(&message, Message::TogglePrivacyLock) {
             self.privacy_locked = !self.privacy_locked;
             self.ime_cursor = None;
@@ -3600,6 +3841,22 @@ impl App {
                             | tools::Action::SyncArm(..)
                             | tools::Action::SyncTarget(..)
                     )
+            )
+        {
+            return Task::none();
+        }
+        // An open menu owns keyboard input, including queued IME and paste
+        // messages from before the overlay appeared.
+        if (self.open_menu.is_some() || self.dock_menu.is_some())
+            && matches!(
+                &message,
+                Message::TerminalImeCursor(..)
+                    | Message::TerminalImeCommit(..)
+                    | Message::RequestPaste
+                    | Message::ClipboardRead(..)
+                    | Message::ConfirmPaste
+                    | Message::PanePaste(..)
+                    | Message::RemoteCursorPress(..)
             )
         {
             return Task::none();
@@ -3670,6 +3927,7 @@ impl App {
                 if self.focused_pane_matches(id)
                     && self.dialog.is_none()
                     && self.remote_editor.is_none()
+                    && !self.sender_focused
                     && !self.free_type.contains_key(&id)
                     && !self.remote_keys.contains(&id) =>
             {
@@ -3679,6 +3937,7 @@ impl App {
             }
             Message::TerminalImeCursor(..) | Message::TerminalImeCommit(..) => {}
             Message::TogglePrivacyLock => unreachable!("privacy lock handled before match"),
+            Message::KeyChord(_) => unreachable!("key chord handled before match"),
             Message::ToggleFocusMode => unreachable!("focus mode handled before match"),
             Message::ToggleLocalNavigation => {
                 unreachable!("local navigation handled before match")
@@ -3820,7 +4079,7 @@ impl App {
             }
             Message::Open(index) => {
                 self.open(index);
-                if self.files_dock.is_some() {
+                if self.files_open() {
                     return self.reload_files();
                 }
             }
@@ -3834,14 +4093,14 @@ impl App {
             }
             Message::SelectTab(index) => {
                 self.activate_tab(index);
-                if self.files_dock.is_some() {
+                if self.files_open() {
                     return self.reload_files();
                 }
             }
             Message::SelectNextTab => {
                 if !self.tabs.is_empty() {
                     self.activate_tab((self.active + 1) % self.tabs.len());
-                    if self.files_dock.is_some() {
+                    if self.files_open() {
                         return self.reload_files();
                     }
                 }
@@ -3849,7 +4108,7 @@ impl App {
             Message::SelectPreviousTab => {
                 if !self.tabs.is_empty() {
                     self.activate_tab((self.active + self.tabs.len() - 1) % self.tabs.len());
-                    if self.files_dock.is_some() {
+                    if self.files_open() {
                         return self.reload_files();
                     }
                 }
@@ -3903,6 +4162,7 @@ impl App {
             }
             Message::CommandQuery(value) => self.command_query = value,
             Message::CommandEdit(action) => {
+                self.sender_focused = self.dialog.is_none();
                 self.command_content.perform(action);
                 self.command_sender = self.command_content.text();
             }
@@ -4014,6 +4274,97 @@ impl App {
                 }
             }
             Message::About => self.dialog = Some(Dialog::About),
+            Message::MenuOpen(menu) => {
+                self.open_menu = if self.open_menu == Some(menu) {
+                    None
+                } else {
+                    Some(menu)
+                };
+            }
+            Message::MenuHover(menu) => {
+                if self.open_menu.is_some() {
+                    self.open_menu = Some(menu);
+                }
+            }
+            Message::MenuClose => self.open_menu = None,
+            Message::MenuCommand(command) => {
+                self.open_menu = None;
+                use menu::Command as C;
+                let message = match command {
+                    C::NewSession => Message::New,
+                    C::ImportProfiles => Message::ImportProfiles,
+                    C::Tunnels => Message::Tunnels,
+                    C::LockScreen => Message::TogglePrivacyLock,
+                    C::Paste => Message::RequestPaste,
+                    C::Palette => Message::Commands,
+                    C::ThemeLight => {
+                        theme::set(theme::ChromeTheme::Light);
+                        self.save_ui_state();
+                        return Task::none();
+                    }
+                    C::ThemeDark => {
+                        theme::set(theme::ChromeTheme::Dark);
+                        self.save_ui_state();
+                        return Task::none();
+                    }
+                    C::ZoomIn => Message::Scale(0.1),
+                    C::ZoomOut => Message::Scale(-0.1),
+                    C::FocusMode => Message::ToggleFocusMode,
+                    C::ToggleSessions => Message::DockToggle(dock::Panel::Session),
+                    C::LayoutBottomTabs => Message::DockPreset(false),
+                    C::LayoutWindTerm => Message::DockPreset(true),
+                    C::TogglePanel(panel) => Message::DockToggle(panel),
+                    C::EditSession | C::Reconnect | C::CloseSession | C::Copy | C::ClosePane => {
+                        let Some(tab) = self.tabs.get(self.active) else {
+                            self.status = "No active session.".into();
+                            return Task::none();
+                        };
+                        let focus = tab.focus;
+                        match command {
+                            C::EditSession => {
+                                match self.profiles.iter().position(|p| *p == tab.profile) {
+                                    Some(index) => Message::EditProfile(index),
+                                    None => {
+                                        self.status = "This session is not a saved profile.".into();
+                                        return Task::none();
+                                    }
+                                }
+                            }
+                            C::Reconnect => Message::Reconnect(focus),
+                            C::CloseSession => Message::AskClose(self.active),
+                            C::Copy => match tab.panes.get(focus) {
+                                Some(pane) => Message::CopySelection(pane.id),
+                                None => return Task::none(),
+                            },
+                            _ => {
+                                if tab.panes.len() < 2 {
+                                    self.status = "Only one pane is open.".into();
+                                    return Task::none();
+                                }
+                                Message::ClosePane(focus)
+                            }
+                        }
+                    }
+                    C::SyncInput => {
+                        if self.tools.sync.selected_count() >= 2 {
+                            Message::Tool(tools::Action::SyncArm(!self.tools.sync.armed()))
+                        } else {
+                            Message::Tool(tools::Action::Open(tools::Panel::Workspace))
+                        }
+                    }
+                    C::ToggleShell => Message::ToggleAuxiliaryShell,
+                    C::LocalMode => Message::ToggleLocalNavigation,
+                    C::FreeType => Message::ToggleFocusedFreeType,
+                    C::RemoteKeys => Message::ToggleFocusedRemoteKeys,
+                    C::SplitRight => Message::Split(pane_grid::Axis::Vertical),
+                    C::SplitDown => Message::Split(pane_grid::Axis::Horizontal),
+                    C::NextTab => Message::SelectNextTab,
+                    C::PreviousTab => Message::SelectPreviousTab,
+                    C::Tool(panel) => Message::Tool(tools::Action::Open(panel)),
+                    C::About => Message::About,
+                };
+                return self.update(message);
+            }
             Message::Tunnels => {
                 self.refresh_tunnel_status();
                 self.dialog = Some(Dialog::Tunnels);
@@ -4223,9 +4574,14 @@ impl App {
                 self.files.name_input.clear();
             }
             Message::DismissModalKey => {
+                if self.open_menu.take().is_some() || self.dock_menu.take().is_some() {
+                    return Task::none();
+                }
                 if self.dialog.is_some() {
                     return self.update(Message::CloseDialog);
                 }
+                // Escape releases the Sender editor so keys reach the terminal.
+                self.sender_focused = false;
             }
             Message::AskClose(index) => {
                 let closing_key = self
@@ -4277,11 +4633,11 @@ impl App {
                         self.refresh_workspace_displays(self.active);
                     }
                 }
-                if self.tabs.is_empty() && self.files_dock.is_some() {
+                if self.tabs.is_empty() && self.files_open() {
                     self.toggle_files();
                 }
                 self.dialog = None;
-                if self.files_dock.is_some() && !self.tabs.is_empty() {
+                if self.files_open() && !self.tabs.is_empty() {
                     return self.reload_files();
                 }
             }
@@ -4290,26 +4646,12 @@ impl App {
                     return Task::none();
                 }
                 self.dialog = None;
-                let opening = self.files_dock.is_none() && !self.tabs.is_empty();
+                let was_open = self.files_open();
                 self.toggle_files();
-                if opening && self.files_dock.is_some() {
-                    return self.reload_files();
+                self.save_ui_state();
+                if !was_open && self.files_open() {
+                    return self.files_became_visible();
                 }
-            }
-            Message::FilesToggleDockPosition => {
-                if self.files_dock.is_none() || self.dialog.is_some() || self.privacy_locked {
-                    return Task::none();
-                }
-                // Only alter pane-grid chrome. The selected remote target,
-                // outstanding transfer jobs and any remote editor stay intact.
-                self.toggle_files();
-                self.files_side_dock = !self.files_side_dock;
-                self.toggle_files();
-                self.status = if self.files_side_dock {
-                    "Files explorer docked on the right.".into()
-                } else {
-                    "Files explorer docked at the bottom.".into()
-                };
             }
             Message::FilesRefresh => return self.reload_files(),
             Message::FilesLocalUp => {
@@ -4618,6 +4960,7 @@ impl App {
                 );
             }
             Message::RemoteEditorSaved { editor_id, result } => {
+                let files_open = self.files_open();
                 let Some(editor) = self.remote_editor.as_mut() else {
                     return Task::none();
                 };
@@ -4632,7 +4975,7 @@ impl App {
                         editor.error = None;
                         self.status =
                             format!("Saved {} through staged SFTP replacement.", editor.remote);
-                        if self.files_dock.is_some()
+                        if files_open
                             && self.files.session_key.as_deref()
                                 == Some(editor.session_key.as_str())
                         {
@@ -4814,9 +5157,7 @@ impl App {
                     Err(error) => self.status = format!("File operation failed: {error}"),
                 }
                 let active_session = self.files.session_key.as_deref();
-                if self.files_dock.is_some()
-                    && (!remote || session_key.as_deref() == active_session)
-                {
+                if self.files_open() && (!remote || session_key.as_deref() == active_session) {
                     return if remote {
                         self.reload_remote_files()
                     } else {
@@ -4923,9 +5264,7 @@ impl App {
                     }
                 }
                 let active_session = self.files.session_key.as_deref();
-                if self.files_dock.is_some()
-                    && (!remote || session_key.as_deref() == active_session)
-                {
+                if self.files_open() && (!remote || session_key.as_deref() == active_session) {
                     return if remote {
                         self.reload_remote_files()
                     } else {
@@ -4974,10 +5313,6 @@ impl App {
                         }
                     }
                 }
-            }
-            Message::ToggleSidebar => {
-                self.dialog = None;
-                self.sidebar_collapsed = !self.sidebar_collapsed;
             }
             Message::RequestPaste => {
                 if self
@@ -5219,11 +5554,11 @@ impl App {
                         *pane = replacement;
                         tab.focus = pane_id;
                         self.status = if connected {
-                            "Reconnected through the production OpenSSH/PTY backend.".into()
+                            "Reconnected.".into()
                         } else if failed {
                             "Reconnect attempt failed; review the pane error.".into()
                         } else {
-                            "Reconnect queued until the terminal event bridge is ready.".into()
+                            "Reconnect queued.".into()
                         };
                     }
                 }
@@ -5293,6 +5628,7 @@ impl App {
                 self.status = "Independent auxiliary SSH shell opened in a right-hand pane (Ctrl/Cmd+Shift+J).".into();
             }
             Message::Focus(pane) => {
+                self.sender_focused = false;
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.focus = pane;
                 }
@@ -5319,9 +5655,6 @@ impl App {
                 }
                 self.prune_tool_panes();
                 self.prune_free_type();
-            }
-            Message::DockResize(event) => {
-                self.dock.resize(event.split, event.ratio.clamp(0.30, 0.75));
             }
             Message::Name(value) => self.form.name = value,
             Message::Host(value) => self.form.host = value,
@@ -5437,11 +5770,9 @@ impl App {
                     }
                 }
                 self.status = if attempted == 0 {
-                    "Terminal event bridge ready.".into()
+                    "Ready".into()
                 } else {
-                    format!(
-                        "Terminal bridge ready: {started} of {attempted} pending session(s) started."
-                    )
+                    format!("Started {started} of {attempted} pending session(s).")
                 };
             }
             Message::PtyEvent(id, event) => {
@@ -5511,7 +5842,7 @@ impl App {
             Message::Event(iced::Event::Window(iced::window::Event::FileDropped(path))) => {
                 if self.dialog.is_none()
                     && !self.focus_mode
-                    && self.files_dock.is_some()
+                    && self.files_open()
                     && !self.tabs.is_empty()
                 {
                     self.files.selected_local = Some(path);
@@ -5528,6 +5859,20 @@ impl App {
             })) => {
                 use keyboard::key::Named;
 
+                if self.open_menu.is_some() || self.dock_menu.is_some() {
+                    if key.as_ref() == keyboard::Key::Named(Named::Escape) {
+                        self.open_menu = None;
+                        self.dock_menu = None;
+                    }
+                    return Task::none();
+                }
+                if self.sender_focused
+                    && self.dialog.is_none()
+                    && key.as_ref() == keyboard::Key::Named(Named::Escape)
+                {
+                    self.sender_focused = false;
+                    return Task::none();
+                }
                 if modifiers.command()
                     && key.as_ref() == keyboard::Key::Character(",")
                     && (self.dialog.is_none() || matches!(self.dialog, Some(Dialog::Tools)))
@@ -5637,6 +5982,108 @@ impl App {
                 }
             }
             Message::Event(_) => {}
+            Message::DockActivate(panel) => {
+                let was_open = self.files_open();
+                self.dock_menu = None;
+                self.docks.activate(panel);
+                if !self.docks.is_visible(dock::Panel::Sender) {
+                    self.sender_focused = false;
+                }
+                self.save_ui_state();
+                if !was_open && self.files_open() {
+                    return self.files_became_visible();
+                }
+            }
+            Message::DockClose(panel) => {
+                self.dock_menu = None;
+                self.docks.close(panel);
+                if !self.docks.is_visible(dock::Panel::Sender) {
+                    self.sender_focused = false;
+                }
+                self.save_ui_state();
+            }
+            Message::DockMove(panel, area) => {
+                let was_open = self.files_open();
+                self.dock_menu = None;
+                self.docks.move_to(panel, area);
+                self.docks.widen_for_file_panel(panel, area);
+                if !self.docks.is_visible(dock::Panel::Sender) {
+                    self.sender_focused = false;
+                }
+                self.save_ui_state();
+                if !was_open && self.files_open() {
+                    return self.files_became_visible();
+                }
+            }
+            Message::DockToggle(panel) => {
+                let was_open = self.files_open();
+                self.dock_menu = None;
+                self.docks.toggle(panel);
+                if !self.docks.is_visible(dock::Panel::Sender) {
+                    self.sender_focused = false;
+                }
+                self.save_ui_state();
+                if !was_open && self.files_open() {
+                    return self.files_became_visible();
+                }
+            }
+            Message::DockCollapse(area) => {
+                let was_open = self.files_open();
+                self.dock_menu = None;
+                self.docks.toggle_collapsed(area);
+                if !self.docks.is_visible(dock::Panel::Sender) {
+                    self.sender_focused = false;
+                }
+                self.save_ui_state();
+                if !was_open && self.files_open() {
+                    return self.files_became_visible();
+                }
+            }
+            Message::WindowResized(size) => self.window_size = size,
+            Message::DockDragStart(area) => {
+                self.dock_menu = None;
+                if self.dialog.is_none() {
+                    self.dock_drag = Some(area);
+                }
+            }
+            Message::DockDragMove(position) => {
+                if self.dialog.is_some() {
+                    self.dock_drag = None;
+                    self.save_ui_state();
+                } else if let Some(area) = self.dock_drag {
+                    self.docks.drag_splitter(area, position, self.window_size);
+                }
+            }
+            Message::DockDragEnd => {
+                if self.dock_drag.take().is_some() {
+                    self.save_ui_state();
+                }
+            }
+            Message::DockMenu(area) => {
+                self.dock_menu = if self.dock_menu == Some(area) {
+                    None
+                } else {
+                    Some(area)
+                };
+            }
+            Message::DockPreset(windterm) => {
+                let was_open = self.files_open();
+                self.dock_menu = None;
+                self.docks = dock::DockLayout::preset(if windterm {
+                    dock::Preset::WindTermDefault
+                } else {
+                    dock::Preset::BottomTabs
+                });
+                self.docks.retain_available(&available_panels());
+                self.docks.add_missing(&available_panels());
+                if !self.docks.is_visible(dock::Panel::Sender) {
+                    self.sender_focused = false;
+                }
+                self.save_ui_state();
+                if !was_open && self.files_open() {
+                    return self.files_became_visible();
+                }
+            }
         }
         Task::none()
     }
@@ -5648,15 +6095,17 @@ impl App {
             // labels, SFTP paths and terminal scrollback.
             return center(
                 column![
-                    text("Workspace hidden").size(30).color(FG),
+                    text("Workspace hidden").size(30).color(fg()),
                     text("SSH connections and transfers continue while this window is hidden.")
                         .size(15)
-                        .color(MUTED),
+                        .color(muted()),
                     text("This is an in-app privacy curtain, not an OS lock or encryption.")
                         .size(12)
-                        .color(MUTED),
+                        .color(muted()),
                     action("Unlock workspace", Message::TogglePrivacyLock).style(primary),
-                    text("Shortcut: Ctrl/Cmd + Shift + L").size(12).color(BLUE),
+                    text("Shortcut: Ctrl/Cmd + Shift + L")
+                        .size(12)
+                        .color(blue()),
                 ]
                 .spacing(18)
                 .align_x(iced::Center),
@@ -5666,7 +6115,12 @@ impl App {
             .height(Fill)
             .into();
         }
-        let target = if self.dialog.is_none() && self.remote_editor.is_none() {
+        let target = if self.dialog.is_none()
+            && self.remote_editor.is_none()
+            && !self.sender_focused
+            && self.open_menu.is_none()
+            && self.dock_menu.is_none()
+        {
             self.focused_terminal_id().filter(|id| {
                 !self.local_navigation.contains(id)
                     && !self.free_type.contains_key(id)
@@ -5691,13 +6145,15 @@ impl App {
             return container(
                 column![
                     row![
-                        text("FOCUS MODE · Alt+Enter to exit").size(12).color(BLUE),
+                        text("FOCUS MODE · Alt+Enter to exit")
+                            .size(12)
+                            .color(blue()),
                         text(&self.tabs[self.active].profile.name)
                             .size(12)
-                            .color(MUTED),
+                            .color(muted()),
                         space::horizontal(),
                         if self.tools.sync.armed() {
-                            text("SYNC INPUT ARMED").size(12).color(DANGER)
+                            text("SYNC INPUT ARMED").size(12).color(danger())
                         } else {
                             text("").size(12)
                         },
@@ -5733,91 +6189,121 @@ impl App {
             .filter(|status| status.is_running())
             .count();
 
-        let header = container(
-            row![
-                container(text(">_").size(21).color(BLUE))
-                    .padding([3, 8])
-                    .style(card),
-                text("Inspirum").size(19),
-                text("Native SSH workspace").size(12).color(MUTED),
-                space::horizontal(),
-                action(
-                    "Tools",
-                    Message::Tool(tools::Action::Open(tools::Panel::Profiles))
-                ),
-                action("Commands", Message::Commands),
-                action("Tunnels", Message::Tunnels),
-                action("Lock", Message::TogglePrivacyLock),
-                action("Focus", Message::ToggleFocusMode),
-                action("A-", Message::Scale(-0.1)),
-                action("A+", Message::Scale(0.1)),
-                action("About", Message::About),
-            ]
-            .spacing(12)
-            .align_y(iced::Center),
-        )
-        .padding([10, 16])
-        .style(surface);
+        let header = self.menu_bar();
 
-        let footer = container(
-            row![
-                text("ICED").size(12).color(BLUE),
-                text(if self.tools.sync.armed() {
-                    format!("SYNC ARMED · {} panes", self.tools.sync.selected_count())
-                } else {
-                    String::new()
-                })
-                .size(12)
-                .color(DANGER),
-                text(&self.status).size(12).color(MUTED),
-                space::horizontal(),
-                if active_transfers > 0 {
-                    text(format!("{active_transfers} active transfer(s)"))
-                        .size(12)
-                        .color(BLUE)
-                } else {
-                    text("").size(12)
-                },
-                if running_tunnels > 0 {
-                    text(format!("{running_tunnels} tunnel session(s)"))
-                        .size(12)
-                        .color(GREEN)
-                } else {
-                    text("").size(12)
-                },
-                text(format!(
-                    "{} saved profiles{}",
-                    self.profiles.len(),
-                    if self.ssh_config.is_some() {
-                        "  /  custom SSH config"
-                    } else {
-                        ""
-                    }
-                ))
-                .size(12)
-                .color(MUTED),
-            ]
-            .spacing(12)
-            .align_y(iced::Center),
-        )
-        .padding([9, 16])
-        .style(surface);
-
-        let mut body = column![
-            header,
-            row![self.sidebar(), self.workspace()].height(Fill),
-            footer
+        let mode = if self
+            .focused_terminal_id()
+            .is_some_and(|id| self.local_navigation.contains(&id))
+        {
+            "Local Mode"
+        } else {
+            "Remote Mode"
+        };
+        let status_text = |value: String| {
+            text(value)
+                .size(theme::metrics::STATUS_TEXT)
+                .color(theme::palette().status_text)
+                .wrapping(iced::widget::text::Wrapping::None)
+        };
+        let mut right = row![
+            text(mode)
+                .size(theme::metrics::STATUS_TEXT)
+                .color(theme::palette().status_text)
+                .wrapping(iced::widget::text::Wrapping::None)
+                .font(iced::Font {
+                    weight: iced::font::Weight::Bold,
+                    ..iced::Font::MONOSPACE
+                }),
+            container(space::horizontal().width(1))
+                .width(1)
+                .height(12)
+                .style(|_| container::Style {
+                    background: Some(theme::palette().status_text.into()),
+                    ..Default::default()
+                }),
         ]
-        .height(Fill);
+        .spacing(16)
+        .align_y(iced::Center);
+        if let Some(tab) = self.tabs.get(self.active) {
+            if let Some((columns, rows)) = tab
+                .panes
+                .get(tab.focus)
+                .and_then(|pane| pane.terminal_grid_size)
+            {
+                right = right.push(status_text(format!("{columns}x{rows}")));
+            }
+            right = right.push(status_text("ssh".to_string()));
+        }
+        if active_transfers > 0 {
+            right = right.push(status_text(format!("{active_transfers} transfers")));
+        }
+        if running_tunnels > 0 {
+            right = right.push(status_text(format!("{running_tunnels} tunnels")));
+        }
+        right = right.push(status_text(
+            chrono::Local::now().format("%Y/%m/%d %H:%M").to_string(),
+        ));
+        let mut left = row![status_text(if self.status.is_empty() {
+            "Ready".to_string()
+        } else {
+            self.status.clone()
+        })]
+        .spacing(16)
+        .align_y(iced::Center);
+        if self.tools.sync.armed() {
+            left = left.push(status_text(format!(
+                "SYNC ARMED - {} panes",
+                self.tools.sync.selected_count()
+            )));
+        }
+        let footer = container(
+            row![container(left).width(Fill).clip(true), right]
+                .spacing(16)
+                .align_y(iced::Center),
+        )
+        .padding([0, 10])
+        .height(theme::metrics::STATUS_BAR_HEIGHT)
+        .width(Fill)
+        .align_y(iced::Center)
+        .style(|_| container::Style {
+            background: Some(theme::palette().status_bg.into()),
+            ..Default::default()
+        });
+
+        let mut body = column![header, self.dock_body(), footer].height(Fill);
 
         if let Some(error) = &self.load_error {
             body = body.push(
-                container(text(error).size(12).color(DANGER))
+                container(text(error).size(12).color(danger()))
                     .padding([8, 16])
                     .width(Fill)
                     .style(surface),
             );
         }
+
+        let body: Element<'_, Message> = if let Some(open) = self.open_menu {
+            stack![
+                body,
+                mouse_area(container(space::horizontal()).width(Fill).height(Fill))
+                    .on_press(Message::MenuClose),
+                container(self.menu_dropdown(open))
+                    .padding(iced::Padding {
+                        top: theme::metrics::MENU_BAR_HEIGHT,
+                        left: open.offset(),
+                        ..iced::Padding::ZERO
+                    })
+                    .width(Fill)
+                    .height(Fill),
+            ]
+            .into()
+        } else {
+            body.into()
+        };
+
+        let body: Element<'_, Message> = match self.dock_menu {
+            Some(area) => self.dock_menu_overlay(body, area),
+            None => body,
+        };
 
         if let Some(dialog) = &self.dialog {
             let content = self.dialog_view(dialog);
@@ -5825,7 +6311,7 @@ impl App {
                 body,
                 opaque(
                     mouse_area(center(opaque(content)).style(|_| container::Style {
-                        background: Some(Color::from_rgba(0.02, 0.03, 0.05, 0.82).into()),
+                        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.35).into()),
                         ..Default::default()
                     }))
                     .on_press(Message::CloseDialog)
@@ -5833,59 +6319,125 @@ impl App {
             ]
             .into()
         } else {
-            body.into()
+            body
         }
     }
 
-    fn sidebar(&self) -> Element<'_, Message> {
-        if self.sidebar_collapsed {
-            return container(
-                column![
-                    action(">>", Message::ToggleSidebar).width(Fill),
-                    action("+", Message::New).style(primary).width(Fill),
-                    space::vertical().height(6),
-                    text("SSH").size(10).color(BLUE),
-                    space::vertical(),
-                    text(self.profiles.len().to_string()).size(11).color(MUTED),
-                ]
-                .spacing(10)
-                .align_x(iced::Center),
-            )
-            .width(58)
-            .height(Fill)
-            .padding([14, 8])
-            .style(surface)
-            .into();
+    fn menu_bar(&self) -> Element<'_, Message> {
+        let mut titles = row![].align_y(iced::Center);
+        for menu in menu::Menu::ALL {
+            let open = self.open_menu == Some(menu);
+            titles = titles.push(
+                mouse_area(
+                    button(
+                        text(menu.title())
+                            .size(theme::metrics::UI_TEXT)
+                            .color(theme::palette().text)
+                            .wrapping(iced::widget::text::Wrapping::None),
+                    )
+                    .padding([4, 8])
+                    .width(menu.title_width())
+                    .style(move |theme, status| menu_title(theme, status, open))
+                    .on_press(Message::MenuOpen(menu)),
+                )
+                .on_enter(Message::MenuHover(menu)),
+            );
         }
+        container(titles)
+            .height(theme::metrics::MENU_BAR_HEIGHT)
+            .width(Fill)
+            .align_y(iced::Center)
+            .style(|_| container::Style {
+                background: Some(theme::palette().chrome.into()),
+                border: Border {
+                    color: theme::palette().border,
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
+    }
 
-        let mut list = column![
-            row![
-                text("SESSIONS").size(12).color(MUTED),
-                space::horizontal(),
-                text(self.profiles.len().to_string()).size(12).color(MUTED),
-                action("<<", Message::ToggleSidebar),
-            ]
-            .spacing(6)
-            .align_y(iced::Center),
-            row![
-                action("+  New connection", Message::New)
-                    .style(primary)
-                    .width(Fill),
-                action("Import", Message::ImportProfiles),
-            ]
-            .spacing(6),
-            text_input("Search sessions...", &self.query)
+    fn menu_dropdown(&self, open: menu::Menu) -> Element<'_, Message> {
+        let mut rows = column![].width(240);
+        for entry in open.entries() {
+            rows = match entry {
+                menu::Entry::Separator => rows.push(
+                    container(space::horizontal())
+                        .width(Fill)
+                        .height(1)
+                        .style(|_| container::Style {
+                            background: Some(theme::palette().border.into()),
+                            ..Default::default()
+                        }),
+                ),
+                menu::Entry::Item {
+                    label,
+                    shortcut,
+                    command,
+                } => rows.push(
+                    button(
+                        row![
+                            text(label)
+                                .size(theme::metrics::UI_TEXT)
+                                .color(theme::palette().text),
+                            space::horizontal(),
+                            text(shortcut)
+                                .size(theme::metrics::UI_TEXT)
+                                .color(theme::palette().muted),
+                        ]
+                        .align_y(iced::Center),
+                    )
+                    .width(Fill)
+                    .height(24)
+                    .padding([3, 10])
+                    .style(menu_item)
+                    .on_press(Message::MenuCommand(command)),
+                ),
+            };
+        }
+        opaque(container(rows).padding(1).style(|_| container::Style {
+            background: Some(theme::palette().list.into()),
+            border: Border {
+                color: theme::palette().border,
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        }))
+    }
+
+    fn sidebar(&self) -> Element<'_, Message> {
+        let p = theme::palette();
+        let filter = column![
+            text_input("Filter", &self.query)
                 .id("session-search")
                 .on_input_maybe(self.dialog.is_none().then_some(Message::Search))
-                // Enter belongs to the search box, never to the active SSH PTY.
+                // Enter belongs to the filter box, never to the active SSH PTY.
                 .on_submit(Message::Search(self.query.clone()))
-                .padding(10),
-            space::vertical().height(6),
+                .size(theme::metrics::UI_TEXT)
+                .padding([4, 2])
+                .style(session_filter),
+            hline(),
         ]
-        .spacing(12);
+        .width(Fill);
+        let top = row![
+            filter,
+            tool_icon(icons::Icon::Plus, "New Session", Message::New),
+            tool_icon(
+                icons::Icon::Download,
+                "Import Profiles",
+                Message::ImportProfiles
+            ),
+        ]
+        .spacing(2)
+        .height(30)
+        .align_y(iced::Center);
 
+        let mut list = column![].spacing(0).width(Fill);
         let matches = self.profile_matches.len();
-        let mut current_group = String::new();
+        let mut current_group: Option<String> = None;
         let mut count = 0;
         for (index, profile) in self
             .profile_matches
@@ -5894,174 +6446,161 @@ impl App {
             .filter_map(|&index| self.profiles.get(index).map(|profile| (index, profile)))
         {
             let group = if profile.folder.trim().is_empty() {
-                "Ungrouped"
+                "Sessions"
             } else {
                 profile.folder.as_str()
             };
-            if current_group != group {
-                list = list
-                    .push(container(text(group.to_owned()).size(12).color(MUTED)).padding([8, 2]));
-                current_group = group.to_owned();
+            if current_group.as_deref() != Some(group) {
+                list = list.push(Self::session_group_row(group));
+                current_group = Some(group.to_owned());
             }
-
-            let selected = self.tabs.get(self.active).is_some_and(|tab| {
-                session_profile_key(&tab.profile) == session_profile_key(profile)
-            });
-            let destination = if profile.user.is_empty() {
-                profile.host.clone()
-            } else {
-                format!("{}@{}", profile.user, profile.host)
-            };
-            let item = button(
-                column![
-                    row![
-                        text(profile.name.clone()).size(14),
-                        space::horizontal(),
-                        if profile.favorite {
-                            text("PIN").size(10).color(GREEN)
-                        } else {
-                            text("SSH").size(10).color(BLUE)
-                        }
-                    ]
-                    .spacing(4),
-                    text(destination).size(12).color(MUTED),
-                ]
-                .spacing(5),
-            )
-            .padding(10)
-            .width(Fill)
-            .on_press(Message::Open(index))
-            .style(if selected { selected_button } else { quiet });
-            list = list.push(
-                row![item, action("Edit", Message::EditProfile(index))]
-                    .spacing(4)
-                    .align_y(iced::Center),
-            );
+            let open = self
+                .tabs
+                .iter()
+                .any(|tab| session_profile_key(&tab.profile) == session_profile_key(profile));
+            list = list.push(Self::session_tree_row(index, profile, open));
             count += 1;
         }
 
         if count == 0 {
-            list = list.push(text("No matching saved sessions").color(MUTED));
+            let empty = if self.query.trim().is_empty() {
+                "No sessions"
+            } else {
+                "No matching sessions"
+            };
+            list = list.push(
+                container(
+                    text(empty)
+                        .size(theme::metrics::UI_TEXT)
+                        .font(iced::Font::MONOSPACE)
+                        .color(p.muted),
+                )
+                .padding([4, 8]),
+            );
         } else if count < matches {
             list = list.push(
-                action(
-                    format!("Show more sessions ({count} of {matches})"),
-                    Message::ShowMoreProfiles,
+                button(
+                    text(format!("Show more sessions ({count} of {matches})"))
+                        .size(theme::metrics::UI_TEXT)
+                        .font(iced::Font::MONOSPACE)
+                        .color(p.muted),
                 )
-                .width(Fill),
+                .width(Fill)
+                .height(theme::metrics::ROW_HEIGHT)
+                .padding([2, 8])
+                .style(icon_button)
+                .on_press(Message::ShowMoreProfiles),
             );
         }
 
         container(
             column![
-                scrollable(list).height(Fill),
-                text("Saved profiles are read from the existing Inspirum profile store.")
-                    .size(12)
-                    .color(MUTED)
+                container(top)
+                    .width(Fill)
+                    .style(|_: &Theme| fill_style(theme::palette().dock)),
+                scrollable(list).width(Fill).height(Fill)
             ]
-            .spacing(16),
+            .spacing(4),
         )
-        .width(270)
+        .width(Fill)
         .height(Fill)
-        .padding(16)
-        .style(surface)
+        .padding(6)
+        .style(session_panel)
         .into()
+    }
+
+    /// WindTerm session tree: group row (disclosure triangle + folder + name).
+    fn session_group_row<'a>(group: &str) -> Element<'a, Message> {
+        let p = theme::palette();
+        container(
+            row![
+                icons::icon(icons::Icon::TriangleDown, 8.0, p.muted),
+                icons::icon(icons::Icon::Folder, 13.0, Color::from_rgb8(230, 200, 110)),
+                text(group.to_owned())
+                    .size(theme::metrics::UI_TEXT)
+                    .font(iced::Font::MONOSPACE)
+                    .color(p.text_dock),
+            ]
+            .spacing(5)
+            .align_y(iced::Center),
+        )
+        .width(Fill)
+        .height(theme::metrics::ROW_HEIGHT)
+        .padding([0, 4])
+        .align_y(iced::Center)
+        .into()
+    }
+
+    /// WindTerm session tree: flat full-width session row with a marker dot.
+    fn session_tree_row<'a>(index: usize, profile: &Session, open: bool) -> Element<'a, Message> {
+        let p = theme::palette();
+        let destination = if profile.user.is_empty() {
+            profile.host.clone()
+        } else {
+            format!("{}@{}", profile.user, profile.host)
+        };
+        let mut suffix = format!(" {destination}");
+        if profile.favorite {
+            suffix.push_str(" *");
+        }
+        for tag in &profile.tags {
+            suffix.push_str(" #");
+            suffix.push_str(tag);
+        }
+        let label = row![
+            icons::dot(p.magenta, 7.0),
+            text(profile.name.clone())
+                .size(theme::metrics::UI_TEXT)
+                .font(iced::Font::MONOSPACE)
+                .color(p.text_dock),
+            text(suffix)
+                .size(theme::metrics::UI_TEXT)
+                .font(iced::Font::MONOSPACE)
+                .color(p.muted)
+                .wrapping(iced::widget::text::Wrapping::None),
+            space::horizontal(),
+        ]
+        .spacing(6)
+        .align_y(iced::Center);
+        let item = button(label)
+            .width(Fill)
+            .height(theme::metrics::ROW_HEIGHT)
+            .padding(iced::Padding::new(0.0).left(24.0).right(4.0))
+            .on_press(Message::Open(index))
+            .style(if open { session_row_open } else { session_row });
+        let edit = button(icons::icon(icons::Icon::Edit, 11.0, p.muted))
+            .height(theme::metrics::ROW_HEIGHT)
+            .padding([0, 5])
+            .style(if open { session_row_open } else { session_row })
+            .on_press(Message::EditProfile(index));
+        row![item, edit].width(Fill).spacing(0).into()
     }
 
     fn workspace(&self) -> Element<'_, Message> {
         if self.tabs.is_empty() {
-            let mut saved = column![].spacing(6).width(360);
-            for (index, profile) in self
-                .profiles
-                .iter()
-                .enumerate()
-                .filter(|(_, profile)| profile.favorite)
-                .chain(
-                    self.profiles
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, profile)| !profile.favorite),
-                )
-                .take(4)
-            {
-                let destination = if profile.user.is_empty() {
-                    profile.host.clone()
-                } else {
-                    format!("{}@{}", profile.user, profile.host)
-                };
-                saved = saved.push(
-                    button(
-                        row![
-                            column![
-                                text(profile.name.clone()).size(14),
-                                text(destination).size(11).color(MUTED),
-                            ]
-                            .spacing(2),
-                            space::horizontal(),
-                            text(if profile.favorite { "PIN" } else { "SSH" })
-                                .size(10)
-                                .color(if profile.favorite { GREEN } else { BLUE }),
-                        ]
-                        .align_y(iced::Center),
-                    )
-                    .padding([9, 12])
-                    .width(Fill)
-                    .style(quiet)
-                    .on_press(Message::Open(index)),
-                );
-            }
-
-            let saved: Element<'_, Message> = if self.profiles.is_empty() {
-                text("No saved SSH sessions yet.")
-                    .size(12)
-                    .color(MUTED)
-                    .into()
-            } else {
-                column![
-                    text("SAVED SESSIONS").size(11).color(MUTED),
-                    saved,
-                    text("Use the session sidebar for the complete library, folders and search.")
-                        .size(11)
-                        .color(MUTED),
-                ]
-                .spacing(8)
-                .into()
-            };
-
-            return center(
-                column![
-                    text(">_").size(56).color(BLUE),
-                    text("Your workspace, ready.").size(30),
-                    text("Open a saved session or create a new connection.")
-                        .size(16)
-                        .color(MUTED),
-                    space::vertical().height(8),
-                    row![
-                        action("+  New connection", Message::New).style(primary),
-                        action("Import profiles", Message::ImportProfiles),
-                    ]
-                    .spacing(8),
-                    space::vertical().height(10),
-                    saved,
-                    space::vertical().height(8),
-                    text("The Iced shell uses the production OpenSSH PTY backend.")
-                        .size(12)
-                        .color(MUTED),
-                ]
-                .spacing(12)
-                .align_x(iced::Center),
-            )
+            return container(center(
+                text("Double-click a session to connect, or Session > New Session (Ctrl+N)")
+                    .size(theme::metrics::UI_TEXT)
+                    .color(muted()),
+            ))
+            .width(Fill)
+            .height(Fill)
+            .style(list_area)
             .into();
         }
 
-        let mut tabs = row![].spacing(4);
+        let p = theme::palette();
+        let mut tabs = row![].spacing(0);
         for (index, tab) in self.tabs.iter().enumerate() {
-            let tab_label = tab
-                .panes
-                .get(tab.focus)
+            let active = index == self.active;
+            let focused_pane = tab.panes.get(tab.focus);
+            let tab_label = focused_pane
                 .and_then(|pane| pane.terminal_title.as_deref())
                 .unwrap_or(&tab.profile.name)
                 .to_owned();
+            let connected = focused_pane.is_some_and(|pane| {
+                pane.terminal.is_some() && !pane.exited && pane.error.is_none()
+            });
             let label = self
                 .tools
                 .tab_labels
@@ -6069,218 +6608,367 @@ impl App {
                 .copied()
                 .unwrap_or_default();
             let color = match label {
-                crate::tab_management::TabVisualLabel::None => MUTED,
-                crate::tab_management::TabVisualLabel::Blue => BLUE,
-                crate::tab_management::TabVisualLabel::Green => GREEN,
+                crate::tab_management::TabVisualLabel::None => muted(),
+                crate::tab_management::TabVisualLabel::Blue => blue(),
+                crate::tab_management::TabVisualLabel::Green => green(),
                 crate::tab_management::TabVisualLabel::Amber => Color::from_rgb8(245, 190, 80),
-                crate::tab_management::TabVisualLabel::Red => DANGER,
+                crate::tab_management::TabVisualLabel::Red => danger(),
             };
-            tabs = tabs.push(
-                container(
-                    row![
-                        text(label.marker()).color(color),
-                        action(tab_label, Message::SelectTab(index)).style(
-                            if index == self.active {
-                                selected_button
-                            } else {
-                                quiet
-                            }
-                        ),
-                        action("x", Message::AskClose(index)),
-                    ]
-                    .spacing(0),
-                )
-                .style(if index == self.active {
-                    active_card
-                } else {
-                    surface
-                }),
-            );
-        }
-        tabs = tabs.push(action("+", Message::New));
-
-        let toolbar = row![
-            text("LIVE SSH").size(12).color(GREEN),
-            space::horizontal(),
-            action(
-                if self
-                    .focused_terminal_id()
-                    .is_some_and(|id| self.local_navigation.contains(&id))
-                {
-                    "LOCAL NAV"
-                } else if self
-                    .focused_terminal_id()
-                    .is_some_and(|id| self.remote_keys.contains(&id))
-                {
-                    "REMOTE KEYS"
-                } else {
-                    "REMOTE INPUT"
-                },
-                Message::ToggleLocalNavigation
-            ),
-            action(
-                if self.tools.sync.armed() {
-                    "SYNC ARMED · Disarm"
-                } else if self.tools.sync.selected_count() >= 2 {
-                    "Arm sync"
-                } else {
-                    "Select sync targets"
-                },
-                if self.tools.sync.selected_count() >= 2 {
-                    Message::Tool(tools::Action::SyncArm(!self.tools.sync.armed()))
-                } else {
-                    Message::Tool(tools::Action::Open(tools::Panel::Workspace))
-                },
-            )
-            .style(if self.tools.sync.armed() {
-                button::danger
+            let status: Element<'_, Message> = if connected {
+                icons::dot(p.magenta, 8.0)
             } else {
-                quiet
-            }),
-            action("Paste", Message::RequestPaste),
-            action("Split right", Message::Split(pane_grid::Axis::Vertical)),
-            action("Split down", Message::Split(pane_grid::Axis::Horizontal)),
-            action(
-                if self.tabs[self.active]
-                    .panes
-                    .iter()
-                    .any(|(_, pane)| pane.auxiliary_shell)
-                {
-                    "Close shell"
+                icons::icon(icons::Icon::CircleHollow, 8.0, p.muted)
+            };
+            let mut body = row![].spacing(4).align_y(iced::Center);
+            if label != crate::tab_management::TabVisualLabel::None {
+                body = body.push(
+                    text(label.marker())
+                        .size(theme::metrics::UI_TEXT)
+                        .color(color),
+                );
+            }
+            let body = body
+                .push(status)
+                .push(
+                    button(text(tab_label).size(theme::metrics::UI_TEXT))
+                        .padding([2, 2])
+                        .style(tab_button)
+                        .on_press(Message::SelectTab(index)),
+                )
+                .push(
+                    button(icons::icon(
+                        icons::Icon::Close,
+                        10.0,
+                        if active { p.text } else { p.muted },
+                    ))
+                    .padding(3)
+                    .style(icon_button)
+                    .on_press(Message::AskClose(index)),
+                );
+            let body = container(body)
+                .padding(iced::Padding::new(0.0).left(10.0).right(4.0).top(2.0))
+                .height(theme::metrics::STRIP_HEIGHT - 1.0)
+                .align_y(iced::Center)
+                .style(if active {
+                    tab_active_fill
                 } else {
-                    "Shell"
-                },
-                Message::ToggleAuxiliaryShell
-            ),
-            action(
-                if self.files_dock.is_some() {
-                    "Hide files"
-                } else {
-                    "Files"
-                },
-                Message::ToggleFiles
-            ),
-        ]
-        .spacing(8)
-        .align_y(iced::Center);
-
-        let dock = pane_grid(&self.dock, |_, panel, _| {
-            pane_grid::Content::new(match panel {
-                Dock::Terminal => self.terminals(),
-                Dock::Files => self.files(),
-            })
-        })
-        .spacing(6)
-        .on_resize(8, Message::DockResize)
-        .height(Fill);
-
-        container(
-            column![
-                scrollable(tabs).direction(scrollable::Direction::Horizontal(
-                    scrollable::Scrollbar::default()
-                )),
-                toolbar,
-                dock
+                    tab_inactive_fill
+                });
+            tabs = tabs.push(if active {
+                stack![
+                    body,
+                    container(space::horizontal())
+                        .width(Fill)
+                        .height(2)
+                        .style(accent_fill)
+                ]
+                .into()
+            } else {
+                Element::from(body)
+            });
+        }
+        let tab_strip = column![
+            row![
+                scrollable(tabs)
+                    .direction(scrollable::Direction::Horizontal(
+                        scrollable::Scrollbar::new().width(2).scroller_width(2)
+                    ))
+                    .width(Fill),
+                button(icons::icon(icons::Icon::Plus, 12.0, p.text))
+                    .padding(6)
+                    .style(icon_button)
+                    .on_press(Message::New),
             ]
-            .spacing(10),
+            .height(theme::metrics::STRIP_HEIGHT - 1.0)
+            .align_y(iced::Center),
+            hline(),
+        ];
+
+        let tab = &self.tabs[self.active];
+        let folder = if tab.profile.folder.trim().is_empty() {
+            "sessions".to_owned()
+        } else {
+            tab.profile.folder.clone()
+        };
+        let crumb_text = |value: String| {
+            text(value)
+                .size(theme::metrics::UI_TEXT)
+                .color(p.text)
+                .wrapping(iced::widget::text::Wrapping::None)
+        };
+        let breadcrumb = container(
+            row![
+                icons::icon(icons::Icon::Info, 12.0, p.muted),
+                container(space::horizontal())
+                    .width(1)
+                    .height(13)
+                    .style(border_fill),
+                crumb_text("ssh".to_owned()),
+                icons::icon(icons::Icon::TriangleRight, 8.0, p.muted),
+                crumb_text(folder),
+                icons::icon(icons::Icon::TriangleRight, 8.0, p.muted),
+                crumb_text(tab.profile.name.clone()),
+            ]
+            .spacing(6)
+            .align_y(iced::Center),
         )
-        .padding(14)
+        .padding([0, 8])
+        .height(23)
+        .width(Fill)
+        .clip(true)
+        .align_y(iced::Center)
+        .style(breadcrumb_field);
+        let shell_open = tab.panes.iter().any(|(_, pane)| pane.auxiliary_shell);
+        // Single-pane tabs hide the pane header; its labels and controls live
+        // in the session toolbar so they stay reachable.
+        let single_pane_parts: Element<'_, Message> = match tab.panes.iter().next() {
+            Some((pane_id, pane)) if tab.panes.len() == 1 => {
+                let (labels, controls) = self.pane_header_parts(*pane_id, pane, false);
+                row![labels, controls]
+                    .spacing(6)
+                    .align_y(iced::Center)
+                    .into()
+            }
+            _ => space::horizontal().width(0).into(),
+        };
+        let toolbar = column![
+            row![
+                tool_icon(
+                    icons::Icon::SplitRight,
+                    "Split right",
+                    Message::Split(pane_grid::Axis::Vertical)
+                ),
+                tool_icon(
+                    icons::Icon::SplitDown,
+                    "Split down",
+                    Message::Split(pane_grid::Axis::Horizontal)
+                ),
+                tool_icon(
+                    icons::Icon::Terminal,
+                    if shell_open { "Close shell" } else { "Shell" },
+                    Message::ToggleAuxiliaryShell
+                ),
+                breadcrumb,
+                single_pane_parts,
+                compact_action("Paste", Message::RequestPaste),
+                compact_action(
+                    if self
+                        .focused_terminal_id()
+                        .is_some_and(|id| self.local_navigation.contains(&id))
+                    {
+                        "LOCAL NAV"
+                    } else if self
+                        .focused_terminal_id()
+                        .is_some_and(|id| self.remote_keys.contains(&id))
+                    {
+                        "REMOTE KEYS"
+                    } else {
+                        "REMOTE INPUT"
+                    },
+                    Message::ToggleLocalNavigation
+                ),
+                compact_action(
+                    if self.tools.sync.armed() {
+                        "SYNC ARMED · Disarm"
+                    } else if self.tools.sync.selected_count() >= 2 {
+                        "Arm sync"
+                    } else {
+                        "Select sync targets"
+                    },
+                    if self.tools.sync.selected_count() >= 2 {
+                        Message::Tool(tools::Action::SyncArm(!self.tools.sync.armed()))
+                    } else {
+                        Message::Tool(tools::Action::Open(tools::Panel::Workspace))
+                    },
+                )
+                .style(if self.tools.sync.armed() {
+                    button::danger
+                } else {
+                    icon_button
+                }),
+                compact_action(
+                    if self.files_open() {
+                        "Hide files"
+                    } else {
+                        "Files"
+                    },
+                    Message::ToggleFiles
+                ),
+            ]
+            .spacing(2)
+            .padding([0, 6])
+            .height(33)
+            .align_y(iced::Center),
+            hline(),
+        ];
+
+        let dock = self.terminals();
+
+        container(column![
+            container(tab_strip).style(surface),
+            container(toolbar).style(surface),
+            container(dock).height(Fill).style(border_fill)
+        ])
         .height(Fill)
         .width(Fill)
         .into()
     }
 
+    /// Mode/state labels and per-pane controls shared by the pane header
+    /// (multi-pane tabs) and the session toolbar (single-pane tabs).
+    fn pane_header_parts<'a>(
+        &'a self,
+        id: pane_grid::Pane,
+        pane: &'a TerminalPane,
+        include_paste: bool,
+    ) -> (
+        iced::widget::Row<'a, Message>,
+        iced::widget::Row<'a, Message>,
+    ) {
+        let state = if pane.exited {
+            Some(("EXITED", muted()))
+        } else if pane.error.is_some() {
+            Some(("ERROR", danger()))
+        } else if pane.terminal.is_some() {
+            None
+        } else {
+            Some(("CONNECTING", blue()))
+        };
+        let mode = if self.free_type.contains_key(&pane.id) {
+            Some("FREE TYPE")
+        } else if self.local_navigation.contains(&pane.id) {
+            Some("LOCAL NAV")
+        } else if self.remote_keys.contains(&pane.id) {
+            Some("REMOTE KEYS")
+        } else if pane.auxiliary_shell {
+            Some("AUX SHELL")
+        } else {
+            None
+        };
+        let mut labels = row![].spacing(6).align_y(iced::Center);
+        if let Some(mode) = mode {
+            labels = labels.push(
+                text(mode)
+                    .size(10)
+                    .color(blue())
+                    .wrapping(iced::widget::text::Wrapping::None),
+            );
+        }
+        if let Some((label, color)) = state {
+            labels = labels.push(
+                text(label)
+                    .size(10)
+                    .color(color)
+                    .wrapping(iced::widget::text::Wrapping::None),
+            );
+        }
+        let mut controls = row![
+            compact_action("Copy", Message::CopySelection(pane.id)),
+            compact_action(
+                if self.tools.sync.is_target(pane.id) {
+                    "SYNC"
+                } else {
+                    "Sync +"
+                },
+                Message::Tool(tools::Action::SyncTarget(
+                    pane.id,
+                    !self.tools.sync.is_target(pane.id),
+                )),
+            )
+            .style(if self.tools.sync.is_target(pane.id) {
+                selected_button
+            } else {
+                icon_button
+            }),
+            if self.free_type.contains_key(&pane.id) {
+                compact_action("Discard draft", Message::FreeTypeDiscard(pane.id))
+            } else {
+                compact_action("Free type", Message::ToggleFreeType(pane.id))
+            },
+            compact_action(
+                if self.remote_keys.contains(&pane.id) {
+                    "Exit keys"
+                } else {
+                    "Remote keys"
+                },
+                Message::ToggleRemoteKeys(pane.id),
+            ),
+        ]
+        .spacing(0)
+        .align_y(iced::Center);
+        if pane.exited || pane.error.is_some() {
+            controls = controls.push(compact_action("Reconnect", Message::Reconnect(id)));
+        } else if include_paste {
+            controls = controls.push(compact_action("Paste", Message::RequestPaste));
+        }
+        controls = controls.push(compact_action("x", Message::ClosePane(id)));
+        (labels, controls)
+    }
+
     fn terminals(&self) -> Element<'_, Message> {
         let tab = &self.tabs[self.active];
-        pane_grid(&tab.panes, |id, pane, _| {
+        let multi_pane = tab.panes.len() > 1;
+        let grid = pane_grid(&tab.panes, |id, pane, _| {
             let focused = tab.focus == id;
-            let state = if pane.exited {
-                ("EXITED", MUTED)
-            } else if pane.error.is_some() {
-                ("ERROR", DANGER)
-            } else if pane.terminal.is_some() {
-                ("CONNECTED", GREEN)
-            } else {
-                ("CONNECTING", BLUE)
-            };
-            let title = pane_grid::TitleBar::new(
-                row![
-                    text(if pane.auxiliary_shell { "AUX SHELL" } else { "PTY" })
-                        .size(10)
-                        .color(if pane.auxiliary_shell { BLUE } else { MUTED }),
-                    text(if self.free_type.contains_key(&pane.id) {
-                        "FREE TYPE"
-                    } else if self.local_navigation.contains(&pane.id) {
-                        "LOCAL NAV"
-                    } else if self.remote_keys.contains(&pane.id) {
-                        "REMOTE KEYS"
-                    } else if focused {
-                        "FOCUSED"
-                    } else {
-                        "SSH"
-                    })
-                    .size(11)
-                    .color(if focused { BLUE } else { MUTED }),
+            let live = !pane.exited && pane.error.is_none() && pane.terminal.is_some();
+            // Narrow-pane rule: below PANE_HEADER_COMPACT_WIDTH only the
+            // status dot, clipped name, state labels, Reconnect and close stay
+            // in the header; the rest is reachable via Edit/Mode menus.
+            let header = responsive(move |size| {
+                let p = theme::palette();
+                let status: Element<'_, Message> = if live {
+                    icons::dot(p.magenta, 8.0)
+                } else {
+                    icons::icon(icons::Icon::CircleHollow, 8.0, p.muted)
+                };
+                let (labels, controls) = if size.width < PANE_HEADER_COMPACT_WIDTH {
+                    let (labels, _) = self.pane_header_parts(id, pane, true);
+                    let mut controls = row![].spacing(0).align_y(iced::Center);
+                    if pane.exited || pane.error.is_some() {
+                        controls =
+                            controls.push(compact_action("Reconnect", Message::Reconnect(id)));
+                    }
+                    controls = controls.push(compact_action("x", Message::ClosePane(id)));
+                    (labels, controls)
+                } else {
+                    self.pane_header_parts(id, pane, true)
+                };
+                let name = container(
                     text(
                         pane.terminal_title
                             .as_deref()
                             .unwrap_or(&pane.profile.name)
-                            .to_owned()
+                            .to_owned(),
                     )
-                    .size(13),
-                    text(state.0).size(10).color(state.1),
-                    space::horizontal(),
-                    action("Copy", Message::CopySelection(pane.id)),
-                    action(
-                        if self.tools.sync.is_target(pane.id) {
-                            "SYNC"
-                        } else {
-                            "Sync +"
-                        },
-                        Message::Tool(tools::Action::SyncTarget(
-                            pane.id,
-                            !self.tools.sync.is_target(pane.id),
-                        )),
-                    )
-                    .style(if self.tools.sync.is_target(pane.id) {
-                        selected_button
-                    } else {
-                        quiet
-                    }),
-                    if self.free_type.contains_key(&pane.id) {
-                        action("Discard draft", Message::FreeTypeDiscard(pane.id))
-                    } else {
-                        action("Free type", Message::ToggleFreeType(pane.id))
-                    },
-                    action(
-                        if self.remote_keys.contains(&pane.id) {
-                            "Exit keys"
-                        } else {
-                            "Remote keys"
-                        },
-                        Message::ToggleRemoteKeys(pane.id),
-                    ),
-                    if pane.exited || pane.error.is_some() {
-                        action("Reconnect", Message::Reconnect(id))
-                    } else {
-                        action("Paste", Message::RequestPaste)
-                    },
-                    action("x", Message::ClosePane(id)),
-                ]
-                .spacing(10)
-                .align_y(iced::Center),
-            )
-            .padding([4, 10])
-            .style(surface);
+                    .size(12)
+                    .color(p.text)
+                    .wrapping(iced::widget::text::Wrapping::None),
+                )
+                .width(Fill)
+                .clip(true);
+                row![status, name, labels, controls]
+                    .spacing(6)
+                    .height(20)
+                    .align_y(iced::Center)
+                    .into()
+            });
+            let title = pane_grid::TitleBar::new(column![
+                container(space::horizontal())
+                    .width(Fill)
+                    .height(2)
+                    .style(if focused { accent_fill } else { pane_header_fill }),
+                container(header).padding([0, 8]).height(20).align_y(iced::Center),
+            ])
+            .style(pane_header_fill);
 
             let terminal_body: Element<'_, Message> = if let Some(error) = &pane.error {
                 column![
-                    text("Unable to start SSH session").size(16).color(DANGER),
-                    text(error).size(13).color(MUTED),
+                    text("Unable to start SSH session").size(16).color(danger()),
+                    text(error).size(13).color(muted()),
                     space::vertical().height(8),
                     text("The saved profile was not altered.")
                         .size(12)
-                        .color(MUTED),
+                        .color(muted()),
                 ]
                 .spacing(10)
                 .width(Fill)
@@ -6294,7 +6982,8 @@ impl App {
                 canvas(TerminalCanvas {
                     focused: self.focused_terminal_id() == Some(pane.id)
                         && self.dialog.is_none()
-                        && self.remote_editor.is_none(),
+                        && self.remote_editor.is_none()
+                        && !self.sender_focused,
                     remote_key_mode: self.remote_keys.contains(&pane.id),
                     pane: id,
                     id: pane.id,
@@ -6318,7 +7007,7 @@ impl App {
                 text(transcript)
                     .font(Font::MONOSPACE)
                     .size(15)
-                    .color(FG)
+                    .color(fg())
                     .width(Fill)
                     .height(Fill)
                     .into()
@@ -6328,7 +7017,7 @@ impl App {
             // not the separate local draft editor below it.
             let terminal_view: Element<'_, Message> = sensor(
                 container(terminal_body)
-                    .padding(14)
+                    .padding(if pane.display.is_some() { 0 } else { 14 })
                     .width(Fill)
                     .height(Fill),
             )
@@ -6343,7 +7032,7 @@ impl App {
                         column![
                             text("FREE TYPE · local editable draft · remote input suspended · Ctrl/Cmd+Shift+E")
                                 .size(11)
-                                .color(BLUE),
+                                .color(blue()),
                             text_editor(draft)
                                 .id(free_type_editor_id(pane_terminal_id))
                                 .placeholder("Compose here; Send is always explicit")
@@ -6356,7 +7045,7 @@ impl App {
                                 action("Discard", Message::FreeTypeDiscard(pane.id)),
                                 text("Multiline still requires paste confirmation.")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                             ]
                             .spacing(8)
                             .align_y(iced::Center),
@@ -6374,7 +7063,7 @@ impl App {
                     terminal_view,
                     text("REMOTE KEYS · real SSH key input · h/j/k/l · 0/$ · u/d · Esc exits")
                         .size(11)
-                        .color(BLUE),
+                        .color(blue()),
                     row![
                         action("Left", Message::RemoteCursorPress(pane.id, RemoteCursorKey::Left)),
                         action("Up", Message::RemoteCursorPress(pane.id, RemoteCursorKey::Up)),
@@ -6397,51 +7086,64 @@ impl App {
             } else {
                 terminal_view
             };
-            pane_grid::Content::new(body)
-            .title_bar(title)
-            .style(if focused { active_card } else { card })
+            // Fill the pane edge to edge with the terminal's own background so
+            // no chrome colour shows around the canvas or while resizing.
+            let terminal_bg = pane.display.as_ref().map(|snapshot| {
+                let [r, g, b] = snapshot.background;
+                Color::from_rgb8(r, g, b)
+            });
+            let content = pane_grid::Content::new(body).style(move |theme: &Theme| match terminal_bg {
+                Some(color) => fill_style(color),
+                None => pane_body(theme),
+            });
+            if multi_pane {
+                content.title_bar(title)
+            } else {
+                content
+            }
         })
-        .spacing(8)
+        .spacing(1)
         .on_click(Message::Focus)
         .on_drag(Message::Drag)
         .on_resize(8, Message::Resize)
-        .height(Fill)
-        .into()
+        .height(Fill);
+        container(grid).height(Fill).style(border_fill).into()
     }
 
-    fn file_listing_panels(&self) -> (Element<'_, Message>, Element<'_, Message>) {
-        let mut local_list = column![file_listing_header()].spacing(3);
+    /// Local and remote file tables laid out `table_width` wide.
+    fn file_lists(&self, table_width: f32) -> (Column<'_, Message>, Column<'_, Message>) {
+        let mut local_list = column![file_listing_header(table_width)];
         if self.files.local_loading {
-            local_list = local_list.push(text("Loading local directory...").size(12).color(MUTED));
+            local_list =
+                local_list.push(text("Loading local directory...").size(12).color(muted()));
         } else if let Some(error) = &self.files.local_error {
-            local_list = local_list.push(text(error).size(12).color(DANGER));
+            local_list = local_list.push(text(error).size(12).color(danger()));
         } else if self.files.local_entries.is_empty() {
-            local_list = local_list.push(text("Directory is empty.").size(12).color(MUTED));
+            local_list = local_list.push(text("Directory is empty.").size(12).color(muted()));
         } else {
-            for entry in self
-                .files
-                .local_entries
-                .iter()
-                .take(self.files.local_visible)
-            {
+            let mut sorted: Vec<&LocalFileEntry> = self.files.local_entries.iter().collect();
+            sorted.sort_by_cached_key(|entry| (!entry.is_dir, entry.name.to_lowercase()));
+            for entry in sorted.into_iter().take(self.files.local_visible) {
                 let cells = FileListingCells {
                     name: display_leaf(&entry.name),
-                    size: if entry.is_dir {
-                        String::new()
-                    } else {
-                        format_file_size(entry.size)
-                    },
-                    kind: file_kind_label(entry.is_dir, &entry.name),
+                    is_dir: entry.is_dir,
+                    modified: format_local_time(entry.modified),
+                    kind: windterm_type(&entry.name, entry.is_dir),
+                    size: entry
+                        .size
+                        .filter(|_| !entry.is_dir)
+                        .map(windterm_size)
+                        .unwrap_or_default(),
                     permissions: entry.permissions.clone(),
                     owner: entry.owner.clone(),
-                    modified: format_local_time(entry.modified),
-                    created: format_local_time(entry.created),
+                    group: entry.group.clone(),
                 };
                 if entry.is_dir {
                     local_list = local_list.push(file_listing_row(
                         cells,
                         Message::FilesOpenLocal(entry.path.clone()),
                         false,
+                        table_width,
                     ));
                 } else {
                     let selected = self.files.selected_local.as_ref() == Some(&entry.path);
@@ -6449,6 +7151,7 @@ impl App {
                         cells,
                         Message::FilesSelectLocal(entry.path.clone()),
                         selected,
+                        table_width,
                     ));
                 }
             }
@@ -6467,34 +7170,36 @@ impl App {
             }
         }
 
-        let mut remote_list = column![file_listing_header()].spacing(3);
+        let mut remote_list = column![file_listing_header(table_width)];
         if self.files.remote_loading {
             remote_list =
-                remote_list.push(text("Loading remote directory...").size(12).color(MUTED));
+                remote_list.push(text("Loading remote directory...").size(12).color(muted()));
         } else if let Some(error) = &self.files.remote_error {
-            remote_list = remote_list.push(text(error).size(12).color(DANGER));
+            remote_list = remote_list.push(text(error).size(12).color(danger()));
         } else if self.files.remote_entries.is_empty() {
-            remote_list = remote_list.push(text("Directory is empty.").size(12).color(MUTED));
+            remote_list = remote_list.push(text("Directory is empty.").size(12).color(muted()));
         } else {
-            for entry in self
-                .files
-                .remote_entries
-                .iter()
-                .take(self.files.remote_visible)
-            {
+            let today = chrono::Local::now().date_naive();
+            let mut sorted: Vec<&sftp::RemoteEntry> = self.files.remote_entries.iter().collect();
+            sorted.sort_by_cached_key(|entry| (!entry.is_dir, entry.name.to_lowercase()));
+            for entry in sorted.into_iter().take(self.files.remote_visible) {
                 let cells = FileListingCells {
                     name: display_leaf(&entry.name),
-                    size: if entry.is_dir {
-                        String::new()
-                    } else {
-                        format_file_size(entry.size)
-                    },
-                    kind: file_kind_label(entry.is_dir, &entry.name),
-                    permissions: entry.permissions.clone().unwrap_or_else(|| "-".into()),
-                    owner: entry.owner.clone().unwrap_or_else(|| "-".into()),
-                    modified: entry.modified.clone().unwrap_or_else(|| "-".into()),
-                    // SFTP `ls` does not expose creation time.
-                    created: "-".into(),
+                    is_dir: entry.is_dir,
+                    modified: entry
+                        .modified
+                        .as_deref()
+                        .map(|raw| windterm_remote_date(raw, today))
+                        .unwrap_or_default(),
+                    kind: windterm_type(&entry.name, entry.is_dir),
+                    size: entry
+                        .size
+                        .filter(|_| !entry.is_dir)
+                        .map(windterm_size)
+                        .unwrap_or_default(),
+                    permissions: entry.permissions.clone().unwrap_or_default(),
+                    owner: entry.owner.clone().unwrap_or_default(),
+                    group: entry.group.clone().unwrap_or_default(),
                 };
                 if entry.is_dir {
                     let path = sftp::join_remote(&self.files.remote_dir, &entry.name);
@@ -6502,6 +7207,7 @@ impl App {
                         cells,
                         Message::FilesOpenRemote(path),
                         false,
+                        table_width,
                     ));
                 } else {
                     let selected = self
@@ -6513,6 +7219,7 @@ impl App {
                         cells,
                         Message::FilesSelectRemote(entry.clone()),
                         selected,
+                        table_width,
                     ));
                 }
             }
@@ -6531,105 +7238,155 @@ impl App {
             }
         }
 
-        let local_panel = container(
-            column![
-                row![
-                    text("LOCAL").size(11).color(MUTED),
-                    text_input("Local directory path", &self.files.local_path_input)
-                        .size(12)
-                        .on_input(Message::FilesLocalPathInput)
-                        .on_submit(Message::FilesLocalPathSubmit)
-                        .width(Fill),
-                    action("Go", Message::FilesLocalPathSubmit),
-                    action("Up", Message::FilesLocalUp),
-                ]
-                .spacing(8)
-                .align_y(iced::Center),
-                scrollable(local_list)
-                    .direction(scrollable::Direction::Both {
-                        vertical: scrollable::Scrollbar::default(),
-                        horizontal: scrollable::Scrollbar::default(),
-                    })
-                    .height(Fill),
-            ]
-            .spacing(8),
-        )
-        .padding(10)
-        .width(Fill)
-        .height(Fill)
-        .style(card);
+        if !self.files.local_loading && self.files.local_error.is_none() {
+            let total = self
+                .files
+                .local_entries
+                .iter()
+                .filter(|entry| !entry.is_dir)
+                .filter_map(|entry| entry.size)
+                .sum();
+            local_list =
+                local_list.push(file_listing_footer(self.files.local_entries.len(), total));
+        }
+        if !self.files.remote_loading && self.files.remote_error.is_none() {
+            let total = self
+                .files
+                .remote_entries
+                .iter()
+                .filter(|entry| !entry.is_dir)
+                .filter_map(|entry| entry.size)
+                .sum();
+            remote_list =
+                remote_list.push(file_listing_footer(self.files.remote_entries.len(), total));
+        }
 
-        let remote_panel = container(
-            column![
-                row![
-                    text("REMOTE").size(11).color(BLUE),
-                    text_input("Remote directory path", &self.files.remote_path_input)
-                        .size(12)
-                        .on_input(Message::FilesRemotePathInput)
-                        .on_submit(Message::FilesRemotePathSubmit)
-                        .width(Fill),
-                    action("Go", Message::FilesRemotePathSubmit),
-                    action("Up", Message::FilesRemoteUp),
-                ]
-                .spacing(8)
-                .align_y(iced::Center),
-                scrollable(remote_list)
+        (local_list, remote_list)
+    }
+
+    fn file_listing_panels(&self) -> (Element<'_, Message>, Element<'_, Message>) {
+        let local_panel = column![
+            files_path_bar(
+                text_input("Local directory path", &self.files.local_path_input)
+                    .size(12)
+                    .style(files_path_input)
+                    .on_input(Message::FilesLocalPathInput)
+                    .on_submit(Message::FilesLocalPathSubmit)
+                    .width(Fill)
+                    .into(),
+                action("Go", Message::FilesLocalPathSubmit),
+                Message::FilesLocalUp,
+            ),
+            responsive(move |size| {
+                container(
+                    scrollable(
+                        self.file_lists(size.width.max(file_listing_table_width()))
+                            .0,
+                    )
                     .direction(scrollable::Direction::Both {
                         vertical: scrollable::Scrollbar::default(),
                         horizontal: scrollable::Scrollbar::default(),
                     })
                     .height(Fill),
-            ]
-            .spacing(8),
-        )
-        .padding(10)
+                )
+                .width(Fill)
+                .height(Fill)
+                .style(list_area)
+                .into()
+            }),
+        ]
         .width(Fill)
-        .height(Fill)
-        .style(card);
+        .height(Fill);
+
+        let remote_panel = column![
+            files_path_bar(
+                text_input("Remote directory path", &self.files.remote_path_input)
+                    .size(12)
+                    .style(files_path_input)
+                    .on_input(Message::FilesRemotePathInput)
+                    .on_submit(Message::FilesRemotePathSubmit)
+                    .width(Fill)
+                    .into(),
+                action("Go", Message::FilesRemotePathSubmit),
+                Message::FilesRemoteUp,
+            ),
+            responsive(move |size| {
+                container(
+                    scrollable(
+                        self.file_lists(size.width.max(file_listing_table_width()))
+                            .1,
+                    )
+                    .direction(scrollable::Direction::Both {
+                        vertical: scrollable::Scrollbar::default(),
+                        horizontal: scrollable::Scrollbar::default(),
+                    })
+                    .height(Fill),
+                )
+                .width(Fill)
+                .height(Fill)
+                .style(list_area)
+                .into()
+            }),
+        ]
+        .width(Fill)
+        .height(Fill);
         (local_panel.into(), remote_panel.into())
     }
 
-    fn files(&self) -> Element<'_, Message> {
-        // Either dock is a fixed share of the window. Lay the panel out from
-        // its real height so the transfer queue, not the file listings, is
-        // what gives way at the minimum window size.
-        responsive(move |size| self.files_layout(size.height)).into()
+    fn files_unavailable(&self) -> Element<'_, Message> {
+        container(
+            text("Open a session to browse files")
+                .size(13)
+                .color(muted()),
+        )
+        .center(Fill)
+        .into()
     }
 
-    fn files_layout(&self, dock_height: f32) -> Element<'_, Message> {
-        let profile = &self.tabs[self.active].profile;
-        let target = if profile.user.is_empty() {
-            profile.host.clone()
-        } else {
-            format!("{}@{}", profile.user, profile.host)
-        };
+    /// Filer dock panel (spec 5.2): remote path bar, table, actions, editor.
+    fn filer_panel(&self) -> Element<'_, Message> {
+        if self.tabs.is_empty() {
+            return self.files_unavailable();
+        }
+        let (_, remote_panel) = self.file_listing_panels();
+        let actions = files_action_row(vec![
+            action("<- Download", Message::FilesRequestDownload).into(),
+            action("New remote folder", Message::FilesRequestMkdirRemote).into(),
+            action("Rename remote", Message::FilesRequestRenameRemote).into(),
+            action("Edit remote", Message::FilesRequestEditRemote).into(),
+            action("Delete remote", Message::FilesRequestDeleteRemote).into(),
+        ]);
+        column![remote_panel, actions, self.remote_editor_section()]
+            .height(Fill)
+            .width(Fill)
+            .into()
+    }
 
-        let bottom_layout = bottom_files_layout_policy();
-        let (local_panel, remote_panel) = self.file_listing_panels();
-        // The listings take every pixel the header, actions bar and bounded
-        // transfer queue leave, so completed transfers cannot consume them.
-        let file_panels: Element<'_, Message> = if self.files_side_dock {
-            column![local_panel, remote_panel]
-                .spacing(8)
-                .height(Fill)
-                .into()
-        } else {
-            row![local_panel, remote_panel]
-                .spacing(8)
-                .height(Fill)
-                .into()
-        };
+    /// Explorer dock panel: local path bar, table and local actions.
+    fn explorer_panel(&self) -> Element<'_, Message> {
+        if self.tabs.is_empty() {
+            return self.files_unavailable();
+        }
+        let (local_panel, _) = self.file_listing_panels();
+        let actions = files_action_row(vec![
+            action("Upload ->", Message::FilesRequestUpload).into(),
+            action("New local folder", Message::FilesRequestMkdirLocal).into(),
+            action("Rename local", Message::FilesRequestRenameLocal).into(),
+            action("Delete local", Message::FilesRequestDeleteLocal).into(),
+        ]);
+        column![local_panel, actions]
+            .height(Fill)
+            .width(Fill)
+            .into()
+    }
 
-        let activity = if self.files.local_loading || self.files.remote_loading {
-            "Loading"
-        } else if self.files.local_error.is_some() || self.files.remote_error.is_some() {
-            "Needs attention"
-        } else {
-            "Ready"
-        };
-
+    /// Transfer dock panel (spec 5.3): one block per job with a progress bar.
+    fn transfer_panel(&self) -> Element<'_, Message> {
+        if self.tabs.is_empty() {
+            return self.files_unavailable();
+        }
         let active_session = self.files.session_key.as_deref();
-        let mut transfer_list = column![].spacing(5);
+        let mut transfer_list = column![].spacing(8).padding(8);
         let mut visible_transfers = 0usize;
         for job in self
             .files
@@ -6637,7 +7394,6 @@ impl App {
             .iter()
             .rev()
             .filter(|job| active_session == Some(job.pending.session_key.as_str()))
-            .take(6)
         {
             visible_transfers += 1;
             let state = match job.state {
@@ -6672,149 +7428,86 @@ impl App {
                 TransferJobState::Completed => {}
             }
 
+            let (name, verb, direction, destination) = transfer_job_summary(job);
+            let fraction = match job.total {
+                Some(total) if total > 0 => {
+                    (job.transferred as f64 / total as f64).clamp(0.0, 1.0) as f32
+                }
+                _ if job.state == TransferJobState::Completed => 1.0,
+                _ => 0.0,
+            };
+            let detail_line = if job.error.is_empty() {
+                progress
+            } else {
+                format!(": {}", job.error)
+            };
+            let state_color = match job.state {
+                TransferJobState::Completed => green(),
+                TransferJobState::Failed => danger(),
+                TransferJobState::Running | TransferJobState::Queued => blue(),
+                TransferJobState::Cancelled => theme::palette().text_dock,
+            };
             transfer_list = transfer_list.push(
-                container(
+                column![
                     row![
-                        column![
-                            text(job.label()).size(12),
-                            text(if job.error.is_empty() {
-                                format!("{state} {progress}").trim().to_owned()
-                            } else {
-                                format!("{state}: {}", job.error)
-                            })
-                            .size(11)
-                            .color(
-                                if job.state == TransferJobState::Failed {
-                                    DANGER
-                                } else {
-                                    MUTED
-                                }
-                            ),
-                        ]
-                        .spacing(2),
+                        icons::icon(icons::Icon::File, 12.0, theme::palette().text),
+                        text(format!(
+                            "{name} - {} {verb}",
+                            format_file_size(Some(job.transferred))
+                        ))
+                        .size(12),
                         space::horizontal(),
+                        text(format!("{destination} {direction}"))
+                            .size(theme::metrics::UI_TEXT)
+                            .color(theme::palette().text_dock),
+                        text(state).size(theme::metrics::UI_TEXT).color(state_color),
+                        text(detail_line)
+                            .size(theme::metrics::UI_TEXT)
+                            .color(theme::palette().text_dock),
                         controls,
                     ]
+                    .spacing(6)
                     .align_y(iced::Center),
-                )
-                .padding([6, 8])
-                .width(Fill)
-                .style(card),
+                    progress_bar(0.0..=1.0, fraction)
+                        .length(Fill)
+                        .girth(13)
+                        .style(transfer_progress),
+                ]
+                .spacing(3),
             );
         }
         if visible_transfers == 0 {
-            transfer_list =
-                transfer_list.push(text("No transfers for this session.").size(11).color(MUTED));
+            transfer_list = transfer_list.push(
+                text("No transfers for this session.")
+                    .size(11)
+                    .color(muted()),
+            );
         }
 
-        let actions_panel: Element<'_, Message> = scrollable(
-            row![
-                action("Upload ->", Message::FilesRequestUpload),
-                action("<- Download", Message::FilesRequestDownload),
-                action("New local folder", Message::FilesRequestMkdirLocal),
-                action("New remote folder", Message::FilesRequestMkdirRemote),
-                action("Rename local", Message::FilesRequestRenameLocal),
-                action("Rename remote", Message::FilesRequestRenameRemote),
-                action("Edit remote", Message::FilesRequestEditRemote),
-                action("Delete local", Message::FilesRequestDeleteLocal),
-                action("Delete remote", Message::FilesRequestDeleteRemote),
-                text("Destructive operations require confirmation.")
-                    .size(11)
-                    .color(MUTED),
-            ]
-            .spacing(8),
-        )
-        .direction(scrollable::Direction::Horizontal(
-            scrollable::Scrollbar::default(),
-        ))
-        .height(if bottom_layout.compact_actions {
-            34
-        } else {
-            68
-        })
-        .into();
-
-        let queue_viewport_height =
-            files_queue_viewport_height(dock_height, self.files_side_dock, bottom_layout);
-        let transfer_queue = match queue_viewport_height {
-            Some(viewport) => container(
-                column![
-                    text("TRANSFER QUEUE").size(11).color(MUTED),
-                    scrollable(transfer_list).height(viewport),
-                ]
-                .spacing(6),
-            )
-            .padding(8)
+        container(scrollable(transfer_list).height(Fill).width(Fill))
             .width(Fill)
-            .style(surface),
-            // Too short for a queue viewport: keep the listings usable and
-            // summarise the queue on one line instead of eating their row.
-            None => container(
-                text(format!(
-                    "TRANSFER QUEUE · {visible_transfers} for this session · enlarge the window to review"
-                ))
-                .size(11)
-                .color(MUTED),
-            )
-            .padding([4, 8])
-            .width(Fill)
-            .style(surface),
-        };
-
-        let content_spacing = if self.files_side_dock { 8 } else { 4 };
-
-        let target_label = text(format!("Target: {target}")).size(12).color(BLUE);
-        let header: Element<'_, Message> = if self.files_side_dock {
-            // The narrow side dock cannot fit the target beside the controls
-            // without wrapping the Dock button label; give it its own line.
-            column![
-                row![
-                    text("Files").size(16),
-                    text(activity).size(11).color(MUTED),
-                    space::horizontal(),
-                    action("Refresh", Message::FilesRefresh),
-                    action("Dock bottom", Message::FilesToggleDockPosition),
-                ]
-                .spacing(12)
-                .align_y(iced::Center),
-                target_label,
-            ]
-            .spacing(2)
+            .height(Fill)
+            .style(list_area)
             .into()
-        } else {
-            row![
-                text("Files").size(16),
-                target_label,
-                text(activity).size(11).color(MUTED),
-                space::horizontal(),
-                action("Refresh", Message::FilesRefresh),
-                action("Dock right", Message::FilesToggleDockPosition),
-            ]
-            .spacing(12)
-            .align_y(iced::Center)
-            .into()
-        };
+    }
 
-        container(
-            column![
-                header,
-                file_panels,
-                actions_panel,
-                if let Some(editor) = self
-                    .remote_editor
-                    .as_ref()
-                    .filter(|editor| active_session == Some(editor.session_key.as_str()))
-                {
-                    // Rendering must not wait on an in-flight SFTP save.
-                    let dirty = editor.dirty;
-                    container(
+    fn remote_editor_section(&self) -> Element<'_, Message> {
+        let active_session = self.files.session_key.as_deref();
+        let section = if let Some(editor) = self
+            .remote_editor
+            .as_ref()
+            .filter(|editor| active_session == Some(editor.session_key.as_str()))
+        {
+            // Rendering must not wait on an in-flight SFTP save.
+            let dirty = editor.dirty;
+            container(
                         column![
                             row![
-                                text(format!("EDIT · {}", editor.remote)).size(12).color(BLUE),
+                                text(format!("EDIT · {}", editor.remote)).size(12).color(blue()),
                                 if dirty {
-                                    text("MODIFIED").size(10).color(DANGER)
+                                    text("MODIFIED").size(10).color(danger())
                                 } else {
-                                    text("SAVED").size(10).color(GREEN)
+                                    text("SAVED").size(10).color(green())
                                 },
                                 space::horizontal(),
                                 action(
@@ -6834,7 +7527,7 @@ impl App {
                                     row![
                                         text("Remote file changed since open.")
                                             .size(12)
-                                            .color(DANGER),
+                                            .color(danger()),
                                         space::horizontal(),
                                         action(
                                             "Overwrite changed remote",
@@ -6856,7 +7549,7 @@ impl App {
                                     row![
                                         text("Discard unsaved editor changes?")
                                             .size(12)
-                                            .color(DANGER),
+                                            .color(danger()),
                                         space::horizontal(),
                                         action("Discard", Message::RemoteEditorDiscard)
                                             .style(button::danger),
@@ -6868,14 +7561,14 @@ impl App {
                                 .padding(8)
                                 .style(card)
                             } else if let Some(error) = &editor.error {
-                                container(text(error).size(11).color(DANGER))
+                                container(text(error).size(11).color(danger()))
                                     .padding(8)
                                     .style(card)
                             } else {
                                 container(
                                     text("Saving re-checks the remote contents and uses staged replacement; closing never uploads automatically.")
                                         .size(11)
-                                        .color(MUTED)
+                                        .color(muted())
                                 )
                                 .padding(4)
                             },
@@ -6884,19 +7577,10 @@ impl App {
                     )
                     .padding(8)
                     .style(active_card)
-                } else {
-                    container(column![]).height(0).padding(0)
-                },
-                transfer_queue,
-            ]
-            .spacing(content_spacing)
-            .height(Fill),
-        )
-        .padding(if self.files_side_dock { 10 } else { 6 })
-        .height(Fill)
-        .width(Fill)
-        .style(card)
-        .into()
+        } else {
+            container(column![]).height(0).padding(0)
+        };
+        section.into()
     }
 
     fn refresh_tunnel_status(&mut self) {
@@ -6909,11 +7593,7 @@ impl App {
     }
 
     fn tunnels_view(&self) -> Element<'_, Message> {
-        let mut tunnel_list = column![
-            text("Tunnel").size(16),
-            text("Saved forwards").size(11).color(MUTED),
-        ]
-        .spacing(8);
+        let mut tunnel_list = column![text("Saved forwards").size(11).color(muted()),].spacing(8);
 
         if self
             .profiles
@@ -6923,7 +7603,7 @@ impl App {
             tunnel_list = tunnel_list.push(
                 text("No tunnels yet. Use + on a profile to create one.")
                     .size(12)
-                    .color(MUTED),
+                    .color(muted()),
             );
         }
 
@@ -6934,7 +7614,11 @@ impl App {
                 .get(&key)
                 .cloned()
                 .unwrap_or(tunnels::Status::Stopped);
-            let status_color = if status.is_running() { GREEN } else { MUTED };
+            let status_color = if status.is_running() {
+                green()
+            } else {
+                muted()
+            };
             let mut group = column![
                 row![
                     text(truncate(&profile.name, 22)).size(13),
@@ -6967,7 +7651,7 @@ impl App {
                 let item = button(
                     column![
                         text(truncate(&row_data.label, 28)).size(13),
-                        text(truncate(&subtitle, 42)).size(10).color(MUTED),
+                        text(truncate(&subtitle, 42)).size(10).color(muted()),
                     ]
                     .spacing(2),
                 )
@@ -7041,10 +7725,10 @@ impl App {
 
             let destination = if edit.draft.kind == tunnels::ForwardKind::Dynamic {
                 column![
-                    text("Dynamic SOCKS tunnel").size(12).color(MUTED),
+                    text("Dynamic SOCKS tunnel").size(12).color(muted()),
                     text("SOCKS clients may send hostnames through the tunnel for remote resolution; there is no fixed destination host for -D.")
                         .size(11)
-                        .color(MUTED),
+                        .color(muted()),
                 ]
                 .spacing(5)
             } else {
@@ -7052,67 +7736,77 @@ impl App {
                     text("Destination").size(13),
                     row![
                         column![
-                            text("Host").size(11).color(MUTED),
+                            text("Host").size(11).color(fg()),
                             text_input("10.1.10.10", &edit.draft.destination_host)
+                                .style(flat_input)
                                 .on_input(Message::TunnelDraftDestinationHost)
-                                .padding(10)
+                                .size(13)
+                                .padding([3, 6])
                         ]
                         .spacing(3)
                         .width(Fill),
                         column![
-                            text("Port").size(11).color(MUTED),
+                            text("Port").size(11).color(fg()),
                             text_input("8000", &edit.draft.destination_port)
+                                .style(flat_input)
                                 .on_input(Message::TunnelDraftDestinationPort)
-                                .padding(10)
+                                .size(13)
+                                .padding([3, 6])
                         ]
                         .spacing(3)
                         .width(120),
                     ]
-                    .spacing(10)
+                    .spacing(8)
                 ]
                 .spacing(5)
             };
 
             container(
                 column![
-                    text(title).size(20),
+                    text(title).size(13),
                     text("WindTerm-style structured tunnel editor")
                         .size(11)
-                        .color(MUTED),
-                    text("Type").size(11).color(MUTED),
+                        .color(muted()),
+                    text("Type").size(11).color(fg()),
                     kind_row,
                     column![
-                        text("Label").size(11).color(MUTED),
+                        text("Label").size(11).color(fg()),
                         text_input("e.g. database", &edit.draft.label)
+                            .style(flat_input)
                             .on_input(Message::TunnelDraftLabel)
-                            .padding(10)
+                            .size(13)
+                            .padding([3, 6])
                     ]
                     .spacing(3),
                     text("Listen").size(13),
                     row![
                         column![
-                            text("Bind address").size(11).color(MUTED),
+                            text("Bind address").size(11).color(fg()),
                             text_input("127.0.0.1", &edit.draft.bind_address)
+                                .style(flat_input)
                                 .on_input(Message::TunnelDraftBind)
-                                .padding(10)
+                                .size(13)
+                                .padding([3, 6])
                         ]
                         .spacing(3)
                         .width(Fill),
                         column![
-                            text("Port").size(11).color(MUTED),
+                            text("Port").size(11).color(fg()),
                             text_input("2000", &edit.draft.listen_port)
+                                .style(flat_input)
                                 .on_input(Message::TunnelDraftListenPort)
-                                .padding(10)
+                                .size(13)
+                                .padding([3, 6])
                         ]
                         .spacing(3)
                         .width(120),
                     ]
-                    .spacing(10),
+                    .spacing(8),
                     iced::widget::checkbox(true)
                         .label("Check requested listener is available before reporting Running"),
                     destination,
                     if !self.tunnel_notice.is_empty() {
-                        text(&self.tunnel_notice).size(12).color(DANGER)
+                        text(&self.tunnel_notice).size(12).color(danger())
                     } else {
                         text("").size(1)
                     },
@@ -7129,26 +7823,26 @@ impl App {
                     .spacing(8)
                     .align_y(iced::Center),
                 ]
-                .spacing(12),
+                .spacing(8),
             )
-            .padding(16)
+            .padding(8)
             .width(Fill)
             .style(card)
             .into()
         } else {
             container(
                 column![
-                    text("Tunnel").size(20),
+                    text("Tunnel").size(13),
                     text("Choose a tunnel on the left, or press + beside a profile to add one.")
                         .size(13)
-                        .color(MUTED),
+                        .color(muted()),
                     text("The editor exposes Local, Remote and Dynamic forwards as structured fields instead of raw OpenSSH -L/-R/-D strings.")
                         .size(11)
-                        .color(MUTED),
+                        .color(muted()),
                 ]
                 .spacing(8),
             )
-            .padding(18)
+            .padding(8)
             .width(Fill)
             .style(card)
             .into()
@@ -7156,7 +7850,7 @@ impl App {
 
         let body = column![
             row![
-                text("Tunnel Manager").size(24),
+                text("Tunnel Manager").size(13),
                 space::horizontal(),
                 action("Refresh", Message::TunnelRefresh),
                 action("Close", Message::CloseDialog).style(primary),
@@ -7165,40 +7859,65 @@ impl App {
             .align_y(iced::Center),
             text("Manage saved SSH port forwards with a WindTerm-style list-and-editor workflow. Running tunnel processes are still isolated per profile and use OpenSSH ExitOnForwardFailure.")
                 .size(12)
-                .color(MUTED),
+                .color(muted()),
             row![
                 container(scrollable(tunnel_list).height(430))
-                    .padding(10)
+                    .padding(8)
                     .width(300)
                     .style(card),
                 editor,
             ]
-            .spacing(12)
+            .spacing(8)
             .height(Fill),
         ]
-        .spacing(10);
+        .spacing(8);
 
         container(body).padding(6).width(Fill).height(Fill).into()
     }
 
     fn dialog_view<'a>(&'a self, dialog: &'a Dialog) -> Element<'a, Message> {
+        let title: &'static str = match dialog {
+            Dialog::Tools => "Tools",
+            Dialog::Connection => {
+                if self.editing_profile.is_some() {
+                    "Edit SSH connection"
+                } else {
+                    "New SSH connection"
+                }
+            }
+            Dialog::Commands => "Command palette",
+            Dialog::Close(_) => "Close this session?",
+            Dialog::PasteConfirm { .. } => "Confirm terminal paste",
+            Dialog::FileOverwrite(_) => "Replace existing file?",
+            Dialog::FileDeleteLocal(_) => "Delete local file?",
+            Dialog::FileDeleteRemote { directory, .. } => {
+                if *directory {
+                    "Delete remote directory?"
+                } else {
+                    "Delete remote file?"
+                }
+            }
+            Dialog::FileName(file_action) => match file_action {
+                FileNameAction::MkdirLocal(_) => "New local folder",
+                FileNameAction::MkdirRemote { .. } => "New remote folder",
+                FileNameAction::RenameLocal(_) => "Rename local file",
+                FileNameAction::RenameRemote { .. } => "Rename remote file",
+            },
+            Dialog::ImportProfiles => "Import SSH profiles",
+            Dialog::Tunnels => "Tunnel",
+            Dialog::About => "Inspirum Terminal · Iced",
+        };
         let body: Element<'_, Message> = match dialog {
             Dialog::Tools => self.tools_view(),
             Dialog::Connection => {
                 let editing = self.editing_profile.is_some();
                 let mut form = column![
                     text(if editing {
-                        "Edit SSH connection"
-                    } else {
-                        "New SSH connection"
-                    })
-                    .size(24),
-                    text(if editing {
                         "Changes are saved to the existing profile. Live panes keep their current connection until reconnect."
                     } else {
                         "Saved through the existing validated, non-secret profile store."
                     })
-                    .color(MUTED),
+                    .color(muted()),
                     field(
                         "Session name",
                         "Optional; defaults to host",
@@ -7226,7 +7945,7 @@ impl App {
                         ))
                         .width(140)
                     ]
-                    .spacing(14),
+                    .spacing(8),
                     field(
                         "Folder",
                         "Optional group",
@@ -7234,30 +7953,32 @@ impl App {
                         Message::Folder
                     ),
                     row![
-                        text("Favourite").size(13).color(MUTED),
+                        text("Favourite").size(13).color(fg()),
                         action(
                             if self.form.favorite { "Pinned" } else { "Not pinned" },
                             Message::Favorite(!self.form.favorite)
                         )
                         .style(if self.form.favorite {
-                            selected_button
+                            flat_selected
                         } else {
                             quiet
                         }),
                     ]
-                    .spacing(10)
+                    .spacing(8)
                     .align_y(iced::Center),
                     column![
-                        text("Tags").size(13).color(MUTED),
+                        text("Tags").size(13).color(fg()),
                         row![
                             text_input("Add profile tag", &self.form.tag_input)
+.style(flat_input)
                                 .id("connection-tag")
                                 .on_input(Message::TagInput)
                                 .on_submit(Message::AddTag)
-                                .padding(11),
+                                .size(13).padding([3, 6]),
                             action("Add", Message::AddTag),
                         ]
-                        .spacing(8),
+                        .spacing(8)
+                        .align_y(iced::Center),
                         row(
                             self.form
                                 .tags
@@ -7285,20 +8006,20 @@ impl App {
                         Message::Advanced
                     ),
                 ]
-                .spacing(16);
+                .spacing(8);
 
                 if self.form.advanced {
                     form = form.push(
                         container(
                             column![
-                                text("Host key verification").size(11).color(MUTED),
+                                text("Host key verification").size(11).color(fg()),
                                 row![
                                     action(
                                         "Ask on new/changed host",
                                         Message::StrictHostKey(false)
                                     )
                                     .style(if !self.form.strict_host_key {
-                                        selected_button
+                                        flat_selected
                                     } else {
                                         quiet
                                     }),
@@ -7307,7 +8028,7 @@ impl App {
                                         Message::StrictHostKey(true)
                                     )
                                     .style(if self.form.strict_host_key {
-                                        selected_button
+                                        flat_selected
                                     } else {
                                         quiet
                                     }),
@@ -7315,7 +8036,7 @@ impl App {
                                 .spacing(8),
                                 text("Host-key verification is always enabled. “Known hosts only” refuses unknown hosts; “Ask” keeps OpenSSH's interactive trust prompt.")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                                 field(
                                     "Identity file",
                                     "~/.ssh/id_ed25519 or other key path",
@@ -7324,26 +8045,26 @@ impl App {
                                 ),
                                 text("Authentication · Inherit follows SSH config defaults")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                                 policy_field("Public-key authentication", self.form.public_key_auth, Message::PublicKeyAuth),
                                 policy_field("Password authentication", self.form.password_auth, Message::PasswordAuth),
                                 policy_field("Keyboard-interactive authentication", self.form.keyboard_interactive_auth, Message::KeyboardInteractiveAuth),
                                 policy_field("Kerberos / GSSAPI authentication", self.form.gssapi_auth, Message::GssapiAuth),
                                 text("GSSAPI requires Kerberos tickets and a capable system OpenSSH; runtime-verified against an isolated Linux realm, not yet verified on Windows/macOS.")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                                 text("Session behavior · inherited unless explicitly overridden")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                                 policy_field("SSH agent forwarding", self.form.agent_forwarding, Message::AgentForwarding),
                                 policy_field("X11 forwarding", self.form.x11_forwarding, Message::X11Forwarding),
                                 policy_field("Compression", self.form.compression, Message::Compression),
                                 text("Only enable agent or X11 forwarding for remote hosts you trust; agent forwarding exposes signing capability to that host.")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                                 text("X11 requires a local X server/DISPLAY and remote X11 support; it has not been verified in Windows/macOS native CI.")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                                 text(forwarding_preflight_hint(
                                     self.form.agent_forwarding,
                                     self.form.x11_forwarding,
@@ -7361,14 +8082,14 @@ impl App {
                                 ),
                                 text("Structured proxy · mutually exclusive with ProxyJump")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                                 row![
                                     action(
                                         "None",
                                         Message::ProxyKind(ProxyKind::None)
                                     )
                                     .style(if self.form.proxy_kind == ProxyKind::None {
-                                        selected_button
+                                        flat_selected
                                     } else {
                                         quiet
                                     }),
@@ -7377,7 +8098,7 @@ impl App {
                                         Message::ProxyKind(ProxyKind::HttpConnect)
                                     )
                                     .style(if self.form.proxy_kind == ProxyKind::HttpConnect {
-                                        selected_button
+                                        flat_selected
                                     } else {
                                         quiet
                                     }),
@@ -7386,7 +8107,7 @@ impl App {
                                         Message::ProxyKind(ProxyKind::Socks5)
                                     )
                                     .style(if self.form.proxy_kind == ProxyKind::Socks5 {
-                                        selected_button
+                                        flat_selected
                                     } else {
                                         quiet
                                     }),
@@ -7411,17 +8132,17 @@ impl App {
                                             ))
                                             .width(140)
                                         ]
-                                        .spacing(14),
+                                        .spacing(8),
                                         row![
                                             text("Proxy authentication")
                                                 .size(12)
-                                                .color(MUTED),
+                                                .color(muted()),
                                             action(
                                                 "None",
                                                 Message::ProxyAuth(ProxyAuth::None)
                                             )
                                             .style(if self.form.proxy_auth == ProxyAuth::None {
-                                                selected_button
+                                                flat_selected
                                             } else {
                                                 quiet
                                             }),
@@ -7430,7 +8151,7 @@ impl App {
                                                 Message::ProxyAuth(ProxyAuth::Environment)
                                             )
                                             .style(if self.form.proxy_auth == ProxyAuth::Environment {
-                                                selected_button
+                                                flat_selected
                                             } else {
                                                 quiet
                                             }),
@@ -7439,14 +8160,14 @@ impl App {
                                         .align_y(iced::Center),
                                         text("Environment mode reads ephemeral proxy credentials at runtime; usernames/passwords are never saved in the profile.")
                                             .size(11)
-                                            .color(MUTED),
+                                            .color(muted()),
                                     ]
-                                    .spacing(10)
+                                    .spacing(8)
                                     .into()
                                 },
                                 text("Algorithm policy · leave empty to inherit OpenSSH defaults")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                                 field(
                                     "Ciphers",
                                     "e.g. chacha20-poly1305@openssh.com,aes256-gcm@openssh.com",
@@ -7485,7 +8206,7 @@ impl App {
                                         Message::Keepalive
                                     )
                                 ]
-                                .spacing(14),
+                                .spacing(8),
                                 field(
                                     "Remote command",
                                     "Optional command after authentication",
@@ -7494,7 +8215,7 @@ impl App {
                                 ),
                                 text("Tunnels · OpenSSH forward specs separated by \";\"; started and stopped from the Tunnels panel")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                                 forward_editor(
                                     "Local forward (-L)",
                                     "127.0.0.1:8080:internal.example:80",
@@ -7515,16 +8236,16 @@ impl App {
                                 ),
                                 text("These values write directly into the existing Session::ssh model and use its current validation. Algorithm fields inherit OpenSSH/config defaults when empty; legacy algorithms still require explicit user input and retain the existing warning policy. Other advanced settings not exposed here yet are preserved when editing an existing profile.")
                                     .size(12)
-                                    .color(MUTED),
+                                    .color(muted()),
                             ]
-                            .spacing(14)
+                            .spacing(8)
                         )
-                        .padding(14)
+                        .padding(8)
                         .style(card),
                     );
                 }
                 if let Some(error) = &self.form.error {
-                    form = form.push(text(error).color(DANGER));
+                    form = form.push(text(error).color(danger()));
                 }
                 form.push(
                     row![
@@ -7537,26 +8258,26 @@ impl App {
                         )
                         .style(primary)
                     ]
-                    .spacing(10),
+                    .spacing(8),
                 )
                 .into()
             }
             Dialog::Commands => {
                 let items = iced_palette_items(&self.command_query, &self.snippets);
                 let mut palette = column![
-                    text("Command palette").size(24),
                     text("Application actions are [APP]. Snippets are [REMOTE TEXT] and only stage text; they never execute automatically.")
                         .size(12)
-                        .color(MUTED),
+                        .color(muted()),
                     text_input("Search actions or snippets", &self.command_query)
+.style(flat_input)
                         .id("command-query")
                         .on_input(Message::CommandQuery)
-                        .padding(11),
+                        .size(13).padding([3, 6]),
                 ]
                 .spacing(8);
 
                 if items.is_empty() {
-                    palette = palette.push(text("No matching commands.").size(12).color(MUTED));
+                    palette = palette.push(text("No matching commands.").size(12).color(muted()));
                 } else {
                     for (index, item) in items.iter().enumerate().take(12) {
                         let label = match item {
@@ -7571,10 +8292,11 @@ impl App {
                 }
 
                 let mut snippets = column![
-                    text("REUSABLE SNIPPETS").size(11).color(MUTED),
+                    text("REUSABLE SNIPPETS").size(11).color(muted()),
                     text_input("Snippet name", &self.snippet_name)
+.style(flat_input)
                         .on_input(Message::SnippetName)
-                        .padding(9),
+                        .size(13).padding([3, 6]),
                     text_editor(&self.snippet_content)
                         .placeholder("Snippet body (non-secret remote text)")
                         .on_action(Message::SnippetEdit)
@@ -7612,26 +8334,26 @@ impl App {
                     palette,
                     container(
                         column![
-                            text("COMMAND SENDER · FOCUSED PANE").size(11).color(BLUE),
+                            text("COMMAND SENDER · FOCUSED PANE").size(11).color(blue()),
                             text_editor(&self.command_content)
                                 .placeholder("Remote-shell text to stage")
                                 .on_action(Message::CommandEdit)
                                 .height(120)
-                                .padding(10),
+                                .padding(8),
                             row![
                                 action("Send explicitly", Message::CommandSend).style(primary),
                                 text("Multiline payloads still require the terminal paste confirmation.")
                                     .size(11)
-                                    .color(MUTED),
+                                    .color(muted()),
                             ]
-                            .spacing(10)
+                            .spacing(8)
                             .align_y(iced::Center),
                         ]
                         .spacing(8)
                     )
-                    .padding(10)
+                    .padding(8)
                     .style(card),
-                    container(snippets).padding(10).style(card),
+                    container(snippets).padding(8).style(card),
                     row![
                         action("New connection", Message::New),
                         action("Next tab", Message::SelectNextTab),
@@ -7642,21 +8364,20 @@ impl App {
                     ]
                     .spacing(7),
                 ]
-                .spacing(12)
+                .spacing(8)
                 .into()
             }
             Dialog::Close(index) => column![
-                text("Close this session?").size(24),
                 text("This disconnects the live SSH/PTY session and closes its Iced workspace tab.")
-                    .color(MUTED),
+                    .color(muted()),
                 row![
                     space::horizontal(),
                     action("Cancel", Message::CloseDialog),
                     action("Close session", Message::ConfirmClose(*index)).style(button::danger)
                 ]
-                .spacing(10),
+                .spacing(8),
             ]
-            .spacing(20)
+            .spacing(8)
             .into(),
             Dialog::PasteConfirm {
                 text: paste,
@@ -7667,7 +8388,6 @@ impl App {
                 let preview = paste_preview_text(&prepared, 4000);
                 let line_count = prepared.lines().count().max(1);
                 column![
-                    text("Confirm terminal paste").size(24),
                     text(format!(
                         "Paste {} bytes across approximately {} line(s)?",
                         prepared.len(),
@@ -7675,7 +8395,7 @@ impl App {
                     )),
                     text("Review carefully. Multiline terminal pastes can execute several commands immediately.")
                         .size(13)
-                        .color(MUTED),
+                        .color(muted()),
                     action(
                         if *normalize_line_endings {
                             "Line endings: normalize CRLF / CR to LF (enabled)"
@@ -7686,12 +8406,12 @@ impl App {
                     ),
                     text("The preview below shows the exact prepared text; nonprinting controls are escaped for review.")
                         .size(12)
-                        .color(MUTED),
+                        .color(muted()),
                     container(
                         scrollable(text(preview).font(Font::MONOSPACE).size(13))
                             .height(220)
                     )
-                    .padding(12)
+                    .padding(8)
                     .width(Fill)
                     .style(card),
                     row![
@@ -7699,12 +8419,12 @@ impl App {
                         action("Cancel", Message::CloseDialog),
                         action("Paste now", Message::ConfirmPaste).style(primary)
                     ]
-                    .spacing(10),
+                    .spacing(8),
                     text("Keyboard: Enter confirms; Escape cancels.")
                         .size(12)
-                        .color(MUTED),
+                        .color(muted()),
                 ]
-                .spacing(16)
+                .spacing(8)
                 .into()
             }
             Dialog::FileOverwrite(pending) => {
@@ -7721,61 +8441,53 @@ impl App {
                     TransferDirection::Download => pending.local.to_string_lossy().into_owned(),
                 };
                 column![
-                    text("Replace existing file?").size(24),
                     text(format!(
                         "A file already exists at the {direction} destination."
                     ))
-                    .color(MUTED),
+                    .color(muted()),
                     container(
                         column![
-                            text("Source").size(11).color(MUTED),
+                            text("Source").size(11).color(fg()),
                             text(source).font(Font::MONOSPACE).size(12),
-                            text("Destination").size(11).color(MUTED),
+                            text("Destination").size(11).color(fg()),
                             text(destination).font(Font::MONOSPACE).size(12),
                         ]
                         .spacing(6)
                     )
-                    .padding(12)
+                    .padding(8)
                     .width(Fill)
                     .style(card),
                     text("Replacing is explicit. The transfer still uses the existing validated SFTP path and verification/resume policy.")
                         .size(12)
-                        .color(MUTED),
+                        .color(muted()),
                     row![
                         space::horizontal(),
                         action("Cancel", Message::CloseDialog),
                         action("Replace and transfer", Message::ConfirmFileOverwrite)
                             .style(button::danger)
                     ]
-                    .spacing(10),
+                    .spacing(8),
                 ]
-                .spacing(16)
+                .spacing(8)
                 .into()
             }
             Dialog::FileDeleteLocal(path) => column![
-                text("Delete local file?").size(24),
                 text(path.to_string_lossy().into_owned())
                     .font(Font::MONOSPACE)
                     .size(12),
                 text("This action is permanent. Directories are removed only when empty.")
                     .size(12)
-                    .color(MUTED),
+                    .color(muted()),
                 row![
                     space::horizontal(),
                     action("Cancel", Message::CloseDialog),
                     action("Delete", Message::ConfirmFileDelete).style(button::danger)
                 ]
-                .spacing(10),
+                .spacing(8),
             ]
-            .spacing(16)
+            .spacing(8)
             .into(),
             Dialog::FileDeleteRemote { path, directory, .. } => column![
-                text(if *directory {
-                    "Delete remote directory?"
-                } else {
-                    "Delete remote file?"
-                })
-                .size(24),
                 text(path).font(Font::MONOSPACE).size(12),
                 text(if *directory {
                     "This action is permanent. Remote directories are removed only when empty."
@@ -7783,59 +8495,59 @@ impl App {
                     "This action is permanent and uses the validated SFTP delete path."
                 })
                 .size(12)
-                .color(MUTED),
+                .color(muted()),
                 row![
                     space::horizontal(),
                     action("Cancel", Message::CloseDialog),
                     action("Delete", Message::ConfirmFileDelete).style(button::danger)
                 ]
-                .spacing(10),
+                .spacing(8),
             ]
-            .spacing(16)
+            .spacing(8)
             .into(),
             Dialog::FileName(file_action) => {
-                let (title, hint) = match file_action {
+                let (_title, hint) = match file_action {
                     FileNameAction::MkdirLocal(_) => ("New local folder", "Folder name"),
                     FileNameAction::MkdirRemote { .. } => ("New remote folder", "Folder name"),
                     FileNameAction::RenameLocal(_) => ("Rename local file", "New filename"),
                     FileNameAction::RenameRemote { .. } => ("Rename remote file", "New filename"),
                 };
                 column![
-                    text(title).size(24),
                     text_input(hint, &self.files.name_input)
+.style(flat_input)
                         .id("file-name")
                         .on_input(Message::FilesNameChanged)
                         .on_submit(Message::ConfirmFileNameAction)
-                        .padding(11),
+                        .size(13).padding([3, 6]),
                     text("Names are validated by the existing SFTP/local-file policy before any operation is executed.")
                         .size(12)
-                        .color(MUTED),
+                        .color(muted()),
                     row![
                         space::horizontal(),
                         action("Cancel", Message::CloseDialog),
                         action("Apply", Message::ConfirmFileNameAction).style(primary)
                     ]
-                    .spacing(10),
+                    .spacing(8),
                 ]
-                .spacing(16)
+                .spacing(8)
                 .into()
             }
             Dialog::ImportProfiles => column![
-                text("Import SSH profiles").size(24),
                 text("Merge a validated non-secret Inspirum profile JSON file into the current library. Existing profiles are never overwritten by import.")
-                    .color(MUTED),
+                    .color(muted()),
                 column![
-                    text("Import file").size(13).color(MUTED),
+                    text("Import file").size(13).color(theme::palette().text),
                     text_input("/path/to/profiles.json", &self.import_path)
+.style(flat_input)
                         .id("import-path")
                         .on_input(Message::ImportPath)
                         .on_submit(Message::ConfirmImportProfiles)
-                        .padding(11)
+                        .size(13).padding([3, 6])
                 ]
                 .spacing(7),
                 text("Conflicting folder/name entries, invalid SSH policy, secret-bearing unsupported fields, oversized files, and malformed JSON are rejected before the active profile store is changed.")
                     .size(12)
-                    .color(MUTED),
+                    .color(muted()),
                 row![
                     space::horizontal(),
                     action("Cancel", Message::CloseDialog),
@@ -7843,28 +8555,25 @@ impl App {
                 ]
                 .spacing(8),
             ]
-            .spacing(14)
+            .spacing(8)
             .into(),
             Dialog::Tunnels => self.tunnels_view(),
             Dialog::About => column![
-                text("Inspirum Terminal · Iced").size(24),
                 text("Inspirum Terminal uses Iced for the desktop interface and the shared OpenSSH/PTY backend for terminal sessions.\n\nTools includes profiles and startup, tabs and saved split workspaces, synchronized input, history and logging, terminal appearance and pointer preferences, SSH trust and multiplexing, forwarding, tmux, SCP, snippets and sanitized support reports.\n\nThe Files pane provides graphical SFTP transfers and remote editing. Clipboard and command sends retain explicit confirmation and terminal identity checks.")
-                    .color(MUTED),
+                    .color(muted()),
                 action("Back to workspace", Message::CloseDialog).style(primary),
             ]
-            .spacing(20)
+            .spacing(8)
             .into(),
         };
 
-        container(scrollable(body))
+        dialog_frame(title, container(scrollable(body)).padding(12))
             .width(if matches!(dialog, Dialog::Tools) {
                 880
             } else {
                 600
             })
             .max_height(720)
-            .padding(28)
-            .style(active_card)
             .into()
     }
 }
@@ -7886,11 +8595,12 @@ fn forward_editor<'a>(
     message: fn(String) -> Message,
 ) -> Element<'a, Message> {
     column![
-        text(label).size(13).color(MUTED),
+        text(label).size(13).color(muted()),
         text_input(hint, value)
+            .style(flat_input)
             .on_input(message)
-            .padding(11)
-            .size(14),
+            .padding(8)
+            .size(13),
     ]
     .spacing(4)
     .into()
@@ -7921,14 +8631,16 @@ fn field<'a>(
         _ => "connection-name",
     };
     column![
-        text(label).size(13).color(MUTED),
+        text(label).size(13).color(theme::palette().text),
         text_input(hint, value)
+            .style(flat_input)
             .id(id)
             .on_input(message)
             .on_submit(Message::Submit)
-            .padding(11)
+            .size(13)
+            .padding([3, 6])
     ]
-    .spacing(7)
+    .spacing(4)
     .into()
 }
 
@@ -7938,20 +8650,20 @@ fn policy_field<'a>(
     message: fn(Option<bool>) -> Message,
 ) -> Element<'a, Message> {
     column![
-        text(label).size(12).color(MUTED),
+        text(label).size(12).color(theme::palette().text),
         row![
             action("Inherit", message(None)).style(if value.is_none() {
-                selected_button
+                flat_selected
             } else {
                 quiet
             }),
             action("Enable", message(Some(true))).style(if value == Some(true) {
-                selected_button
+                flat_selected
             } else {
                 quiet
             }),
             action("Disable", message(Some(false))).style(if value == Some(false) {
-                selected_button
+                flat_selected
             } else {
                 quiet
             }),
@@ -7963,28 +8675,30 @@ fn policy_field<'a>(
 }
 
 fn action<'a>(label: impl Into<String>, message: Message) -> button::Button<'a, Message> {
-    button(text(label.into()).size(14))
-        .padding([8, 12])
+    button(text(label.into()).size(13))
+        .padding([3, 10])
         .style(quiet)
         .on_press(message)
 }
 
 fn surface(_: &Theme) -> container::Style {
+    let p = theme::palette();
     container::Style {
-        background: Some(PANEL.into()),
-        text_color: Some(FG),
+        background: Some(p.chrome.into()),
+        text_color: Some(p.text),
         ..Default::default()
     }
 }
 
 fn card(_: &Theme) -> container::Style {
+    let p = theme::palette();
     container::Style {
-        background: Some(BG.into()),
-        text_color: Some(FG),
+        background: Some(p.dock.into()),
+        text_color: Some(p.text),
         border: Border {
-            color: LINE,
+            color: p.border,
             width: 1.0,
-            radius: 6.0.into(),
+            radius: 0.0.into(),
         },
         ..Default::default()
     }
@@ -7993,28 +8707,47 @@ fn card(_: &Theme) -> container::Style {
 fn active_card(theme: &Theme) -> container::Style {
     container::Style {
         border: Border {
-            color: BLUE,
+            color: blue(),
             width: 1.0,
-            radius: 6.0.into(),
+            radius: 0.0.into(),
         },
         ..card(theme)
     }
 }
 
-/// Resting fill and outline for every clickable control. A control must read
-/// as clickable before the pointer reaches it, so plain labels (no fill, no
-/// outline) and buttons (filled, outlined) never share the same look.
-const CONTROL_FILL: Color = Color::from_rgb8(26, 35, 48);
-const CONTROL_HOVER: Color = Color::from_rgb8(38, 50, 68);
-const CONTROL_PRESSED: Color = Color::from_rgb8(20, 27, 38);
-const CONTROL_BORDER: Color = Color::from_rgb8(72, 90, 115);
+/// Flat WindTerm text button: `list` fill with a 1px `border` outline at rest,
+/// so a control still reads as clickable before the pointer reaches it.
+fn menu_title(_: &Theme, status: button::Status, open: bool) -> button::Style {
+    let p = theme::palette();
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => Some(p.hover.into()),
+        _ if open => Some(p.hover.into()),
+        _ => None,
+    };
+    button::Style {
+        background,
+        text_color: p.text,
+        ..Default::default()
+    }
+}
+
+fn menu_item(_: &Theme, status: button::Status) -> button::Style {
+    let p = theme::palette();
+    button::Style {
+        background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+            .then(|| p.hover.into()),
+        text_color: p.text,
+        ..Default::default()
+    }
+}
 
 fn quiet(_: &Theme, status: button::Status) -> button::Style {
+    let p = theme::palette();
     let (background, border_color, text_color) = match status {
-        button::Status::Hovered => (CONTROL_HOVER, BLUE, FG),
-        button::Status::Pressed => (CONTROL_PRESSED, BLUE, FG),
-        button::Status::Disabled => (ELEVATED, LINE, MUTED),
-        button::Status::Active => (CONTROL_FILL, CONTROL_BORDER, FG),
+        button::Status::Hovered => (p.hover, p.accent, p.text),
+        button::Status::Pressed => (p.selected_row, p.accent, p.text),
+        button::Status::Disabled => (p.dock, p.border, p.muted),
+        button::Status::Active => (p.list, p.border, p.text),
     };
     button::Style {
         background: Some(background.into()),
@@ -8022,26 +8755,20 @@ fn quiet(_: &Theme, status: button::Status) -> button::Style {
         border: Border {
             color: border_color,
             width: 1.0,
-            radius: 5.0.into(),
+            radius: 2.0.into(),
         },
         ..Default::default()
     }
 }
 
-/// Selected fill: the accent at low alpha over the elevated surface, so the
-/// state reads from the row itself while the text stays high contrast.
-const SELECTED_FILL: Color = Color::from_rgb8(38, 58, 88);
-
 fn selected_button(theme: &Theme, status: button::Status) -> button::Style {
     let base = quiet(theme, status);
+    let p = theme::palette();
     button::Style {
-        background: Some(SELECTED_FILL.into()),
-        // Keep selected text as bright as resting text; accent lives in the
-        // fill and outline. Accent-coloured text on an accent-tinted fill was
-        // the least readable state in the dock.
-        text_color: FG,
+        background: Some(p.selected_row.into()),
+        text_color: p.text,
         border: Border {
-            color: BLUE,
+            color: p.accent,
             ..base.border
         },
         ..base
@@ -8050,14 +8777,408 @@ fn selected_button(theme: &Theme, status: button::Status) -> button::Style {
 
 fn primary(theme: &Theme, status: button::Status) -> button::Style {
     let base = quiet(theme, status);
+    let p = theme::palette();
     button::Style {
-        background: Some(BLUE.into()),
-        text_color: BG,
+        background: Some(p.accent.into()),
+        text_color: Color::WHITE,
         border: Border {
-            color: BLUE,
+            color: p.accent,
             ..base.border
         },
         ..base
+    }
+}
+
+fn hline<'a>() -> Element<'a, Message> {
+    container(space::horizontal())
+        .width(Fill)
+        .height(1)
+        .style(border_fill)
+        .into()
+}
+
+/// Pane width below which the pane header drops its secondary controls.
+const PANE_HEADER_COMPACT_WIDTH: f32 = 420.0;
+
+fn compact_action<'a>(label: impl Into<String>, message: Message) -> button::Button<'a, Message> {
+    button(
+        text(label.into())
+            .size(12)
+            .wrapping(iced::widget::text::Wrapping::None),
+    )
+    .padding([2, 6])
+    .style(icon_button)
+    .on_press(message)
+}
+
+fn tool_icon<'a>(icon: icons::Icon, tip: &'a str, message: Message) -> Element<'a, Message> {
+    let p = theme::palette();
+    iced::widget::tooltip(
+        button(icons::icon(icon, 14.0, p.text))
+            .padding(6)
+            .style(icon_button)
+            .on_press(message),
+        container(text(tip).size(theme::metrics::STATUS_TEXT))
+            .padding([2, 6])
+            .style(card),
+        iced::widget::tooltip::Position::Bottom,
+    )
+    .into()
+}
+
+fn fill_style(color: Color) -> container::Style {
+    container::Style {
+        background: Some(color.into()),
+        text_color: Some(theme::palette().text),
+        ..Default::default()
+    }
+}
+
+fn list_area(_: &Theme) -> container::Style {
+    fill_style(theme::palette().list)
+}
+
+fn border_fill(_: &Theme) -> container::Style {
+    fill_style(theme::palette().border)
+}
+
+fn accent_fill(_: &Theme) -> container::Style {
+    fill_style(theme::palette().accent)
+}
+
+fn tab_active_fill(_: &Theme) -> container::Style {
+    fill_style(theme::palette().tab_active)
+}
+
+fn tab_inactive_fill(_: &Theme) -> container::Style {
+    fill_style(theme::palette().tab_inactive)
+}
+
+fn pane_header_fill(_: &Theme) -> container::Style {
+    fill_style(theme::palette().header)
+}
+
+fn pane_body(_: &Theme) -> container::Style {
+    fill_style(theme::palette().dock)
+}
+
+fn breadcrumb_field(_: &Theme) -> container::Style {
+    let p = theme::palette();
+    container::Style {
+        border: Border {
+            color: p.border,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..fill_style(p.raised)
+    }
+}
+
+/// Flat icon/compact control: no fill or outline at rest, square hover.
+fn icon_button(_: &Theme, status: button::Status) -> button::Style {
+    let p = theme::palette();
+    let (background, text_color) = match status {
+        button::Status::Hovered => (Some(p.hover.into()), p.text),
+        button::Status::Pressed => (Some(p.selected_row.into()), p.text),
+        button::Status::Disabled => (None, p.muted),
+        button::Status::Active => (None, p.text),
+    };
+    button::Style {
+        background,
+        text_color,
+        border: Border::default(),
+        ..Default::default()
+    }
+}
+
+/// Tab label: transparent so the tab container fill shows through.
+fn tab_button(theme: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: None,
+        ..icon_button(theme, status)
+    }
+}
+
+fn file_row(_theme: &Theme, status: button::Status) -> button::Style {
+    let palette = theme::palette();
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => palette.hover,
+        _ => palette.list,
+    };
+    button::Style {
+        background: Some(background.into()),
+        text_color: palette.text_dock,
+        border: Border::default(),
+        ..button::Style::default()
+    }
+}
+
+fn file_row_selected(_theme: &Theme, _status: button::Status) -> button::Style {
+    let palette = theme::palette();
+    button::Style {
+        background: Some(palette.selected_row.into()),
+        text_color: palette.text_dock,
+        border: Border::default(),
+        ..button::Style::default()
+    }
+}
+
+fn file_header(_theme: &Theme) -> container::Style {
+    container::Style::default().background(theme::palette().header)
+}
+
+fn file_divider(_theme: &Theme) -> container::Style {
+    container::Style::default().background(theme::palette().border)
+}
+
+fn session_panel(_theme: &Theme) -> container::Style {
+    fill_style(theme::palette().list)
+}
+
+/// Borderless WindTerm filter field; the underline is a separate hline.
+fn session_filter(_theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let p = theme::palette();
+    text_input::Style {
+        background: Color::TRANSPARENT.into(),
+        border: Border::default(),
+        icon: p.muted,
+        placeholder: p.muted,
+        value: p.text_dock,
+        selection: match status {
+            text_input::Status::Disabled => p.hover,
+            _ => p.selected_row,
+        },
+    }
+}
+
+fn session_row(_theme: &Theme, status: button::Status) -> button::Style {
+    let p = theme::palette();
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => Some(p.hover.into()),
+        _ => None,
+    };
+    button::Style {
+        background,
+        text_color: p.text_dock,
+        border: Border::default(),
+        ..button::Style::default()
+    }
+}
+
+fn session_row_open(_theme: &Theme, _status: button::Status) -> button::Style {
+    let p = theme::palette();
+    button::Style {
+        background: Some(p.selected_row.into()),
+        text_color: p.text_dock,
+        border: Border::default(),
+        ..button::Style::default()
+    }
+}
+
+fn flat_input(_: &Theme, status: text_input::Status) -> text_input::Style {
+    let p = theme::palette();
+    let focused = matches!(status, text_input::Status::Focused { .. });
+    text_input::Style {
+        background: p.list.into(),
+        border: Border {
+            color: if focused { p.accent } else { p.border },
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        icon: p.muted,
+        placeholder: p.muted,
+        value: p.text,
+        selection: p.selected_row,
+    }
+}
+
+fn dialog_strip(_: &Theme) -> container::Style {
+    container::Style::default().background(theme::palette().chrome)
+}
+
+fn dialog_window(_: &Theme) -> container::Style {
+    let p = theme::palette();
+    container::Style {
+        background: Some(p.dock.into()),
+        text_color: Some(p.text),
+        border: Border {
+            color: p.border,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// WindTerm-style dialog chrome: dock fill, 1px border, chrome title strip.
+fn dialog_frame<'a>(
+    title: &'a str,
+    body: impl Into<Element<'a, Message>>,
+) -> container::Container<'a, Message> {
+    container(column![
+        container(text(title).size(13).color(theme::palette().text))
+            .padding([0, 8])
+            .align_y(iced::Center)
+            .width(iced::Length::Fill)
+            .height(theme::metrics::STRIP_HEIGHT)
+            .style(dialog_strip),
+        hline(),
+        body.into(),
+    ])
+    .padding(1)
+    .style(dialog_window)
+}
+
+/// Flat WindTerm selection row: selected fill, no border, square corners.
+fn flat_selected(_: &Theme, status: button::Status) -> button::Style {
+    let p = theme::palette();
+    let background = match status {
+        button::Status::Hovered => p.hover,
+        _ => p.selected_row,
+    };
+    button::Style {
+        background: Some(background.into()),
+        text_color: p.text,
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// A relative remote destination (`.`) qualified with the session target.
+fn relative_remote_destination(session: &Session) -> String {
+    match (session.user.trim(), session.host.trim()) {
+        (_, "") => ".".to_owned(),
+        ("", host) => format!("{host}:."),
+        (user, host) => format!("{user}@{host}:."),
+    }
+}
+
+/// `(name, verb, DIRECTION, destination dir)` for a transfer block (spec 5.3).
+fn transfer_job_summary(job: &TransferJob) -> (String, &'static str, &'static str, String) {
+    let local_name = job
+        .pending
+        .local
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| job.pending.local.to_string_lossy().into_owned());
+    let remote_name = job
+        .pending
+        .remote
+        .rsplit('/')
+        .next()
+        .unwrap_or(job.pending.remote.as_str())
+        .to_owned();
+    match job.pending.direction {
+        TransferDirection::Upload => {
+            let dir = job
+                .pending
+                .remote
+                .rsplit_once('/')
+                .map(|(dir, _)| if dir.is_empty() { "/" } else { dir })
+                .map(str::to_owned)
+                .unwrap_or_else(|| relative_remote_destination(&job.pending.session));
+            (local_name, "uploaded", "UPLOAD", dir)
+        }
+        TransferDirection::Download => {
+            let dir = job
+                .pending
+                .local
+                .parent()
+                .map(|dir| dir.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            (remote_name, "downloaded", "DOWNLOAD", dir)
+        }
+    }
+}
+
+/// Path bar (34px): underlined plain-text path input then flat buttons.
+fn files_path_bar<'a>(
+    input: Element<'a, Message>,
+    go: button::Button<'a, Message>,
+    up_message: Message,
+) -> Element<'a, Message> {
+    let p = theme::palette();
+    // Icon + label: CI OCR clicks the literal `Up`.
+    let up = iced::widget::tooltip(
+        button(
+            row![
+                icons::icon(icons::Icon::ArrowUp, 12.0, p.text),
+                text("Up").size(12)
+            ]
+            .spacing(3)
+            .align_y(iced::Center),
+        )
+        .padding([2, 6])
+        .style(icon_button)
+        .on_press(up_message),
+        container(text("Parent directory").size(theme::metrics::STATUS_TEXT))
+            .padding([2, 6])
+            .style(card),
+        iced::widget::tooltip::Position::Bottom,
+    );
+    row![
+        column![
+            input,
+            container(space::horizontal())
+                .height(1)
+                .width(Fill)
+                .style(border_fill),
+        ]
+        .width(Fill),
+        up,
+        tool_icon(icons::Icon::Refresh, "Refresh", Message::FilesRefresh),
+        go,
+    ]
+    .spacing(4)
+    .padding([0, 6])
+    .height(34)
+    .align_y(iced::Center)
+    .into()
+}
+
+fn files_action_row(buttons: Vec<Element<'_, Message>>) -> Element<'_, Message> {
+    scrollable(
+        row(buttons)
+            .spacing(6)
+            .padding([2, 6])
+            .align_y(iced::Center),
+    )
+    .direction(scrollable::Direction::Horizontal(
+        scrollable::Scrollbar::new().width(2).scroller_width(2),
+    ))
+    .height(30)
+    .into()
+}
+
+fn files_path_input(_: &Theme, status: text_input::Status) -> text_input::Style {
+    let p = theme::palette();
+    text_input::Style {
+        background: Color::TRANSPARENT.into(),
+        border: Border::default(),
+        icon: p.muted,
+        placeholder: p.muted,
+        value: p.text,
+        selection: match status {
+            text_input::Status::Disabled => p.hover,
+            _ => p.selected_row,
+        },
+    }
+}
+
+fn transfer_progress(_: &Theme) -> progress_bar::Style {
+    let p = theme::palette();
+    progress_bar::Style {
+        background: Color::TRANSPARENT.into(),
+        bar: p.accent.into(),
+        border: Border {
+            color: p.accent,
+            width: 1.0,
+            radius: 1.0.into(),
+        },
     }
 }
 
@@ -8081,9 +9202,12 @@ mod tests {
         let hover = super::quiet(&theme, Status::Hovered);
         assert_ne!(rest.border.color, hover.border.color);
         let selected = super::selected_button(&theme, Status::Active);
-        assert_eq!(selected.border.color, super::BLUE);
-        assert_eq!(selected.text_color, super::FG);
-        assert_eq!(super::primary(&theme, Status::Active).text_color, super::BG);
+        assert_eq!(selected.border.color, super::blue());
+        assert_eq!(selected.text_color, super::fg());
+        assert_eq!(
+            super::primary(&theme, Status::Active).text_color,
+            iced::Color::WHITE
+        );
     }
 
     #[test]
@@ -8118,6 +9242,35 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn file_listing_summary_uses_singular_for_one_item() {
+        assert_eq!(
+            file_listing_summary(1, 2048),
+            format!("1 item {}", windterm_size(2048))
+        );
+        assert!(file_listing_summary(0, 0).starts_with("0 items "));
+        assert!(file_listing_summary(3, 10).starts_with("3 items "));
+    }
+
+    #[test]
+    fn dock_splitter_drag_resizes_right_dock() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-dock-drag-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.ui_state_path = None;
+        let _ = app.update(Message::DockMove(dock::Panel::Filer, dock::Area::Right));
+        assert!(app.docks.right_width >= dock::FILE_PANEL_MIN_WIDTH);
+        let w = app.window_size.width;
+        let _ = app.update(Message::DockDragStart(dock::Area::Right));
+        assert_eq!(app.dock_drag, Some(dock::Area::Right));
+        let _ = app.update(Message::DockDragMove(iced::Point::new(w - 500.0, 300.0)));
+        assert!((app.docks.right_width - 500.0).abs() <= 1.0);
+        let _ = app.update(Message::DockDragEnd);
+        assert_eq!(app.dock_drag, None);
+    }
 
     #[test]
     fn saved_session_sidebar_pages_reset_after_search_changes() {
@@ -8838,10 +9991,26 @@ mod tests {
 
     #[test]
     fn file_kind_labels() {
-        assert_eq!(file_kind_label(true, "src"), "<DIR>");
-        assert_eq!(file_kind_label(false, "Cargo.toml"), "TOML");
-        assert_eq!(file_kind_label(false, "README"), "File");
-        assert_eq!(file_kind_label(false, ".bashrc"), "File");
+        assert_eq!(windterm_type("src", true), "Directory");
+        assert_eq!(windterm_type("Cargo.toml", false), "TOML File");
+        assert_eq!(windterm_type("README", false), "File");
+        assert_eq!(windterm_type(".bash_history", false), "BASH_HISTORY File");
+        assert_eq!(windterm_size(1), "1 Byte");
+        assert_eq!(windterm_size(18), "18 Bytes");
+        assert_eq!(windterm_size(8192), "8.0 KB");
+        assert_eq!(windterm_size(146_066_636), "139.3 MB");
+        assert_eq!(windterm_size(5_476_083_302), "5.1 GB");
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 9, 10).unwrap();
+        assert_eq!(
+            windterm_remote_date("Sep 9 12:04", today),
+            "2026/09/09 12:04"
+        );
+        assert_eq!(
+            windterm_remote_date("Dec 1 08:00", today),
+            "2025/12/01 08:00"
+        );
+        assert_eq!(windterm_remote_date("Mar 3 2024", today), "2024/03/03");
+        assert_eq!(windterm_remote_date("garbage", today), "garbage");
     }
 
     #[test]
@@ -9053,31 +10222,6 @@ mod tests {
     }
 
     #[test]
-    fn bottom_files_layout_bounds_queue_and_reserves_a_hit_target_row() {
-        let policy = bottom_files_layout_policy();
-        assert!(policy.queue_viewport_height <= 56.0);
-        assert!(policy.list_min_height >= 104.0);
-        assert!(policy.compact_actions);
-        // 1280x800 bottom dock keeps the full queue viewport.
-        assert_eq!(
-            files_queue_viewport_height(366.0, false, policy),
-            Some(policy.queue_viewport_height)
-        );
-        // 960x640 bottom dock (~254px) collapses the queue to a summary line
-        // so the listings keep two full rows.
-        assert_eq!(files_queue_viewport_height(254.0, false, policy), None);
-        // Just enough spare space keeps a small viewport rather than collapsing.
-        let tight = BOTTOM_FILES_CHROME + policy.list_min_height + BOTTOM_QUEUE_MIN_VIEWPORT;
-        assert_eq!(
-            files_queue_viewport_height(tight, false, policy),
-            Some(BOTTOM_QUEUE_MIN_VIEWPORT)
-        );
-        // 1280x800 side dock (~600px) keeps two listings and a bounded queue.
-        let side = files_queue_viewport_height(600.0, true, policy).expect("side queue");
-        assert!((BOTTOM_QUEUE_MIN_VIEWPORT..=SIDE_QUEUE_MAX_VIEWPORT).contains(&side));
-    }
-
-    #[test]
     fn active_session_guard_rejects_events_after_tab_switch() {
         let path = std::env::temp_dir().join(format!(
             "inspirum-iced-active-editor-{}-nonexistent.json",
@@ -9109,6 +10253,191 @@ mod tests {
         assert!(app.active_session_matches(&second_key));
     }
 
+    fn pressed_key(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Message {
+        Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        }))
+    }
+
+    #[test]
+    fn menus_block_shortcuts_and_paste_without_dismissing_the_overlay() {
+        for dock in [false, true] {
+            let path = std::env::temp_dir().join(format!(
+                "inspirum-menu-keys-{}-{dock}-nonexistent.json",
+                std::process::id()
+            ));
+            let mut app = App::boot(path, None);
+            if dock {
+                app.dock_menu = Some(dock::Area::Bottom);
+            } else {
+                app.open_menu = Some(menu::Menu::Session);
+            }
+            let _ = app.update(pressed_key(
+                keyboard::Key::Character("n".into()),
+                keyboard::Modifiers::CTRL,
+            ));
+            assert!(
+                app.dialog.is_none(),
+                "menu must block application shortcuts"
+            );
+            let status = app.status.clone();
+            let _ = app.update(pressed_key(
+                keyboard::Key::Character("v".into()),
+                keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT,
+            ));
+            assert_eq!(app.status, status, "menu must block terminal paste");
+            assert!(
+                app.open_menu.is_some() || app.dock_menu.is_some(),
+                "non-Escape keys must not dismiss the menu"
+            );
+            let _ = app.update(pressed_key(
+                keyboard::Key::Named(keyboard::key::Named::Escape),
+                keyboard::Modifiers::default(),
+            ));
+            assert!(app.open_menu.is_none() && app.dock_menu.is_none());
+        }
+    }
+
+    #[test]
+    fn menu_blocks_terminal_ime_cursor_updates() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-menu-ime-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session::default();
+        let pane = app.new_terminal_pane(profile.clone());
+        let id = pane.id;
+        app.tabs.push(Workspace::new(profile, pane));
+        app.open_menu = Some(menu::Menu::Edit);
+        let _ = app.update(Message::TerminalImeCursor(id, iced::Rectangle::default()));
+        assert!(
+            app.ime_cursor.is_none(),
+            "IME target must be disabled under a menu"
+        );
+    }
+
+    #[test]
+    fn ignored_escape_releases_sender_without_forwarding_or_erasing_draft() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-sender-ignored-escape-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.stage_command("keep this draft".into());
+        app.sender_focused = true;
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(
+            !app.sender_focused,
+            "Escape must release Sender focus locally"
+        );
+        assert_eq!(app.command_sender, "keep this draft");
+    }
+
+    #[test]
+    fn escape_releases_sender_focus_only_without_menu_or_dialog() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-sender-escape-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.sender_focused = true;
+        let _ = app.update(Message::DismissModalKey);
+        assert!(!app.sender_focused);
+    }
+
+    #[test]
+    fn fresh_app_bottom_dock_has_sender_and_keeps_it_after_files_toggle() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-sender-dock-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        assert_eq!(
+            app.docks.area(dock::Area::Bottom).panels,
+            vec![
+                dock::Panel::Sender,
+                dock::Panel::Session,
+                dock::Panel::Transfer,
+                dock::Panel::Filer,
+                dock::Panel::Explorer,
+            ]
+        );
+        assert!(app.docks.is_visible(dock::Panel::Session));
+        let profile = Session {
+            host: "example.invalid".into(),
+            name: "sender fixture".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        app.tabs.push(Workspace::new(profile, pane));
+        app.toggle_files();
+        app.toggle_files();
+        app.toggle_files();
+        assert!(app.docks.area_of(dock::Panel::Sender).is_some());
+        assert!(app.docks.area_of(dock::Panel::Session).is_some());
+        app.sender_focused = true;
+        let _ = app.update(Message::DockActivate(dock::Panel::Sender));
+        assert!(app.sender_focused);
+        let _ = app.update(Message::DockActivate(dock::Panel::Session));
+        assert!(!app.sender_focused);
+        app.sender_focused = true;
+        let _ = app.update(Message::SelectTab(0));
+        assert!(!app.sender_focused);
+    }
+
+    #[test]
+    fn dock_controls_persist_close_toggle_and_files_shortcut() {
+        let profiles = std::env::temp_dir().join(format!(
+            "inspirum-dock-controls-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let state_path = std::env::temp_dir().join(format!(
+            "inspirum-dock-controls-{}-ui-state.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(profiles, None);
+        app.ui_state_path = Some(state_path.clone());
+        let _ = app.update(Message::DockMove(dock::Panel::Filer, dock::Area::Right));
+        let _ = app.update(Message::DockClose(dock::Panel::Filer));
+        assert_eq!(
+            ui_state::load(&state_path)
+                .docks
+                .unwrap()
+                .area_of(dock::Panel::Filer),
+            None
+        );
+        let _ = app.update(Message::DockToggle(dock::Panel::Filer));
+        assert_eq!(
+            ui_state::load(&state_path)
+                .docks
+                .unwrap()
+                .area_of(dock::Panel::Filer),
+            Some(dock::Area::Right)
+        );
+
+        let profile = Session {
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        app.tabs.push(Workspace::new(profile, pane));
+        let _ = app.update(Message::ToggleFiles);
+        assert_eq!(ui_state::load(&state_path).docks.unwrap(), app.docks);
+        let _ = app.update(Message::ToggleFiles);
+        assert_eq!(ui_state::load(&state_path).docks.unwrap(), app.docks);
+        std::fs::remove_file(state_path).unwrap();
+    }
+
     #[test]
     fn files_explorer_can_move_to_side_without_losing_transfer_context() {
         let path = std::env::temp_dir().join(format!(
@@ -9126,22 +10455,33 @@ mod tests {
         app.files.session_key = Some("preserve-transfer-target".into());
         app.files.remote_dir = "/work/important".into();
         app.toggle_files();
-        assert!(app.files_dock.is_some());
-        assert!(!app.files_side_dock);
-        let _ = app.update(Message::FilesToggleDockPosition);
-        assert!(app.files_side_dock);
-        assert!(app.files_dock.is_some());
+        assert!(app.files_open());
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Filer),
+            Some(dock::Area::Bottom)
+        );
+        assert!(
+            app.docks.is_visible(dock::Panel::Filer),
+            "Filer opens last, active"
+        );
+        assert!(app.docks.area_of(dock::Panel::Explorer).is_some());
+        assert!(app.docks.area_of(dock::Panel::Transfer).is_some());
+        app.docks.move_to(dock::Panel::Filer, dock::Area::Right);
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Filer),
+            Some(dock::Area::Right)
+        );
+        assert!(app.files_open());
         assert_eq!(app.files.remote_dir, "/work/important");
         assert_eq!(
             app.files.session_key.as_deref(),
             Some("preserve-transfer-target")
         );
-        let _ = app.update(Message::FilesToggleDockPosition);
-        assert!(!app.files_side_dock);
-        assert!(app.files_dock.is_some());
-        let _ = app.update(Message::TogglePrivacyLock);
-        let _ = app.update(Message::FilesToggleDockPosition);
-        assert!(!app.files_side_dock, "privacy lock prevents re-docking");
+        app.toggle_files();
+        assert!(!app.files_open());
+        for panel in FILES_PANELS {
+            assert_eq!(app.docks.area_of(panel), None);
+        }
     }
 
     #[test]
@@ -9729,5 +11069,284 @@ mod tests {
             ..Default::default()
         };
         assert!(zero.session().is_err());
+    }
+
+    fn arm_synced_pair(label: &str) -> (App, u64, u64) {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-{label}-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session {
+            name: "fake-disconnected-sync".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let first = app.new_terminal_pane(profile.clone());
+        let first_id = first.id;
+        app.tabs.push(Workspace::new(profile.clone(), first));
+        let second = app.new_terminal_pane(profile);
+        let second_id = second.id;
+        app.tabs[0].split(pane_grid::Axis::Vertical, second);
+        let _ = app.update(Message::Tool(tools::Action::SyncTarget(first_id, true)));
+        let _ = app.update(Message::Tool(tools::Action::SyncTarget(second_id, true)));
+        let _ = app.update(Message::Tool(tools::Action::SyncArm(true)));
+        assert!(app.tools.sync.armed(), "two selected panes must arm sync");
+        let focused_id = app.tabs[0]
+            .panes
+            .get(app.tabs[0].focus)
+            .map(|pane| pane.id)
+            .expect("focused pane");
+        assert!(
+            focused_id == first_id || focused_id == second_id,
+            "focused pane {focused_id} must be one of the synced panes"
+        );
+        (app, first_id, second_id)
+    }
+
+    /// `pressed_key` sets `text: None`. A plain character only becomes PTY
+    /// bytes when the event carries committed text (`terminal_key_bytes`).
+    fn pressed_char(ch: &str) -> Message {
+        let key = keyboard::Key::Character(ch.into());
+        Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::default(),
+            text: Some(ch.into()),
+            repeat: false,
+        }))
+    }
+
+    #[test]
+    fn enter_with_open_menu_writes_to_neither_source_nor_synced_pane() {
+        let (mut app, first_id, second_id) = arm_synced_pair("menu-enter");
+        let plain = keyboard::Modifiers::default();
+        for (open_menu, dock_menu) in [
+            (Some(menu::Menu::Session), None),
+            (None, Some(dock::Area::Bottom)),
+        ] {
+            app.open_menu = open_menu;
+            app.dock_menu = dock_menu;
+            app.pty_write_log.clear();
+            let _ = app.update(pressed_key(
+                keyboard::Key::Named(keyboard::key::Named::Enter),
+                plain,
+            ));
+            let _ = app.update(pressed_key(keyboard::Key::Character("x".into()), plain));
+            let _ = app.update(pressed_char("x"));
+            assert!(
+                app.pty_write_log.is_empty(),
+                "open menu must write to neither source nor synced pane, log={:?}",
+                app.pty_write_log
+            );
+            assert!(
+                app.open_menu.is_some() || app.dock_menu.is_some(),
+                "non-Escape keys must leave the menu open"
+            );
+            app.open_menu = None;
+            app.dock_menu = None;
+            app.pty_write_log.clear();
+            let _ = app.update(pressed_key(
+                keyboard::Key::Named(keyboard::key::Named::Enter),
+                plain,
+            ));
+            assert!(
+                app.pty_write_log.iter().any(|(id, _)| *id == first_id)
+                    && app.pty_write_log.iter().any(|(id, _)| *id == second_id),
+                "recorder must see Enter on both synced panes, log={:?}",
+                app.pty_write_log
+            );
+        }
+    }
+
+    #[test]
+    fn escape_in_sender_writes_nothing_and_releases_focus() {
+        let (mut app, _first_id, _second_id) = arm_synced_pair("sender-escape");
+        assert!(app.open_menu.is_none() && app.dock_menu.is_none());
+        app.sender_focused = true;
+        app.pty_write_log.clear();
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(
+            app.pty_write_log.is_empty(),
+            "Sender Escape must not reach any pane, log={:?}",
+            app.pty_write_log
+        );
+        assert!(
+            !app.sender_focused,
+            "Escape must release Sender focus locally"
+        );
+        app.pty_write_log.clear();
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(
+            app.pty_write_log
+                .iter()
+                .any(|(_, bytes)| bytes.contains(&0x1b)),
+            "Escape after releasing Sender must be logged as 0x1b, log={:?}",
+            app.pty_write_log
+        );
+    }
+
+    #[test]
+    fn ime_commit_and_paste_write_nothing_while_menu_open() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-menu-ime-paste-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session::default();
+        let pane = app.new_terminal_pane(profile.clone());
+        let id = pane.id;
+        app.tabs.push(Workspace::new(profile, pane));
+        app.open_menu = Some(menu::Menu::Session);
+        app.pty_write_log.clear();
+        let _ = app.update(Message::TerminalImeCommit(id, "x".into()));
+        let _ = app.update(Message::ClipboardRead(id, vec![id], Some("x".into())));
+        assert!(
+            app.pty_write_log.is_empty(),
+            "menu must drop IME commit and paste, log={:?}",
+            app.pty_write_log
+        );
+        assert!(app.open_menu.is_some(), "menu must stay open");
+        app.open_menu = None;
+        app.pty_write_log.clear();
+        let _ = app.update(Message::TerminalImeCommit(id, "x".into()));
+        assert!(
+            app.pty_write_log
+                .iter()
+                .any(|(pane, bytes)| *pane == id && bytes.as_slice() == b"x"),
+            "IME commit must be logged once the menu is closed, log={:?}",
+            app.pty_write_log
+        );
+    }
+
+    fn app_with_one_pane_and_auxiliary_shell(label: &str) -> App {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-{label}-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session {
+            name: "chord fixture".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        app.tabs.push(Workspace::new(profile, pane));
+        let _ = app.update(Message::ToggleAuxiliaryShell);
+        let tab = &app.tabs[0];
+        assert_eq!(tab.panes.len(), 2);
+        assert!(
+            tab.panes.iter().any(|(_, pane)| pane.auxiliary_shell),
+            "auxiliary SSH pane created"
+        );
+        app
+    }
+
+    fn every_key_chord() -> [KeyChord; 7] {
+        [
+            KeyChord::FocusMode,
+            KeyChord::FreeType,
+            KeyChord::RemoteKeys,
+            KeyChord::LocalNavigation,
+            KeyChord::SplitRight,
+            KeyChord::ToggleFiles,
+            KeyChord::AuxiliaryShell,
+        ]
+    }
+
+    #[test]
+    fn key_chords_do_nothing_while_a_menu_is_open() {
+        let mut app = app_with_one_pane_and_auxiliary_shell("chord-menu-blocks");
+        let focus_mode = app.focus_mode;
+        let files_open = app.files_open();
+        for (open_menu, dock_menu) in [
+            (Some(menu::Menu::Session), None),
+            (None, Some(dock::Area::Bottom)),
+        ] {
+            app.open_menu = open_menu;
+            app.dock_menu = dock_menu;
+            for chord in every_key_chord() {
+                let _ = app.update(Message::KeyChord(chord));
+                assert_eq!(
+                    app.tabs[0].panes.len(),
+                    2,
+                    "{chord:?} changed pane count while a menu was open"
+                );
+                assert!(
+                    app.tabs[0]
+                        .panes
+                        .iter()
+                        .any(|(_, pane)| pane.auxiliary_shell),
+                    "{chord:?} removed the auxiliary shell while a menu was open"
+                );
+                assert_eq!(
+                    app.focus_mode, focus_mode,
+                    "{chord:?} changed focus mode while a menu was open"
+                );
+                assert!(
+                    app.free_type.is_empty(),
+                    "{chord:?} opened free type while a menu was open"
+                );
+                assert!(
+                    app.remote_keys.is_empty(),
+                    "{chord:?} enabled remote keys while a menu was open"
+                );
+                assert!(
+                    app.local_navigation.is_empty(),
+                    "{chord:?} enabled local navigation while a menu was open"
+                );
+                assert_eq!(
+                    app.files_open(),
+                    files_open,
+                    "{chord:?} changed the files dock while a menu was open"
+                );
+                assert!(
+                    app.open_menu.is_some() || app.dock_menu.is_some(),
+                    "{chord:?} closed the menu"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn key_chords_work_again_after_the_menu_closes() {
+        let mut app = app_with_one_pane_and_auxiliary_shell("chord-menu-closed");
+        app.open_menu = Some(menu::Menu::Session);
+        app.dock_menu = Some(dock::Area::Bottom);
+        app.open_menu = None;
+        app.dock_menu = None;
+        assert!(!app.focus_mode);
+        let _ = app.update(Message::KeyChord(KeyChord::AuxiliaryShell));
+        assert_eq!(app.tabs[0].panes.len(), 1);
+        assert!(
+            !app.tabs[0]
+                .panes
+                .iter()
+                .any(|(_, pane)| pane.auxiliary_shell),
+            "auxiliary shell chord must close the shell once the menu is gone"
+        );
+        let _ = app.update(Message::KeyChord(KeyChord::FocusMode));
+        assert!(
+            app.focus_mode,
+            "focus-mode chord must toggle once the menu is gone"
+        );
+    }
+
+    #[test]
+    fn privacy_lock_still_toggles_while_a_menu_is_open() {
+        let mut app = app_with_one_pane_and_auxiliary_shell("privacy-lock-menu");
+        app.open_menu = Some(menu::Menu::Session);
+        assert!(!app.privacy_locked);
+        let _ = app.update(Message::TogglePrivacyLock);
+        assert!(app.privacy_locked);
+        assert_eq!(app.open_menu, Some(menu::Menu::Session));
     }
 }

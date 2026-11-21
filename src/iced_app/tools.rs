@@ -330,9 +330,11 @@ fn act(label: impl Into<String>, action: Action) -> iced::widget::Button<'static
 }
 fn input<'a>(label: &'a str, value: &'a str, field: Field) -> Element<'a, Message> {
     column![
-        text(label).size(12).color(MUTED),
+        text(label).size(12).color(muted()),
         text_input(label, value)
-            .padding(8)
+            .style(flat_input)
+            .size(13)
+            .padding([3, 6])
             .on_input(move |v| msg(Action::Set(field, v)))
     ]
     .spacing(5)
@@ -605,10 +607,10 @@ impl App {
                                 .min(self.tabs.len().saturating_sub(1));
                             self.prune_tool_panes();
                             self.dialog = None;
-                            if self.tabs.is_empty() && self.files_dock.is_some() {
+                            if self.tabs.is_empty() && self.files_open() {
                                 self.toggle_files();
                             }
-                            if self.files_dock.is_some() {
+                            if self.files_open() {
                                 return self.reload_files();
                             }
                         }
@@ -730,7 +732,7 @@ impl App {
                 if let Some(index) = self.tabs.iter().position(|t| Self::workspace_id(t) == id) {
                     self.activate_tab(index);
                     self.dialog = None;
-                    if self.files_dock.is_some() {
+                    if self.files_open() {
                         return self.reload_files();
                     }
                 }
@@ -1175,7 +1177,7 @@ impl App {
             for panel in panels {
                 line = line.push(act(panel.name(), Action::Open(*panel)).style(
                     if *panel == self.tools.panel {
-                        selected_button
+                        flat_selected
                     } else {
                         quiet
                     },
@@ -1234,7 +1236,7 @@ impl App {
                 ]
                 .spacing(8)
             ]
-            .spacing(16)
+            .spacing(8)
             .into()
         } else {
             match self.tools.panel {
@@ -1249,15 +1251,15 @@ impl App {
         column![
             nav,
             if self.tools.busy {
-                text("Working in background…").color(BLUE)
+                text("Working in background…").color(blue())
             } else {
                 text("")
             },
             content,
-            text(&self.status).size(12).color(MUTED),
+            text(&self.status).size(12).color(muted()),
             super::action("Close", Message::CloseDialog)
         ]
-        .spacing(12)
+        .spacing(8)
         .into()
     }
     fn profiles_tool_view(&self) -> Element<'_, Message> {
@@ -1280,10 +1282,12 @@ impl App {
             );
         }
         column![
-            text("Profile library and startup").size(24),
+            text("Profile library and startup").size(13),
             text_input("Filter profiles", &self.query)
+                .style(flat_input)
                 .on_input(Message::Search)
-                .padding(8),
+                .size(13)
+                .padding([3, 6]),
             scrollable(list).height(240),
             act("Show more profiles", Action::Open(Panel::Profiles))
                 .on_press(Message::ShowMoreProfiles),
@@ -1308,7 +1312,7 @@ impl App {
             ]
             .spacing(6)
         ]
-        .spacing(10)
+        .spacing(8)
         .into()
     }
     fn workspace_tool_view(&self) -> Element<'_, Message> {
@@ -1357,7 +1361,7 @@ impl App {
             .map(Self::workspace_id)
             .unwrap_or_default();
         column![
-            text("Tabs and workspace").size(24),
+            text("Tabs and workspace").size(13),
             input("Find tabs", &self.tools.tab_query, Field::TabQuery),
             scrollable(list).height(130),
             row![
@@ -1397,7 +1401,7 @@ impl App {
                 .label("ARM synchronized input")
                 .on_toggle(|v| msg(Action::SyncArm(v)))
         ]
-        .spacing(10)
+        .spacing(8)
         .into()
     }
     fn history_tool_view(&self) -> Element<'_, Message> {
@@ -1462,10 +1466,12 @@ impl App {
             .history_owner
             .is_some_and(|id| self.tools.logs.contains_key(&id));
         column![
-            text("Retained terminal history").size(24),
+            text("Retained terminal history").size(13),
             text_input("Find text", state.map(|s| s.query()).unwrap_or(""))
+                .style(flat_input)
                 .on_input(|q| msg(Action::HistoryQuery(q)))
-                .padding(8),
+                .size(13)
+                .padding([3, 6]),
             row![
                 act("Previous", Action::HistoryNext(false)),
                 act("Next", Action::HistoryNext(true)),
@@ -1508,7 +1514,7 @@ impl App {
             fonts = fonts.push(act(label, Action::FontFamily(family)));
         }
         column![
-            text("Terminal appearance and interaction").size(24),
+            text("Terminal appearance and interaction").size(13),
             fonts,
             text(format!("Font size: {:.0}", a.font_size)),
             slider(8.0..=36.0, a.font_size, |v| msg(Action::FontSize(v))),
@@ -1532,7 +1538,7 @@ impl App {
                 Field::Background
             ),
             text(a.contrast_warning().unwrap_or_default())
-                .color(DANGER)
+                .color(danger())
                 .size(12),
             row![
                 act("Block cursor", Action::Cursor(TerminalCursorStyle::Block)),
@@ -1567,7 +1573,7 @@ impl App {
                     Action::PastePolicy(PastePolicy::ConfirmMultiline)
                 )
                 .style(if self.paste_policy == PastePolicy::ConfirmMultiline {
-                    selected_button
+                    flat_selected
                 } else {
                     quiet
                 }),
@@ -1576,7 +1582,7 @@ impl App {
                     Action::PastePolicy(PastePolicy::ConfirmAll)
                 )
                 .style(if self.paste_policy == PastePolicy::ConfirmAll {
-                    selected_button
+                    flat_selected
                 } else {
                     quiet
                 }),
@@ -1592,7 +1598,7 @@ impl App {
     }
     fn snippets_tool_view(&self) -> Element<'_, Message> {
         column![
-            text("Snippet exchange and command targets").size(24),
+            text("Snippet exchange and command targets").size(13),
             input(
                 "Snippet JSON import/export path",
                 &self.tools.snippet_path,
@@ -1620,7 +1626,7 @@ impl App {
             act("Preview and send…", Action::SendCommand),
             super::action("Manage snippets / command palette", Message::Commands)
         ]
-        .spacing(10)
+        .spacing(8)
         .into()
     }
 }

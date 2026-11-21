@@ -3,6 +3,8 @@
 Status: all GUI workflows have Iced implementations. Iced is the only frontend; the egui fallback has been removed. Manual native responsiveness/IME acceptance remains open in #78.
 Acceptance reconciliation: 10 October 2026, after merged PR #121. Tracking: open issue #78; migration merged in #84 (earlier study PR #83). See the [evidence-indexed acceptance matrix](../ui-acceptance.md) for completed functionality, CI scope and pending named-device qualification. The original design goals below remain acceptance requirements, not evidence that they passed.
 
+> **Superseded sections (issue #140):** sections 4 (Layout specification) and 5 (Visual system), including the "Clickable versus label" rule, are superseded by the [WindTerm-style UI specification](windterm-ui-spec.md). The headings are kept so that existing links continue to resolve.
+
 ## 1. Design brief
 
 The user rejected the existing interface as cluttered, difficult to read and difficult to use. The goal is not another colour patch. It is a fast, legible, terminal-first native workspace that borrows WindTerm's useful workflows while preserving Inspirum's SSH-first functionality and safety boundaries.
@@ -82,22 +84,21 @@ the #64 interaction-mode/SSH correctness acceptance.
 
 ### Dockable file explorer beside the terminal
 
-When the Files browser is open, **Dock right** moves the same local/remote
-SFTP browser to a right-hand explorer pane, beside the SSH terminal. The
-side mode stacks the local and remote directory lists and groups file actions
-in shorter rows to avoid a clipped narrow toolbar. **Dock bottom** restores
-the original horizontal transfer dock. Both layouts remain resizable with the
-Iced pane-grid divider.
+The remote and local file browsers are the **Filer** and **Explorer** dock
+panels, and the transfer queue is the **Transfer** panel. Each panel's gear
+menu moves it to the Left, Right or Bottom dock area (there are no separate
+Dock right / Dock bottom buttons). Dock areas are resizable with their
+splitters.
 
 Re-docking only changes layout: it does **not** reconnect, restart transfers,
 change the selected remote host, discard remote edits or bypass existing
-overwrite/delete confirmation. Opening the Files dock through its normal
-toolbar/shortcut returns to the last selected orientation. The privacy
+overwrite/delete confirmation. Reopening a panel from the View menu returns it to
+its last dock area. The privacy
 curtain blocks re-docking.
 
 ### Auxiliary SSH shell beside the main terminal
 
-The workspace's **Shell** toolbar action (Ctrl/Cmd+Shift+J while no text
+The **Shell** session-toolbar action (also View > Shell) (Ctrl/Cmd+Shift+J while no text
 editor has captured the keys) opens an independent authenticated SSH PTY for
 the active session in a right-hand split. It is identified as **AUX SHELL**
 and receives input only when explicitly focused. The main terminal remains
@@ -109,14 +110,14 @@ authentication policies; opening it does not change sync-input targets.
 terminal. If it is the last pane, the tab's existing close confirmation
 continues to apply. Reconnect preserves the auxiliary-shell role. The
 four-pane workspace limit applies, and the privacy curtain prevents shell
-creation/teardown. The Files dock remains separate. This is a practical
+creation/teardown. The Filer/Explorer dock panels remain separate. This is a practical
 auxiliary shell workflow in the existing draggable split grid, **not** a
 second independently dockable file-explorer tree. Native Mac click latency
 and keyboard/IME acceptance remain tracked in #78.
 
 ### Transfer files without losing the terminal
 
-Files opens a resizable lower drawer. Local and Remote have unambiguous headings; the remote side shows the exact session and path. Queued transfers retain their original session ID even when the active tab changes. Progress and errors are real, not decorative status values. Upload/download, conflict/resume, destructive operations and editor save retain existing confirmation and integrity logic.
+The Filer (remote) and Explorer (local) dock panels and the Transfer panel sit in the dock areas, by default as bottom tabs; the remote side shows the exact session and path. Queued transfers retain their original session ID even when the active tab changes. Progress and errors are real, not decorative status values. Upload/download, conflict/resume, destructive operations and editor save retain existing confirmation and integrity logic.
 
 ### Find a command or a less-common feature
 
@@ -128,43 +129,23 @@ Connecting, authentication requested, connected, disconnected, host-key conflict
 
 ## 4. Layout specification
 
-- A compact top bar for workspace identity and global actions; native window chrome is retained.
-- Left session library: prototype width 256 logical pixels; production must support resize/collapse with a usable minimum width and remembered preference.
-- Central tabs and terminals occupy the primary area. The disconnected/start state is quiet: New connection and sample/recent/saved sessions, not empty configuration forms.
-- A collapsible files/transfers drawer uses approximately the lower 30-40 percent when open, with a draggable divider. It must not silently replace the terminal.
-- A small status bar shows real session state, encoding/terminal context and relevant jobs. Do not invent latency or throughput readings.
-- Global preferences and support tools live in dedicated dialogs/panels. Advanced forms do not occupy the default session tree.
+Superseded by [windterm-ui-spec.md](windterm-ui-spec.md) (issue #140). In summary:
 
-The current Iced candidate implements independent tabs, split/grid resizing, reconnect/close lifecycle, a lower resizable Files drawer, live SFTP transfers, remote editing, saved-session launch shortcuts, and validated merge-only profile import. Sidebar width remains fixed apart from collapse/expand, and complete native focus/IME/accessibility acceptance is still outstanding.
+- A menu bar (Session, Edit, View, Mode, Window, Help) replaces the earlier top action bar; native window chrome is retained.
+- The centre workspace holds a flat session tab strip, a session toolbar with a breadcrumb, and terminal panes; pane headers appear only on split tabs.
+- Session, Sender, Transfer, Filer (remote files) and Explorer (local files) are dock panels in Left, Right and Bottom dock areas with tab strips, a gear menu (Move to Left/Right/Bottom, Close) and drag-resizable splitters. The default preset places all panels as bottom tabs.
+- A status bar shows mode, terminal size, `ssh`, running counts and local date-time.
+- Dock layout and theme are persisted in `ui-state.json` next to the profiles file.
+
+See [section 11 of the specification](windterm-ui-spec.md#11-implementation-status) for what is implemented.
 
 ## 5. Visual system
 
-| Token | Value | Role |
-| --- | --- | --- |
-| Workspace | #0E1219 | Quiet terminal/background surface |
-| Sidebar/panels | #161D28 | Secondary navigation |
-| Elevated/selected | #1E2837 | Hover and selected surfaces |
-| Divider | #303E51 | Boundaries without heavy boxes |
-| Main text | #E7EDF7 | Primary labels and terminal content |
-| Secondary text | #A3B1C4 | Metadata, never almost-black grey |
-| Accent | #7BB0FF | Focus and primary action |
-| Success | #71D9AB | Positive state, paired with text |
-
-Start with 14 logical-pixel UI text, 15-16 pixel terminal text, 12-13 pixel secondary labels, 32-36 pixel controls and a consistent 4/8/12/16 spacing rhythm. These are starting measurements, not fixed requirements at every display scale. Use an ordinary readable system UI font and a proper monospace terminal font; preserve independent font settings in production. Avoid gradients, oversized dashboards, decorative animation and a different colour for every tool.
-
-Selected, hovered, focused, disabled, pending and error states need separate treatment. Colour alone is insufficient. Production acceptance includes visible keyboard focus, contrast measurement, 100/125/150/200 percent scaling and a light/high-contrast alternative without changing interaction placement.
+Superseded by [windterm-ui-spec.md](windterm-ui-spec.md) (issue #140). The earlier dark token table and the outlined-button rule are no longer in force. The chrome now follows the WindTerm-style Light (default) and Dark themes defined in section 2 of the specification, selectable under View or with the `INSPIRUM_THEME` environment variable; typography, metrics and control styling follow its section 3.
 
 ### Clickable versus label
 
-Users could not tell a button, tab or link from a plain label because resting buttons had no fill or outline. The rule is now explicit and enforced by a unit test (`clickable_controls_are_distinct_from_labels_at_rest`):
-
-- **Every clickable control** (buttons, tabs, sidebar session rows, file rows, close/add controls) has a resting fill `#1A2330` and a 1 px outline `#485A73` with 5 px radius. Hover brightens the fill to `#263244` with an accent outline; pressed darkens; disabled uses the panel colour with the divider outline and secondary text.
-- **Selected** controls (active tab, selected file row, enabled toggles) use an accent-tinted fill `#263A58` with an accent outline; the text stays the main text colour so selection never reduces legibility.
-- **Primary** action keeps the accent fill with dark text.
-- **Labels, headers, metadata and status text** never have a fill or outline. Section headers (`LOCAL`, `REMOTE`, `TRANSFER QUEUE`) stay small muted caps.
-- Links only occur inside terminal content, where URL highlighting already uses the accent colour.
-
-The native preview deliberately uses simple text controls while the hierarchy is evaluated. A consistent original line-icon set and compact icon-with-tooltip controls are a later visual pass, not a prerequisite for understanding the first layout.
+Superseded by sections 2 and 3 of [windterm-ui-spec.md](windterm-ui-spec.md) (issue #140).
 
 ## 6. Feature placement and preservation
 
@@ -172,7 +153,7 @@ This is a migration map, not a claim that every mapped feature has been implemen
 
 | Existing feature area | New location | Behaviour to preserve |
 | --- | --- | --- |
-| Profiles, folders, favourites, tags, search | Session library and profile context menu | Atomic non-secret storage, rename/duplicate/delete semantics |
+| Profiles, folders, favourites, tags, search | Session dock panel | Atomic non-secret storage, rename/duplicate/delete semantics |
 | Import/export and startup/restore | Session/library actions and preferences | Collision handling; no unsolicited reconnection |
 | Host, user, port and configuration path | Basic connection dialog | Validated argv construction; no local shell interpretation |
 | Identity/authentication/GSSAPI | Authentication section | Inherit/enable/disable policies; no secret persistence |
@@ -184,7 +165,7 @@ This is a migration map, not a claim that every mapped feature has been implemen
 | History search, marks, timestamps, folding | Terminal search/navigation tools | Correct retained-buffer behaviour and bounded work |
 | Appearance and pointer/copy settings | Preferences with profile overrides | Independent terminal settings and safe paste policy |
 | Command palette, snippets, completion | Palette and sender tools | Separate app actions from remote text; no auto-execute |
-| Local/remote browser, SFTP/SCP and transfer queue | Lower Files/Transfers drawer | Path safety, overwrite/conflict, resume, integrity and cleanup |
+| Local/remote browser, SFTP/SCP and transfer queue | Filer, Explorer and Transfer dock panels | Path safety, overwrite/conflict, resume, integrity and cleanup |
 | Remote editor | Editor tab associated with the correct session/file | Temporary copy, conflict detection, explicit overwrite and cleanup |
 | Diagnostics, support export and logging | Help/support and session tools | Redaction, bounded storage and logging off by default |
 

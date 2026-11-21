@@ -16,8 +16,10 @@ pub struct RemoteEntry {
     pub size: Option<u64>,
     /// Mode string as printed by `ls -l`, e.g. `drwxr-xr-x`.
     pub permissions: Option<String>,
-    /// `owner:group` as reported by `ls -lan` (numeric ids).
+    /// Owner as reported by `ls -la` (user name, or uid when unmapped).
     pub owner: Option<String>,
+    /// Group as reported by `ls -la` (group name, or gid when unmapped).
+    pub group: Option<String>,
     /// Modification time as printed by `ls -l` (`Mon DD HH:MM` or `Mon DD  YYYY`).
     pub modified: Option<String>,
 }
@@ -30,6 +32,7 @@ impl RemoteEntry {
             size,
             permissions: None,
             owner: None,
+            group: None,
             modified: None,
         }
     }
@@ -106,7 +109,8 @@ fn parse_listing(output: &str) -> Vec<RemoteEntry> {
             is_dir: fields[0].starts_with('d'),
             size: fields[4].parse().ok(),
             permissions: Some(fields[0].to_owned()),
-            owner: Some(format!("{}:{}", fields[2], fields[3])),
+            owner: Some(fields[2].to_owned()),
+            group: Some(fields[3].to_owned()),
             modified: Some(fields[5..8].join(" ")),
         });
     }
@@ -123,7 +127,7 @@ pub fn list_remote(
         config,
         &[
             format!("cd {}", quote_batch_arg(remote_dir)?),
-            "ls -lan".into(),
+            "ls -la".into(),
         ],
     )?;
     Ok(parse_listing(&output))
@@ -133,7 +137,7 @@ pub fn remote_size(session: &Session, config: Option<&Path>, remote: &str) -> Re
     let output = run_batch(
         session,
         config,
-        &[format!("ls -lan {}", quote_batch_arg(remote)?)],
+        &[format!("ls -la {}", quote_batch_arg(remote)?)],
     )?;
     parse_listing(&output)
         .into_iter()
@@ -590,7 +594,8 @@ mod tests {
                     is_dir: false,
                     size: Some(12),
                     permissions: Some("-rw-r--r--".into()),
-                    owner: Some("1000:1000".into()),
+                    owner: Some("1000".into()),
+                    group: Some("1000".into()),
                     modified: Some("Jan 01 00:00".into()),
                 },
                 RemoteEntry {
@@ -598,7 +603,8 @@ mod tests {
                     is_dir: true,
                     size: Some(4096),
                     permissions: Some("drwxr-xr-x".into()),
-                    owner: Some("1000:1000".into()),
+                    owner: Some("1000".into()),
+                    group: Some("1000".into()),
                     modified: Some("Jan 01 00:00".into()),
                 }
             ]
@@ -615,15 +621,35 @@ mod tests {
         );
         assert_eq!(parsed.len(), 3);
         assert_eq!(parsed[0].permissions.as_deref(), Some("drwxr-xr-x"));
-        assert_eq!(parsed[0].owner.as_deref(), Some("0:0"));
+        assert_eq!(parsed[0].owner.as_deref(), Some("0"));
+        assert_eq!(parsed[0].group.as_deref(), Some("0"));
         assert_eq!(parsed[0].modified.as_deref(), Some("Mar 3 2024"));
         assert!(parsed[0].is_dir);
         assert_eq!(parsed[1].name, "link");
         assert_eq!(parsed[1].permissions.as_deref(), Some("lrwxrwxrwx"));
-        assert_eq!(parsed[1].owner.as_deref(), Some("1000:1001"));
+        assert_eq!(parsed[1].owner.as_deref(), Some("1000"));
+        assert_eq!(parsed[1].group.as_deref(), Some("1001"));
         assert_eq!(parsed[1].modified.as_deref(), Some("Oct 18 09:41"));
         assert_eq!(parsed[2].permissions.as_deref(), Some("-rwsr-xr-x"));
         assert_eq!(parsed[2].size, Some(12345));
+    }
+
+    #[test]
+    fn listing_parser_reads_owner_and_group_names() {
+        let parsed = parse_listing(
+            "sftp> ls -la\n\
+             -rw-r--r--    1 rocky    rocky        8192 Oct 18 14:23 .bash_history\n\
+             -rw-r--r--    1 rocky    wheel          12 Oct 18 14:23 my notes file.txt\n",
+        );
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, ".bash_history");
+        assert_eq!(parsed[0].owner.as_deref(), Some("rocky"));
+        assert_eq!(parsed[0].group.as_deref(), Some("rocky"));
+        assert_eq!(parsed[0].size, Some(8192));
+        assert_eq!(parsed[0].modified.as_deref(), Some("Oct 18 14:23"));
+        assert_eq!(parsed[1].name, "my notes file.txt");
+        assert_eq!(parsed[1].group.as_deref(), Some("wheel"));
+        assert_eq!(parsed[1].size, Some(12));
     }
 
     #[test]
