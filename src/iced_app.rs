@@ -1483,8 +1483,8 @@ fn matched_delimiters(snapshot: &terminal_core::DisplaySnapshot) -> Option<(usiz
     };
     let mut depth = 0_usize;
     if forward {
-        for index in cursor..snapshot.cells.len() {
-            let ch = snapshot.cells[index].character;
+        for (index, cell) in snapshot.cells.iter().enumerate().skip(cursor) {
+            let ch = cell.character;
             if ch == opening {
                 depth += 1;
             } else if ch == closing {
