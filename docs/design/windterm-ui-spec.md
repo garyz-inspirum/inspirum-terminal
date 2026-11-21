@@ -147,6 +147,13 @@ is hidden. Persisted with the workspace.
     Session above Outline; Bottom = Sender, Transfer, Shell.
 - Dock splitters are 1 px lines with a 5 px invisible grab zone.
 
+Current build: the dock panels are Sender, Session, Transfer, Filer and
+Explorer. Outline and Shell are not available as dock panels (the auxiliary
+shell opens as a split pane) and Tunnels remains a dialog. The presets are
+`Window > Layout: Bottom tabs` and `Window > Layout: WindTerm default`; the
+missing panels are skipped. Layout and theme are saved in `ui-state.json`
+next to the profiles file.
+
 ### 5.1 Session panel
 
 `Filter` field (no box: text over a 1 px underline, 30 px high), then a tree:
@@ -155,6 +162,9 @@ indented 20 px (marker: filled circle in a per-session colour for SSH; name).
 Single click selects, double click or Enter opens. Selected row uses
 `selected_row` full width. Right-click / gear: Open, Edit, New Session,
 Import. Favourites and tags stay visible as muted suffix text.
+
+Current build: a single click on a session row opens it. Groups are not
+collapsible and there is no right-click menu.
 
 ### 5.2 Filer and Explorer panels
 
@@ -181,6 +191,9 @@ Explorer the local file system.
   other side's current directory), Edit (remote), New Folder, Rename, Delete,
   Refresh. Destructive actions keep their confirmation dialogs.
 
+Current build: the Up control shows an arrow plus the word `Up`. Context
+(right-click) menus are not implemented.
+
 ### 5.3 Transfer panel
 
 One entry per job: file icon, `<name> - <bytes> downloaded|uploaded`, right
@@ -197,6 +210,9 @@ Empty state: nothing (blank panel), as in WindTerm.
   controls unless implemented.
 - Outline: `Filter` + list of commands with blue bullet dots, only if backed
   by real data.
+
+Current build: Sender is a dock panel. Shell opens as a split pane in the
+session tab, not as a dock panel. Outline is not available.
 
 ## 6. Centre workspace
 
@@ -263,3 +279,29 @@ script (updated to the new labels and layout, not weakened).
 
 Terminal gutter (timestamps, line numbers, folding), per-split-group tab
 strips, quick bar, Find strip, drag-and-drop docking, session tab colours.
+
+## 11. Implementation status
+
+Status of the build on branch `feat/windterm-ui-docs` (issue #140, PR #141),
+checked against the source. "Implemented" means present in the code; it is not
+an acceptance claim.
+
+| Spec section | Status | Note |
+| --- | --- | --- |
+| 1. Window structure | Implemented | Menu bar, session tab strip, session toolbar, dock areas, status bar. |
+| 2. Themes | Implemented | Light (default) and Dark, View > Theme, `INSPIRUM_THEME` override; persisted in `ui-state.json`. |
+| 3. Typography and metrics | Partly | Not measured against every value in the table. |
+| 4. Menu bar | Implemented | Session, Edit, View, Mode, Window, Help with drop-downs (items in `src/iced_app/menu.rs`). |
+| 5. Dock system | Partly | Left/Right/Bottom areas, tab strips, gear menu (Move to Left/Right/Bottom, Close), both presets, drag-resizable splitters, persistence. No drag-and-drop docking. |
+| 5.1 Session panel | Partly | Single click opens; no collapsible groups, no context menu. |
+| 5.2 Filer and Explorer | Partly | WindTerm columns (Name, Date Modified, Type, Size, Permissions, Owner, Group). No context menus. |
+| 5.3 Transfer panel | Implemented | Transfer queue as a dock panel. |
+| 5.4 Shell, Sender, Outline | Partly | Sender is a dock panel. Shell opens as a split pane, not a dock panel. Outline not implemented. |
+| 6.1 Session tab strip | Partly | Tab strip present; no per-session tab colours. |
+| 6.2 Session toolbar | Implemented | Toolbar with breadcrumb. |
+| 6.3 Terminal panes | Partly | Pane headers only for split tabs. No timestamp/line-number/fold gutter. |
+| 6.4 Empty workspace | Implemented | Muted centred hint line. |
+| 7. Status bar | Implemented | Mode, `<cols>x<rows>`, `ssh`, counts, date-time. |
+| 8. Dialogs | Partly | Restyling not reviewed dialog by dialog. |
+| 9. Things that must keep working | Not yet verified | GUI acceptance on the new layout is pending; a local container harness is in `scripts/local-gui/`. |
+| 10. Not in this pass | Not yet | Gutter, per-split-group tab strips, quick bar, Find strip, drag-and-drop docking, session tab colours. |
