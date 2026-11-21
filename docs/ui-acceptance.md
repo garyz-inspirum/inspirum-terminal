@@ -89,6 +89,13 @@ integrity. This passing synthetic fixture does not demonstrate physical-device
 usability, native macOS/Windows behavior, IME, SCP, conflict/cancel/resume, or
 remote-editor acceptance.
 
+**21 November 2026:** the evidence index above predates the WindTerm layout
+rebuild (#140, PR #141). The E4, E6 and E8 screenshots show the previous
+layout (session sidebar, Files view with Dock right / Dock bottom buttons).
+The file browser and transfer queue are now the Filer, Explorer and Transfer
+dock panels, moved with each panel's gear menu. Acceptance on the new layout
+is pending; nothing in this paragraph is an acceptance claim.
+
 ## Proposed roadmap issue corrections (not applied here)
 
 The live #1 body contains older checkpoints. A separate authorized issue edit
