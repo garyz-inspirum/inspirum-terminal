@@ -4516,6 +4516,8 @@ impl App {
                 if self.dialog.is_some() {
                     return self.update(Message::CloseDialog);
                 }
+                // Escape releases the Sender editor so keys reach the terminal.
+                self.sender_focused = false;
             }
             Message::AskClose(index) => {
                 let closing_key = self
