@@ -2432,9 +2432,17 @@ async def main() -> int:
                             f"(UNEXPECTED_CONTEXT_PTY_INPUT {typed_before} -> {typed_after})"
                         )
                     command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                    # Do not move or click between Escape and these checks: a
+                    # backdrop click dismisses the menu and would hide a broken
+                    # Escape. Poll until Refresh is gone, the popup pixels are
+                    # gone, and the file row is readable again. menu_shot is
+                    # still the frame where Refresh and New Folder were found.
                     closed_shot = destination / "connected-files-context-closed.png"
                     gone_deadline = time.monotonic() + 12 * TIME_SCALE
                     still_refresh = None
+                    closed_pixels = 0
+                    restored_row = None
+                    row_restored = False
                     while True:
                         await asyncio.to_thread(screenshot, window, closed_shot, env)
                         try:
@@ -2444,6 +2452,28 @@ async def main() -> int:
                             )
                         except RuntimeError:
                             still_refresh = None
+                        closed_pixels = await asyncio.to_thread(
+                            diff, menu_shot, closed_shot, env,
+                        )
+                        restored_row = None
+                        row_restored = False
+                        try:
+                            restored_row = await asyncio.to_thread(
+                                locate_visible_label,
+                                closed_shot, download_name, region=body, budget=1.0,
+                            )
+                            row_restored = all(
+                                abs(restored_row[edge] - context_row[edge]) <= 6
+                                for edge in range(4)
+                            )
+                        except RuntimeError:
+                            restored_row = None
+                            row_restored = False
+                        if (
+                            still_refresh is None
+                            and closed_pixels >= 2000
+                            and row_restored
+                        ):
                             break
                         if time.monotonic() >= gone_deadline:
                             break
@@ -2459,6 +2489,29 @@ async def main() -> int:
                             "Escape from the Filer context menu forwarded input to SSH "
                             f"(UNEXPECTED_CONTEXT_PTY_INPUT {typed_after} -> {escaped_after})"
                         )
+                    restore_failed = []
+                    if closed_pixels < 2000:
+                        restore_failed.append(
+                            f"menu pixel diff {closed_pixels} < 2000 "
+                            f"({menu_shot.name} vs {closed_shot.name})"
+                        )
+                    if not row_restored:
+                        restore_failed.append(
+                            f"file row bounds {restored_row} not within 6 px of "
+                            f"context_row {context_row} on every edge "
+                            f"(region {body})"
+                        )
+                    if restore_failed:
+                        raise RuntimeError(
+                            "Escape did not restore the Filer context menu background; "
+                            + "; ".join(restore_failed)
+                        )
+                    print(
+                        f"Escape restored the row: {closed_pixels} pixels "
+                        f"({menu_shot.name} vs {closed_shot.name}); "
+                        f"row {restored_row} vs context_row {context_row}",
+                        flush=True,
+                    )
                 finally:
                     probe_state["phase"] = None
                 # Escape clears the menu and does not restore the terminal
@@ -3151,7 +3204,7 @@ async def main() -> int:
                     "PASS: click-driven SFTP upload preserved exact binary bytes in the native-smoke chroot\n"
                     "PASS: click-driven SFTP download preserved exact binary bytes in the visible local directory\n"
                     "PASS: Filer Name header click reversed remote name order and the second click restored it without a new SFTP listing\n"
-                    "PASS: Filer no-pause right-click anchored at the new pointer with the previous pointer parked away rendered Refresh and New Folder, consumed typing, Return and Escape, and the shell answered AFTER_CONTEXT_MENU\n"
+                    "PASS: Filer no-pause right-click anchored at the new pointer with the previous pointer parked away rendered Refresh and New Folder, consumed typing, Return and Escape restored the row, and the shell answered AFTER_CONTEXT_MENU\n"
                     "PASS: exact payloads appeared at the expected disposable remote and local paths\n"
                     f"Connected split screenshot change: {split_pixels} pixels\n"
                     f"Opened utility dock screenshot change: {files_pixels} pixels\n"
