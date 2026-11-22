@@ -389,7 +389,7 @@ impl App {
     fn workspace_id(tab: &Workspace) -> u64 {
         tab.id
     }
-    fn history_refresh(&mut self) {
+    pub(super) fn history_refresh(&mut self) {
         if let Some(tab) = self.tabs.get_mut(self.active)
             && let Some(pane) = tab.panes.get_mut(tab.focus)
             && let Some(terminal) = &pane.terminal
@@ -1145,7 +1145,11 @@ impl App {
         Task::batch(tasks)
     }
     pub(super) fn refresh_visible_history(&mut self) {
-        if matches!(self.dialog, Some(Dialog::Tools)) && self.tools.panel == Panel::History {
+        // The History inspector and the Find strip share one snapshot. A
+        // visible strip follows the focused pane the same way the panel does.
+        if self.find_open
+            || (matches!(self.dialog, Some(Dialog::Tools)) && self.tools.panel == Panel::History)
+        {
             self.history_refresh();
         }
     }
