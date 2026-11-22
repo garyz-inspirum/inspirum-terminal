@@ -5249,6 +5249,7 @@ impl App {
                     C::ZoomOut => Message::Scale(-0.1),
                     C::FocusMode => Message::ToggleFocusMode,
                     C::ToggleSessions => Message::DockToggle(dock::Panel::Session),
+                    C::ToggleFiles => Message::ToggleFiles,
                     C::LayoutBottomTabs => Message::DockPreset(false),
                     C::LayoutWindTerm => Message::DockPreset(true),
                     C::TogglePanel(panel) => Message::DockToggle(panel),
@@ -7432,7 +7433,7 @@ impl App {
         right = right.push(status_text(
             chrono::Local::now().format("%Y/%m/%d %H:%M").to_string(),
         ));
-        let mut left = row![status_text(if self.status.is_empty() {
+        let left = row![status_text(if self.status.is_empty() {
             "Ready".to_string()
         } else {
             self.status.clone()
@@ -7440,10 +7441,27 @@ impl App {
         .spacing(16)
         .align_y(iced::Center);
         if self.tools.sync.armed() {
-            left = left.push(status_text(format!(
-                "SYNC ARMED - {} panes",
-                self.tools.sync.selected_count()
-            )));
+            let warning = container(
+                text(format!(
+                    "INPUT TO {} PANES",
+                    self.tools.sync.selected_count()
+                ))
+                .size(theme::metrics::STATUS_TEXT)
+                .color(Color::from_rgb8(35, 26, 8))
+                .wrapping(iced::widget::text::Wrapping::None)
+                .font(iced::Font {
+                    weight: iced::font::Weight::Bold,
+                    ..iced::Font::MONOSPACE
+                }),
+            )
+            .padding([2, 7])
+            .width(160)
+            .align_x(iced::Center)
+            .style(|theme| container::Style {
+                background: Some(Color::from_rgb8(245, 190, 80).into()),
+                ..breadcrumb_field(theme)
+            });
+            right = row![warning, right].spacing(12).align_y(iced::Center);
         }
         let footer = container(
             row![container(left).width(Fill).clip(true), right]
@@ -7536,6 +7554,17 @@ impl App {
                 .on_enter(Message::MenuHover(menu)),
             );
         }
+        titles = titles.push(space::horizontal()).push(
+            button(
+                text("Tunnels")
+                    .size(theme::metrics::UI_TEXT)
+                    .color(theme::palette().text)
+                    .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .padding([4, 8])
+            .style(|theme, status| menu_title(theme, status, false))
+            .on_press(Message::Tunnels),
+        );
         container(titles)
             .height(theme::metrics::MENU_BAR_HEIGHT)
             .width(Fill)
@@ -7916,131 +7945,12 @@ impl App {
             hline(),
         ];
 
-        let tab = &self.tabs[self.active];
-        let folder = if tab.profile.folder.trim().is_empty() {
-            "sessions".to_owned()
-        } else {
-            tab.profile.folder.clone()
-        };
-        let crumb_text = |value: String| {
-            text(value)
-                .size(theme::metrics::UI_TEXT)
-                .color(p.text)
-                .wrapping(iced::widget::text::Wrapping::None)
-        };
-        let breadcrumb = container(
-            row![
-                icons::icon(icons::Icon::Info, 12.0, p.muted),
-                container(space::horizontal())
-                    .width(1)
-                    .height(13)
-                    .style(border_fill),
-                crumb_text("ssh".to_owned()),
-                icons::icon(icons::Icon::TriangleRight, 8.0, p.muted),
-                crumb_text(folder),
-                icons::icon(icons::Icon::TriangleRight, 8.0, p.muted),
-                crumb_text(tab.profile.name.clone()),
-            ]
-            .spacing(6)
-            .align_y(iced::Center),
-        )
-        .padding([0, 8])
-        .height(23)
-        .width(Fill)
-        .clip(true)
-        .align_y(iced::Center)
-        .style(breadcrumb_field);
-        let shell_open = tab.panes.iter().any(|(_, pane)| pane.auxiliary_shell);
-        // Single-pane tabs hide the pane header; its labels and controls live
-        // in the session toolbar so they stay reachable.
-        let single_pane_parts: Element<'_, Message> = match tab.panes.iter().next() {
-            Some((pane_id, pane)) if tab.panes.len() == 1 => {
-                let (labels, controls) = self.pane_header_parts(*pane_id, pane, false);
-                row![labels, controls]
-                    .spacing(6)
-                    .align_y(iced::Center)
-                    .into()
-            }
-            _ => space::horizontal().width(0).into(),
-        };
-        let toolbar = column![
-            row![
-                tool_icon(
-                    icons::Icon::SplitRight,
-                    "Split right",
-                    Message::Split(pane_grid::Axis::Vertical)
-                ),
-                tool_icon(
-                    icons::Icon::SplitDown,
-                    "Split down",
-                    Message::Split(pane_grid::Axis::Horizontal)
-                ),
-                tool_icon(
-                    icons::Icon::Terminal,
-                    if shell_open { "Close shell" } else { "Shell" },
-                    Message::ToggleAuxiliaryShell
-                ),
-                breadcrumb,
-                single_pane_parts,
-                compact_action("Paste", Message::RequestPaste),
-                compact_action(
-                    if self
-                        .focused_terminal_id()
-                        .is_some_and(|id| self.local_navigation.contains(&id))
-                    {
-                        "LOCAL NAV"
-                    } else if self
-                        .focused_terminal_id()
-                        .is_some_and(|id| self.remote_keys.contains(&id))
-                    {
-                        "REMOTE KEYS"
-                    } else {
-                        "REMOTE INPUT"
-                    },
-                    Message::ToggleLocalNavigation
-                ),
-                compact_action(
-                    if self.tools.sync.armed() {
-                        "SYNC ARMED · Disarm"
-                    } else if self.tools.sync.selected_count() >= 2 {
-                        "Arm sync"
-                    } else {
-                        "Select sync targets"
-                    },
-                    if self.tools.sync.selected_count() >= 2 {
-                        Message::Tool(tools::Action::SyncArm(!self.tools.sync.armed()))
-                    } else {
-                        Message::Tool(tools::Action::Open(tools::Panel::Workspace))
-                    },
-                )
-                .style(if self.tools.sync.armed() {
-                    button::danger
-                } else {
-                    icon_button
-                }),
-                compact_action(
-                    if self.files_open() {
-                        "Hide files"
-                    } else {
-                        "Files"
-                    },
-                    Message::ToggleFiles
-                ),
-            ]
-            .spacing(2)
-            .padding([0, 6])
-            .height(33)
-            .align_y(iced::Center),
-            hline(),
-        ];
-
         let dock = self.terminals();
 
         // The strip is omitted when closed so the terminal's computed rows
         // stay exactly the closed-workspace layout.
         let mut centre = column![
             container(tab_strip).style(surface),
-            container(toolbar).style(surface),
             container(dock).height(Fill).style(border_fill),
         ];
         if self.find_open {
@@ -8050,13 +7960,11 @@ impl App {
         container(centre).height(Fill).width(Fill).into()
     }
 
-    /// Mode/state labels and per-pane controls shared by the pane header
-    /// (multi-pane tabs) and the session toolbar (single-pane tabs).
+    /// Mode/state labels and reconnect/close controls for split-pane headers.
     fn pane_header_parts<'a>(
         &'a self,
         id: pane_grid::Pane,
         pane: &'a TerminalPane,
-        include_paste: bool,
     ) -> (
         iced::widget::Row<'a, Message>,
         iced::widget::Row<'a, Message>,
@@ -8098,44 +8006,9 @@ impl App {
                     .wrapping(iced::widget::text::Wrapping::None),
             );
         }
-        let mut controls = row![
-            compact_action("Copy", Message::CopySelection(pane.id)),
-            compact_action(
-                if self.tools.sync.is_target(pane.id) {
-                    "SYNC"
-                } else {
-                    "Sync +"
-                },
-                Message::Tool(tools::Action::SyncTarget(
-                    pane.id,
-                    !self.tools.sync.is_target(pane.id),
-                )),
-            )
-            .style(if self.tools.sync.is_target(pane.id) {
-                selected_button
-            } else {
-                icon_button
-            }),
-            if self.free_type.contains_key(&pane.id) {
-                compact_action("Discard draft", Message::FreeTypeDiscard(pane.id))
-            } else {
-                compact_action("Free type", Message::ToggleFreeType(pane.id))
-            },
-            compact_action(
-                if self.remote_keys.contains(&pane.id) {
-                    "Exit keys"
-                } else {
-                    "Remote keys"
-                },
-                Message::ToggleRemoteKeys(pane.id),
-            ),
-        ]
-        .spacing(0)
-        .align_y(iced::Center);
+        let mut controls = row![].spacing(0).align_y(iced::Center);
         if pane.exited || pane.error.is_some() {
             controls = controls.push(compact_action("Reconnect", Message::Reconnect(id)));
-        } else if include_paste {
-            controls = controls.push(compact_action("Paste", Message::RequestPaste));
         }
         controls = controls.push(compact_action("x", Message::ClosePane(id)));
         (labels, controls)
@@ -8147,28 +8020,14 @@ impl App {
         let grid = pane_grid(&tab.panes, |id, pane, _| {
             let focused = tab.focus == id;
             let live = !pane.exited && pane.error.is_none() && pane.terminal.is_some();
-            // Narrow-pane rule: below PANE_HEADER_COMPACT_WIDTH only the
-            // status dot, clipped name, state labels, Reconnect and close stay
-            // in the header; the rest is reachable via Edit/Mode menus.
-            let header = responsive(move |size| {
+            let header = responsive(move |_size| {
                 let p = theme::palette();
                 let status: Element<'_, Message> = if live {
                     icons::dot(p.magenta, 8.0)
                 } else {
                     icons::icon(icons::Icon::CircleHollow, 8.0, p.muted)
                 };
-                let (labels, controls) = if size.width < PANE_HEADER_COMPACT_WIDTH {
-                    let (labels, _) = self.pane_header_parts(id, pane, true);
-                    let mut controls = row![].spacing(0).align_y(iced::Center);
-                    if pane.exited || pane.error.is_some() {
-                        controls =
-                            controls.push(compact_action("Reconnect", Message::Reconnect(id)));
-                    }
-                    controls = controls.push(compact_action("x", Message::ClosePane(id)));
-                    (labels, controls)
-                } else {
-                    self.pane_header_parts(id, pane, true)
-                };
+                let (labels, controls) = self.pane_header_parts(id, pane);
                 let name = container(
                     text(
                         pane.terminal_title
@@ -10243,9 +10102,6 @@ fn hline<'a>() -> Element<'a, Message> {
         .style(border_fill)
         .into()
 }
-
-/// Pane width below which the pane header drops its secondary controls.
-const PANE_HEADER_COMPACT_WIDTH: f32 = 420.0;
 
 fn compact_action<'a>(label: impl Into<String>, message: Message) -> button::Button<'a, Message> {
     button(
