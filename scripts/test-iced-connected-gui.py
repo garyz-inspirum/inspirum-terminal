@@ -1777,7 +1777,7 @@ async def main() -> int:
                 )
                 try:
                     await click_label(
-                        window, destination / "connected-session-list.png",
+                        window, destination / "connected-session-open.png",
                         "CI connected fixture", env, timeout=8, settle=1.5,
                         clicks=2,
                     )
