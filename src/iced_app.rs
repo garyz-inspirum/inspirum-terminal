@@ -3891,6 +3891,27 @@ impl App {
         }
     }
 
+    /// Keep the persistent warning aligned with the focused source's routing.
+    /// Arming a selected pair does not broadcast from an unselected pane.
+    fn sync_input_warning(&self) -> Option<String> {
+        if !self.tools.sync.armed() {
+            return None;
+        }
+        let focused = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.panes.get(tab.focus))
+            .filter(|pane| !pane.exited)
+            .map(|pane| pane.id);
+        Some(match focused {
+            Some(id) if self.tools.sync.is_target(id) => {
+                format!("INPUT TO {} PANES", self.paste_targets(id).len())
+            }
+            Some(_) => "ARMED · 1 PANE".to_string(),
+            None => "ARMED · NO PANE".to_string(),
+        })
+    }
+
     fn send_to_focused_terminal(&mut self, bytes: Vec<u8>) {
         if self.find_focused {
             return;
@@ -7341,8 +7362,8 @@ impl App {
                             .size(12)
                             .color(muted()),
                         space::horizontal(),
-                        if self.tools.sync.armed() {
-                            text("SYNC INPUT ARMED").size(12).color(danger())
+                        if let Some(warning) = self.sync_input_warning() {
+                            text(warning).size(12).color(danger())
                         } else {
                             text("").size(12)
                         },
@@ -7440,19 +7461,16 @@ impl App {
         })]
         .spacing(16)
         .align_y(iced::Center);
-        if self.tools.sync.armed() {
+        if let Some(warning_label) = self.sync_input_warning() {
             let warning = container(
-                text(format!(
-                    "INPUT TO {} PANES",
-                    self.tools.sync.selected_count()
-                ))
-                .size(theme::metrics::STATUS_TEXT)
-                .color(Color::from_rgb8(35, 26, 8))
-                .wrapping(iced::widget::text::Wrapping::None)
-                .font(iced::Font {
-                    weight: iced::font::Weight::Bold,
-                    ..iced::Font::MONOSPACE
-                }),
+                text(warning_label)
+                    .size(theme::metrics::STATUS_TEXT)
+                    .color(Color::from_rgb8(35, 26, 8))
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .font(iced::Font {
+                        weight: iced::font::Weight::Bold,
+                        ..iced::Font::MONOSPACE
+                    }),
             )
             .padding([2, 7])
             .width(160)
@@ -12456,6 +12474,55 @@ mod tests {
             "focused pane {focused_id} must be one of the synced panes"
         );
         (app, first_id, second_id)
+    }
+
+    #[test]
+    fn sync_warning_tracks_destinations_across_three_pane_focus_switches() {
+        let (mut app, first_id, second_id) = arm_synced_pair("three-pane-warning");
+        let profile = app.tabs[0].profile.clone();
+        let third = app.new_terminal_pane(profile);
+        let third_id = third.id;
+        app.tabs[0].split(pane_grid::Axis::Vertical, third);
+        assert!(app.tools.sync.armed(), "splitting must not disarm sync");
+        assert!(!app.tools.sync.is_target(third_id));
+
+        for (focused_id, expected_warning, expected_destinations) in [
+            (first_id, "INPUT TO 2 PANES", vec![first_id, second_id]),
+            (third_id, "ARMED · 1 PANE", vec![third_id]),
+            (second_id, "INPUT TO 2 PANES", vec![first_id, second_id]),
+        ] {
+            let pane = app.tabs[0]
+                .panes
+                .iter()
+                .find_map(|(pane, terminal)| (terminal.id == focused_id).then_some(pane))
+                .expect("pane in active workspace");
+            let _ = app.update(Message::Focus(pane));
+            assert!(app.focused_pane_matches(focused_id));
+            assert_eq!(app.sync_input_warning().as_deref(), Some(expected_warning));
+            if focused_id == third_id {
+                let _ = app.update(Message::ToggleFocusMode);
+                assert!(app.focus_mode);
+                assert_eq!(app.sync_input_warning().as_deref(), Some(expected_warning));
+            }
+            app.pty_write_log.clear();
+            let _ = app.update(pressed_key(
+                keyboard::Key::Named(keyboard::key::Named::Enter),
+                keyboard::Modifiers::default(),
+            ));
+            let mut destinations: Vec<_> = app.pty_write_log.iter().map(|(id, _)| *id).collect();
+            destinations.sort_unstable();
+            let mut expected_destinations = expected_destinations;
+            expected_destinations.sort_unstable();
+            assert_eq!(
+                destinations, expected_destinations,
+                "warning must match actual writes"
+            );
+            if app.focus_mode {
+                let _ = app.update(Message::ToggleFocusMode);
+            }
+        }
+        let _ = app.update(Message::Tool(tools::Action::SyncArm(false)));
+        assert_eq!(app.sync_input_warning(), None);
     }
 
     /// `pressed_key` sets `text: None`. A plain character only becomes PTY
