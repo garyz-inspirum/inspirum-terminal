@@ -3600,7 +3600,10 @@ async def main() -> int:
 
                 command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
                 p3_dismissed = destination / "connected-find-p3-dismissed.png"
-                p3_dismiss_pixels = p3_dialog_pixels
+                p3_overlay_box = (width // 4, height // 5,
+                                  width * 3 // 4, height * 4 // 5)
+                p3_dismiss_pixels = 0
+                p3_overlay_pixels = 0
                 p3_words = []
                 p3_deadline = time.monotonic() + 8 * TIME_SCALE
                 while True:
@@ -3608,23 +3611,39 @@ async def main() -> int:
                         raise RuntimeError(f"P3 GUI exited dismissing Command Palette ({app.returncode})")
                     await asyncio.to_thread(screenshot, window, p3_dismissed, env)
                     p3_dismiss_pixels = await asyncio.to_thread(
-                        diff, p3_frame, p3_dismissed, env,
+                        diff, p3_dialog, p3_dismissed, env,
                     )
-                    # Avoid costly OCR until the dialog has visibly disappeared.
-                    if p3_dismiss_pixels < 2000:
-                        p3_words = await asyncio.to_thread(
-                            read_strip_words, p3_dismissed, find_band,
+                    # Compare against the OPEN palette; strip labels also show while open.
+                    if p3_dismiss_pixels >= 2000:
+                        p3_overlay_pixels = await asyncio.to_thread(
+                            band_changed_pixels, p3_dialog, p3_dismissed,
+                            p3_overlay_box,
                         )
-                        if (match_strip_label(p3_words, "Prev", find_band) is not None
-                                and match_strip_label(p3_words, "Next", find_band) is not None):
+                        if p3_overlay_pixels >= 2000:
                             break
                     if time.monotonic() >= p3_deadline:
                         raise RuntimeError(
-                            f"P3 Command Palette did not dismiss: pixels vs pre-dialog="
-                            f"{p3_dismiss_pixels} (need <2000), "
-                            f"band={find_band} words={p3_words[:40]}"
+                            f"P3 Command Palette did not dismiss: pixels vs open="
+                            f"{p3_dismiss_pixels} (need >=2000), central="
+                            f"{p3_overlay_pixels} (need >=2000), "
+                            f"band={find_band} words={p3_words[:40]} "
+                            f"(not read: overlay did not change)"
                         )
                     await asyncio.sleep(.3 * TIME_SCALE)
+                # One OCR read after the overlay has repainted, never in the poll.
+                p3_words = await asyncio.to_thread(
+                    read_strip_words, p3_dismissed, find_band,
+                )
+                if (match_strip_label(p3_words, "Prev", find_band) is None
+                        or match_strip_label(p3_words, "Next", find_band) is None):
+                    raise RuntimeError(
+                        f"P3 Find band absent after Palette dismissal: pixels vs open="
+                        f"{p3_dismiss_pixels}, central={p3_overlay_pixels}, "
+                        f"band={find_band} words={p3_words[:40]}"
+                    )
+                print(f"P3 Palette dismissed: pixels vs open={p3_dismiss_pixels}, "
+                      f"central={p3_overlay_pixels}, band={find_band} "
+                      f"words={p3_words[:40]}", flush=True)
 
                 # No terminal click: a dialog dismissal must return keys to SSH.
                 await find_echo("FIND_P3_PANE")
