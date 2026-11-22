@@ -3542,10 +3542,11 @@ struct App {
     selected_profile: Option<usize>,
     /// `session_profile_key` captured when the row was selected.
     selected_profile_key: Option<String>,
-    /// Last select of `selected_profile`. A second select of that same row
-    /// within `SESSION_DOUBLE_CLICK` opens it, then this is cleared so one
-    /// double-click gesture cannot open twice.
-    session_click_at: Option<Instant>,
+    /// Last left-click of a session row, bound to that row's profile key.
+    /// A second left-click of the same key within `SESSION_DOUBLE_CLICK`
+    /// opens it, then this is cleared so one double-click gesture cannot
+    /// open twice. A right-click clears it.
+    session_click: Option<(Instant, String)>,
     /// Group names whose session rows are hidden. Not written to UI state.
     /// A non-empty filter still shows matching rows inside a collapsed group.
     collapsed_groups: HashSet<String>,
@@ -3696,7 +3697,7 @@ impl App {
             remote_file_sort_ascending: true,
             selected_profile: None,
             selected_profile_key: None,
-            session_click_at: None,
+            session_click: None,
             collapsed_groups: HashSet::new(),
             last_pointer: iced::Point::ORIGIN,
             context_menu: None,
@@ -3716,7 +3717,7 @@ impl App {
         // them. Drop the selection rather than risk pointing at another profile.
         self.selected_profile = None;
         self.selected_profile_key = None;
-        self.session_click_at = None;
+        self.session_click = None;
     }
 
     fn new_terminal_pane(&mut self, profile: Session) -> TerminalPane {
@@ -4178,8 +4179,9 @@ impl App {
 
     /// Write the selection state `SelectSession` writes.
     ///
-    /// Does not arm or consume `session_click_at` and does not open a tab.
+    /// Does not arm or consume `session_click` and does not open a tab.
     /// Right-click uses this so it cannot start or finish a double-click open.
+    /// The caller clears `session_click` so a right-click interrupts the gesture.
     fn select_session_row(&mut self, index: usize) -> Option<String> {
         match self.profiles.get(index).map(session_profile_key) {
             Some(key) => {
@@ -6955,21 +6957,25 @@ impl App {
             Message::SelectSession(index) => {
                 let now = Instant::now();
                 let profile_key = self.profiles.get(index).map(session_profile_key);
-                let same_row = self.selected_profile == Some(index)
-                    && profile_key.is_some()
-                    && self.selected_profile_key == profile_key;
-                let open_now = same_row
-                    && self
-                        .session_click_at
-                        .is_some_and(|previous| session_double_click(previous, now));
+                // The pending click is the row that was left-clicked, not
+                // whatever `selected_profile` currently points at. A right-click
+                // can change the selection without owning that timestamp.
+                let open_now = profile_key.as_ref().is_some_and(|key| {
+                    self.session_click
+                        .as_ref()
+                        .is_some_and(|(previous, pending)| {
+                            pending == key && session_double_click(*previous, now)
+                        })
+                });
                 // Selection state is shared with right-click. Only a left
-                // click arms or consumes the double-click timer.
-                if self.select_session_row(index).is_some() {
+                // click arms or consumes the double-click timer, and only
+                // for the row that was left-clicked.
+                if let Some(key) = self.select_session_row(index) {
                     // Consume the gesture so the opening click is not also
                     // the start of a second open.
-                    self.session_click_at = if open_now { None } else { Some(now) };
+                    self.session_click = if open_now { None } else { Some((now, key)) };
                 } else {
-                    self.session_click_at = None;
+                    self.session_click = None;
                 }
                 if open_now {
                     return self.open_profile(index);
@@ -7035,13 +7041,15 @@ impl App {
                 self.context_menu = None;
             }
             Message::OpenSessionContext { index } => {
+                // A right-click interrupts a pending double-click. Clear even
+                // when the menu itself is refused, so the timestamp cannot be
+                // reused against a selection this click just changed.
+                self.session_click = None;
                 if self.privacy_locked || self.dialog.is_some() {
                     return Task::none();
                 }
-                // Select first, but do not arm or consume the double-click
-                // timer. A right-click must never open a session by itself.
+                // Select first. A right-click must never open a session by itself.
                 let Some(key) = self.select_session_row(index) else {
-                    self.session_click_at = None;
                     return Task::none();
                 };
                 self.open_menu = None;
@@ -13078,7 +13086,7 @@ mod tests {
         assert_eq!(app.tabs.len(), 1);
         assert_eq!(app.selected_profile, Some(1));
         // The opening click consumes the gesture.
-        assert!(app.session_click_at.is_none());
+        assert!(app.session_click.is_none());
 
         let _ = app.update(Message::SelectSession(1));
         assert_eq!(
@@ -13219,7 +13227,10 @@ mod tests {
     fn session_click_outside_window_does_not_open() {
         let mut app = session_click_app();
         let _ = app.update(Message::SelectSession(0));
-        app.session_click_at = Instant::now().checked_sub(Duration::from_millis(401));
+        let key = session_profile_key(&app.profiles[0]);
+        app.session_click = Instant::now()
+            .checked_sub(Duration::from_millis(401))
+            .map(|at| (at, key));
         let _ = app.update(Message::SelectSession(0));
         assert!(app.tabs.is_empty());
         assert_eq!(app.selected_profile, Some(0));
@@ -13248,7 +13259,7 @@ mod tests {
         let _ = app.update(Message::Search("beta".into()));
         assert_eq!(app.selected_profile, None);
         assert!(app.selected_profile_key.is_none());
-        assert!(app.session_click_at.is_none());
+        assert!(app.session_click.is_none());
         assert_eq!(app.profile_matches, vec![1]);
 
         // A rebuilt profile list must not leave the old index selected.
@@ -13489,7 +13500,7 @@ mod tests {
         );
         assert!(app.tabs.is_empty(), "right-click must not open a tab");
         assert!(
-            app.session_click_at.is_none(),
+            app.session_click.is_none(),
             "right-click must not arm the double-click timer"
         );
         let labels: Vec<_> = session_context_entries()
@@ -13502,7 +13513,7 @@ mod tests {
         let _ = app.update(Message::OpenSessionContext { index: 1 });
         assert!(app.tabs.is_empty());
         assert!(app.context_menu.is_some());
-        assert!(app.session_click_at.is_none());
+        assert!(app.session_click.is_none());
 
         let _ = app.update(pressed_key(
             keyboard::Key::Named(keyboard::key::Named::Escape),
@@ -13513,25 +13524,58 @@ mod tests {
     }
 
     #[test]
-    fn session_right_click_does_not_consume_a_pending_double_click() {
+    fn session_right_click_clears_a_pending_double_click() {
         let mut app = session_click_app();
         let _ = app.update(Message::SelectSession(1));
-        assert!(app.session_click_at.is_some());
+        assert!(app.session_click.is_some());
         assert!(app.tabs.is_empty());
-        let armed = app.session_click_at;
         let _ = app.update(Message::OpenSessionContext { index: 1 });
         assert!(
             app.tabs.is_empty(),
             "right-click must not open even inside the double-click window"
         );
-        assert_eq!(
-            app.session_click_at, armed,
-            "right-click must not arm or consume the timer"
+        assert!(
+            app.session_click.is_none(),
+            "right-click must clear the pending double-click"
         );
         assert!(matches!(
             app.context_menu,
             Some(ContextMenu::Session { index: 1, .. })
         ));
+    }
+
+    #[test]
+    fn session_left_a_right_b_left_b_does_not_open() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::SelectSession(0));
+        let _ = app.update(Message::OpenSessionContext { index: 1 });
+        let _ = app.update(Message::FileContextDismiss);
+        assert!(app.context_menu.is_none());
+        let _ = app.update(Message::SelectSession(1));
+        assert!(app.tabs.is_empty(), "B's only left click must not open");
+        let key_b = session_profile_key(&app.profiles[1]);
+        assert!(
+            app.session_click
+                .as_ref()
+                .is_some_and(|(_, key)| key == &key_b),
+            "the pending click must be armed for B"
+        );
+        let _ = app.update(Message::SelectSession(1));
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn session_left_a_left_b_does_not_open() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::SelectSession(0));
+        let _ = app.update(Message::SelectSession(1));
+        assert!(app.tabs.is_empty());
+        let key_b = session_profile_key(&app.profiles[1]);
+        assert!(
+            app.session_click
+                .as_ref()
+                .is_some_and(|(_, key)| key == &key_b)
+        );
     }
 
     #[test]
