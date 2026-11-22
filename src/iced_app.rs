@@ -9211,7 +9211,7 @@ impl App {
                                     std::env::var_os("DISPLAY").is_some_and(|value| !value.is_empty()),
                                 ))
                                     .size(11)
-                                    .color(Color::from_rgb8(240, 190, 100)),
+                                    .color(theme::palette().warning_text),
 
                                 field(
                                     "ProxyJump",
@@ -9718,7 +9718,19 @@ impl App {
             .into(),
         };
 
-        dialog_frame(title, container(scrollable(body)).padding(12))
+        // Keep form controls inside the scroll rail, not underneath it. The
+        // gutter belongs to the scrollable content so it survives scrolling.
+        let body = if matches!(dialog, Dialog::Connection) {
+            scrollable(container(body).padding(iced::Padding {
+                top: 0.0,
+                right: 16.0,
+                bottom: 0.0,
+                left: 0.0,
+            }))
+        } else {
+            scrollable(body)
+        };
+        dialog_frame(title, container(body).padding(12))
             .width(if matches!(dialog, Dialog::Tools) {
                 880
             } else {
@@ -10086,7 +10098,8 @@ fn primary(theme: &Theme, status: button::Status) -> button::Style {
     let p = theme::palette();
     button::Style {
         background: Some(p.accent.into()),
-        text_color: Color::WHITE,
+        // Both chrome accents are mid-value blues; dark lettering clears AA.
+        text_color: Color::BLACK,
         border: Border {
             color: p.accent,
             ..base.border
@@ -10332,7 +10345,7 @@ fn dialog_frame<'a>(
     .style(dialog_window)
 }
 
-/// Flat WindTerm selection row: selected fill, no border, square corners.
+/// Selected dialog choice: a visible 2px accent outline even on hover.
 fn flat_selected(_: &Theme, status: button::Status) -> button::Style {
     let p = theme::palette();
     let background = match status {
@@ -10343,9 +10356,9 @@ fn flat_selected(_: &Theme, status: button::Status) -> button::Style {
         background: Some(background.into()),
         text_color: p.text,
         border: Border {
-            color: Color::TRANSPARENT,
-            width: 0.0,
-            radius: 0.0.into(),
+            color: p.selection_indicator,
+            width: 2.0,
+            radius: 2.0.into(),
         },
         ..Default::default()
     }
