@@ -2133,6 +2133,11 @@ enum Message {
     FilesSortRemote(FileSortColumn),
     Exit,
     ConfirmExit,
+    /// Single click on a session row. The `usize` is an index into `profiles`
+    /// (the value stored in `profile_matches`), not a visible-row offset.
+    SelectSession(usize),
+    /// Toggle a session-tree group. Not persisted.
+    ToggleSessionGroup(String),
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -3274,6 +3279,19 @@ struct App {
     /// Filer (remote) column. Independent of the Explorer sort.
     remote_file_sort: FileSortColumn,
     remote_file_sort_ascending: bool,
+    /// Selected session row: index into `profiles`, not the filtered list.
+    /// Cleared when the profile list or filter is rebuilt so it cannot point
+    /// at a different profile.
+    selected_profile: Option<usize>,
+    /// `session_profile_key` captured when the row was selected.
+    selected_profile_key: Option<String>,
+    /// Last select of `selected_profile`. A second select of that same row
+    /// within `SESSION_DOUBLE_CLICK` opens it, then this is cleared so one
+    /// double-click gesture cannot open twice.
+    session_click_at: Option<Instant>,
+    /// Group names whose session rows are hidden. Not written to UI state.
+    /// A non-empty filter still shows matching rows inside a collapsed group.
+    collapsed_groups: HashSet<String>,
 }
 
 const FILES_PANELS: [dock::Panel; 3] = [
@@ -3415,6 +3433,10 @@ impl App {
             local_file_sort_ascending: true,
             remote_file_sort: FileSortColumn::Name,
             remote_file_sort_ascending: true,
+            selected_profile: None,
+            selected_profile_key: None,
+            session_click_at: None,
+            collapsed_groups: HashSet::new(),
         }
     }
 
@@ -3427,6 +3449,11 @@ impl App {
                 session_matches_query(profile, &self.query).then_some(index)
             })
             .collect();
+        // Indices are stable under a filter, but a rebuilt list can shift
+        // them. Drop the selection rather than risk pointing at another profile.
+        self.selected_profile = None;
+        self.selected_profile_key = None;
+        self.session_click_at = None;
     }
 
     fn new_terminal_pane(&mut self, profile: Session) -> TerminalPane {
@@ -6625,6 +6652,39 @@ impl App {
                 }
                 return iced::exit();
             }
+            Message::SelectSession(index) => {
+                let now = Instant::now();
+                let profile_key = self.profiles.get(index).map(session_profile_key);
+                let same_row = self.selected_profile == Some(index)
+                    && profile_key.is_some()
+                    && self.selected_profile_key == profile_key;
+                let open_now = same_row
+                    && self
+                        .session_click_at
+                        .is_some_and(|previous| session_double_click(previous, now));
+                if let Some(key) = profile_key {
+                    self.selected_profile = Some(index);
+                    self.selected_profile_key = Some(key);
+                    // Consume the gesture so the opening click is not also
+                    // the start of a second open.
+                    self.session_click_at = if open_now { None } else { Some(now) };
+                } else {
+                    self.selected_profile = None;
+                    self.selected_profile_key = None;
+                    self.session_click_at = None;
+                }
+                if open_now {
+                    self.open(index);
+                    if self.files_open() {
+                        return self.reload_files();
+                    }
+                }
+            }
+            Message::ToggleSessionGroup(group) => {
+                if !self.collapsed_groups.remove(&group) {
+                    self.collapsed_groups.insert(group);
+                }
+            }
         }
         Task::none()
     }
@@ -6995,16 +7055,26 @@ impl App {
             } else {
                 profile.folder.as_str()
             };
+            let folded =
+                session_group_hides_rows(self.collapsed_groups.contains(group), &self.query);
             if current_group.as_deref() != Some(group) {
-                list = list.push(Self::session_group_row(group));
+                list = list.push(Self::session_group_row(group, folded));
                 current_group = Some(group.to_owned());
+            }
+            count += 1;
+            if folded {
+                continue;
             }
             let open = self
                 .tabs
                 .iter()
                 .any(|tab| session_profile_key(&tab.profile) == session_profile_key(profile));
-            list = list.push(Self::session_tree_row(index, profile, open));
-            count += 1;
+            // `index` comes from `profile_matches` and addresses `self.profiles`.
+            // A filter hides rows; it does not renumber this index.
+            let selected = self.selected_profile == Some(index)
+                && self.selected_profile_key.as_deref()
+                    == Some(session_profile_key(profile).as_str());
+            list = list.push(Self::session_tree_row(index, profile, open, selected));
         }
 
         if count == 0 {
@@ -7055,11 +7125,16 @@ impl App {
     }
 
     /// WindTerm session tree: group row (disclosure triangle + folder + name).
-    fn session_group_row<'a>(group: &str) -> Element<'a, Message> {
+    fn session_group_row<'a>(group: &str, collapsed: bool) -> Element<'a, Message> {
         let p = theme::palette();
-        container(
+        let triangle = if collapsed {
+            icons::Icon::TriangleRight
+        } else {
+            icons::Icon::TriangleDown
+        };
+        button(
             row![
-                icons::icon(icons::Icon::TriangleDown, 8.0, p.muted),
+                icons::icon(triangle, 8.0, p.muted),
                 icons::icon(icons::Icon::Folder, 13.0, Color::from_rgb8(230, 200, 110)),
                 text(group.to_owned())
                     .size(theme::metrics::UI_TEXT)
@@ -7072,12 +7147,18 @@ impl App {
         .width(Fill)
         .height(theme::metrics::ROW_HEIGHT)
         .padding([0, 4])
-        .align_y(iced::Center)
+        .style(session_row)
+        .on_press(Message::ToggleSessionGroup(group.to_owned()))
         .into()
     }
 
     /// WindTerm session tree: flat full-width session row with a marker dot.
-    fn session_tree_row<'a>(index: usize, profile: &Session, open: bool) -> Element<'a, Message> {
+    fn session_tree_row<'a>(
+        index: usize,
+        profile: &Session,
+        open: bool,
+        selected: bool,
+    ) -> Element<'a, Message> {
         let p = theme::palette();
         let destination = if profile.user.is_empty() {
             profile.host.clone()
@@ -7107,16 +7188,28 @@ impl App {
         ]
         .spacing(6)
         .align_y(iced::Center);
+        // `mouse_area::on_double_click` exists, but MouseArea returns early
+        // when its child captures the press, and a button with `on_press`
+        // captures ButtonPressed. A button without `on_press` is always
+        // Status::Disabled. The second select of this same profile index
+        // within SESSION_DOUBLE_CLICK opens it instead.
+        let row_style = if selected {
+            session_row_selected
+        } else if open {
+            session_row_open
+        } else {
+            session_row
+        };
         let item = button(label)
             .width(Fill)
             .height(theme::metrics::ROW_HEIGHT)
             .padding(iced::Padding::new(0.0).left(24.0).right(4.0))
-            .on_press(Message::Open(index))
-            .style(if open { session_row_open } else { session_row });
+            .on_press(Message::SelectSession(index))
+            .style(row_style);
         let edit = button(icons::icon(icons::Icon::Edit, 11.0, p.muted))
             .height(theme::metrics::ROW_HEIGHT)
             .padding([0, 5])
-            .style(if open { session_row_open } else { session_row })
+            .style(row_style)
             .on_press(Message::EditProfile(index));
         row![item, edit].width(Fill).spacing(0).into()
     }
@@ -9816,6 +9909,30 @@ fn transfer_progress(_: &Theme) -> progress_bar::Style {
     }
 }
 
+/// Selected session row: palette `selected_row` fill, full width, no border.
+fn session_row_selected(_theme: &Theme, _status: button::Status) -> button::Style {
+    let p = theme::palette();
+    button::Style {
+        background: Some(p.selected_row.into()),
+        text_color: p.text_dock,
+        border: Border::default(),
+        ..button::Style::default()
+    }
+}
+
+const SESSION_DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// True when `now` is at most [`SESSION_DOUBLE_CLICK`] after `previous`.
+fn session_double_click(previous: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(previous) <= SESSION_DOUBLE_CLICK
+}
+
+/// Collapsed groups hide their rows only while the filter is empty.
+/// A query that matched a session (the caller already filtered) shows it.
+fn session_group_hides_rows(collapsed: bool, query: &str) -> bool {
+    collapsed && query.trim().is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -12508,5 +12625,146 @@ mod tests {
         assert_eq!(label, "2026/11/22 00:01");
         assert_eq!(key_year, 2026);
         assert!(label.starts_with(&format!("{key_year:04}/")));
+    }
+
+    fn session_click_app() -> App {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-session-click-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.profiles = vec![
+            Session {
+                name: "alpha".into(),
+                host: "alpha.example.invalid".into(),
+                ..Session::default()
+            },
+            Session {
+                name: "beta".into(),
+                host: "beta.example.invalid".into(),
+                ..Session::default()
+            },
+        ];
+        app.refresh_profile_matches();
+        app
+    }
+
+    #[test]
+    fn session_single_click_selects_and_opens_no_tab() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::SelectSession(0));
+        assert_eq!(app.selected_profile, Some(0));
+        assert_eq!(
+            app.selected_profile_key.as_deref(),
+            Some(session_profile_key(&app.profiles[0]).as_str())
+        );
+        assert!(app.tabs.is_empty());
+
+        // A click on a different row selects it and still opens nothing.
+        let _ = app.update(Message::SelectSession(1));
+        assert_eq!(app.selected_profile, Some(1));
+        assert!(app.tabs.is_empty());
+    }
+
+    #[test]
+    fn session_second_click_within_window_opens_exactly_one_tab() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::SelectSession(1));
+        assert!(app.tabs.is_empty());
+
+        let _ = app.update(Message::SelectSession(1));
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.selected_profile, Some(1));
+        // The opening click consumes the gesture.
+        assert!(app.session_click_at.is_none());
+
+        let _ = app.update(Message::SelectSession(1));
+        assert_eq!(
+            app.tabs.len(),
+            1,
+            "a follow-up click must not open a second tab"
+        );
+    }
+
+    #[test]
+    fn session_click_outside_window_does_not_open() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::SelectSession(0));
+        app.session_click_at = Instant::now().checked_sub(Duration::from_millis(401));
+        let _ = app.update(Message::SelectSession(0));
+        assert!(app.tabs.is_empty());
+        assert_eq!(app.selected_profile, Some(0));
+    }
+
+    #[test]
+    fn session_double_click_window_is_four_hundred_milliseconds() {
+        let start = Instant::now();
+        assert!(session_double_click(start, start));
+        assert!(session_double_click(
+            start,
+            start + Duration::from_millis(400)
+        ));
+        assert!(!session_double_click(
+            start,
+            start + Duration::from_millis(401)
+        ));
+    }
+
+    #[test]
+    fn session_selection_clears_when_the_filter_changes() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::SelectSession(0));
+        assert_eq!(app.selected_profile, Some(0));
+
+        let _ = app.update(Message::Search("beta".into()));
+        assert_eq!(app.selected_profile, None);
+        assert!(app.selected_profile_key.is_none());
+        assert!(app.session_click_at.is_none());
+        assert_eq!(app.profile_matches, vec![1]);
+
+        // A rebuilt profile list must not leave the old index selected.
+        let _ = app.update(Message::Search(String::new()));
+        let _ = app.update(Message::SelectSession(1));
+        app.profiles.insert(
+            0,
+            Session {
+                name: "ahead".into(),
+                host: "ahead.example.invalid".into(),
+                ..Session::default()
+            },
+        );
+        app.refresh_profile_matches();
+        assert_eq!(app.selected_profile, None);
+        assert!(app.selected_profile_key.is_none());
+    }
+
+    #[test]
+    fn collapsing_a_session_group_hides_its_rows_until_a_filter_matches() {
+        assert!(session_group_hides_rows(true, ""));
+        assert!(session_group_hides_rows(true, "   "));
+        assert!(!session_group_hides_rows(false, ""));
+        assert!(!session_group_hides_rows(true, "beta"));
+
+        let mut app = session_click_app();
+        app.profiles[0].folder = "Work".into();
+        app.refresh_profile_matches();
+        let _ = app.update(Message::ToggleSessionGroup("Work".into()));
+        assert!(app.collapsed_groups.contains("Work"));
+        assert!(session_group_hides_rows(
+            app.collapsed_groups.contains("Work"),
+            &app.query,
+        ));
+
+        // The collapse flag stays, but a matching filter shows the rows.
+        let _ = app.update(Message::Search("alpha".into()));
+        assert!(app.collapsed_groups.contains("Work"));
+        assert!(!session_group_hides_rows(
+            app.collapsed_groups.contains("Work"),
+            &app.query,
+        ));
+
+        let _ = app.update(Message::ToggleSessionGroup("Work".into()));
+        assert!(!app.collapsed_groups.contains("Work"));
+        assert!(!session_group_hides_rows(false, ""));
     }
 }

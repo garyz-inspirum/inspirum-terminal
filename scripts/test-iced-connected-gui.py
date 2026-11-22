@@ -1041,11 +1041,13 @@ async def locate_rendered_label(
 
 async def click_label(
     window: str, shot_path: Path, label: str, env: dict[str, str], *,
-    region=None, timeout: float = 22, settle: float = .5,
+    region=None, timeout: float = 22, settle: float = .5, clicks: int = 1,
 ):
     """Screenshot until ``label`` is rendered (optionally inside ``region``),
     click its centre with a native pointer event and return its bounds.
 
+    ``clicks`` is the number of left-button clicks. Session rows open on a
+    double click (``clicks=2``); every other caller keeps the single click.
     Screenshot and OCR run off the event loop (the fixture SSH server shares
     it), exactly like ``locate_rendered_label``.
     """
@@ -1062,9 +1064,12 @@ async def click_label(
             if time.monotonic() >= deadline:
                 raise
             await asyncio.sleep(.5)
+    click = ["click", "1"] if clicks == 1 else [
+        "click", "--repeat", str(clicks), "--delay", "120", "1",
+    ]
     command(
         "xdotool", "mousemove", "--window", window,
-        *map(str, center(bounds)), "click", "1", env=env,
+        *map(str, center(bounds)), *click, env=env,
     )
     await asyncio.sleep(settle)
     return bounds
@@ -1371,8 +1376,12 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
     def key(*keys: str) -> None:
         command("xdotool", "windowfocus", window, "key", "--clearmodifiers", *keys, env=env)
 
-    def click(x: int, y: int) -> None:
-        command("xdotool", "mousemove", "--window", window, str(x), str(y), "click", "1", env=env)
+    def click(x: int, y: int, clicks: int = 1) -> None:
+        args = ["xdotool", "mousemove", "--window", window, str(x), str(y), "click"]
+        if clicks != 1:
+            args.extend(["--repeat", str(clicks), "--delay", "120"])
+        args.append("1")
+        command(*args, env=env)
 
     def shot(name: str) -> None:
         path = tour_dir / name
@@ -1427,14 +1436,14 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
     # Steps 4-5 are mandatory: a real SSH session must start.
     if "SESSION_STARTED" not in log_text():
         for y in (630, 653, 612, 676, 699):
-            click(200, y)
+            click(200, y, clicks=2)
             await asyncio.sleep(1.5)
             if "SESSION_STARTED" in log_text():
                 break
             key("Escape")
     if "SESSION_STARTED" not in log_text():
         print(
-            "tour: FAILED clicking the saved profile never started a real SSH session. "
+            "tour: FAILED double-clicking the saved profile never started a real SSH session. "
             "SSH events: " + repr(log_text()[-800:])
             + "; application log tail: " + app_log.read_text(encoding="utf-8")[-1800:],
             flush=True,
@@ -1660,7 +1669,7 @@ async def main() -> int:
 
                 # Saved sessions are listed in the bottom Session dock panel
                 # (Filter row, 'Sessions' group row, then one flat 23px row per
-                # profile). Locate the profile name by OCR and single-click
+                # profile). Locate the profile name by OCR and double-click
                 # it; fall back to bounded points in the session list rows,
                 # never destructive dialogs. Authentication, rather than a
                 # screenshot delta alone, proves the click worked.
@@ -1668,12 +1677,16 @@ async def main() -> int:
                     await click_label(
                         window, destination / "connected-session-list.png",
                         "CI connected fixture", env, timeout=8, settle=1.5,
+                        clicks=2,
                     )
                 except RuntimeError:
                     pass
                 if "SESSION_STARTED" not in events.path.read_text(encoding="utf-8"):
                     for y in (630, 653, 612, 676, 699):
-                        command("xdotool", "mousemove", "--window", window, "200", str(y), "click", "1", env=env)
+                        command(
+                            "xdotool", "mousemove", "--window", window, "200", str(y),
+                            "click", "--repeat", "2", "--delay", "120", "1", env=env,
+                        )
                         await asyncio.sleep(1.5)
                         if "SESSION_STARTED" in events.path.read_text(encoding="utf-8"):
                             break
@@ -1682,7 +1695,7 @@ async def main() -> int:
                         command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
                 if "SESSION_STARTED" not in events.path.read_text(encoding="utf-8"):
                     raise RuntimeError(
-                        "clicking the saved profile never started a real SSH session. "
+                        "double-clicking the saved profile never started a real SSH session. "
                         "SSH events: " + repr(events.path.read_text(encoding="utf-8")[-800:])
                         + "; application log tail: " + app_log.read_text(encoding="utf-8")[-1800:]
                     )
