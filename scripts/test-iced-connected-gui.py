@@ -984,16 +984,17 @@ def locate_visible_label(
 
 # 13px monospace hit counter on the dark theme. Tesseract confuses these
 # glyphs; the translated token must still be a slash-separated digit pair.
-# Accepted: 0↔O/o, 1↔l/I/|, 2↔Z/z, 5↔S/s, 8↔B. A missing slash is a miss.
+# Accepted: 0↔O/o (and @ for the right-hand zero observed on Linux),
+# 1↔l/I/|, 2↔Z/z, 5↔S/s, 8↔B. A missing slash is a miss.
 _FIND_COUNTER_DIGIT = str.maketrans({
-    "O": "0", "o": "0",
+    "O": "0", "o": "0", "@": "0",
     "l": "1", "I": "1", "|": "1",
     "Z": "2", "z": "2",
     "S": "5", "s": "5",
     "B": "8",
 })
 _FIND_COUNTER_RE = re.compile(
-    r"^([0-9OoIlI|ZzSsB]{1,3})\s*/\s*([0-9OoIlI|ZzSsB]{1,3})$"
+    r"^([0-9OoIlI|ZzSsB]{1,3})\s*/\s*([0-9OoIlI|ZzSsB]{1,3}|@)$"
 )
 
 

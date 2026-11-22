@@ -80,6 +80,31 @@ class FindStripCounterTest(unittest.TestCase):
                 self.assertIsNotNone(parsed, raw)
                 self.assertEqual(parsed[:2], want, raw)
 
+    def test_linux_nohit_counter_at_glyph_only_inside_find_band(self):
+        # Linux Native CI run 44996238669: tightly cropped Find OCR returned
+        # ['0/@', 'Prev', 'Next', 'x'] after NATIVEZZQ, not '0/0'.
+        band = (0, 499, 1280, 543)
+        words = [
+            ("0/@", (1128, 518, 1151, 530)),
+            ("Prev", (1163, 518, 1194, 530)),
+            ("Next", (1212, 518, 1243, 530)),
+            ("x", (1250, 518, 1260, 530)),
+        ]
+        parsed = module.find_hit_counter(module.strip_words_as_rows(words))
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed, (0, 0, "0/@"))
+        self.assertEqual(module.find_strip_residue(words, band)["counter"], parsed)
+        # A closed/absent strip must not acquire a counter from outside its band.
+        outside = [("0/@", (1128, 560, 1151, 572))]
+        self.assertIsNone(module.find_strip_residue(outside, band)["counter"])
+        self.assertIsNone(module.find_strip_residue([], band)["counter"])
+        self.assertIsNone(module.match_strip_label([("Prev@", words[1][1])], "Prev", band))
+
+    def test_arbitrary_at_sign_text_is_not_a_counter(self):
+        for raw in ("@", "0@@", "@/@", "@/0", "0/@@", "0/@x", "0@0", "Prev/@", "0/@/0"):
+            with self.subTest(raw=raw):
+                self.assertIsNone(module.find_hit_counter([_row(raw, (1128, 518, 1151, 530))]))
+
     def test_empty_counter_misread_yields_to_zero_pair(self):
         # Bordered dark strip: PSM 7 reads an empty counter as 0/9, PSM 11
         # reads 0/0. A non-zero index keeps a real 9.
