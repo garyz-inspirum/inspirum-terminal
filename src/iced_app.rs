@@ -1856,6 +1856,43 @@ enum FileContextAction {
     Refresh,
 }
 
+/// One right-click menu. File rows and session rows share this state so the
+/// existing keyboard, IME, paste and chord guards keep covering it.
+#[derive(Clone, Debug)]
+enum ContextMenu {
+    File(FileContextMenu),
+    Session {
+        index: usize,
+        key: String,
+        anchor: iced::Point,
+    },
+}
+
+impl ContextMenu {
+    fn anchor(&self) -> iced::Point {
+        match self {
+            ContextMenu::File(menu) => menu.anchor,
+            ContextMenu::Session { anchor, .. } => *anchor,
+        }
+    }
+
+    #[cfg(test)]
+    fn file(&self) -> Option<&FileContextMenu> {
+        match self {
+            ContextMenu::File(menu) => Some(menu),
+            ContextMenu::Session { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionContextAction {
+    Open,
+    Edit,
+    NewSession,
+    Import,
+}
+
 const FILE_CONTEXT_MENU_WIDTH: f32 = 200.0;
 const FILE_CONTEXT_ITEM_HEIGHT: f32 = 24.0;
 
@@ -1940,12 +1977,23 @@ fn file_context_action_message(
     }
 }
 
-fn file_context_popup<'a>(items: &[(&'static str, FileContextAction)]) -> Element<'a, Message> {
+/// Spec 5.1 items. The popup has no separator widget, so none is drawn
+/// between Edit and New Session.
+fn session_context_entries() -> Vec<(&'static str, SessionContextAction)> {
+    vec![
+        ("Open", SessionContextAction::Open),
+        ("Edit", SessionContextAction::Edit),
+        ("New Session", SessionContextAction::NewSession),
+        ("Import", SessionContextAction::Import),
+    ]
+}
+
+fn context_popup<'a>(items: Vec<(&'static str, Message)>) -> Element<'a, Message> {
     let mut rows = column![].width(FILE_CONTEXT_MENU_WIDTH);
-    for (label, action) in items {
+    for (label, message) in items {
         rows = rows.push(
             button(
-                text(*label)
+                text(label)
                     .size(theme::metrics::UI_TEXT)
                     .color(theme::palette().text),
             )
@@ -1953,7 +2001,7 @@ fn file_context_popup<'a>(items: &[(&'static str, FileContextAction)]) -> Elemen
             .height(FILE_CONTEXT_ITEM_HEIGHT)
             .padding([3, 10])
             .style(menu_item)
-            .on_press(Message::FileContextChoose(*action)),
+            .on_press(message),
         );
     }
     opaque(container(rows).padding(1).style(|_| container::Style {
@@ -1968,16 +2016,26 @@ fn file_context_popup<'a>(items: &[(&'static str, FileContextAction)]) -> Elemen
 }
 
 /// Same stack pattern as `dock_menu_overlay`: a full-size press layer dismisses,
-/// and padding anchors the flat menu at the pointer.
+/// and padding anchors the flat menu at the pointer. Session rows use the same
+/// popup; it has no separator row, so that menu is four items.
 fn file_context_overlay<'a>(
     body: Element<'a, Message>,
-    menu: &FileContextMenu,
+    menu: &ContextMenu,
     window: iced::Size,
 ) -> Element<'a, Message> {
-    let items = file_context_entries(menu);
+    let items: Vec<(&'static str, Message)> = match menu {
+        ContextMenu::File(file) => file_context_entries(file)
+            .into_iter()
+            .map(|(label, action)| (label, Message::FileContextChoose(action)))
+            .collect(),
+        ContextMenu::Session { .. } => session_context_entries()
+            .into_iter()
+            .map(|(label, action)| (label, Message::SessionContextChoose(action)))
+            .collect(),
+    };
     let height = file_context_menu_height(items.len());
-    let anchor = clamp_file_context_anchor(menu.anchor, window, height);
-    let popup = file_context_popup(&items);
+    let anchor = clamp_file_context_anchor(menu.anchor(), window, height);
+    let popup = context_popup(items);
     stack![
         body,
         mouse_area(container(space::horizontal()).width(Fill).height(Fill))
@@ -2331,6 +2389,12 @@ enum Message {
         path: PathBuf,
         is_dir: bool,
     },
+    /// Right-click on a session row. Selects the row, then opens the menu.
+    /// Does not arm the double-click timer and never opens a tab by itself.
+    OpenSessionContext {
+        index: usize,
+    },
+    SessionContextChoose(SessionContextAction),
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -3487,8 +3551,8 @@ struct App {
     collapsed_groups: HashSet<String>,
     /// Last pointer position. The file context menu anchors here.
     last_pointer: iced::Point,
-    /// Open right-click menu on a file row, if any.
-    context_menu: Option<FileContextMenu>,
+    /// Open right-click menu, if any. File and session rows share this.
+    context_menu: Option<ContextMenu>,
 }
 
 const FILES_PANELS: [dock::Panel; 3] = [
@@ -4109,6 +4173,25 @@ impl App {
             self.reload_files()
         } else {
             Task::none()
+        }
+    }
+
+    /// Write the selection state `SelectSession` writes.
+    ///
+    /// Does not arm or consume `session_click_at` and does not open a tab.
+    /// Right-click uses this so it cannot start or finish a double-click open.
+    fn select_session_row(&mut self, index: usize) -> Option<String> {
+        match self.profiles.get(index).map(session_profile_key) {
+            Some(key) => {
+                self.selected_profile = Some(index);
+                self.selected_profile_key = Some(key.clone());
+                Some(key)
+            }
+            None => {
+                self.selected_profile = None;
+                self.selected_profile_key = None;
+                None
+            }
         }
     }
 
@@ -6879,15 +6962,13 @@ impl App {
                     && self
                         .session_click_at
                         .is_some_and(|previous| session_double_click(previous, now));
-                if let Some(key) = profile_key {
-                    self.selected_profile = Some(index);
-                    self.selected_profile_key = Some(key);
+                // Selection state is shared with right-click. Only a left
+                // click arms or consumes the double-click timer.
+                if self.select_session_row(index).is_some() {
                     // Consume the gesture so the opening click is not also
                     // the start of a second open.
                     self.session_click_at = if open_now { None } else { Some(now) };
                 } else {
-                    self.selected_profile = None;
-                    self.selected_profile_key = None;
                     self.session_click_at = None;
                 }
                 if open_now {
@@ -6913,13 +6994,13 @@ impl App {
                 let select = self.update(Message::FilesSelectRemote(entry));
                 self.open_menu = None;
                 self.dock_menu = None;
-                self.context_menu = Some(FileContextMenu {
+                self.context_menu = Some(ContextMenu::File(FileContextMenu {
                     side: FileContextSide::Remote,
                     is_dir,
                     open_path,
                     local_path: None,
                     anchor: self.last_pointer,
-                });
+                }));
                 return select;
             }
             Message::OpenLocalFileContext { path, is_dir } => {
@@ -6932,17 +7013,17 @@ impl App {
                 let select = self.update(Message::FilesSelectLocal(path));
                 self.open_menu = None;
                 self.dock_menu = None;
-                self.context_menu = Some(FileContextMenu {
+                self.context_menu = Some(ContextMenu::File(FileContextMenu {
                     side: FileContextSide::Local,
                     is_dir,
                     open_path,
                     local_path: Some(local_path),
                     anchor: self.last_pointer,
-                });
+                }));
                 return select;
             }
             Message::FileContextChoose(action) => {
-                let Some(menu) = self.context_menu.take() else {
+                let Some(ContextMenu::File(menu)) = self.context_menu.take() else {
                     return Task::none();
                 };
                 let Some(message) = file_context_action_message(&menu, action) else {
@@ -6952,6 +7033,40 @@ impl App {
             }
             Message::FileContextDismiss => {
                 self.context_menu = None;
+            }
+            Message::OpenSessionContext { index } => {
+                if self.privacy_locked || self.dialog.is_some() {
+                    return Task::none();
+                }
+                // Select first, but do not arm or consume the double-click
+                // timer. A right-click must never open a session by itself.
+                let Some(key) = self.select_session_row(index) else {
+                    self.session_click_at = None;
+                    return Task::none();
+                };
+                self.open_menu = None;
+                self.dock_menu = None;
+                self.context_menu = Some(ContextMenu::Session {
+                    index,
+                    key,
+                    anchor: self.last_pointer,
+                });
+            }
+            Message::SessionContextChoose(action) => {
+                let Some(ContextMenu::Session { index, key, .. }) = self.context_menu.take() else {
+                    return Task::none();
+                };
+                let current = self.profiles.get(index).map(session_profile_key);
+                if current.as_deref() != Some(key.as_str()) {
+                    return Task::none();
+                }
+                match action {
+                    SessionContextAction::Open => return self.open_profile(index),
+                    SessionContextAction::Edit => return self.update(Message::EditProfile(index)),
+                    // Same messages the Session menu dispatches.
+                    SessionContextAction::NewSession => return self.update(Message::New),
+                    SessionContextAction::Import => return self.update(Message::ImportProfiles),
+                }
             }
         }
         Task::none()
@@ -7484,7 +7599,11 @@ impl App {
             .padding([0, 5])
             .style(row_style)
             .on_press(Message::EditProfile(index));
-        row![item, edit].width(Fill).spacing(0).into()
+        // Right presses are not captured by the row buttons, so a wrapping
+        // mouse_area receives them (same pattern as file rows).
+        mouse_area(row![item, edit].width(Fill).spacing(0))
+            .on_right_press(Message::OpenSessionContext { index })
+            .into()
     }
 
     fn workspace(&self) -> Element<'_, Message> {
@@ -12985,10 +13104,8 @@ mod tests {
         });
         assert!(app.context_menu.is_some(), "right-click opens the menu");
         assert_eq!(
-            app.context_menu
-                .as_ref()
-                .map(|menu| (menu.anchor.x, menu.anchor.y)),
-            Some((48.0, 64.0))
+            app.context_menu.as_ref().map(ContextMenu::anchor),
+            Some(iced::Point::new(48.0, 64.0))
         );
         assert_eq!(
             app.files
@@ -13030,7 +13147,10 @@ mod tests {
             "Edit is omitted for directories"
         );
         let open = file_context_action_message(
-            app.context_menu.as_ref().expect("menu"),
+            app.context_menu
+                .as_ref()
+                .and_then(ContextMenu::file)
+                .expect("menu"),
             FileContextAction::Open,
         );
         assert!(matches!(open, Some(Message::FilesOpenRemote(path)) if path == "/srv/src"));
@@ -13243,6 +13363,7 @@ mod tests {
         assert_eq!(
             app.context_menu
                 .as_ref()
+                .and_then(ContextMenu::file)
                 .map(|menu| (menu.side, menu.anchor.x, menu.anchor.y)),
             Some((FileContextSide::Local, 30.0, 40.0))
         );
@@ -13274,7 +13395,10 @@ mod tests {
         assert!(local_context_labels(true).contains(&"Open"));
         assert!(!local_context_labels(true).contains(&"Edit"));
         let open = file_context_action_message(
-            app.context_menu.as_ref().expect("menu"),
+            app.context_menu
+                .as_ref()
+                .and_then(ContextMenu::file)
+                .expect("menu"),
             FileContextAction::Open,
         );
         assert!(matches!(
@@ -13332,5 +13456,205 @@ mod tests {
         );
         assert_eq!(app.files.local_entries.len(), 1);
         assert_eq!(app.files.local_entries[0].path, path);
+    }
+
+    #[test]
+    fn session_right_click_selects_opens_menu_and_opens_no_tab() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::PointerMoved(iced::Point::new(20.0, 36.0)));
+        let _ = app.update(Message::OpenSessionContext { index: 1 });
+        let key = session_profile_key(&app.profiles[1]);
+        assert_eq!(app.selected_profile, Some(1));
+        assert_eq!(app.selected_profile_key.as_deref(), Some(key.as_str()));
+        assert!(
+            matches!(
+                &app.context_menu,
+                Some(ContextMenu::Session {
+                    index: 1,
+                    key: stored,
+                    anchor,
+                }) if stored == &key && anchor.x == 20.0 && anchor.y == 36.0
+            ),
+            "right-click opens the session menu at the pointer"
+        );
+        assert!(app.tabs.is_empty(), "right-click must not open a tab");
+        assert!(
+            app.session_click_at.is_none(),
+            "right-click must not arm the double-click timer"
+        );
+        let labels: Vec<_> = session_context_entries()
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect();
+        assert_eq!(labels, vec!["Open", "Edit", "New Session", "Import"]);
+
+        // A second right-click, immediately, still opens nothing.
+        let _ = app.update(Message::OpenSessionContext { index: 1 });
+        assert!(app.tabs.is_empty());
+        assert!(app.context_menu.is_some());
+        assert!(app.session_click_at.is_none());
+
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(app.context_menu.is_none(), "Escape closes the context menu");
+        assert!(app.tabs.is_empty());
+    }
+
+    #[test]
+    fn session_right_click_does_not_consume_a_pending_double_click() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::SelectSession(1));
+        assert!(app.session_click_at.is_some());
+        assert!(app.tabs.is_empty());
+        let armed = app.session_click_at;
+        let _ = app.update(Message::OpenSessionContext { index: 1 });
+        assert!(
+            app.tabs.is_empty(),
+            "right-click must not open even inside the double-click window"
+        );
+        assert_eq!(
+            app.session_click_at, armed,
+            "right-click must not arm or consume the timer"
+        );
+        assert!(matches!(
+            app.context_menu,
+            Some(ContextMenu::Session { index: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn session_context_open_opens_exactly_one_tab() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::OpenSessionContext { index: 0 });
+        assert!(app.tabs.is_empty());
+        let _ = app.update(Message::SessionContextChoose(SessionContextAction::Open));
+        assert_eq!(app.tabs.len(), 1);
+        assert!(app.context_menu.is_none());
+        let _ = app.update(Message::SessionContextChoose(SessionContextAction::Open));
+        assert_eq!(
+            app.tabs.len(),
+            1,
+            "a second choose with no menu opens nothing"
+        );
+    }
+
+    #[test]
+    fn session_context_edit_opens_connection_dialog_for_that_profile() {
+        let mut app = session_click_app();
+        let key = session_profile_key(&app.profiles[1]);
+        let _ = app.update(Message::OpenSessionContext { index: 1 });
+        let _ = app.update(Message::SessionContextChoose(SessionContextAction::Edit));
+        assert!(matches!(app.dialog, Some(Dialog::Connection)));
+        assert_eq!(app.editing_profile.as_deref(), Some(key.as_str()));
+        assert!(app.tabs.is_empty());
+        assert!(app.context_menu.is_none());
+    }
+
+    #[test]
+    fn session_context_new_and_import_dispatch_the_session_menu_commands() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::OpenSessionContext { index: 0 });
+        let _ = app.update(Message::SessionContextChoose(
+            SessionContextAction::NewSession,
+        ));
+        assert!(matches!(app.dialog, Some(Dialog::Connection)));
+        assert!(
+            app.editing_profile.is_none(),
+            "New Session is a new connection, not an edit"
+        );
+        assert!(app.tabs.is_empty());
+        assert!(app.context_menu.is_none());
+
+        app.dialog = None;
+        let _ = app.update(Message::OpenSessionContext { index: 0 });
+        let _ = app.update(Message::SessionContextChoose(SessionContextAction::Import));
+        assert!(matches!(app.dialog, Some(Dialog::ImportProfiles)));
+        assert!(app.context_menu.is_none());
+    }
+
+    #[test]
+    fn session_context_stale_key_does_nothing() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::OpenSessionContext { index: 0 });
+        app.profiles[0].name = "renamed".into();
+        let _ = app.update(Message::SessionContextChoose(SessionContextAction::Open));
+        assert!(
+            app.context_menu.is_none(),
+            "a stale choice still closes the menu"
+        );
+        assert!(app.tabs.is_empty(), "a stale key must not open a tab");
+        assert!(app.dialog.is_none());
+
+        let _ = app.update(Message::OpenSessionContext { index: 1 });
+        app.profiles.remove(1);
+        let _ = app.update(Message::SessionContextChoose(SessionContextAction::Edit));
+        assert!(app.dialog.is_none());
+        assert!(app.editing_profile.is_none());
+        assert!(app.context_menu.is_none());
+
+        let _ = app.update(Message::OpenSessionContext { index: 0 });
+        app.profiles[0].name = "moved".into();
+        let _ = app.update(Message::SessionContextChoose(
+            SessionContextAction::NewSession,
+        ));
+        assert!(
+            app.dialog.is_none(),
+            "a stale menu must not dispatch New Session"
+        );
+        assert!(app.tabs.is_empty());
+    }
+
+    #[test]
+    fn session_context_menu_blocks_terminal_keys_and_chords() {
+        let (mut app, first_id, _second_id) = arm_synced_pair("session-context-keys");
+        app.profiles = vec![Session {
+            name: "alpha".into(),
+            host: "alpha.example.invalid".into(),
+            ..Session::default()
+        }];
+        app.refresh_profile_matches();
+        let focus_mode = app.focus_mode;
+        let _ = app.update(Message::OpenSessionContext { index: 0 });
+        assert!(app.context_menu.is_some());
+        app.pty_write_log.clear();
+        let status = app.status.clone();
+        let _ = app.update(pressed_char("x"));
+        let _ = app.update(pressed_key(
+            keyboard::Key::Character("x".into()),
+            keyboard::Modifiers::default(),
+        ));
+        let _ = app.update(Message::KeyChord(KeyChord::FocusMode));
+        let _ = app.update(Message::TerminalImeCursor(
+            first_id,
+            iced::Rectangle::default(),
+        ));
+        let _ = app.update(Message::TerminalImeCommit(first_id, "x".into()));
+        let _ = app.update(Message::RequestPaste);
+        assert!(
+            app.pty_write_log.is_empty(),
+            "open context menu must not write to a pane, log={:?}",
+            app.pty_write_log
+        );
+        assert_eq!(app.focus_mode, focus_mode, "chords must not run");
+        assert_eq!(app.status, status, "paste must not start");
+        assert!(
+            app.context_menu.is_some(),
+            "non-Escape keys leave the menu open"
+        );
+        assert!(app.ime_cursor.is_none(), "IME target must stay disabled");
+
+        app.context_menu = None;
+        app.pty_write_log.clear();
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Enter),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(
+            app.pty_write_log.iter().any(|(id, _)| *id == first_id),
+            "recorder must see Enter once the menu is gone, log={:?}",
+            app.pty_write_log
+        );
     }
 }
