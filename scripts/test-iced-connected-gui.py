@@ -1674,6 +1674,32 @@ async def main() -> int:
                 # it; fall back to bounded points in the session list rows,
                 # never destructive dialogs. Authentication, rather than a
                 # screenshot delta alone, proves the click worked.
+                # A single click selects the saved profile and must not open
+                # it. The product's double-click window is 400 ms; wait longer
+                # so the double click below cannot combine with this one.
+                # The tour path stays coordinate-driven and is not changed.
+                # count() is defined later in this function, so read the log.
+                try:
+                    await click_label(
+                        window, destination / "connected-session-list.png",
+                        "CI connected fixture", env, timeout=8, settle=0,
+                        clicks=1,
+                    )
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        "single click could not find session row "
+                        "'CI connected fixture' before the opening double click"
+                    ) from exc
+                await asyncio.sleep(1.2 * TIME_SCALE)
+                screenshot(window, destination / "connected-session-selected.png", env)
+                started_before_open = events.path.read_text(encoding="utf-8").splitlines().count(
+                    "SESSION_STARTED"
+                )
+                if started_before_open != 0:
+                    raise RuntimeError(
+                        "single click on 'CI connected fixture' opened a session "
+                        f"({started_before_open} SESSION_STARTED) before the double click"
+                    )
                 try:
                     await click_label(
                         window, destination / "connected-session-list.png",
@@ -3093,6 +3119,7 @@ async def main() -> int:
                     f"Alternate-screen screenshot change: {fullscreen_pixels} pixels\n"
                     f"Remote-key mode screenshot change: {remote_keys_pixels} pixels\n"
                     "PASS: real remote-key Left arrow reached the isolated SFTP-capable SSH shell\n"
+                    "PASS: a single click on the saved session selected it without SESSION_STARTED; the double click still opened it\n"
                     "PASS: terminal owned the keyboard before chrome menu probes\n"
                     "PASS: Session menu, Sender and dock gear consumed typing, Return and Escape without SSH input\n"
                     "PASS: shell answered AFTER_MENU, AFTER_SENDER_ESCAPE and AFTER_GEAR without terminal re-click\n"
