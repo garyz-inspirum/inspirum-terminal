@@ -3906,10 +3906,10 @@ impl App {
             .map(|pane| pane.id);
         Some(match focused {
             Some(id) if self.tools.sync.is_target(id) => {
-                format!("SYNC: {selected_count} SELECTED · MIRRORING")
+                format!("{selected_count} SELECTED · MIRRORING")
             }
-            Some(_) => format!("SYNC: {selected_count} SELECTED · THIS PANE ONLY"),
-            None => format!("SYNC: {selected_count} SELECTED · NO ACTIVE PANE"),
+            Some(_) => format!("{selected_count} SELECTED · THIS PANE ONLY"),
+            None => format!("{selected_count} SELECTED · NO ACTIVE PANE"),
         })
     }
 
@@ -12490,17 +12490,13 @@ mod tests {
         for (focused_id, expected_warning, expected_destinations) in [
             (
                 first_id,
-                "SYNC: 2 SELECTED · MIRRORING",
+                "2 SELECTED · MIRRORING",
                 vec![first_id, second_id],
             ),
-            (
-                third_id,
-                "SYNC: 2 SELECTED · THIS PANE ONLY",
-                vec![third_id],
-            ),
+            (third_id, "2 SELECTED · THIS PANE ONLY", vec![third_id]),
             (
                 second_id,
-                "SYNC: 2 SELECTED · MIRRORING",
+                "2 SELECTED · MIRRORING",
                 vec![first_id, second_id],
             ),
         ] {
@@ -12538,7 +12534,7 @@ mod tests {
         app.active = app.tabs.len();
         assert_eq!(
             app.sync_input_warning().as_deref(),
-            Some("SYNC: 2 SELECTED · NO ACTIVE PANE")
+            Some("2 SELECTED · NO ACTIVE PANE")
         );
         app.active = active;
         let _ = app.update(Message::Tool(tools::Action::SyncArm(false)));
