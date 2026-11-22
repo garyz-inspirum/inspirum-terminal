@@ -39,10 +39,29 @@ sys.modules[spec.name] = fixture
 spec.loader.exec_module(fixture)
 
 
+LOGGED_ECHO_LINES = (
+    "echo:TOUR_PROBE",
+    "echo:TERMINAL_OWNED",
+    "echo:AFTER_MENU",
+    "echo:AFTER_SENDER_ESCAPE",
+    "echo:AFTER_GEAR",
+    "echo:AFTER_CONTEXT_MENU",
+    "echo:AFTER_FIND",
+    "echo:FIND_P1_PANE",
+    "echo:FIND_P1_AFTER",
+    "echo:FIND_P2_PANE",
+    "echo:FIND_P2_AFTER",
+    "echo:FIND_P3_AFTER",
+    "echo:AFTER_EXIT_CANCEL",
+)
+
+
 class MonitoredSession(fixture.NativeSession):
     """Never log remote input: report only a fixed synthetic test marker."""
 
     def handle_line(self, line: str) -> None:
+        if line in LOGGED_ECHO_LINES:
+            self.events.write(f"NATIVE_ECHO:{line[5:]}")
         if line == "echo:FREE_TYPE_PROBE":
             self.events.write("UNEXPECTED_FREE_TYPE_PTY_INPUT")
         if line == "echo:LOCK_PROBE":
@@ -140,16 +159,7 @@ async def monitored_shell(
                     if line == "echo:TOUR_PROBE" and TOUR_WITHHOLD_ECHO:
                         continue
                     answer = f"NATIVE_ECHO:{line[5:]}"
-                    if line in (
-                        "echo:TOUR_PROBE",
-                        "echo:TERMINAL_OWNED",
-                        "echo:AFTER_MENU",
-                        "echo:AFTER_SENDER_ESCAPE",
-                        "echo:AFTER_GEAR",
-                        "echo:AFTER_CONTEXT_MENU",
-                        "echo:AFTER_FIND",
-                        "echo:AFTER_EXIT_CANCEL",
-                    ):
+                    if line in LOGGED_ECHO_LINES:
                         events.write(answer)
                     stdout.write(f"{answer}\r\n")
                 elif line == "exit":
@@ -4289,6 +4299,19 @@ async def main() -> int:
                     raise RuntimeError(
                         f"window-manager close: application exit code {close_code}"
                     )
+                find_echo_tokens = (
+                    "FIND_P1_PANE", "FIND_P1_AFTER", "FIND_P2_PANE",
+                    "FIND_P2_AFTER", "FIND_P3_AFTER",
+                )
+                logged_lines = set(events.path.read_text(encoding="utf-8").splitlines())
+                missing_find_echoes = [
+                    token for token in find_echo_tokens
+                    if f"NATIVE_ECHO:{token}" not in logged_lines
+                ]
+                if missing_find_echoes:
+                    raise RuntimeError(
+                        f"Find ownership probes missing SSH echo events: {missing_find_echoes}"
+                    )
                 (destination / "connected-acceptance.txt").write_text(
                     "PASS: two authenticated independent OpenSSH PTYs through production Iced\n"
                     "PASS: native Files dock established actual isolated SSH SFTP subsystem\n"
@@ -4312,6 +4335,7 @@ async def main() -> int:
                     "PASS: terminal owned the keyboard before chrome menu probes\n"
                     "PASS: Session menu, Sender and dock gear consumed typing, Return and Escape without SSH input\n"
                     "PASS: shell answered AFTER_MENU, AFTER_SENDER_ESCAPE and AFTER_GEAR without terminal re-click\n"
+                    "PASS: Find ownership probes: click-back then Escape closed Find; Next then typing stayed in Find; Commands dismiss handed the keyboard back to Find; shell answered FIND_P1_AFTER, FIND_P2_AFTER and FIND_P3_AFTER without a terminal click\n"
                     "PASS: Ctrl+Shift+J under the Session and dock gear menus left the auxiliary SSH shell connected; it closed it after Escape\n"
                     "PASS: privacy-locked and free-type synthetic text never reached SSH\n"
                     "PASS: Session Exit asked for confirmation and Cancel left the shell answering AFTER_EXIT_CANCEL\n"
