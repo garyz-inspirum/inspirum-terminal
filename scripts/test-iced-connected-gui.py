@@ -1601,6 +1601,23 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
         shot("tour-07-split.png")
     await step("split", s07)
 
+    async def s07b():
+        # Best-effort Find strip. Escape in finally so a failed shot cannot
+        # leave the strip open for the Filer step.
+        key("ctrl+shift+f")
+        try:
+            await asyncio.sleep(1)
+            command(
+                "xdotool", "windowfocus", window, "type", "--delay", "20",
+                "NATIVE", env=env,
+            )
+            await asyncio.sleep(1)
+            shot("tour-07b-find.png")
+        finally:
+            key("Escape")
+            await asyncio.sleep(.5)
+    await step("find", s07b)
+
     async def s08():
         key("ctrl+shift+o")
         await wait_for(lambda: "SFTP_LIST_READY" in log_text(), "remote SFTP listing")
