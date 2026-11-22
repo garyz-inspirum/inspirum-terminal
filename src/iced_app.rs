@@ -12496,7 +12496,7 @@ mod tests {
                 .iter()
                 .find_map(|(pane, terminal)| (terminal.id == focused_id).then_some(pane))
                 .expect("pane in active workspace");
-            let _ = app.update(Message::Focus(pane));
+            let _ = app.update(Message::Focus(*pane));
             assert!(app.focused_pane_matches(focused_id));
             assert_eq!(app.sync_input_warning().as_deref(), Some(expected_warning));
             if focused_id == third_id {
