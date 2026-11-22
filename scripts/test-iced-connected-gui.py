@@ -2255,24 +2255,15 @@ async def main() -> int:
                 )
                 click_x, click_y = center(context_row)
                 width, height = window_size(window, env)
-                action_band = (0, int(height * .62), width, height - 8)
-                try:
-                    rename_remote = await asyncio.to_thread(
-                        locate_visible_label,
-                        destination / "connected-files-context-row.png",
-                        "Rename remote",
-                        region=action_band,
-                    )
-                except RuntimeError as exc:
-                    raise RuntimeError(
-                        "Filer action row 'Rename remote' was not visible "
-                        "before the context-menu probe, so the menu search "
-                        f"box cannot exclude that button (action_band={action_band})"
-                    ) from exc
+                # Menu anchors at last_pointer, updated by CursorMoved. A combined
+                # mousemove+click is one frame, so the row right-press is handled
+                # first. Move, pause, then click, as a person does.
                 command(
                     "xdotool", "mousemove", "--window", window,
-                    str(click_x), str(click_y), "click", "3", env=env,
+                    str(click_x), str(click_y), env=env,
                 )
+                await asyncio.sleep(0.4 * TIME_SCALE)
+                command("xdotool", "click", "3", env=env)
                 # The click is a synthetic X event with no settle. A locate
                 # that captures the pre-redraw frame spends its OCR budget
                 # and reports a miss. Wait until the window actually changes
@@ -2306,33 +2297,21 @@ async def main() -> int:
                         "Filer context-menu search box collapsed from click "
                         f"({click_x}, {click_y}) in {width}x{height}: {menu_region}"
                     )
-                # "Rename" is the first token of the action-row button
-                # "Rename remote" (and "Delete remote" is the same trap).
-                # If that button's y falls inside the pointer box, search
-                # Rename only above it. Refresh and New Folder are not on
-                # the action row (path-bar refresh is an icon), so Refresh
-                # keeps the full box: the clamped menu's last row can share
-                # y with the action row when the click is near the bottom.
-                rename_region = menu_region
-                if rename_remote[1] < menu_region[3] and rename_remote[3] > menu_region[1]:
-                    cut = rename_remote[1] - 4
-                    if cut <= menu_region[1]:
-                        raise RuntimeError(
-                            "Filer action row 'Rename remote' covers the whole "
-                            f"context-menu search box {menu_region}; "
-                            f"button bounds {rename_remote}"
-                        )
-                    rename_region = (
-                        menu_region[0], menu_region[1], menu_region[2], cut,
-                    )
+                # "Rename" is the first OCR token of action-row "Rename remote",
+                # and locate_visible_label cannot require "Rename" not followed
+                # by " remote". That button (x 292-384, y ~760) overlaps a
+                # 202x147 menu anchored at this pointer, so a y-cut would also
+                # drop a Rename row that sits anywhere in the menu. Require
+                # Refresh and New Folder in the full pointer box instead:
+                # neither is on the action row ("New remote folder").
                 open_deadline = time.monotonic() + 20 * TIME_SCALE
-                rename_item = None
+                new_folder_item = None
                 refresh_item = None
                 last_open_error = "menu labels not searched"
                 while True:
                     await asyncio.to_thread(screenshot, window, menu_shot, env)
                     saw_refresh = False
-                    saw_rename = False
+                    saw_new_folder = False
                     try:
                         refresh_item = await asyncio.to_thread(
                             locate_visible_label,
@@ -2343,30 +2322,29 @@ async def main() -> int:
                         last_open_error = str(exc)
                     if saw_refresh:
                         try:
-                            rename_item = await asyncio.to_thread(
+                            new_folder_item = await asyncio.to_thread(
                                 locate_visible_label,
-                                menu_shot, "Rename", region=rename_region, budget=4,
+                                menu_shot, "New Folder", region=menu_region, budget=4,
                             )
-                            saw_rename = True
+                            saw_new_folder = True
                         except RuntimeError as exc:
                             last_open_error = str(exc)
-                    if saw_refresh and saw_rename:
+                    if saw_refresh and saw_new_folder:
                         break
                     if time.monotonic() >= open_deadline:
                         raise RuntimeError(
-                            "Filer context menu did not render Rename and Refresh "
+                            "Filer context menu did not render Refresh and New Folder "
                             f"after right-click at ({click_x}, {click_y}) on "
                             f"{download_name}: {last_open_error}; "
-                            f"refresh region {menu_region}, rename region {rename_region}, "
-                            f"action-row 'Rename remote' at {rename_remote}"
+                            f"region {menu_region}"
                         )
                     await asyncio.sleep(.4)
-                if rename_item is None or refresh_item is None:
+                if new_folder_item is None or refresh_item is None:
                     raise RuntimeError(
                         "Filer context menu locate returned no bounds after "
-                        f"finding Rename and Refresh (Rename {rename_item}, "
-                        f"Refresh {refresh_item}, rename region {rename_region}, "
-                        f"refresh region {menu_region})"
+                        f"finding Refresh and New Folder "
+                        f"(New Folder {new_folder_item}, Refresh {refresh_item}, "
+                        f"region {menu_region})"
                     )
 
                 # Menu owns the keyboard. Arm the watch only after the
@@ -3107,7 +3085,7 @@ async def main() -> int:
                     "PASS: click-driven SFTP upload preserved exact binary bytes in the native-smoke chroot\n"
                     "PASS: click-driven SFTP download preserved exact binary bytes in the visible local directory\n"
                     "PASS: Filer Name header click reversed remote name order and the second click restored it without a new SFTP listing\n"
-                    "PASS: Filer right-click menu rendered Rename and Refresh, consumed typing, Return and Escape, and the shell answered AFTER_CONTEXT_MENU\n"
+                    "PASS: Filer right-click menu rendered Refresh and New Folder, consumed typing, Return and Escape, and the shell answered AFTER_CONTEXT_MENU\n"
                     "PASS: exact payloads appeared at the expected disposable remote and local paths\n"
                     f"Connected split screenshot change: {split_pixels} pixels\n"
                     f"Opened utility dock screenshot change: {files_pixels} pixels\n"
