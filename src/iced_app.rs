@@ -2019,6 +2019,23 @@ fn session_context_entries() -> Vec<(&'static str, SessionContextAction)> {
     ]
 }
 
+/// Surface shared with the menu-bar drop-downs. `palette.border` is only
+/// 1.61:1 against the light list fill and 1.71:1 against the dark list fill, so
+/// the outline disappears on the dark panel. `text_dock` is at least 9:1
+/// against dock and list in both themes.
+fn menu_popup_style(_: &Theme) -> container::Style {
+    let p = theme::palette();
+    container::Style {
+        background: Some(p.list.into()),
+        border: Border {
+            color: p.text_dock,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
 fn context_popup<'a>(items: Vec<(&'static str, Message)>) -> Element<'a, Message> {
     let mut rows = column![].width(FILE_CONTEXT_MENU_WIDTH);
     for (label, message) in items {
@@ -2035,15 +2052,7 @@ fn context_popup<'a>(items: Vec<(&'static str, Message)>) -> Element<'a, Message
             .on_press(message),
         );
     }
-    opaque(container(rows).padding(1).style(|_| container::Style {
-        background: Some(theme::palette().list.into()),
-        border: Border {
-            color: theme::palette().border,
-            width: 1.0,
-            radius: 0.0.into(),
-        },
-        ..Default::default()
-    }))
+    opaque(container(rows).padding(1).style(menu_popup_style))
 }
 
 /// Same stack pattern as `dock_menu_overlay`: a full-size press layer dismisses,
@@ -7438,15 +7447,7 @@ impl App {
                 ),
             };
         }
-        opaque(container(rows).padding(1).style(|_| container::Style {
-            background: Some(theme::palette().list.into()),
-            border: Border {
-                color: theme::palette().border,
-                width: 1.0,
-                radius: 0.0.into(),
-            },
-            ..Default::default()
-        }))
+        opaque(container(rows).padding(1).style(menu_popup_style))
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
