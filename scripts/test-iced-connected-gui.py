@@ -2143,7 +2143,7 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
             screenshot(window, menu_frame, env)
             menu_box = await asyncio.to_thread(
                 locate_visible_label, menu_frame, "Workspace",
-                region=(245, 24, 510, 540),
+                region=(210, 24, 455, 400),
             )
             if menu_box is None:
                 raise RuntimeError("Window menu Workspace entry not visible")
