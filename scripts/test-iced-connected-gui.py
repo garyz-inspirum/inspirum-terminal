@@ -2245,6 +2245,17 @@ async def main() -> int:
                 # Delete. The popup is clamped inside the window (200px wide,
                 # 6*24+2 px for a remote file), so a click near the bottom
                 # opens upward rather than down from the pointer.
+                # No-pause gesture is the regression case for a popup anchored
+                # at a stale pointer. Park in the terminal pane (the point the
+                # later chrome probes click), let that become the last known
+                # pointer, then move and right-press in one command with no
+                # sleep between motion and the press.
+                parked_x, parked_y = 640, 280
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    str(parked_x), str(parked_y), env=env,
+                )
+                await asyncio.sleep(0.6 * TIME_SCALE)
                 context_row = await locate_rendered_label(
                     window,
                     destination / "connected-files-context-row.png",
@@ -2255,15 +2266,44 @@ async def main() -> int:
                 )
                 click_x, click_y = center(context_row)
                 width, height = window_size(window, env)
-                # Menu anchors at last_pointer, updated by CursorMoved. A combined
-                # mousemove+click is one frame, so the row right-press is handled
-                # first. Move, pause, then click, as a person does.
+                # Pointer box, clamped to the window. The menu may sit above
+                # the click when the clamp pushes the anchor up. Computed
+                # before the press: a popup opened at the parked point is
+                # about 200px wide and 146px tall, so it cannot put Refresh
+                # or New Folder in this box when the parked point is far away.
+                menu_region = (
+                    max(0, click_x - 10),
+                    max(0, click_y - 240),
+                    min(width, click_x + 260),
+                    min(height, click_y + 240),
+                )
+                if menu_region[2] <= menu_region[0] or menu_region[3] <= menu_region[1]:
+                    raise RuntimeError(
+                        "Filer context-menu search box collapsed from click "
+                        f"({click_x}, {click_y}) in {width}x{height}: {menu_region}"
+                    )
+                parked_x_gap = (
+                    menu_region[0] - parked_x if parked_x < menu_region[0]
+                    else parked_x - menu_region[2] if parked_x > menu_region[2]
+                    else 0
+                )
+                parked_y_gap = (
+                    menu_region[1] - parked_y if parked_y < menu_region[1]
+                    else parked_y - menu_region[3] if parked_y > menu_region[3]
+                    else 0
+                )
+                if parked_x_gap < 300 and parked_y_gap < 300:
+                    raise RuntimeError(
+                        "parked pointer "
+                        f"({parked_x}, {parked_y}) is not outside menu_region "
+                        f"{menu_region} by at least 300 px on either axis "
+                        f"(x gap {parked_x_gap}, y gap {parked_y_gap}; "
+                        f"click ({click_x}, {click_y}) in {width}x{height})"
+                    )
                 command(
                     "xdotool", "mousemove", "--window", window,
-                    str(click_x), str(click_y), env=env,
+                    str(click_x), str(click_y), "click", "3", env=env,
                 )
-                await asyncio.sleep(0.4 * TIME_SCALE)
-                command("xdotool", "click", "3", env=env)
                 # The click is a synthetic X event with no settle. A locate
                 # that captures the pre-redraw frame spends its OCR budget
                 # and reports a miss. Wait until the window actually changes
@@ -2284,19 +2324,6 @@ async def main() -> int:
                             f"repaint the window ({painted} pixels vs {row_shot.name})"
                         )
                     await asyncio.sleep(.3)
-                # Pointer box, clamped to the window. The menu may sit above
-                # the click when the clamp pushes the anchor up.
-                menu_region = (
-                    max(0, click_x - 10),
-                    max(0, click_y - 240),
-                    min(width, click_x + 260),
-                    min(height, click_y + 240),
-                )
-                if menu_region[2] <= menu_region[0] or menu_region[3] <= menu_region[1]:
-                    raise RuntimeError(
-                        "Filer context-menu search box collapsed from click "
-                        f"({click_x}, {click_y}) in {width}x{height}: {menu_region}"
-                    )
                 # "Rename" is the first OCR token of action-row "Rename remote",
                 # and locate_visible_label cannot require "Rename" not followed
                 # by " remote". That button (x 292-384, y ~760) overlaps a
@@ -2346,6 +2373,45 @@ async def main() -> int:
                         f"(New Folder {new_folder_item}, Refresh {refresh_item}, "
                         f"region {menu_region})"
                     )
+                for item_name, item_bounds in (
+                    ("Refresh", refresh_item),
+                    ("New Folder", new_folder_item),
+                ):
+                    if _bounds_inside(item_bounds, menu_region) is None:
+                        raise RuntimeError(
+                            f"Filer context menu {item_name} bounds {item_bounds} "
+                            f"are not wholly inside menu_region {menu_region} "
+                            f"(Refresh {refresh_item}, New Folder {new_folder_item}, "
+                            f"parked ({parked_x}, {parked_y}))"
+                        )
+                    left, top, right, bottom = item_bounds
+                    near_x = (
+                        left - parked_x if parked_x < left
+                        else parked_x - right if parked_x > right
+                        else 0
+                    )
+                    near_y = (
+                        top - parked_y if parked_y < top
+                        else parked_y - bottom if parked_y > bottom
+                        else 0
+                    )
+                    parked_gap = (near_x * near_x + near_y * near_y) ** 0.5
+                    if parked_gap < 150:
+                        raise RuntimeError(
+                            f"Filer context menu {item_name} bounds {item_bounds} "
+                            f"lie within 150 px of parked pointer "
+                            f"({parked_x}, {parked_y}) (gap {parked_gap:.1f}; "
+                            f"Refresh {refresh_item}, New Folder {new_folder_item}, "
+                            f"region {menu_region})"
+                        )
+                print(
+                    "Filer context menu anchored at click "
+                    f"({click_x}, {click_y}); Refresh {refresh_item} "
+                    f"New Folder {new_folder_item} inside {menu_region}; "
+                    f"parked ({parked_x}, {parked_y}) axis gaps "
+                    f"x={parked_x_gap} y={parked_y_gap}",
+                    flush=True,
+                )
 
                 # Menu owns the keyboard. Arm the watch only after the
                 # right-click settles: that click selects the row and must
@@ -3085,7 +3151,7 @@ async def main() -> int:
                     "PASS: click-driven SFTP upload preserved exact binary bytes in the native-smoke chroot\n"
                     "PASS: click-driven SFTP download preserved exact binary bytes in the visible local directory\n"
                     "PASS: Filer Name header click reversed remote name order and the second click restored it without a new SFTP listing\n"
-                    "PASS: Filer right-click menu rendered Refresh and New Folder, consumed typing, Return and Escape, and the shell answered AFTER_CONTEXT_MENU\n"
+                    "PASS: Filer no-pause right-click anchored at the new pointer with the previous pointer parked away rendered Refresh and New Folder, consumed typing, Return and Escape, and the shell answered AFTER_CONTEXT_MENU\n"
                     "PASS: exact payloads appeared at the expected disposable remote and local paths\n"
                     f"Connected split screenshot change: {split_pixels} pixels\n"
                     f"Opened utility dock screenshot change: {files_pixels} pixels\n"
