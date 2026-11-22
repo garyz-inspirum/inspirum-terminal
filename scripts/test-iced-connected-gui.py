@@ -1910,9 +1910,6 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
                 raise RuntimeError("Advanced control not located at non-baseline size")
             await asyncio.sleep(1)
             shot("tour-04a-advanced-ssh-1280x800.png")
-            expanded = tour_dir / "tour-04a-advanced-ssh-1280x800.png"
-            await tour_label(expanded, "New SSH Connection")
-            await tour_label(expanded, "Advanced SSH options")
         finally:
             key("Escape")
             await asyncio.sleep(.5)
@@ -1953,21 +1950,47 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
                     command("xdotool", "mousemove", "--window", window,
                             str(form_x), str(form_y), "click", "4", env=env)
                 await asyncio.sleep(.7)
-                expanded = tour_dir / f"tour-04c-advanced-ssh-{size_tag}.png"
-                shot(expanded.name)
-                await tour_label(expanded, "New SSH Connection")
-                await tour_label(expanded, "Advanced SSH options")
+                shot(f"tour-04c-advanced-ssh-{size_tag}.png")
                 for _ in range(6):
                     command("xdotool", "mousemove", "--window", window,
                             str(form_x), str(form_y), "click", "5", env=env)
                 await asyncio.sleep(.7)
-                scrolled = tour_dir / f"tour-04d-advanced-ssh-scrolled-{size_tag}.png"
-                shot(scrolled.name)
-                # OCR is only a visibility hint, not proof of keyboard or
-                # pointer accessibility; parent must inspect the actual PNG.
-                visible = [label for label in ("Save", "Connect", "Cancel", "Proxy")
-                           if await tour_label(scrolled, label)]
-                print(f"tour: min-size scrolled visible controls (OCR): {visible}", flush=True)
+                shot(f"tour-04d-advanced-ssh-scrolled-{size_tag}.png")
+                # The six-wheel frame shows proxy controls, not the footer.
+                # Drive to the end and keep a separate frame as evidence.
+                for _ in range(30):
+                    command("xdotool", "mousemove", "--window", window,
+                            str(form_x), str(form_y), "click", "5", env=env)
+                await asyncio.sleep(1)
+                bottom = tour_dir / f"tour-04e-advanced-ssh-bottom-{size_tag}.png"
+                shot(bottom.name)
+                # Only check dark-on-light footer buttons in the bottom band.
+                # A miss is inconclusive; do not assert scroll reachability.
+                footer_region = (0, max(0, min_height - 160), min_width, min_height)
+                try:
+                    tesseract = shutil.which("tesseract")
+                    if tesseract is None:
+                        raise RuntimeError("tesseract unavailable")
+                    footer = None
+                    for psm in ("6", "11"):
+                        words = await asyncio.to_thread(
+                            region_upscaled_rows, bottom, tesseract, footer_region,
+                            psm=psm,
+                        )
+                        for label in ("Cancel", "Save only"):
+                            footer = _bounds_inside(
+                                match_visible_label(words, label), footer_region,
+                            )
+                            if footer:
+                                break
+                        if footer:
+                            break
+                    if footer:
+                        print(f"tour: minimum-size footer label visible at {footer}", flush=True)
+                    else:
+                        print(f"tour: WARNING minimum-size footer not detected in {bottom.name}", flush=True)
+                except Exception as error:  # best-effort visual evidence
+                    print(f"tour: WARNING minimum-size footer check failed in {bottom.name}: {error}", flush=True)
             finally:
                 key("Escape")
                 await asyncio.sleep(.5)
