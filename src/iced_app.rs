@@ -359,6 +359,20 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
         };
         Subscription::batch([
             drag,
+            // Kept because MouseArea::on_move is skipped when a child captured
+            // the event (`shell.is_event_captured()`). Drags over a capturing
+            // widget still need `last_pointer`. Context-menu anchors do not
+            // use this path: the root `on_move` in `view` publishes
+            // PointerMoved as a widget message during CursorMoved, and that
+            // message is applied before the later ButtonPressed's right-press
+            // message. Subscription output from this listener is broadcast
+            // only after that widget batch.
+            event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::PointerMoved(position))
+                }
+                _ => None,
+            }),
             iced::window::resize_events().map(|(_, size)| Message::WindowResized(size)),
             iced::window::close_requests().map(|_| Message::Exit),
             event::listen_with(|event, status, _| match &event {
@@ -1765,6 +1779,7 @@ fn file_listing_row<'a>(
     message: Message,
     selected: bool,
     table_width: f32,
+    on_right_press: Option<Message>,
 ) -> Element<'a, Message> {
     let (glyph, color) = if cells.is_dir {
         let color = match theme::current() {
@@ -1803,7 +1818,7 @@ fn file_listing_row<'a>(
         file_cell(cells.group, Length::Fill, false),
     ]
     .height(theme::metrics::ROW_HEIGHT);
-    button(content)
+    let row = button(content)
         .on_press(message)
         .padding(0)
         .width(table_width)
@@ -1811,8 +1826,243 @@ fn file_listing_row<'a>(
             file_row_selected
         } else {
             file_row
-        })
-        .into()
+        });
+    match on_right_press {
+        Some(on_right_press) => mouse_area(row).on_right_press(on_right_press).into(),
+        None => row.into(),
+    }
+}
+
+/// Which file panel owns the open context menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileContextSide {
+    Remote,
+    Local,
+}
+
+/// Right-click menu on a Filer or Explorer row.
+#[derive(Clone, Debug)]
+struct FileContextMenu {
+    side: FileContextSide,
+    is_dir: bool,
+    /// Display/remote path used by Open. Files leave this unused.
+    open_path: String,
+    /// Original local path for Open. Avoids a lossy string round-trip.
+    local_path: Option<PathBuf>,
+    anchor: iced::Point,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileContextAction {
+    Open,
+    Download,
+    Upload,
+    Edit,
+    NewFolder,
+    Rename,
+    Delete,
+    Refresh,
+}
+
+/// One right-click menu. File rows and session rows share this state so the
+/// existing keyboard, IME, paste and chord guards keep covering it.
+#[derive(Clone, Debug)]
+enum ContextMenu {
+    File(FileContextMenu),
+    Session {
+        index: usize,
+        key: String,
+        anchor: iced::Point,
+    },
+}
+
+impl ContextMenu {
+    fn anchor(&self) -> iced::Point {
+        match self {
+            ContextMenu::File(menu) => menu.anchor,
+            ContextMenu::Session { anchor, .. } => *anchor,
+        }
+    }
+
+    #[cfg(test)]
+    fn file(&self) -> Option<&FileContextMenu> {
+        match self {
+            ContextMenu::File(menu) => Some(menu),
+            ContextMenu::Session { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionContextAction {
+    Open,
+    Edit,
+    NewSession,
+    Import,
+}
+
+const FILE_CONTEXT_MENU_WIDTH: f32 = 200.0;
+const FILE_CONTEXT_ITEM_HEIGHT: f32 = 24.0;
+
+fn file_context_menu_height(item_count: usize) -> f32 {
+    item_count as f32 * FILE_CONTEXT_ITEM_HEIGHT + 2.0
+}
+
+/// Keep the whole popup inside the window. A menu taller than the window pins to the top.
+fn clamp_file_context_anchor(anchor: iced::Point, window: iced::Size, height: f32) -> iced::Point {
+    let max_x = (window.width - FILE_CONTEXT_MENU_WIDTH).max(0.0);
+    let max_y = (window.height - height).max(0.0);
+    iced::Point::new(anchor.x.clamp(0.0, max_x), anchor.y.clamp(0.0, max_y))
+}
+
+/// Spec 5.2 items that already have a panel message. Open is directories only.
+/// Edit is remote files only. Download is remote files only and Upload is
+/// local files only: both are always rejected for directories, so they are
+/// omitted rather than shown. Local rows have no edit message, and neither
+/// side has an open-file message, so those items are omitted too.
+fn file_context_entries(menu: &FileContextMenu) -> Vec<(&'static str, FileContextAction)> {
+    let mut items = Vec::new();
+    if menu.is_dir {
+        items.push(("Open", FileContextAction::Open));
+    }
+    match menu.side {
+        FileContextSide::Remote => {
+            if !menu.is_dir {
+                items.push(("Download", FileContextAction::Download));
+                items.push(("Edit", FileContextAction::Edit));
+            }
+        }
+        FileContextSide::Local => {
+            if !menu.is_dir {
+                items.push(("Upload", FileContextAction::Upload));
+            }
+        }
+    }
+    items.push(("New Folder", FileContextAction::NewFolder));
+    items.push(("Rename", FileContextAction::Rename));
+    items.push(("Delete", FileContextAction::Delete));
+    items.push(("Refresh", FileContextAction::Refresh));
+    items
+}
+
+fn file_context_action_message(
+    menu: &FileContextMenu,
+    action: FileContextAction,
+) -> Option<Message> {
+    match (menu.side, action) {
+        (FileContextSide::Remote, FileContextAction::Open) if menu.is_dir => {
+            Some(Message::FilesOpenRemote(menu.open_path.clone()))
+        }
+        (FileContextSide::Local, FileContextAction::Open) if menu.is_dir => {
+            menu.local_path.clone().map(Message::FilesOpenLocal)
+        }
+        (_, FileContextAction::Open) => None,
+        (FileContextSide::Remote, FileContextAction::Download) => {
+            Some(Message::FilesRequestDownload)
+        }
+        (FileContextSide::Local, FileContextAction::Upload) => Some(Message::FilesRequestUpload),
+        (FileContextSide::Remote, FileContextAction::Edit) if !menu.is_dir => {
+            Some(Message::FilesRequestEditRemote)
+        }
+        (FileContextSide::Remote, FileContextAction::NewFolder) => {
+            Some(Message::FilesRequestMkdirRemote)
+        }
+        (FileContextSide::Local, FileContextAction::NewFolder) => {
+            Some(Message::FilesRequestMkdirLocal)
+        }
+        (FileContextSide::Remote, FileContextAction::Rename) => {
+            Some(Message::FilesRequestRenameRemote)
+        }
+        (FileContextSide::Local, FileContextAction::Rename) => {
+            Some(Message::FilesRequestRenameLocal)
+        }
+        (FileContextSide::Remote, FileContextAction::Delete) => {
+            Some(Message::FilesRequestDeleteRemote)
+        }
+        (FileContextSide::Local, FileContextAction::Delete) => {
+            Some(Message::FilesRequestDeleteLocal)
+        }
+        (_, FileContextAction::Refresh) => Some(Message::FilesRefresh),
+        // Cross-side items (local Download, remote Upload) and Edit on a
+        // directory or a local row are not offered. Drop a stale message.
+        _ => None,
+    }
+}
+
+/// Spec 5.1 items. The popup has no separator widget, so none is drawn
+/// between Edit and New Session.
+fn session_context_entries() -> Vec<(&'static str, SessionContextAction)> {
+    vec![
+        ("Open", SessionContextAction::Open),
+        ("Edit", SessionContextAction::Edit),
+        ("New Session", SessionContextAction::NewSession),
+        ("Import", SessionContextAction::Import),
+    ]
+}
+
+fn context_popup<'a>(items: Vec<(&'static str, Message)>) -> Element<'a, Message> {
+    let mut rows = column![].width(FILE_CONTEXT_MENU_WIDTH);
+    for (label, message) in items {
+        rows = rows.push(
+            button(
+                text(label)
+                    .size(theme::metrics::UI_TEXT)
+                    .color(theme::palette().text),
+            )
+            .width(Fill)
+            .height(FILE_CONTEXT_ITEM_HEIGHT)
+            .padding([3, 10])
+            .style(menu_item)
+            .on_press(message),
+        );
+    }
+    opaque(container(rows).padding(1).style(|_| container::Style {
+        background: Some(theme::palette().list.into()),
+        border: Border {
+            color: theme::palette().border,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    }))
+}
+
+/// Same stack pattern as `dock_menu_overlay`: a full-size press layer dismisses,
+/// and padding anchors the flat menu at the pointer. Session rows use the same
+/// popup; it has no separator row, so that menu is four items.
+fn file_context_overlay<'a>(
+    body: Element<'a, Message>,
+    menu: &ContextMenu,
+    window: iced::Size,
+) -> Element<'a, Message> {
+    let items: Vec<(&'static str, Message)> = match menu {
+        ContextMenu::File(file) => file_context_entries(file)
+            .into_iter()
+            .map(|(label, action)| (label, Message::FileContextChoose(action)))
+            .collect(),
+        ContextMenu::Session { .. } => session_context_entries()
+            .into_iter()
+            .map(|(label, action)| (label, Message::SessionContextChoose(action)))
+            .collect(),
+    };
+    let height = file_context_menu_height(items.len());
+    let anchor = clamp_file_context_anchor(menu.anchor(), window, height);
+    let popup = context_popup(items);
+    stack![
+        body,
+        mouse_area(container(space::horizontal()).width(Fill).height(Fill))
+            .on_press(Message::FileContextDismiss)
+            .on_right_press(Message::FileContextDismiss),
+        container(popup)
+            .padding(iced::Padding {
+                top: anchor.y,
+                left: anchor.x,
+                ..iced::Padding::ZERO
+            })
+            .width(Fill)
+            .height(Fill),
+    ]
+    .into()
 }
 
 fn file_listing_footer<'a>(count: usize, total: u64) -> Element<'a, Message> {
@@ -1921,7 +2171,6 @@ enum Message {
     Tool(tools::Action),
     Search(String),
     ShowMoreProfiles,
-    Open(usize),
     EditProfile(usize),
     SelectTab(usize),
     SelectNextTab,
@@ -2133,6 +2382,31 @@ enum Message {
     FilesSortRemote(FileSortColumn),
     Exit,
     ConfirmExit,
+    /// Single click on a session row. The `usize` is an index into `profiles`
+    /// (the value stored in `profile_matches`), not a visible-row offset.
+    SelectSession(usize),
+    /// Toggle a session-tree group. Not persisted.
+    ToggleSessionGroup(String),
+    /// Last pointer position, used to anchor the file context menu.
+    PointerMoved(iced::Point),
+    /// Right-click on a Filer row. Selects the row, then opens the menu.
+    OpenRemoteFileContext {
+        entry: sftp::RemoteEntry,
+        open_path: String,
+    },
+    FileContextChoose(FileContextAction),
+    FileContextDismiss,
+    /// Right-click on an Explorer row. Selects the row, then opens the menu.
+    OpenLocalFileContext {
+        path: PathBuf,
+        is_dir: bool,
+    },
+    /// Right-click on a session row. Selects the row, then opens the menu.
+    /// Does not arm the double-click timer and never opens a tab by itself.
+    OpenSessionContext {
+        index: usize,
+    },
+    SessionContextChoose(SessionContextAction),
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -3274,6 +3548,26 @@ struct App {
     /// Filer (remote) column. Independent of the Explorer sort.
     remote_file_sort: FileSortColumn,
     remote_file_sort_ascending: bool,
+    /// Selected session row: index into `profiles`, not the filtered list.
+    /// Cleared when the profile list or filter is rebuilt so it cannot point
+    /// at a different profile.
+    selected_profile: Option<usize>,
+    /// `session_profile_key` captured when the row was selected.
+    selected_profile_key: Option<String>,
+    /// Last left-click of a session row, bound to that row's profile key.
+    /// A second left-click of the same key within `SESSION_DOUBLE_CLICK`
+    /// opens it, then this is cleared so one double-click gesture cannot
+    /// open twice. A right-click clears it.
+    session_click: Option<(Instant, String)>,
+    /// Group names whose session rows are hidden. Not written to UI state.
+    /// A non-empty filter still shows matching rows inside a collapsed group.
+    collapsed_groups: HashSet<String>,
+    /// Last pointer position. Context menus copy this into `anchor`.
+    /// Updated by `Message::PointerMoved`, from the root `on_move` (press
+    /// path) and from the CursorMoved subscription (captured drags).
+    last_pointer: iced::Point,
+    /// Open right-click menu, if any. File and session rows share this.
+    context_menu: Option<ContextMenu>,
 }
 
 const FILES_PANELS: [dock::Panel; 3] = [
@@ -3415,6 +3709,12 @@ impl App {
             local_file_sort_ascending: true,
             remote_file_sort: FileSortColumn::Name,
             remote_file_sort_ascending: true,
+            selected_profile: None,
+            selected_profile_key: None,
+            session_click: None,
+            collapsed_groups: HashSet::new(),
+            last_pointer: iced::Point::ORIGIN,
+            context_menu: None,
         }
     }
 
@@ -3427,6 +3727,11 @@ impl App {
                 session_matches_query(profile, &self.query).then_some(index)
             })
             .collect();
+        // Indices are stable under a filter, but a rebuilt list can shift
+        // them. Drop the selection rather than risk pointing at another profile.
+        self.selected_profile = None;
+        self.selected_profile_key = None;
+        self.session_click = None;
     }
 
     fn new_terminal_pane(&mut self, profile: Session) -> TerminalPane {
@@ -3876,6 +4181,36 @@ impl App {
         self.dialog = None;
     }
 
+    /// Open the profile at `index`, then refresh file listings when a file panel is visible.
+    fn open_profile(&mut self, index: usize) -> Task<Message> {
+        self.open(index);
+        if self.files_open() {
+            self.reload_files()
+        } else {
+            Task::none()
+        }
+    }
+
+    /// Write the selection state `SelectSession` writes.
+    ///
+    /// Does not arm or consume `session_click` and does not open a tab.
+    /// Right-click uses this so it cannot start or finish a double-click open.
+    /// The caller clears `session_click` so a right-click interrupts the gesture.
+    fn select_session_row(&mut self, index: usize) -> Option<String> {
+        match self.profiles.get(index).map(session_profile_key) {
+            Some(key) => {
+                self.selected_profile = Some(index);
+                self.selected_profile_key = Some(key.clone());
+                Some(key)
+            }
+            None => {
+                self.selected_profile = None;
+                self.selected_profile_key = None;
+                None
+            }
+        }
+    }
+
     fn files_open(&self) -> bool {
         !self.tabs.is_empty()
             && FILES_PANELS
@@ -4266,7 +4601,10 @@ impl App {
         let _slow = SlowIcedScope::start("event_update");
         let message = match message {
             Message::KeyChord(chord) => {
-                if self.open_menu.is_some() || self.dock_menu.is_some() {
+                if self.open_menu.is_some()
+                    || self.dock_menu.is_some()
+                    || self.context_menu.is_some()
+                {
                     return Task::none();
                 }
                 return self.update(chord.message());
@@ -4345,7 +4683,7 @@ impl App {
         }
         // An open menu owns keyboard input, including queued IME and paste
         // messages from before the overlay appeared.
-        if (self.open_menu.is_some() || self.dock_menu.is_some())
+        if (self.open_menu.is_some() || self.dock_menu.is_some() || self.context_menu.is_some())
             && matches!(
                 &message,
                 Message::TerminalImeCursor(..)
@@ -4575,12 +4913,6 @@ impl App {
                 self.profile_visible =
                     next_profile_page(self.profile_visible, self.profile_matches.len());
             }
-            Message::Open(index) => {
-                self.open(index);
-                if self.files_open() {
-                    return self.reload_files();
-                }
-            }
             Message::EditProfile(index) => {
                 if let Some(profile) = self.profiles.get(index).cloned() {
                     self.editing_profile = Some(session_profile_key(&profile));
@@ -4773,6 +5105,7 @@ impl App {
             }
             Message::About => self.dialog = Some(Dialog::About),
             Message::MenuOpen(menu) => {
+                self.context_menu = None;
                 self.open_menu = if self.open_menu == Some(menu) {
                     None
                 } else {
@@ -5080,7 +5413,11 @@ impl App {
                 self.files.name_input.clear();
             }
             Message::DismissModalKey => {
-                if self.open_menu.take().is_some() || self.dock_menu.take().is_some() {
+                let closed_context = self.context_menu.take().is_some();
+                if self.open_menu.take().is_some()
+                    || self.dock_menu.take().is_some()
+                    || closed_context
+                {
                     return Task::none();
                 }
                 if self.dialog.is_some() {
@@ -6369,10 +6706,14 @@ impl App {
             })) => {
                 use keyboard::key::Named;
 
-                if self.open_menu.is_some() || self.dock_menu.is_some() {
+                if self.open_menu.is_some()
+                    || self.dock_menu.is_some()
+                    || self.context_menu.is_some()
+                {
                     if key.as_ref() == keyboard::Key::Named(Named::Escape) {
                         self.open_menu = None;
                         self.dock_menu = None;
+                        self.context_menu = None;
                     }
                     return Task::none();
                 }
@@ -6570,6 +6911,7 @@ impl App {
                 }
             }
             Message::DockMenu(area) => {
+                self.context_menu = None;
                 self.dock_menu = if self.dock_menu == Some(area) {
                     None
                 } else {
@@ -6614,6 +6956,7 @@ impl App {
             Message::Exit => {
                 self.open_menu = None;
                 self.dock_menu = None;
+                self.context_menu = None;
                 if self.tabs.is_empty() {
                     return iced::exit();
                 }
@@ -6624,6 +6967,128 @@ impl App {
                     return Task::none();
                 }
                 return iced::exit();
+            }
+            Message::SelectSession(index) => {
+                let now = Instant::now();
+                let profile_key = self.profiles.get(index).map(session_profile_key);
+                // The pending click is the row that was left-clicked, not
+                // whatever `selected_profile` currently points at. A right-click
+                // can change the selection without owning that timestamp.
+                let open_now = profile_key.as_ref().is_some_and(|key| {
+                    self.session_click
+                        .as_ref()
+                        .is_some_and(|(previous, pending)| {
+                            pending == key && session_double_click(*previous, now)
+                        })
+                });
+                // Selection state is shared with right-click. Only a left
+                // click arms or consumes the double-click timer, and only
+                // for the row that was left-clicked.
+                if let Some(key) = self.select_session_row(index) {
+                    // Consume the gesture so the opening click is not also
+                    // the start of a second open.
+                    self.session_click = if open_now { None } else { Some((now, key)) };
+                } else {
+                    self.session_click = None;
+                }
+                if open_now {
+                    return self.open_profile(index);
+                }
+            }
+            Message::ToggleSessionGroup(group) => {
+                if !self.collapsed_groups.remove(&group) {
+                    self.collapsed_groups.insert(group);
+                }
+            }
+            Message::PointerMoved(position) => {
+                self.last_pointer = position;
+            }
+            Message::OpenRemoteFileContext { entry, open_path } => {
+                if self.privacy_locked || self.dialog.is_some() {
+                    return Task::none();
+                }
+                // Select first so Download/Rename/Delete apply to this row.
+                // Directory left-click navigates (`FilesOpenRemote`); selecting
+                // here does not, so the menu's Open item is what navigates.
+                let is_dir = entry.is_dir;
+                let select = self.update(Message::FilesSelectRemote(entry));
+                self.open_menu = None;
+                self.dock_menu = None;
+                self.context_menu = Some(ContextMenu::File(FileContextMenu {
+                    side: FileContextSide::Remote,
+                    is_dir,
+                    open_path,
+                    local_path: None,
+                    anchor: self.last_pointer,
+                }));
+                return select;
+            }
+            Message::OpenLocalFileContext { path, is_dir } => {
+                if self.privacy_locked || self.dialog.is_some() {
+                    return Task::none();
+                }
+                // Same rule as Filer: select, do not navigate. Open does that.
+                let open_path = path.to_string_lossy().into_owned();
+                let local_path = path.clone();
+                let select = self.update(Message::FilesSelectLocal(path));
+                self.open_menu = None;
+                self.dock_menu = None;
+                self.context_menu = Some(ContextMenu::File(FileContextMenu {
+                    side: FileContextSide::Local,
+                    is_dir,
+                    open_path,
+                    local_path: Some(local_path),
+                    anchor: self.last_pointer,
+                }));
+                return select;
+            }
+            Message::FileContextChoose(action) => {
+                let Some(ContextMenu::File(menu)) = self.context_menu.take() else {
+                    return Task::none();
+                };
+                let Some(message) = file_context_action_message(&menu, action) else {
+                    return Task::none();
+                };
+                return self.update(message);
+            }
+            Message::FileContextDismiss => {
+                self.context_menu = None;
+            }
+            Message::OpenSessionContext { index } => {
+                // A right-click interrupts a pending double-click. Clear even
+                // when the menu itself is refused, so the timestamp cannot be
+                // reused against a selection this click just changed.
+                self.session_click = None;
+                if self.privacy_locked || self.dialog.is_some() {
+                    return Task::none();
+                }
+                // Select first. A right-click must never open a session by itself.
+                let Some(key) = self.select_session_row(index) else {
+                    return Task::none();
+                };
+                self.open_menu = None;
+                self.dock_menu = None;
+                self.context_menu = Some(ContextMenu::Session {
+                    index,
+                    key,
+                    anchor: self.last_pointer,
+                });
+            }
+            Message::SessionContextChoose(action) => {
+                let Some(ContextMenu::Session { index, key, .. }) = self.context_menu.take() else {
+                    return Task::none();
+                };
+                let current = self.profiles.get(index).map(session_profile_key);
+                if current.as_deref() != Some(key.as_str()) {
+                    return Task::none();
+                }
+                match action {
+                    SessionContextAction::Open => return self.open_profile(index),
+                    SessionContextAction::Edit => return self.update(Message::EditProfile(index)),
+                    // Same messages the Session menu dispatches.
+                    SessionContextAction::NewSession => return self.update(Message::New),
+                    SessionContextAction::Import => return self.update(Message::ImportProfiles),
+                }
             }
         }
         Task::none()
@@ -6664,6 +7129,7 @@ impl App {
             && !self.sender_focused
             && self.open_menu.is_none()
             && self.dock_menu.is_none()
+            && self.context_menu.is_none()
         {
             self.focused_terminal_id().filter(|id| {
                 !self.local_navigation.contains(id)
@@ -6677,7 +7143,14 @@ impl App {
             .ime_cursor
             .filter(|(id, _)| Some(*id) == target)
             .map(|(_, cursor)| cursor);
-        terminal_ime::wrap(self.view_content(), target, cursor)
+        // Outermost wrap on every non-privacy return, including menu and
+        // dialog stacks built inside `view_content`. `on_move` reports a
+        // point relative to this widget (`cursor.position_in`); the root is
+        // laid out at the window origin, so that matches the absolute cursor.
+        // It does not capture the event and does not change layout size.
+        mouse_area(terminal_ime::wrap(self.view_content(), target, cursor))
+            .on_move(Message::PointerMoved)
+            .into()
     }
 
     fn view_content(&self) -> Element<'_, Message> {
@@ -6849,6 +7322,10 @@ impl App {
             Some(area) => self.dock_menu_overlay(body, area),
             None => body,
         };
+        let body: Element<'_, Message> = match &self.context_menu {
+            Some(menu) => file_context_overlay(body, menu, self.window_size),
+            None => body,
+        };
 
         if let Some(dialog) = &self.dialog {
             let content = self.dialog_view(dialog);
@@ -6995,16 +7472,26 @@ impl App {
             } else {
                 profile.folder.as_str()
             };
+            let folded =
+                session_group_hides_rows(self.collapsed_groups.contains(group), &self.query);
             if current_group.as_deref() != Some(group) {
-                list = list.push(Self::session_group_row(group));
+                list = list.push(Self::session_group_row(group, folded));
                 current_group = Some(group.to_owned());
+            }
+            count += 1;
+            if folded {
+                continue;
             }
             let open = self
                 .tabs
                 .iter()
                 .any(|tab| session_profile_key(&tab.profile) == session_profile_key(profile));
-            list = list.push(Self::session_tree_row(index, profile, open));
-            count += 1;
+            // `index` comes from `profile_matches` and addresses `self.profiles`.
+            // A filter hides rows; it does not renumber this index.
+            let selected = self.selected_profile == Some(index)
+                && self.selected_profile_key.as_deref()
+                    == Some(session_profile_key(profile).as_str());
+            list = list.push(Self::session_tree_row(index, profile, open, selected));
         }
 
         if count == 0 {
@@ -7055,29 +7542,42 @@ impl App {
     }
 
     /// WindTerm session tree: group row (disclosure triangle + folder + name).
-    fn session_group_row<'a>(group: &str) -> Element<'a, Message> {
+    fn session_group_row<'a>(group: &str, collapsed: bool) -> Element<'a, Message> {
         let p = theme::palette();
-        container(
+        let triangle = if collapsed {
+            icons::Icon::TriangleRight
+        } else {
+            icons::Icon::TriangleDown
+        };
+        // 10 px triangle is 2 px wider than the old 8 px glyph. Spacing 4
+        // (was 5) keeps the group name at the same x: 10+4+13+4 == 8+5+13+5.
+        button(
             row![
-                icons::icon(icons::Icon::TriangleDown, 8.0, p.muted),
+                icons::icon(triangle, 10.0, p.text_dock),
                 icons::icon(icons::Icon::Folder, 13.0, Color::from_rgb8(230, 200, 110)),
                 text(group.to_owned())
                     .size(theme::metrics::UI_TEXT)
                     .font(iced::Font::MONOSPACE)
                     .color(p.text_dock),
             ]
-            .spacing(5)
+            .spacing(4)
             .align_y(iced::Center),
         )
         .width(Fill)
         .height(theme::metrics::ROW_HEIGHT)
         .padding([0, 4])
-        .align_y(iced::Center)
+        .style(session_row)
+        .on_press(Message::ToggleSessionGroup(group.to_owned()))
         .into()
     }
 
     /// WindTerm session tree: flat full-width session row with a marker dot.
-    fn session_tree_row<'a>(index: usize, profile: &Session, open: bool) -> Element<'a, Message> {
+    fn session_tree_row<'a>(
+        index: usize,
+        profile: &Session,
+        open: bool,
+        selected: bool,
+    ) -> Element<'a, Message> {
         let p = theme::palette();
         let destination = if profile.user.is_empty() {
             profile.host.clone()
@@ -7092,6 +7592,9 @@ impl App {
             suffix.push_str(" #");
             suffix.push_str(tag);
         }
+        // Selected fill is `selected_row`. `text_dock` on that fill is 8.9:1
+        // (light) and 8.2:1 (dark); `muted` on the same fill is under 4.5:1.
+        let suffix_color = if selected { p.text_dock } else { p.muted };
         let label = row![
             icons::dot(p.magenta, 7.0),
             text(profile.name.clone())
@@ -7101,24 +7604,45 @@ impl App {
             text(suffix)
                 .size(theme::metrics::UI_TEXT)
                 .font(iced::Font::MONOSPACE)
-                .color(p.muted)
+                .color(suffix_color)
                 .wrapping(iced::widget::text::Wrapping::None),
             space::horizontal(),
         ]
         .spacing(6)
         .align_y(iced::Center);
+        // `mouse_area::on_double_click` exists, but MouseArea returns early
+        // when its child captures the press, and a button with `on_press`
+        // captures ButtonPressed. A button without `on_press` is always
+        // Status::Disabled. The second select of this same profile index
+        // within SESSION_DOUBLE_CLICK opens it instead.
+        let row_style = if selected {
+            session_row_selected
+        } else if open {
+            session_row_open
+        } else {
+            session_row
+        };
         let item = button(label)
             .width(Fill)
             .height(theme::metrics::ROW_HEIGHT)
             .padding(iced::Padding::new(0.0).left(24.0).right(4.0))
-            .on_press(Message::Open(index))
-            .style(if open { session_row_open } else { session_row });
-        let edit = button(icons::icon(icons::Icon::Edit, 11.0, p.muted))
+            .on_press(Message::SelectSession(index))
+            .style(row_style);
+        let edit_color = if selected || open {
+            p.text_dock
+        } else {
+            p.muted
+        };
+        let edit = button(icons::icon(icons::Icon::Edit, 12.0, edit_color))
             .height(theme::metrics::ROW_HEIGHT)
             .padding([0, 5])
-            .style(if open { session_row_open } else { session_row })
+            .style(row_style)
             .on_press(Message::EditProfile(index));
-        row![item, edit].width(Fill).spacing(0).into()
+        // Right presses are not captured by the row buttons, so a wrapping
+        // mouse_area receives them (same pattern as file rows).
+        mouse_area(row![item, edit].width(Fill).spacing(0))
+            .on_right_press(Message::OpenSessionContext { index })
+            .into()
     }
 
     fn workspace(&self) -> Element<'_, Message> {
@@ -7720,22 +8244,22 @@ impl App {
                     owner: entry.owner.clone(),
                     group: entry.group.clone(),
                 };
-                if entry.is_dir {
-                    local_list = local_list.push(file_listing_row(
-                        cells,
-                        Message::FilesOpenLocal(entry.path.clone()),
-                        false,
-                        table_width,
-                    ));
+                let selected = self.files.selected_local.as_ref() == Some(&entry.path);
+                let activate = if entry.is_dir {
+                    Message::FilesOpenLocal(entry.path.clone())
                 } else {
-                    let selected = self.files.selected_local.as_ref() == Some(&entry.path);
-                    local_list = local_list.push(file_listing_row(
-                        cells,
-                        Message::FilesSelectLocal(entry.path.clone()),
-                        selected,
-                        table_width,
-                    ));
-                }
+                    Message::FilesSelectLocal(entry.path.clone())
+                };
+                local_list = local_list.push(file_listing_row(
+                    cells,
+                    activate,
+                    selected,
+                    table_width,
+                    Some(Message::OpenLocalFileContext {
+                        path: entry.path.clone(),
+                        is_dir: entry.is_dir,
+                    }),
+                ));
             }
             if self.files.local_visible < self.files.local_entries.len() {
                 local_list = local_list.push(
@@ -7788,27 +8312,27 @@ impl App {
                     owner: entry.owner.clone().unwrap_or_default(),
                     group: entry.group.clone().unwrap_or_default(),
                 };
-                if entry.is_dir {
-                    let path = sftp::join_remote(&self.files.remote_dir, &entry.name);
-                    remote_list = remote_list.push(file_listing_row(
-                        cells,
-                        Message::FilesOpenRemote(path),
-                        false,
-                        table_width,
-                    ));
+                let open_path = sftp::join_remote(&self.files.remote_dir, &entry.name);
+                let selected = self
+                    .files
+                    .selected_remote
+                    .as_ref()
+                    .is_some_and(|selected| selected.name == entry.name);
+                let activate = if entry.is_dir {
+                    Message::FilesOpenRemote(open_path.clone())
                 } else {
-                    let selected = self
-                        .files
-                        .selected_remote
-                        .as_ref()
-                        .is_some_and(|selected| selected.name == entry.name);
-                    remote_list = remote_list.push(file_listing_row(
-                        cells,
-                        Message::FilesSelectRemote(entry.clone()),
-                        selected,
-                        table_width,
-                    ));
-                }
+                    Message::FilesSelectRemote(entry.clone())
+                };
+                remote_list = remote_list.push(file_listing_row(
+                    cells,
+                    activate,
+                    selected,
+                    table_width,
+                    Some(Message::OpenRemoteFileContext {
+                        entry: entry.clone(),
+                        open_path,
+                    }),
+                ));
             }
             if self.files.remote_visible < self.files.remote_entries.len() {
                 remote_list = remote_list.push(
@@ -8505,7 +9029,7 @@ impl App {
                     } else {
                         "Saved through the existing validated, non-secret profile store."
                     })
-                    .color(muted()),
+                    .color(if editing { fg() } else { muted() }),
                     field(
                         "Session name",
                         "Optional; defaults to host",
@@ -8957,7 +9481,7 @@ impl App {
             }
             Dialog::Close(index) => column![
                 text("This disconnects the live SSH/PTY session and closes its Iced workspace tab.")
-                    .color(muted()),
+                    .color(fg()),
                 row![
                     space::horizontal(),
                     action("Cancel", Message::CloseDialog),
@@ -8980,7 +9504,8 @@ impl App {
                         "Paste {} bytes across approximately {} line(s)?",
                         prepared.len(),
                         line_count
-                    )),
+                    ))
+                    .color(fg()),
                     text("Review carefully. Multiline terminal pastes can execute several commands immediately.")
                         .size(13)
                         .color(muted()),
@@ -9032,7 +9557,7 @@ impl App {
                     text(format!(
                         "A file already exists at the {direction} destination."
                     ))
-                    .color(muted()),
+                    .color(fg()),
                     container(
                         column![
                             text("Source").size(11).color(fg()),
@@ -9065,7 +9590,7 @@ impl App {
                     .size(12),
                 text("This action is permanent. Directories are removed only when empty.")
                     .size(12)
-                    .color(muted()),
+                    .color(fg()),
                 row![
                     space::horizontal(),
                     action("Cancel", Message::CloseDialog),
@@ -9083,7 +9608,7 @@ impl App {
                     "This action is permanent and uses the validated SFTP delete path."
                 })
                 .size(12)
-                .color(muted()),
+                .color(fg()),
                 row![
                     space::horizontal(),
                     action("Cancel", Message::CloseDialog),
@@ -9122,7 +9647,7 @@ impl App {
             }
             Dialog::ImportProfiles => column![
                 text("Merge a validated non-secret Inspirum profile JSON file into the current library. Existing profiles are never overwritten by import.")
-                    .color(muted()),
+                    .color(fg()),
                 column![
                     text("Import file").size(13).color(theme::palette().text),
                     text_input("/path/to/profiles.json", &self.import_path)
@@ -9813,6 +10338,30 @@ fn transfer_progress(_: &Theme) -> progress_bar::Style {
             radius: 1.0.into(),
         },
     }
+}
+
+/// Selected session row: palette `selected_row` fill, full width, no border.
+fn session_row_selected(_theme: &Theme, _status: button::Status) -> button::Style {
+    let p = theme::palette();
+    button::Style {
+        background: Some(p.selected_row.into()),
+        text_color: p.text_dock,
+        border: Border::default(),
+        ..button::Style::default()
+    }
+}
+
+const SESSION_DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// True when `now` is at most [`SESSION_DOUBLE_CLICK`] after `previous`.
+fn session_double_click(previous: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(previous) <= SESSION_DOUBLE_CLICK
+}
+
+/// Collapsed groups hide their rows only while the filter is empty.
+/// A query that matched a session (the caller already filtered) shows it.
+fn session_group_hides_rows(collapsed: bool, query: &str) -> bool {
+    collapsed && query.trim().is_empty()
 }
 
 #[cfg(test)]
@@ -12507,5 +13056,768 @@ mod tests {
         assert_eq!(label, "2026/11/22 00:01");
         assert_eq!(key_year, 2026);
         assert!(label.starts_with(&format!("{key_year:04}/")));
+    }
+
+    fn session_click_app() -> App {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-session-click-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.profiles = vec![
+            Session {
+                name: "alpha".into(),
+                host: "alpha.example.invalid".into(),
+                ..Session::default()
+            },
+            Session {
+                name: "beta".into(),
+                host: "beta.example.invalid".into(),
+                ..Session::default()
+            },
+        ];
+        app.refresh_profile_matches();
+        app
+    }
+
+    #[test]
+    fn session_single_click_selects_and_opens_no_tab() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::SelectSession(0));
+        assert_eq!(app.selected_profile, Some(0));
+        assert_eq!(
+            app.selected_profile_key.as_deref(),
+            Some(session_profile_key(&app.profiles[0]).as_str())
+        );
+        assert!(app.tabs.is_empty());
+
+        // A click on a different row selects it and still opens nothing.
+        let _ = app.update(Message::SelectSession(1));
+        assert_eq!(app.selected_profile, Some(1));
+        assert!(app.tabs.is_empty());
+    }
+
+    #[test]
+    fn session_second_click_within_window_opens_exactly_one_tab() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::SelectSession(1));
+        assert!(app.tabs.is_empty());
+
+        let _ = app.update(Message::SelectSession(1));
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.selected_profile, Some(1));
+        // The opening click consumes the gesture.
+        assert!(app.session_click.is_none());
+
+        let _ = app.update(Message::SelectSession(1));
+        assert_eq!(
+            app.tabs.len(),
+            1,
+            "a follow-up click must not open a second tab"
+        );
+    }
+
+    fn remote_context_labels(is_dir: bool) -> Vec<&'static str> {
+        file_context_entries(&FileContextMenu {
+            side: FileContextSide::Remote,
+            is_dir,
+            open_path: "/srv/item".into(),
+            local_path: None,
+            anchor: iced::Point::ORIGIN,
+        })
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect()
+    }
+
+    #[test]
+    fn remote_context_menu_selects_the_row_and_escape_closes_it() {
+        let mut app = app_with_one_pane_and_auxiliary_shell("filer-context-select");
+        let remote_dir = app.files.remote_dir.clone();
+        let file = sftp::RemoteEntry::new("notes.txt", false, Some(12));
+        app.files.remote_entries = vec![file.clone()];
+        let _ = app.update(Message::PointerMoved(iced::Point::new(48.0, 64.0)));
+        let _ = app.update(Message::OpenRemoteFileContext {
+            entry: file.clone(),
+            open_path: "/srv/notes.txt".into(),
+        });
+        assert!(app.context_menu.is_some(), "right-click opens the menu");
+        assert_eq!(
+            app.context_menu.as_ref().map(ContextMenu::anchor),
+            Some(iced::Point::new(48.0, 64.0))
+        );
+        assert_eq!(
+            app.files
+                .selected_remote
+                .as_ref()
+                .map(|entry| entry.name.as_str()),
+            Some("notes.txt")
+        );
+        assert_eq!(
+            remote_context_labels(false),
+            vec![
+                "Download",
+                "Edit",
+                "New Folder",
+                "Rename",
+                "Delete",
+                "Refresh",
+            ]
+        );
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(app.context_menu.is_none(), "Escape closes the context menu");
+        assert!(
+            app.pty_write_log.is_empty(),
+            "Escape must not reach the terminal"
+        );
+
+        let dir = sftp::RemoteEntry::new("src", true, None);
+        let _ = app.update(Message::OpenRemoteFileContext {
+            entry: dir,
+            open_path: "/srv/src".into(),
+        });
+        assert_eq!(
+            app.files.remote_dir, remote_dir,
+            "right-click must not navigate"
+        );
+        assert!(
+            app.files
+                .selected_remote
+                .as_ref()
+                .is_some_and(|entry| entry.name == "src" && entry.is_dir)
+        );
+        assert_eq!(
+            remote_context_labels(true),
+            vec!["Open", "New Folder", "Rename", "Delete", "Refresh"]
+        );
+        let open = file_context_action_message(
+            app.context_menu
+                .as_ref()
+                .and_then(ContextMenu::file)
+                .expect("menu"),
+            FileContextAction::Open,
+        );
+        assert!(matches!(open, Some(Message::FilesOpenRemote(path)) if path == "/srv/src"));
+    }
+
+    #[test]
+    fn remote_context_menu_blocks_terminal_keys_and_chords() {
+        let (mut app, first_id, _second_id) = arm_synced_pair("filer-context-keys");
+        let focus_mode = app.focus_mode;
+        let _ = app.update(Message::OpenRemoteFileContext {
+            entry: sftp::RemoteEntry::new("notes.txt", false, Some(4)),
+            open_path: "/srv/notes.txt".into(),
+        });
+        assert!(app.context_menu.is_some());
+        app.pty_write_log.clear();
+        let status = app.status.clone();
+        let _ = app.update(pressed_char("x"));
+        let _ = app.update(pressed_key(
+            keyboard::Key::Character("x".into()),
+            keyboard::Modifiers::default(),
+        ));
+        let _ = app.update(Message::KeyChord(KeyChord::FocusMode));
+        let _ = app.update(Message::TerminalImeCursor(
+            first_id,
+            iced::Rectangle::default(),
+        ));
+        let _ = app.update(Message::TerminalImeCommit(first_id, "x".into()));
+        let _ = app.update(Message::RequestPaste);
+        assert!(
+            app.pty_write_log.is_empty(),
+            "open context menu must not write to a pane, log={:?}",
+            app.pty_write_log
+        );
+        assert_eq!(app.focus_mode, focus_mode, "chords must not run");
+        assert_eq!(app.status, status, "paste must not start");
+        assert!(
+            app.context_menu.is_some(),
+            "non-Escape keys leave the menu open"
+        );
+        assert!(app.ime_cursor.is_none(), "IME target must stay disabled");
+
+        app.context_menu = None;
+        app.pty_write_log.clear();
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Enter),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(
+            app.pty_write_log.iter().any(|(id, _)| *id == first_id),
+            "recorder must see Enter once the menu is gone, log={:?}",
+            app.pty_write_log
+        );
+    }
+
+    #[test]
+    fn session_click_outside_window_does_not_open() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::SelectSession(0));
+        let key = session_profile_key(&app.profiles[0]);
+        app.session_click = Instant::now()
+            .checked_sub(Duration::from_millis(401))
+            .map(|at| (at, key));
+        let _ = app.update(Message::SelectSession(0));
+        assert!(app.tabs.is_empty());
+        assert_eq!(app.selected_profile, Some(0));
+    }
+
+    #[test]
+    fn session_double_click_window_is_four_hundred_milliseconds() {
+        let start = Instant::now();
+        assert!(session_double_click(start, start));
+        assert!(session_double_click(
+            start,
+            start + Duration::from_millis(400)
+        ));
+        assert!(!session_double_click(
+            start,
+            start + Duration::from_millis(401)
+        ));
+    }
+
+    #[test]
+    fn session_selection_clears_when_the_filter_changes() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::SelectSession(0));
+        assert_eq!(app.selected_profile, Some(0));
+
+        let _ = app.update(Message::Search("beta".into()));
+        assert_eq!(app.selected_profile, None);
+        assert!(app.selected_profile_key.is_none());
+        assert!(app.session_click.is_none());
+        assert_eq!(app.profile_matches, vec![1]);
+
+        // A rebuilt profile list must not leave the old index selected.
+        let _ = app.update(Message::Search(String::new()));
+        let _ = app.update(Message::SelectSession(1));
+        app.profiles.insert(
+            0,
+            Session {
+                name: "ahead".into(),
+                host: "ahead.example.invalid".into(),
+                ..Session::default()
+            },
+        );
+        app.refresh_profile_matches();
+        assert_eq!(app.selected_profile, None);
+        assert!(app.selected_profile_key.is_none());
+    }
+
+    #[test]
+    fn collapsing_a_session_group_hides_its_rows_until_a_filter_matches() {
+        assert!(session_group_hides_rows(true, ""));
+        assert!(session_group_hides_rows(true, "   "));
+        assert!(!session_group_hides_rows(false, ""));
+        assert!(!session_group_hides_rows(true, "beta"));
+
+        let mut app = session_click_app();
+        app.profiles[0].folder = "Work".into();
+        app.refresh_profile_matches();
+        let _ = app.update(Message::ToggleSessionGroup("Work".into()));
+        assert!(app.collapsed_groups.contains("Work"));
+        assert!(session_group_hides_rows(
+            app.collapsed_groups.contains("Work"),
+            &app.query,
+        ));
+
+        // The collapse flag stays, but a matching filter shows the rows.
+        let _ = app.update(Message::Search("alpha".into()));
+        assert!(app.collapsed_groups.contains("Work"));
+        assert!(!session_group_hides_rows(
+            app.collapsed_groups.contains("Work"),
+            &app.query,
+        ));
+
+        let _ = app.update(Message::ToggleSessionGroup("Work".into()));
+        assert!(!app.collapsed_groups.contains("Work"));
+        assert!(!session_group_hides_rows(false, ""));
+    }
+
+    #[test]
+    fn remote_context_menu_delete_opens_confirmation_without_deleting() {
+        let mut app = app_with_one_pane_and_auxiliary_shell("filer-context-delete");
+        app.files.remote_dir = "/srv".into();
+        let entry = sftp::RemoteEntry::new("notes.txt", false, Some(4));
+        app.files.remote_entries = vec![entry.clone()];
+        let _ = app.update(Message::OpenRemoteFileContext {
+            entry: entry.clone(),
+            open_path: "/srv/notes.txt".into(),
+        });
+        let _ = app.update(Message::FileContextChoose(FileContextAction::Delete));
+        assert!(
+            app.context_menu.is_none(),
+            "choosing an item closes the menu"
+        );
+        assert!(
+            matches!(
+                &app.dialog,
+                Some(Dialog::FileDeleteRemote {
+                    path,
+                    directory,
+                    ..
+                }) if path == "/srv/notes.txt" && !*directory
+            ),
+            "Delete must open the existing confirmation, dialog={:?}",
+            app.dialog.as_ref().map(|dialog| match dialog {
+                Dialog::FileDeleteRemote {
+                    path, directory, ..
+                } => {
+                    format!("delete {path} dir={directory}")
+                }
+                _ => "other".into(),
+            })
+        );
+        assert_eq!(app.files.remote_entries, vec![entry]);
+    }
+
+    #[test]
+    fn file_context_anchor_stays_inside_the_window() {
+        let window = iced::Size::new(400.0, 300.0);
+        let height = file_context_menu_height(2);
+        let clamped = clamp_file_context_anchor(iced::Point::new(390.0, 290.0), window, height);
+        assert_eq!(clamped.x, window.width - FILE_CONTEXT_MENU_WIDTH);
+        assert_eq!(clamped.y, window.height - height);
+        let inside = clamp_file_context_anchor(iced::Point::new(10.0, 20.0), window, height);
+        assert_eq!(inside.x, 10.0);
+        assert_eq!(inside.y, 20.0);
+    }
+
+    fn local_context_labels(is_dir: bool) -> Vec<&'static str> {
+        file_context_entries(&FileContextMenu {
+            side: FileContextSide::Local,
+            is_dir,
+            open_path: "/tmp/item".into(),
+            local_path: None,
+            anchor: iced::Point::ORIGIN,
+        })
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect()
+    }
+
+    #[test]
+    fn local_context_menu_selects_the_row_and_escape_closes_it() {
+        let mut app = app_with_one_pane_and_auxiliary_shell("explorer-context-select");
+        let local_dir = app.files.local_dir.clone();
+        let path = std::path::PathBuf::from("/tmp/notes.txt");
+        let _ = app.update(Message::PointerMoved(iced::Point::new(30.0, 40.0)));
+        let _ = app.update(Message::OpenLocalFileContext {
+            path: path.clone(),
+            is_dir: false,
+        });
+        assert!(app.context_menu.is_some(), "right-click opens the menu");
+        assert_eq!(
+            app.context_menu
+                .as_ref()
+                .and_then(ContextMenu::file)
+                .map(|menu| (menu.side, menu.anchor.x, menu.anchor.y)),
+            Some((FileContextSide::Local, 30.0, 40.0))
+        );
+        assert_eq!(app.files.selected_local.as_deref(), Some(path.as_path()));
+        assert_eq!(
+            local_context_labels(false),
+            vec!["Upload", "New Folder", "Rename", "Delete", "Refresh"]
+        );
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(app.context_menu.is_none(), "Escape closes the context menu");
+        assert!(
+            app.pty_write_log.is_empty(),
+            "Escape must not reach the terminal"
+        );
+
+        let dir = std::path::PathBuf::from("/tmp/src");
+        let _ = app.update(Message::OpenLocalFileContext {
+            path: dir.clone(),
+            is_dir: true,
+        });
+        assert_eq!(
+            app.files.local_dir, local_dir,
+            "right-click must not navigate"
+        );
+        assert_eq!(app.files.selected_local.as_deref(), Some(dir.as_path()));
+        assert_eq!(
+            local_context_labels(true),
+            vec!["Open", "New Folder", "Rename", "Delete", "Refresh"]
+        );
+        let open = file_context_action_message(
+            app.context_menu
+                .as_ref()
+                .and_then(ContextMenu::file)
+                .expect("menu"),
+            FileContextAction::Open,
+        );
+        assert!(matches!(
+            open,
+            Some(Message::FilesOpenLocal(path)) if path == dir
+        ));
+    }
+
+    #[test]
+    fn directory_context_menu_omits_transfer_actions() {
+        let remote_file = remote_context_labels(false);
+        assert_eq!(
+            remote_file,
+            vec![
+                "Download",
+                "Edit",
+                "New Folder",
+                "Rename",
+                "Delete",
+                "Refresh",
+            ]
+        );
+        let remote_dir = remote_context_labels(true);
+        assert_eq!(
+            remote_dir,
+            vec!["Open", "New Folder", "Rename", "Delete", "Refresh"]
+        );
+        assert!(!remote_dir.contains(&"Download"));
+        assert_eq!(
+            file_context_menu_height(remote_dir.len()),
+            remote_dir.len() as f32 * FILE_CONTEXT_ITEM_HEIGHT + 2.0
+        );
+        assert!(
+            file_context_menu_height(remote_dir.len())
+                < file_context_menu_height(remote_file.len())
+        );
+
+        let local_file = local_context_labels(false);
+        assert_eq!(
+            local_file,
+            vec!["Upload", "New Folder", "Rename", "Delete", "Refresh"]
+        );
+        let local_dir = local_context_labels(true);
+        assert_eq!(
+            local_dir,
+            vec!["Open", "New Folder", "Rename", "Delete", "Refresh"]
+        );
+        assert!(!local_dir.contains(&"Upload"));
+        assert_eq!(
+            file_context_menu_height(local_dir.len()),
+            local_dir.len() as f32 * FILE_CONTEXT_ITEM_HEIGHT + 2.0
+        );
+        // Open replaces Upload, so the local popup stays the same height.
+        // Remote drops Download and Edit and adds only Open, so it shrinks.
+        assert_eq!(
+            file_context_menu_height(local_dir.len()),
+            file_context_menu_height(local_file.len())
+        );
+    }
+
+    #[test]
+    fn local_context_menu_blocks_terminal_keys_and_chords() {
+        let (mut app, first_id, _second_id) = arm_synced_pair("explorer-context-keys");
+        let focus_mode = app.focus_mode;
+        let _ = app.update(Message::OpenLocalFileContext {
+            path: std::path::PathBuf::from("/tmp/notes.txt"),
+            is_dir: false,
+        });
+        assert!(app.context_menu.is_some());
+        app.pty_write_log.clear();
+        let status = app.status.clone();
+        let _ = app.update(pressed_char("x"));
+        let _ = app.update(Message::KeyChord(KeyChord::FocusMode));
+        let _ = app.update(Message::TerminalImeCommit(first_id, "x".into()));
+        let _ = app.update(Message::RequestPaste);
+        assert!(
+            app.pty_write_log.is_empty(),
+            "open context menu must not write to a pane, log={:?}",
+            app.pty_write_log
+        );
+        assert_eq!(app.focus_mode, focus_mode, "chords must not run");
+        assert_eq!(app.status, status, "paste must not start");
+        assert!(
+            app.context_menu.is_some(),
+            "non-Escape keys leave the menu open"
+        );
+    }
+
+    #[test]
+    fn local_context_menu_delete_opens_confirmation_without_deleting() {
+        let mut app = app_with_one_pane_and_auxiliary_shell("explorer-context-delete");
+        let path = std::path::PathBuf::from("/tmp/notes.txt");
+        app.files.local_entries = vec![listing_entry("notes.txt", false, Some(4), None)];
+        app.files.local_entries[0].path = path.clone();
+        let _ = app.update(Message::OpenLocalFileContext {
+            path: path.clone(),
+            is_dir: false,
+        });
+        let _ = app.update(Message::FileContextChoose(FileContextAction::Delete));
+        assert!(
+            app.context_menu.is_none(),
+            "choosing an item closes the menu"
+        );
+        assert!(
+            matches!(&app.dialog, Some(Dialog::FileDeleteLocal(pending)) if pending == &path),
+            "Delete must open the existing confirmation"
+        );
+        assert_eq!(app.files.local_entries.len(), 1);
+        assert_eq!(app.files.local_entries[0].path, path);
+    }
+
+    #[test]
+    fn session_right_click_selects_opens_menu_and_opens_no_tab() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::PointerMoved(iced::Point::new(20.0, 36.0)));
+        let _ = app.update(Message::OpenSessionContext { index: 1 });
+        let key = session_profile_key(&app.profiles[1]);
+        assert_eq!(app.selected_profile, Some(1));
+        assert_eq!(app.selected_profile_key.as_deref(), Some(key.as_str()));
+        assert!(
+            matches!(
+                &app.context_menu,
+                Some(ContextMenu::Session {
+                    index: 1,
+                    key: stored,
+                    anchor,
+                }) if stored == &key && anchor.x == 20.0 && anchor.y == 36.0
+            ),
+            "right-click opens the session menu at the pointer"
+        );
+        assert!(app.tabs.is_empty(), "right-click must not open a tab");
+        assert!(
+            app.session_click.is_none(),
+            "right-click must not arm the double-click timer"
+        );
+        let labels: Vec<_> = session_context_entries()
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect();
+        assert_eq!(labels, vec!["Open", "Edit", "New Session", "Import"]);
+
+        // A second right-click, immediately, still opens nothing.
+        let _ = app.update(Message::OpenSessionContext { index: 1 });
+        assert!(app.tabs.is_empty());
+        assert!(app.context_menu.is_some());
+        assert!(app.session_click.is_none());
+
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(app.context_menu.is_none(), "Escape closes the context menu");
+        assert!(app.tabs.is_empty());
+    }
+
+    #[test]
+    fn session_right_click_clears_a_pending_double_click() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::SelectSession(1));
+        assert!(app.session_click.is_some());
+        assert!(app.tabs.is_empty());
+        let _ = app.update(Message::OpenSessionContext { index: 1 });
+        assert!(
+            app.tabs.is_empty(),
+            "right-click must not open even inside the double-click window"
+        );
+        assert!(
+            app.session_click.is_none(),
+            "right-click must clear the pending double-click"
+        );
+        assert!(matches!(
+            app.context_menu,
+            Some(ContextMenu::Session { index: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn session_left_a_right_b_left_b_does_not_open() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::SelectSession(0));
+        let _ = app.update(Message::OpenSessionContext { index: 1 });
+        let _ = app.update(Message::FileContextDismiss);
+        assert!(app.context_menu.is_none());
+        let _ = app.update(Message::SelectSession(1));
+        assert!(app.tabs.is_empty(), "B's only left click must not open");
+        let key_b = session_profile_key(&app.profiles[1]);
+        assert!(
+            app.session_click
+                .as_ref()
+                .is_some_and(|(_, key)| key == &key_b),
+            "the pending click must be armed for B"
+        );
+        let _ = app.update(Message::SelectSession(1));
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn session_left_a_left_b_does_not_open() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::SelectSession(0));
+        let _ = app.update(Message::SelectSession(1));
+        assert!(app.tabs.is_empty());
+        let key_b = session_profile_key(&app.profiles[1]);
+        assert!(
+            app.session_click
+                .as_ref()
+                .is_some_and(|(_, key)| key == &key_b)
+        );
+    }
+
+    #[test]
+    fn context_menu_anchor_uses_pointer_message_delivered_before_press() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::PointerMoved(iced::Point::new(400.0, 300.0)));
+        let _ = app.update(Message::PointerMoved(iced::Point::new(12.0, 18.0)));
+        let _ = app.update(Message::OpenSessionContext { index: 0 });
+        assert_eq!(
+            app.context_menu.as_ref().map(ContextMenu::anchor),
+            Some(iced::Point::new(12.0, 18.0))
+        );
+
+        let mut app = app_with_one_pane_and_auxiliary_shell("filer-context-anchor-order");
+        let file = sftp::RemoteEntry::new("notes.txt", false, Some(12));
+        app.files.remote_entries = vec![file.clone()];
+        let _ = app.update(Message::PointerMoved(iced::Point::new(400.0, 300.0)));
+        let _ = app.update(Message::PointerMoved(iced::Point::new(22.0, 28.0)));
+        let _ = app.update(Message::OpenRemoteFileContext {
+            entry: file,
+            open_path: "/srv/notes.txt".into(),
+        });
+        assert_eq!(
+            app.context_menu.as_ref().map(ContextMenu::anchor),
+            Some(iced::Point::new(22.0, 28.0))
+        );
+    }
+
+    #[test]
+    fn session_context_open_opens_exactly_one_tab() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::OpenSessionContext { index: 0 });
+        assert!(app.tabs.is_empty());
+        let _ = app.update(Message::SessionContextChoose(SessionContextAction::Open));
+        assert_eq!(app.tabs.len(), 1);
+        assert!(app.context_menu.is_none());
+        let _ = app.update(Message::SessionContextChoose(SessionContextAction::Open));
+        assert_eq!(
+            app.tabs.len(),
+            1,
+            "a second choose with no menu opens nothing"
+        );
+    }
+
+    #[test]
+    fn session_context_edit_opens_connection_dialog_for_that_profile() {
+        let mut app = session_click_app();
+        let key = session_profile_key(&app.profiles[1]);
+        let _ = app.update(Message::OpenSessionContext { index: 1 });
+        let _ = app.update(Message::SessionContextChoose(SessionContextAction::Edit));
+        assert!(matches!(app.dialog, Some(Dialog::Connection)));
+        assert_eq!(app.editing_profile.as_deref(), Some(key.as_str()));
+        assert!(app.tabs.is_empty());
+        assert!(app.context_menu.is_none());
+    }
+
+    #[test]
+    fn session_context_new_and_import_dispatch_the_session_menu_commands() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::OpenSessionContext { index: 0 });
+        let _ = app.update(Message::SessionContextChoose(
+            SessionContextAction::NewSession,
+        ));
+        assert!(matches!(app.dialog, Some(Dialog::Connection)));
+        assert!(
+            app.editing_profile.is_none(),
+            "New Session is a new connection, not an edit"
+        );
+        assert!(app.tabs.is_empty());
+        assert!(app.context_menu.is_none());
+
+        app.dialog = None;
+        let _ = app.update(Message::OpenSessionContext { index: 0 });
+        let _ = app.update(Message::SessionContextChoose(SessionContextAction::Import));
+        assert!(matches!(app.dialog, Some(Dialog::ImportProfiles)));
+        assert!(app.context_menu.is_none());
+    }
+
+    #[test]
+    fn session_context_stale_key_does_nothing() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::OpenSessionContext { index: 0 });
+        app.profiles[0].name = "renamed".into();
+        let _ = app.update(Message::SessionContextChoose(SessionContextAction::Open));
+        assert!(
+            app.context_menu.is_none(),
+            "a stale choice still closes the menu"
+        );
+        assert!(app.tabs.is_empty(), "a stale key must not open a tab");
+        assert!(app.dialog.is_none());
+
+        let _ = app.update(Message::OpenSessionContext { index: 1 });
+        app.profiles.remove(1);
+        let _ = app.update(Message::SessionContextChoose(SessionContextAction::Edit));
+        assert!(app.dialog.is_none());
+        assert!(app.editing_profile.is_none());
+        assert!(app.context_menu.is_none());
+
+        let _ = app.update(Message::OpenSessionContext { index: 0 });
+        app.profiles[0].name = "moved".into();
+        let _ = app.update(Message::SessionContextChoose(
+            SessionContextAction::NewSession,
+        ));
+        assert!(
+            app.dialog.is_none(),
+            "a stale menu must not dispatch New Session"
+        );
+        assert!(app.tabs.is_empty());
+    }
+
+    #[test]
+    fn session_context_menu_blocks_terminal_keys_and_chords() {
+        let (mut app, first_id, _second_id) = arm_synced_pair("session-context-keys");
+        app.profiles = vec![Session {
+            name: "alpha".into(),
+            host: "alpha.example.invalid".into(),
+            ..Session::default()
+        }];
+        app.refresh_profile_matches();
+        let focus_mode = app.focus_mode;
+        let _ = app.update(Message::OpenSessionContext { index: 0 });
+        assert!(app.context_menu.is_some());
+        app.pty_write_log.clear();
+        let status = app.status.clone();
+        let _ = app.update(pressed_char("x"));
+        let _ = app.update(pressed_key(
+            keyboard::Key::Character("x".into()),
+            keyboard::Modifiers::default(),
+        ));
+        let _ = app.update(Message::KeyChord(KeyChord::FocusMode));
+        let _ = app.update(Message::TerminalImeCursor(
+            first_id,
+            iced::Rectangle::default(),
+        ));
+        let _ = app.update(Message::TerminalImeCommit(first_id, "x".into()));
+        let _ = app.update(Message::RequestPaste);
+        assert!(
+            app.pty_write_log.is_empty(),
+            "open context menu must not write to a pane, log={:?}",
+            app.pty_write_log
+        );
+        assert_eq!(app.focus_mode, focus_mode, "chords must not run");
+        assert_eq!(app.status, status, "paste must not start");
+        assert!(
+            app.context_menu.is_some(),
+            "non-Escape keys leave the menu open"
+        );
+        assert!(app.ime_cursor.is_none(), "IME target must stay disabled");
+
+        app.context_menu = None;
+        app.pty_write_log.clear();
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Enter),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(
+            app.pty_write_log.iter().any(|(id, _)| *id == first_id),
+            "recorder must see Enter once the menu is gone, log={:?}",
+            app.pty_write_log
+        );
     }
 }

@@ -136,6 +136,7 @@ async def monitored_shell(
                         "echo:AFTER_MENU",
                         "echo:AFTER_SENDER_ESCAPE",
                         "echo:AFTER_GEAR",
+                        "echo:AFTER_CONTEXT_MENU",
                         "echo:AFTER_EXIT_CANCEL",
                     ):
                         events.write(answer)
@@ -1017,6 +1018,44 @@ def diff(first: Path, second: Path, env: dict[str, str]) -> int:
         ) from exc
 
 
+def band_changed_pixels(first: Path, second: Path, box) -> int:
+    """Pixels in ``box`` whose RGB differs by more than 24 on any channel.
+
+    ``_read_png`` returns ``(width, height, channels, rows)``. Each row is
+    ``width * channels`` bytes (3 for RGB, 4 for RGBA). Alpha is ignored.
+    """
+    width1, height1, channels1, rows1 = _read_png(first)
+    width2, height2, channels2, rows2 = _read_png(second)
+    if (width1, height1) != (width2, height2):
+        raise RuntimeError(
+            f"band pixel compare size mismatch: {first.name} {width1}x{height1} "
+            f"vs {second.name} {width2}x{height2}"
+        )
+    left, top, right, bottom = (int(edge) for edge in box)
+    if (
+        left < 0 or top < 0 or right > width1 or bottom > height1
+        or right <= left or bottom <= top
+    ):
+        raise RuntimeError(
+            f"band pixel compare box {box} is outside {width1}x{height1} "
+            f"({first.name} vs {second.name})"
+        )
+    changed = 0
+    for y in range(top, bottom):
+        row1 = rows1[y]
+        row2 = rows2[y]
+        for x in range(left, right):
+            i1 = x * channels1
+            i2 = x * channels2
+            if (
+                abs(row1[i1] - row2[i2]) > 24
+                or abs(row1[i1 + 1] - row2[i2 + 1]) > 24
+                or abs(row1[i1 + 2] - row2[i2 + 2]) > 24
+            ):
+                changed += 1
+    return changed
+
+
 async def locate_rendered_label(
     window: str, path: Path, label: str, *, env: dict[str, str], timeout: float = 22,
     region=None,
@@ -1041,11 +1080,13 @@ async def locate_rendered_label(
 
 async def click_label(
     window: str, shot_path: Path, label: str, env: dict[str, str], *,
-    region=None, timeout: float = 22, settle: float = .5,
+    region=None, timeout: float = 22, settle: float = .5, clicks: int = 1,
 ):
     """Screenshot until ``label`` is rendered (optionally inside ``region``),
     click its centre with a native pointer event and return its bounds.
 
+    ``clicks`` is the number of left-button clicks. Session rows open on a
+    double click (``clicks=2``); every other caller keeps the single click.
     Screenshot and OCR run off the event loop (the fixture SSH server shares
     it), exactly like ``locate_rendered_label``.
     """
@@ -1062,9 +1103,12 @@ async def click_label(
             if time.monotonic() >= deadline:
                 raise
             await asyncio.sleep(.5)
+    click = ["click", "1"] if clicks == 1 else [
+        "click", "--repeat", str(clicks), "--delay", "120", "1",
+    ]
     command(
         "xdotool", "mousemove", "--window", window,
-        *map(str, center(bounds)), "click", "1", env=env,
+        *map(str, center(bounds)), *click, env=env,
     )
     await asyncio.sleep(settle)
     return bounds
@@ -1371,8 +1415,12 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
     def key(*keys: str) -> None:
         command("xdotool", "windowfocus", window, "key", "--clearmodifiers", *keys, env=env)
 
-    def click(x: int, y: int) -> None:
-        command("xdotool", "mousemove", "--window", window, str(x), str(y), "click", "1", env=env)
+    def click(x: int, y: int, clicks: int = 1) -> None:
+        args = ["xdotool", "mousemove", "--window", window, str(x), str(y), "click"]
+        if clicks != 1:
+            args.extend(["--repeat", str(clicks), "--delay", "120"])
+        args.append("1")
+        command(*args, env=env)
 
     def shot(name: str) -> None:
         path = tour_dir / name
@@ -1427,14 +1475,14 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
     # Steps 4-5 are mandatory: a real SSH session must start.
     if "SESSION_STARTED" not in log_text():
         for y in (630, 653, 612, 676, 699):
-            click(200, y)
+            click(200, y, clicks=2)
             await asyncio.sleep(1.5)
             if "SESSION_STARTED" in log_text():
                 break
             key("Escape")
     if "SESSION_STARTED" not in log_text():
         print(
-            "tour: FAILED clicking the saved profile never started a real SSH session. "
+            "tour: FAILED double-clicking the saved profile never started a real SSH session. "
             "SSH events: " + repr(log_text()[-800:])
             + "; application log tail: " + app_log.read_text(encoding="utf-8")[-1800:],
             flush=True,
@@ -1660,20 +1708,87 @@ async def main() -> int:
 
                 # Saved sessions are listed in the bottom Session dock panel
                 # (Filter row, 'Sessions' group row, then one flat 23px row per
-                # profile). Locate the profile name by OCR and single-click
+                # profile). Locate the profile name by OCR and double-click
                 # it; fall back to bounded points in the session list rows,
                 # never destructive dialogs. Authentication, rather than a
                 # screenshot delta alone, proves the click worked.
+                # A single click selects the saved profile and must not open
+                # it. The product's double-click window is 400 ms; wait longer
+                # so the double click below cannot combine with this one.
+                # The tour path stays coordinate-driven and is not changed.
+                # count() is defined later in this function, so read the log.
+                # connected-session-list.png is taken inside click_label before
+                # the click, with the pointer not on the row. Assumption: the
+                # pointer starts wherever Xvfb put it; park it in the terminal
+                # pane so the before-shot is not a hover fill.
+                command(
+                    "xdotool", "mousemove", "--window", window, "640", "280", env=env,
+                )
+                await asyncio.sleep(0.3)
+                try:
+                    session_row = await click_label(
+                        window, destination / "connected-session-list.png",
+                        "CI connected fixture", env, timeout=8, settle=0,
+                        clicks=1,
+                    )
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        "single click could not find session row "
+                        "'CI connected fixture' before the opening double click"
+                    ) from exc
+                await asyncio.sleep(1.2 * TIME_SCALE)
+                started_before_open = events.path.read_text(encoding="utf-8").splitlines().count(
+                    "SESSION_STARTED"
+                )
+                if started_before_open != 0:
+                    raise RuntimeError(
+                        "single click on 'CI connected fixture' opened a session "
+                        f"({started_before_open} SESSION_STARTED) before the double click"
+                    )
+                # Hover fill also changes pixels. Move off the row without
+                # clicking, then measure the selected-row fill in the row band.
+                command(
+                    "xdotool", "mousemove", "--window", window, "640", "280", env=env,
+                )
+                await asyncio.sleep(0.5 * TIME_SCALE)
+                list_shot = destination / "connected-session-list.png"
+                selected_shot = destination / "connected-session-selected.png"
+                await asyncio.to_thread(screenshot, window, selected_shot, env)
+                win_w, _ = window_size(window, env)
+                band = (
+                    8,
+                    session_row[1] - 4,
+                    min(win_w, session_row[2] + 120),
+                    session_row[3] + 4,
+                )
+                highlight = await asyncio.to_thread(
+                    band_changed_pixels, list_shot, selected_shot, band,
+                )
+                if highlight < 150:
+                    raise RuntimeError(
+                        "single click did not highlight the session row "
+                        f"({highlight} pixels changed in band {band}; "
+                        f"{list_shot.name} vs {selected_shot.name})"
+                    )
+                print(
+                    f"single click highlighted the session row: {highlight} pixels "
+                    f"in band {band}",
+                    flush=True,
+                )
                 try:
                     await click_label(
                         window, destination / "connected-session-list.png",
                         "CI connected fixture", env, timeout=8, settle=1.5,
+                        clicks=2,
                     )
                 except RuntimeError:
                     pass
                 if "SESSION_STARTED" not in events.path.read_text(encoding="utf-8"):
                     for y in (630, 653, 612, 676, 699):
-                        command("xdotool", "mousemove", "--window", window, "200", str(y), "click", "1", env=env)
+                        command(
+                            "xdotool", "mousemove", "--window", window, "200", str(y),
+                            "click", "--repeat", "2", "--delay", "120", "1", env=env,
+                        )
                         await asyncio.sleep(1.5)
                         if "SESSION_STARTED" in events.path.read_text(encoding="utf-8"):
                             break
@@ -1682,7 +1797,7 @@ async def main() -> int:
                         command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
                 if "SESSION_STARTED" not in events.path.read_text(encoding="utf-8"):
                     raise RuntimeError(
-                        "clicking the saved profile never started a real SSH session. "
+                        "double-clicking the saved profile never started a real SSH session. "
                         "SSH events: " + repr(events.path.read_text(encoding="utf-8")[-800:])
                         + "; application log tail: " + app_log.read_text(encoding="utf-8")[-1800:]
                     )
@@ -2199,6 +2314,298 @@ async def main() -> int:
                         "Name header click started an SFTP listing: "
                         f"SFTP_LIST_READY {listings_at_sort} -> {listings_after_sort}"
                     )
+
+                # Filer right-click menu on the remote file row. Rows are name
+                # ascending again (111, then 444). Do not choose Rename or
+                # Delete. The popup is clamped inside the window (200px wide,
+                # 6*24+2 px for a remote file), so a click near the bottom
+                # opens upward rather than down from the pointer.
+                # No-pause gesture is the regression case for a popup anchored
+                # at a stale pointer. Park at the top right of the terminal
+                # pane, far from the bottom-dock row on the x axis, let that
+                # become the last known pointer, then move and right-press in
+                # one command with no sleep between motion and the press.
+                parked_x, parked_y = 1100, 200
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    str(parked_x), str(parked_y), env=env,
+                )
+                await asyncio.sleep(0.6 * TIME_SCALE)
+                context_row = await locate_rendered_label(
+                    window,
+                    destination / "connected-files-context-row.png",
+                    download_name,
+                    env=env,
+                    region=body,
+                    timeout=20,
+                )
+                click_x, click_y = center(context_row)
+                width, height = window_size(window, env)
+                # Pointer box, clamped to the window. The menu may sit above
+                # the click when the clamp pushes the anchor up. Computed
+                # before the press: a popup opened at the parked point is
+                # about 200px wide and 146px tall, so it cannot put Refresh
+                # or New Folder in this box when the parked point is far away.
+                menu_region = (
+                    max(0, click_x - 10),
+                    max(0, click_y - 240),
+                    min(width, click_x + 260),
+                    min(height, click_y + 240),
+                )
+                if menu_region[2] <= menu_region[0] or menu_region[3] <= menu_region[1]:
+                    raise RuntimeError(
+                        "Filer context-menu search box collapsed from click "
+                        f"({click_x}, {click_y}) in {width}x{height}: {menu_region}"
+                    )
+                parked_x_gap = (
+                    menu_region[0] - parked_x if parked_x < menu_region[0]
+                    else parked_x - menu_region[2] if parked_x > menu_region[2]
+                    else 0
+                )
+                parked_y_gap = (
+                    menu_region[1] - parked_y if parked_y < menu_region[1]
+                    else parked_y - menu_region[3] if parked_y > menu_region[3]
+                    else 0
+                )
+                if parked_x_gap < 300 and parked_y_gap < 300:
+                    raise RuntimeError(
+                        "parked pointer "
+                        f"({parked_x}, {parked_y}) is not outside menu_region "
+                        f"{menu_region} by at least 300 px on either axis "
+                        f"(x gap {parked_x_gap}, y gap {parked_y_gap}; "
+                        f"click ({click_x}, {click_y}) in {width}x{height})"
+                    )
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    str(click_x), str(click_y), "click", "3", env=env,
+                )
+                # The click is a synthetic X event with no settle. A locate
+                # that captures the pre-redraw frame spends its OCR budget
+                # and reports a miss. Wait until the window actually changes
+                # (selection fill and/or the popup), then search for labels.
+                menu_shot = destination / "connected-files-context-menu.png"
+                row_shot = destination / "connected-files-context-row.png"
+                paint_deadline = time.monotonic() + 8 * TIME_SCALE
+                painted = 0
+                while True:
+                    await asyncio.to_thread(screenshot, window, menu_shot, env)
+                    painted = await asyncio.to_thread(diff, row_shot, menu_shot, env)
+                    if painted >= 50:
+                        break
+                    if time.monotonic() >= paint_deadline:
+                        raise RuntimeError(
+                            "right-click on "
+                            f"{download_name} at ({click_x}, {click_y}) did not "
+                            f"repaint the window ({painted} pixels vs {row_shot.name})"
+                        )
+                    await asyncio.sleep(.3)
+                # "Rename" is the first OCR token of action-row "Rename remote",
+                # and locate_visible_label cannot require "Rename" not followed
+                # by " remote". That button (x 292-384, y ~760) overlaps a
+                # 202x147 menu anchored at this pointer, so a y-cut would also
+                # drop a Rename row that sits anywhere in the menu. Require
+                # Refresh and New Folder in the full pointer box instead:
+                # neither is on the action row ("New remote folder").
+                open_deadline = time.monotonic() + 20 * TIME_SCALE
+                new_folder_item = None
+                refresh_item = None
+                last_open_error = "menu labels not searched"
+                while True:
+                    await asyncio.to_thread(screenshot, window, menu_shot, env)
+                    saw_refresh = False
+                    saw_new_folder = False
+                    try:
+                        refresh_item = await asyncio.to_thread(
+                            locate_visible_label,
+                            menu_shot, "Refresh", region=menu_region, budget=4,
+                        )
+                        saw_refresh = True
+                    except RuntimeError as exc:
+                        last_open_error = str(exc)
+                    if saw_refresh:
+                        try:
+                            new_folder_item = await asyncio.to_thread(
+                                locate_visible_label,
+                                menu_shot, "New Folder", region=menu_region, budget=4,
+                            )
+                            saw_new_folder = True
+                        except RuntimeError as exc:
+                            last_open_error = str(exc)
+                    if saw_refresh and saw_new_folder:
+                        break
+                    if time.monotonic() >= open_deadline:
+                        raise RuntimeError(
+                            "Filer context menu did not render Refresh and New Folder "
+                            f"after right-click at ({click_x}, {click_y}) on "
+                            f"{download_name}: {last_open_error}; "
+                            f"region {menu_region}"
+                        )
+                    await asyncio.sleep(.4)
+                if new_folder_item is None or refresh_item is None:
+                    raise RuntimeError(
+                        "Filer context menu locate returned no bounds after "
+                        f"finding Refresh and New Folder "
+                        f"(New Folder {new_folder_item}, Refresh {refresh_item}, "
+                        f"region {menu_region})"
+                    )
+                for item_name, item_bounds in (
+                    ("Refresh", refresh_item),
+                    ("New Folder", new_folder_item),
+                ):
+                    if _bounds_inside(item_bounds, menu_region) is None:
+                        raise RuntimeError(
+                            f"Filer context menu {item_name} bounds {item_bounds} "
+                            f"are not wholly inside menu_region {menu_region} "
+                            f"(Refresh {refresh_item}, New Folder {new_folder_item}, "
+                            f"parked ({parked_x}, {parked_y}))"
+                        )
+                    left, top, right, bottom = item_bounds
+                    near_x = (
+                        left - parked_x if parked_x < left
+                        else parked_x - right if parked_x > right
+                        else 0
+                    )
+                    near_y = (
+                        top - parked_y if parked_y < top
+                        else parked_y - bottom if parked_y > bottom
+                        else 0
+                    )
+                    parked_gap = (near_x * near_x + near_y * near_y) ** 0.5
+                    if parked_gap < 150:
+                        raise RuntimeError(
+                            f"Filer context menu {item_name} bounds {item_bounds} "
+                            f"lie within 150 px of parked pointer "
+                            f"({parked_x}, {parked_y}) (gap {parked_gap:.1f}; "
+                            f"Refresh {refresh_item}, New Folder {new_folder_item}, "
+                            f"region {menu_region})"
+                        )
+                print(
+                    "Filer context menu anchored at click "
+                    f"({click_x}, {click_y}); Refresh {refresh_item} "
+                    f"New Folder {new_folder_item} inside {menu_region}; "
+                    f"parked ({parked_x}, {parked_y}) axis gaps "
+                    f"x={parked_x_gap} y={parked_y_gap}",
+                    flush=True,
+                )
+
+                # Menu owns the keyboard. Arm the watch only after the
+                # right-click settles: that click selects the row and must
+                # not be scored as typed input. Do not click a menu row.
+                probe_state["phase"] = "CONTEXT"
+                try:
+                    typed_before = count("UNEXPECTED_CONTEXT_PTY_INPUT")
+                    command(
+                        "xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "CONTEXT_LOCAL_SENTINEL", env=env,
+                    )
+                    command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                    await asyncio.sleep(.6)
+                    typed_after = count("UNEXPECTED_CONTEXT_PTY_INPUT")
+                    if typed_after != typed_before:
+                        raise RuntimeError(
+                            "Filer context menu forwarded typing or Return to SSH "
+                            f"(UNEXPECTED_CONTEXT_PTY_INPUT {typed_before} -> {typed_after})"
+                        )
+                    command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                    # Do not move or click between Escape and these checks: a
+                    # backdrop click dismisses the menu and would hide a broken
+                    # Escape. Poll until Refresh is gone, the popup pixels are
+                    # gone, and the file row is readable again. menu_shot is
+                    # still the frame where Refresh and New Folder were found.
+                    closed_shot = destination / "connected-files-context-closed.png"
+                    gone_deadline = time.monotonic() + 12 * TIME_SCALE
+                    still_refresh = "not searched: popup pixels never changed"
+                    closed_pixels = 0
+                    restored_row = None
+                    row_restored = False
+                    # Cheap pixel poll first: the frame right after the key
+                    # predates the repaint, and one OCR miss on it can outlast
+                    # the whole deadline. OCR only frames that changed.
+                    while True:
+                        await asyncio.to_thread(screenshot, window, closed_shot, env)
+                        closed_pixels = await asyncio.to_thread(
+                            diff, menu_shot, closed_shot, env,
+                        )
+                        if closed_pixels >= 2000:
+                            try:
+                                still_refresh = await asyncio.to_thread(
+                                    locate_visible_label,
+                                    closed_shot, "Refresh", region=menu_region, budget=1.0,
+                                )
+                            except RuntimeError:
+                                still_refresh = None
+                                break
+                        if time.monotonic() >= gone_deadline:
+                            break
+                        await asyncio.sleep(.4)
+                    # The row is located once, on the frame that passed both
+                    # checks above, with the default budget and outside the
+                    # deadline: a miss here walks every fallback stage.
+                    if still_refresh is None:
+                        try:
+                            restored_row = await asyncio.to_thread(
+                                locate_visible_label,
+                                closed_shot, download_name, region=body,
+                            )
+                            row_restored = all(
+                                abs(restored_row[edge] - context_row[edge]) <= 6
+                                for edge in range(4)
+                            )
+                        except RuntimeError:
+                            restored_row = None
+                    escaped_after = count("UNEXPECTED_CONTEXT_PTY_INPUT")
+                    if still_refresh is not None:
+                        raise RuntimeError(
+                            "Escape did not close the Filer context menu; "
+                            f"Refresh still at {still_refresh} in {menu_region}"
+                        )
+                    if escaped_after != typed_after:
+                        raise RuntimeError(
+                            "Escape from the Filer context menu forwarded input to SSH "
+                            f"(UNEXPECTED_CONTEXT_PTY_INPUT {typed_after} -> {escaped_after})"
+                        )
+                    restore_failed = []
+                    if closed_pixels < 2000:
+                        restore_failed.append(
+                            f"menu pixel diff {closed_pixels} < 2000 "
+                            f"({menu_shot.name} vs {closed_shot.name})"
+                        )
+                    if not row_restored:
+                        restore_failed.append(
+                            f"file row bounds {restored_row} not within 6 px of "
+                            f"context_row {context_row} on every edge "
+                            f"(region {body})"
+                        )
+                    if restore_failed:
+                        raise RuntimeError(
+                            "Escape did not restore the Filer context menu background; "
+                            + "; ".join(restore_failed)
+                        )
+                    print(
+                        f"Escape restored the row: {closed_pixels} pixels "
+                        f"({menu_shot.name} vs {closed_shot.name}); "
+                        f"row {restored_row} vs context_row {context_row}",
+                        flush=True,
+                    )
+                finally:
+                    probe_state["phase"] = None
+                # Escape clears the menu and does not restore the terminal
+                # the way the Session menu does. Click the pane the earlier
+                # chrome probes used, then require the shell to answer.
+                command(
+                    "xdotool", "windowfocus", window, "mousemove", "--window", window,
+                    "640", "280", "click", "1", env=env,
+                )
+                await asyncio.sleep(.3)
+                command(
+                    "xdotool", "type", "--clearmodifiers", "--delay", "25",
+                    "echo:AFTER_CONTEXT_MENU", env=env,
+                )
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: "NATIVE_ECHO:AFTER_CONTEXT_MENU" in events.path.read_text(encoding="utf-8").splitlines(),
+                    "shell echo after dismissing Filer context menu",
+                )
 
                 # The populated queue lives in the Transfer tab. Both completed
                 # jobs must be listed; scroll its visible interior and retain
@@ -2872,6 +3279,7 @@ async def main() -> int:
                     "PASS: click-driven SFTP upload preserved exact binary bytes in the native-smoke chroot\n"
                     "PASS: click-driven SFTP download preserved exact binary bytes in the visible local directory\n"
                     "PASS: Filer Name header click reversed remote name order and the second click restored it without a new SFTP listing\n"
+                    "PASS: Filer no-pause right-click anchored at the new pointer with the previous pointer parked away rendered Refresh and New Folder, consumed typing, Return and Escape restored the row, and the shell answered AFTER_CONTEXT_MENU\n"
                     "PASS: exact payloads appeared at the expected disposable remote and local paths\n"
                     f"Connected split screenshot change: {split_pixels} pixels\n"
                     f"Opened utility dock screenshot change: {files_pixels} pixels\n"
@@ -2883,6 +3291,7 @@ async def main() -> int:
                     f"Alternate-screen screenshot change: {fullscreen_pixels} pixels\n"
                     f"Remote-key mode screenshot change: {remote_keys_pixels} pixels\n"
                     "PASS: real remote-key Left arrow reached the isolated SFTP-capable SSH shell\n"
+                    "PASS: a single click on the saved session selected it (row highlight measured) without SESSION_STARTED; the double click still opened it\n"
                     "PASS: terminal owned the keyboard before chrome menu probes\n"
                     "PASS: Session menu, Sender and dock gear consumed typing, Return and Escape without SSH input\n"
                     "PASS: shell answered AFTER_MENU, AFTER_SENDER_ESCAPE and AFTER_GEAR without terminal re-click\n"
