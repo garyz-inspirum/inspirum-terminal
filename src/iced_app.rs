@@ -2101,7 +2101,6 @@ enum Message {
     Tool(tools::Action),
     Search(String),
     ShowMoreProfiles,
-    Open(usize),
     EditProfile(usize),
     SelectTab(usize),
     SelectNextTab,
@@ -4103,6 +4102,16 @@ impl App {
         self.dialog = None;
     }
 
+    /// Open the profile at `index`, then refresh file listings when a file panel is visible.
+    fn open_profile(&mut self, index: usize) -> Task<Message> {
+        self.open(index);
+        if self.files_open() {
+            self.reload_files()
+        } else {
+            Task::none()
+        }
+    }
+
     fn files_open(&self) -> bool {
         !self.tabs.is_empty()
             && FILES_PANELS
@@ -4804,12 +4813,6 @@ impl App {
             Message::ShowMoreProfiles => {
                 self.profile_visible =
                     next_profile_page(self.profile_visible, self.profile_matches.len());
-            }
-            Message::Open(index) => {
-                self.open(index);
-                if self.files_open() {
-                    return self.reload_files();
-                }
             }
             Message::EditProfile(index) => {
                 if let Some(profile) = self.profiles.get(index).cloned() {
@@ -6888,10 +6891,7 @@ impl App {
                     self.session_click_at = None;
                 }
                 if open_now {
-                    self.open(index);
-                    if self.files_open() {
-                        return self.reload_files();
-                    }
+                    return self.open_profile(index);
                 }
             }
             Message::ToggleSessionGroup(group) => {
