@@ -359,6 +359,12 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
         };
         Subscription::batch([
             drag,
+            event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::PointerMoved(position))
+                }
+                _ => None,
+            }),
             iced::window::resize_events().map(|(_, size)| Message::WindowResized(size)),
             iced::window::close_requests().map(|_| Message::Exit),
             event::listen_with(|event, status, _| match &event {
@@ -1765,6 +1771,7 @@ fn file_listing_row<'a>(
     message: Message,
     selected: bool,
     table_width: f32,
+    on_right_press: Option<Message>,
 ) -> Element<'a, Message> {
     let (glyph, color) = if cells.is_dir {
         let color = match theme::current() {
@@ -1803,7 +1810,7 @@ fn file_listing_row<'a>(
         file_cell(cells.group, Length::Fill, false),
     ]
     .height(theme::metrics::ROW_HEIGHT);
-    button(content)
+    let row = button(content)
         .on_press(message)
         .padding(0)
         .width(table_width)
@@ -1811,8 +1818,138 @@ fn file_listing_row<'a>(
             file_row_selected
         } else {
             file_row
-        })
-        .into()
+        });
+    match on_right_press {
+        Some(on_right_press) => mouse_area(row).on_right_press(on_right_press).into(),
+        None => row.into(),
+    }
+}
+
+/// Right-click menu on a Filer row. Explorer adds its own side in a later change.
+#[derive(Clone, Debug)]
+struct FileContextMenu {
+    is_dir: bool,
+    /// Remote path used by Open. Files leave this unused; they have no open message.
+    open_path: String,
+    anchor: iced::Point,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileContextAction {
+    Open,
+    Download,
+    Edit,
+    NewFolder,
+    Rename,
+    Delete,
+    Refresh,
+}
+
+const FILE_CONTEXT_MENU_WIDTH: f32 = 200.0;
+const FILE_CONTEXT_ITEM_HEIGHT: f32 = 24.0;
+
+fn file_context_menu_height(item_count: usize) -> f32 {
+    item_count as f32 * FILE_CONTEXT_ITEM_HEIGHT + 2.0
+}
+
+/// Keep the whole popup inside the window. A menu taller than the window pins to the top.
+fn clamp_file_context_anchor(anchor: iced::Point, window: iced::Size, height: f32) -> iced::Point {
+    let max_x = (window.width - FILE_CONTEXT_MENU_WIDTH).max(0.0);
+    let max_y = (window.height - height).max(0.0);
+    iced::Point::new(anchor.x.clamp(0.0, max_x), anchor.y.clamp(0.0, max_y))
+}
+
+/// Spec 5.2 items that already have a Filer message. Open is directories only
+/// (`FilesOpenRemote` navigates). Edit is files only. Files have no separate
+/// open message, so Open is omitted for them.
+fn file_context_entries(menu: &FileContextMenu) -> Vec<(&'static str, FileContextAction)> {
+    let mut items = Vec::new();
+    if menu.is_dir {
+        items.push(("Open", FileContextAction::Open));
+    }
+    items.push(("Download", FileContextAction::Download));
+    if !menu.is_dir {
+        items.push(("Edit", FileContextAction::Edit));
+    }
+    items.push(("New Folder", FileContextAction::NewFolder));
+    items.push(("Rename", FileContextAction::Rename));
+    items.push(("Delete", FileContextAction::Delete));
+    items.push(("Refresh", FileContextAction::Refresh));
+    items
+}
+
+fn file_context_action_message(
+    menu: &FileContextMenu,
+    action: FileContextAction,
+) -> Option<Message> {
+    match action {
+        FileContextAction::Open if menu.is_dir => {
+            Some(Message::FilesOpenRemote(menu.open_path.clone()))
+        }
+        FileContextAction::Open => None,
+        FileContextAction::Download => Some(Message::FilesRequestDownload),
+        FileContextAction::Edit if !menu.is_dir => Some(Message::FilesRequestEditRemote),
+        FileContextAction::Edit => None,
+        FileContextAction::NewFolder => Some(Message::FilesRequestMkdirRemote),
+        FileContextAction::Rename => Some(Message::FilesRequestRenameRemote),
+        FileContextAction::Delete => Some(Message::FilesRequestDeleteRemote),
+        FileContextAction::Refresh => Some(Message::FilesRefresh),
+    }
+}
+
+fn file_context_popup<'a>(items: &[(&'static str, FileContextAction)]) -> Element<'a, Message> {
+    let mut rows = column![].width(FILE_CONTEXT_MENU_WIDTH);
+    for (label, action) in items {
+        rows = rows.push(
+            button(
+                text(*label)
+                    .size(theme::metrics::UI_TEXT)
+                    .color(theme::palette().text),
+            )
+            .width(Fill)
+            .height(FILE_CONTEXT_ITEM_HEIGHT)
+            .padding([3, 10])
+            .style(menu_item)
+            .on_press(Message::FileContextChoose(*action)),
+        );
+    }
+    opaque(container(rows).padding(1).style(|_| container::Style {
+        background: Some(theme::palette().list.into()),
+        border: Border {
+            color: theme::palette().border,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    }))
+}
+
+/// Same stack pattern as `dock_menu_overlay`: a full-size press layer dismisses,
+/// and padding anchors the flat menu at the pointer.
+fn file_context_overlay<'a>(
+    body: Element<'a, Message>,
+    menu: &FileContextMenu,
+    window: iced::Size,
+) -> Element<'a, Message> {
+    let items = file_context_entries(menu);
+    let height = file_context_menu_height(items.len());
+    let anchor = clamp_file_context_anchor(menu.anchor, window, height);
+    let popup = file_context_popup(&items);
+    stack![
+        body,
+        mouse_area(container(space::horizontal()).width(Fill).height(Fill))
+            .on_press(Message::FileContextDismiss)
+            .on_right_press(Message::FileContextDismiss),
+        container(popup)
+            .padding(iced::Padding {
+                top: anchor.y,
+                left: anchor.x,
+                ..iced::Padding::ZERO
+            })
+            .width(Fill)
+            .height(Fill),
+    ]
+    .into()
 }
 
 fn file_listing_footer<'a>(count: usize, total: u64) -> Element<'a, Message> {
@@ -2133,6 +2270,15 @@ enum Message {
     FilesSortRemote(FileSortColumn),
     Exit,
     ConfirmExit,
+    /// Last pointer position, used to anchor the file context menu.
+    PointerMoved(iced::Point),
+    /// Right-click on a Filer row. Selects the row, then opens the menu.
+    OpenRemoteFileContext {
+        entry: sftp::RemoteEntry,
+        open_path: String,
+    },
+    FileContextChoose(FileContextAction),
+    FileContextDismiss,
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -3274,6 +3420,10 @@ struct App {
     /// Filer (remote) column. Independent of the Explorer sort.
     remote_file_sort: FileSortColumn,
     remote_file_sort_ascending: bool,
+    /// Last pointer position. The file context menu anchors here.
+    last_pointer: iced::Point,
+    /// Open right-click menu on a file row, if any.
+    context_menu: Option<FileContextMenu>,
 }
 
 const FILES_PANELS: [dock::Panel; 3] = [
@@ -3415,6 +3565,8 @@ impl App {
             local_file_sort_ascending: true,
             remote_file_sort: FileSortColumn::Name,
             remote_file_sort_ascending: true,
+            last_pointer: iced::Point::ORIGIN,
+            context_menu: None,
         }
     }
 
@@ -4266,7 +4418,10 @@ impl App {
         let _slow = SlowIcedScope::start("event_update");
         let message = match message {
             Message::KeyChord(chord) => {
-                if self.open_menu.is_some() || self.dock_menu.is_some() {
+                if self.open_menu.is_some()
+                    || self.dock_menu.is_some()
+                    || self.context_menu.is_some()
+                {
                     return Task::none();
                 }
                 return self.update(chord.message());
@@ -4345,7 +4500,7 @@ impl App {
         }
         // An open menu owns keyboard input, including queued IME and paste
         // messages from before the overlay appeared.
-        if (self.open_menu.is_some() || self.dock_menu.is_some())
+        if (self.open_menu.is_some() || self.dock_menu.is_some() || self.context_menu.is_some())
             && matches!(
                 &message,
                 Message::TerminalImeCursor(..)
@@ -4773,6 +4928,7 @@ impl App {
             }
             Message::About => self.dialog = Some(Dialog::About),
             Message::MenuOpen(menu) => {
+                self.context_menu = None;
                 self.open_menu = if self.open_menu == Some(menu) {
                     None
                 } else {
@@ -5080,7 +5236,11 @@ impl App {
                 self.files.name_input.clear();
             }
             Message::DismissModalKey => {
-                if self.open_menu.take().is_some() || self.dock_menu.take().is_some() {
+                let closed_context = self.context_menu.take().is_some();
+                if self.open_menu.take().is_some()
+                    || self.dock_menu.take().is_some()
+                    || closed_context
+                {
                     return Task::none();
                 }
                 if self.dialog.is_some() {
@@ -6369,10 +6529,14 @@ impl App {
             })) => {
                 use keyboard::key::Named;
 
-                if self.open_menu.is_some() || self.dock_menu.is_some() {
+                if self.open_menu.is_some()
+                    || self.dock_menu.is_some()
+                    || self.context_menu.is_some()
+                {
                     if key.as_ref() == keyboard::Key::Named(Named::Escape) {
                         self.open_menu = None;
                         self.dock_menu = None;
+                        self.context_menu = None;
                     }
                     return Task::none();
                 }
@@ -6570,6 +6734,7 @@ impl App {
                 }
             }
             Message::DockMenu(area) => {
+                self.context_menu = None;
                 self.dock_menu = if self.dock_menu == Some(area) {
                     None
                 } else {
@@ -6614,6 +6779,7 @@ impl App {
             Message::Exit => {
                 self.open_menu = None;
                 self.dock_menu = None;
+                self.context_menu = None;
                 if self.tabs.is_empty() {
                     return iced::exit();
                 }
@@ -6624,6 +6790,39 @@ impl App {
                     return Task::none();
                 }
                 return iced::exit();
+            }
+            Message::PointerMoved(position) => {
+                self.last_pointer = position;
+            }
+            Message::OpenRemoteFileContext { entry, open_path } => {
+                if self.privacy_locked || self.dialog.is_some() {
+                    return Task::none();
+                }
+                // Select first so Download/Rename/Delete apply to this row.
+                // Directory left-click navigates (`FilesOpenRemote`); selecting
+                // here does not, so the menu's Open item is what navigates.
+                let is_dir = entry.is_dir;
+                let select = self.update(Message::FilesSelectRemote(entry));
+                self.open_menu = None;
+                self.dock_menu = None;
+                self.context_menu = Some(FileContextMenu {
+                    is_dir,
+                    open_path,
+                    anchor: self.last_pointer,
+                });
+                return select;
+            }
+            Message::FileContextChoose(action) => {
+                let Some(menu) = self.context_menu.take() else {
+                    return Task::none();
+                };
+                let Some(message) = file_context_action_message(&menu, action) else {
+                    return Task::none();
+                };
+                return self.update(message);
+            }
+            Message::FileContextDismiss => {
+                self.context_menu = None;
             }
         }
         Task::none()
@@ -6664,6 +6863,7 @@ impl App {
             && !self.sender_focused
             && self.open_menu.is_none()
             && self.dock_menu.is_none()
+            && self.context_menu.is_none()
         {
             self.focused_terminal_id().filter(|id| {
                 !self.local_navigation.contains(id)
@@ -6847,6 +7047,10 @@ impl App {
 
         let body: Element<'_, Message> = match self.dock_menu {
             Some(area) => self.dock_menu_overlay(body, area),
+            None => body,
+        };
+        let body: Element<'_, Message> = match &self.context_menu {
+            Some(menu) => file_context_overlay(body, menu, self.window_size),
             None => body,
         };
 
@@ -7726,6 +7930,7 @@ impl App {
                         Message::FilesOpenLocal(entry.path.clone()),
                         false,
                         table_width,
+                        None,
                     ));
                 } else {
                     let selected = self.files.selected_local.as_ref() == Some(&entry.path);
@@ -7734,6 +7939,7 @@ impl App {
                         Message::FilesSelectLocal(entry.path.clone()),
                         selected,
                         table_width,
+                        None,
                     ));
                 }
             }
@@ -7788,27 +7994,27 @@ impl App {
                     owner: entry.owner.clone().unwrap_or_default(),
                     group: entry.group.clone().unwrap_or_default(),
                 };
-                if entry.is_dir {
-                    let path = sftp::join_remote(&self.files.remote_dir, &entry.name);
-                    remote_list = remote_list.push(file_listing_row(
-                        cells,
-                        Message::FilesOpenRemote(path),
-                        false,
-                        table_width,
-                    ));
+                let open_path = sftp::join_remote(&self.files.remote_dir, &entry.name);
+                let selected = self
+                    .files
+                    .selected_remote
+                    .as_ref()
+                    .is_some_and(|selected| selected.name == entry.name);
+                let activate = if entry.is_dir {
+                    Message::FilesOpenRemote(open_path.clone())
                 } else {
-                    let selected = self
-                        .files
-                        .selected_remote
-                        .as_ref()
-                        .is_some_and(|selected| selected.name == entry.name);
-                    remote_list = remote_list.push(file_listing_row(
-                        cells,
-                        Message::FilesSelectRemote(entry.clone()),
-                        selected,
-                        table_width,
-                    ));
-                }
+                    Message::FilesSelectRemote(entry.clone())
+                };
+                remote_list = remote_list.push(file_listing_row(
+                    cells,
+                    activate,
+                    selected,
+                    table_width,
+                    Some(Message::OpenRemoteFileContext {
+                        entry: entry.clone(),
+                        open_path,
+                    }),
+                ));
             }
             if self.files.remote_visible < self.files.remote_entries.len() {
                 remote_list = remote_list.push(
@@ -12507,5 +12713,178 @@ mod tests {
         assert_eq!(label, "2026/11/22 00:01");
         assert_eq!(key_year, 2026);
         assert!(label.starts_with(&format!("{key_year:04}/")));
+    }
+
+    fn remote_context_labels(is_dir: bool) -> Vec<&'static str> {
+        file_context_entries(&FileContextMenu {
+            is_dir,
+            open_path: "/srv/item".into(),
+            anchor: iced::Point::ORIGIN,
+        })
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect()
+    }
+
+    #[test]
+    fn remote_context_menu_selects_the_row_and_escape_closes_it() {
+        let mut app = app_with_one_pane_and_auxiliary_shell("filer-context-select");
+        let remote_dir = app.files.remote_dir.clone();
+        let file = sftp::RemoteEntry::new("notes.txt", false, Some(12));
+        app.files.remote_entries = vec![file.clone()];
+        let _ = app.update(Message::PointerMoved(iced::Point::new(48.0, 64.0)));
+        let _ = app.update(Message::OpenRemoteFileContext {
+            entry: file.clone(),
+            open_path: "/srv/notes.txt".into(),
+        });
+        assert!(app.context_menu.is_some(), "right-click opens the menu");
+        assert_eq!(
+            app.context_menu
+                .as_ref()
+                .map(|menu| (menu.anchor.x, menu.anchor.y)),
+            Some((48.0, 64.0))
+        );
+        assert_eq!(
+            app.files
+                .selected_remote
+                .as_ref()
+                .map(|entry| entry.name.as_str()),
+            Some("notes.txt")
+        );
+        assert!(!remote_context_labels(false).contains(&"Open"));
+        assert!(remote_context_labels(false).contains(&"Edit"));
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(app.context_menu.is_none(), "Escape closes the context menu");
+        assert!(
+            app.pty_write_log.is_empty(),
+            "Escape must not reach the terminal"
+        );
+
+        let dir = sftp::RemoteEntry::new("src", true, None);
+        let _ = app.update(Message::OpenRemoteFileContext {
+            entry: dir,
+            open_path: "/srv/src".into(),
+        });
+        assert_eq!(
+            app.files.remote_dir, remote_dir,
+            "right-click must not navigate"
+        );
+        assert!(
+            app.files
+                .selected_remote
+                .as_ref()
+                .is_some_and(|entry| entry.name == "src" && entry.is_dir)
+        );
+        assert!(remote_context_labels(true).contains(&"Open"));
+        assert!(
+            !remote_context_labels(true).contains(&"Edit"),
+            "Edit is omitted for directories"
+        );
+        let open = file_context_action_message(
+            app.context_menu.as_ref().expect("menu"),
+            FileContextAction::Open,
+        );
+        assert!(matches!(open, Some(Message::FilesOpenRemote(path)) if path == "/srv/src"));
+    }
+
+    #[test]
+    fn remote_context_menu_blocks_terminal_keys_and_chords() {
+        let (mut app, first_id, _second_id) = arm_synced_pair("filer-context-keys");
+        let focus_mode = app.focus_mode;
+        let _ = app.update(Message::OpenRemoteFileContext {
+            entry: sftp::RemoteEntry::new("notes.txt", false, Some(4)),
+            open_path: "/srv/notes.txt".into(),
+        });
+        assert!(app.context_menu.is_some());
+        app.pty_write_log.clear();
+        let status = app.status.clone();
+        let _ = app.update(pressed_char("x"));
+        let _ = app.update(pressed_key(
+            keyboard::Key::Character("x".into()),
+            keyboard::Modifiers::default(),
+        ));
+        let _ = app.update(Message::KeyChord(KeyChord::FocusMode));
+        let _ = app.update(Message::TerminalImeCursor(
+            first_id,
+            iced::Rectangle::default(),
+        ));
+        let _ = app.update(Message::TerminalImeCommit(first_id, "x".into()));
+        let _ = app.update(Message::RequestPaste);
+        assert!(
+            app.pty_write_log.is_empty(),
+            "open context menu must not write to a pane, log={:?}",
+            app.pty_write_log
+        );
+        assert_eq!(app.focus_mode, focus_mode, "chords must not run");
+        assert_eq!(app.status, status, "paste must not start");
+        assert!(
+            app.context_menu.is_some(),
+            "non-Escape keys leave the menu open"
+        );
+        assert!(app.ime_cursor.is_none(), "IME target must stay disabled");
+
+        app.context_menu = None;
+        app.pty_write_log.clear();
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Enter),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(
+            app.pty_write_log.iter().any(|(id, _)| *id == first_id),
+            "recorder must see Enter once the menu is gone, log={:?}",
+            app.pty_write_log
+        );
+    }
+
+    #[test]
+    fn remote_context_menu_delete_opens_confirmation_without_deleting() {
+        let mut app = app_with_one_pane_and_auxiliary_shell("filer-context-delete");
+        app.files.remote_dir = "/srv".into();
+        let entry = sftp::RemoteEntry::new("notes.txt", false, Some(4));
+        app.files.remote_entries = vec![entry.clone()];
+        let _ = app.update(Message::OpenRemoteFileContext {
+            entry: entry.clone(),
+            open_path: "/srv/notes.txt".into(),
+        });
+        let _ = app.update(Message::FileContextChoose(FileContextAction::Delete));
+        assert!(
+            app.context_menu.is_none(),
+            "choosing an item closes the menu"
+        );
+        assert!(
+            matches!(
+                &app.dialog,
+                Some(Dialog::FileDeleteRemote {
+                    path,
+                    directory,
+                    ..
+                }) if path == "/srv/notes.txt" && !*directory
+            ),
+            "Delete must open the existing confirmation, dialog={:?}",
+            app.dialog.as_ref().map(|dialog| match dialog {
+                Dialog::FileDeleteRemote {
+                    path, directory, ..
+                } => {
+                    format!("delete {path} dir={directory}")
+                }
+                _ => "other".into(),
+            })
+        );
+        assert_eq!(app.files.remote_entries, vec![entry]);
+    }
+
+    #[test]
+    fn file_context_anchor_stays_inside_the_window() {
+        let window = iced::Size::new(400.0, 300.0);
+        let height = file_context_menu_height(2);
+        let clamped = clamp_file_context_anchor(iced::Point::new(390.0, 290.0), window, height);
+        assert_eq!(clamped.x, window.width - FILE_CONTEXT_MENU_WIDTH);
+        assert_eq!(clamped.y, window.height - height);
+        let inside = clamp_file_context_anchor(iced::Point::new(10.0, 20.0), window, height);
+        assert_eq!(inside.x, 10.0);
+        assert_eq!(inside.y, 20.0);
     }
 }
