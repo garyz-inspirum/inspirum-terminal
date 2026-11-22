@@ -17,6 +17,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
@@ -99,6 +100,9 @@ async def monitored_shell(
                 return
             # Observe *any* PTY bytes while a chrome control owns focus,
             # including incomplete lines and a bare Escape. Never log input.
+            # Phase names: MENU, SENDER, GEAR, CONTEXT, FIND. The marker is
+            # UNEXPECTED_<PHASE>_PTY_INPUT, so FIND is
+            # UNEXPECTED_FIND_PTY_INPUT.
             if probe_state["phase"] is not None:
                 events.write(f"UNEXPECTED_{probe_state['phase']}_PTY_INPUT")
             buffer += chunk.replace("\r\n", "\n").replace("\r", "\n")
@@ -137,6 +141,7 @@ async def monitored_shell(
                         "echo:AFTER_SENDER_ESCAPE",
                         "echo:AFTER_GEAR",
                         "echo:AFTER_CONTEXT_MENU",
+                        "echo:AFTER_FIND",
                         "echo:AFTER_EXIT_CANCEL",
                     ):
                         events.write(answer)
@@ -958,6 +963,75 @@ def locate_visible_label(
             f"(screenshot: {path}, region={region})"
         )
     return bounds
+
+
+# 13px monospace hit counter on the dark theme. Tesseract confuses these
+# glyphs; the translated token must still be a slash-separated digit pair.
+# Accepted: 0↔O/o, 1↔l/I/|, 2↔Z/z, 5↔S/s, 8↔B. A missing slash is a miss.
+_FIND_COUNTER_DIGIT = str.maketrans({
+    "O": "0", "o": "0",
+    "l": "1", "I": "1", "|": "1",
+    "Z": "2", "z": "2",
+    "S": "5", "s": "5",
+    "B": "8",
+})
+_FIND_COUNTER_RE = re.compile(
+    r"^([0-9OlI|ZzSsB]{1,3})\s*/\s*([0-9OlI|ZzSsB]{1,3})$"
+)
+
+
+def ocr_words_in_region(path: Path, region):
+    """Return OCR words inside ``region`` without requiring a fixed label.
+
+    Reuses ``locate_visible_label``'s region preprocessing: an x3 crop at
+    psm 6, psm 11, and inverted psm 6. A psm 7 pass is added because the
+    Find band is one 13px line and a full-width block can drop a
+    3-character counter. Words are ``(text, x, y, width, height,
+    confidence)`` in window coordinates. An empty list is a miss, not an
+    exception.
+    """
+    tesseract = shutil.which("tesseract")
+    if tesseract is None:
+        raise RuntimeError("visible label targeting requires tesseract")
+    words = []
+    for psm, invert in (("6", False), ("11", False), ("6", True), ("7", False)):
+        words.extend(region_upscaled_rows(
+            path, tesseract, region, psm=psm, invert=invert,
+        ))
+    return words
+
+
+def find_hit_counter(words):
+    """Return ``(current, total, raw)`` for a slash-separated counter.
+
+    A single OCR word wins. Otherwise a 2- or 3-token run on the same line
+    (``1`` ``/`` ``5``, or ``1/`` ``5``). Does not join the whole band, so
+    neighbouring labels cannot invent a pair. ``None`` if nothing matches.
+    """
+    def parse(token):
+        match = _FIND_COUNTER_RE.fullmatch(token.strip())
+        if match is None:
+            return None
+        left = match.group(1).translate(_FIND_COUNTER_DIGIT)
+        right = match.group(2).translate(_FIND_COUNTER_DIGIT)
+        if not left.isdigit() or not right.isdigit():
+            return None
+        return int(left), int(right), token.strip()
+
+    for word in words:
+        parsed = parse(word[0])
+        if parsed is not None:
+            return parsed
+    for line in _group_lines(words):
+        texts = [word[0] for word in line]
+        for index in range(len(texts)):
+            for span in (2, 3):
+                if index + span > len(texts):
+                    continue
+                parsed = parse("".join(texts[index:index + span]))
+                if parsed is not None:
+                    return parsed
+    return None
 
 
 def name_rows_region(first_row_bounds, row_count, *, row_height=23, name_right=None):
@@ -2605,6 +2679,235 @@ async def main() -> int:
                 await wait_for(
                     lambda: "NATIVE_ECHO:AFTER_CONTEXT_MENU" in events.path.read_text(encoding="utf-8").splitlines(),
                     "shell echo after dismissing Filer context menu",
+                )
+
+                # Find strip: Ctrl+Shift+F opens a 26px bar at the bottom of
+                # the centre workspace, directly above the bottom dock tab
+                # strip, and focuses its input. The left pane was clicked at
+                # (640, 280) for AFTER_CONTEXT_MENU and already holds several
+                # NATIVE_ECHO lines; do not click again. Dock tab top is the
+                # Filer glyph centre minus 13 (STRIP_HEIGHT / 2). `strip` is
+                # the OCR search band (0.62*height..0.76*height), not the
+                # strip's y — a strip rendered elsewhere fails the band.
+                width, height = window_size(window, env)
+                dock_tab_top = center(filer_tab)[1] - 13
+                find_band = (
+                    0,
+                    max(0, dock_tab_top - 40),
+                    width,
+                    min(height, dock_tab_top + 4),
+                )
+                if find_band[3] - find_band[1] < 30 or find_band[2] <= find_band[0]:
+                    raise RuntimeError(
+                        "Find strip search band collapsed: "
+                        f"dock_tab_top={dock_tab_top} Filer {filer_tab} "
+                        f"strip {strip} window {width}x{height} band {find_band}"
+                    )
+                find_before = destination / "connected-find-before.png"
+                find_open_shot = destination / "connected-find-open.png"
+                await asyncio.to_thread(screenshot, window, find_before, env)
+                command(
+                    "xdotool", "windowfocus", window, "key",
+                    "--clearmodifiers", "ctrl+shift+f", env=env,
+                )
+                open_deadline = time.monotonic() + 8 * TIME_SCALE
+                open_pixels = 0
+                while True:
+                    if app.poll() is not None:
+                        raise RuntimeError(
+                            "GUI exited before the Find strip repainted "
+                            f"(code {app.returncode})"
+                        )
+                    await asyncio.to_thread(screenshot, window, find_open_shot, env)
+                    open_pixels = await asyncio.to_thread(
+                        diff, find_before, find_open_shot, env,
+                    )
+                    if open_pixels >= 50:
+                        break
+                    if time.monotonic() >= open_deadline:
+                        raise RuntimeError(
+                            "Ctrl+Shift+F did not repaint the window "
+                            f"({open_pixels} pixels vs {find_before.name}; "
+                            f"band {find_band})"
+                        )
+                    await asyncio.sleep(.3)
+                label_deadline = time.monotonic() + 20 * TIME_SCALE
+                prev_bounds = None
+                next_bounds = None
+                last_find_error = "Find labels not searched"
+                while True:
+                    await asyncio.to_thread(screenshot, window, find_open_shot, env)
+                    try:
+                        prev_bounds = await asyncio.to_thread(
+                            locate_visible_label, find_open_shot, "Prev",
+                            region=find_band, budget=4,
+                        )
+                        next_bounds = await asyncio.to_thread(
+                            locate_visible_label, find_open_shot, "Next",
+                            region=find_band, budget=4,
+                        )
+                        break
+                    except RuntimeError as exc:
+                        last_find_error = str(exc)
+                        prev_bounds = None
+                        next_bounds = None
+                    if time.monotonic() >= label_deadline:
+                        raise RuntimeError(
+                            "Find strip did not render Prev and Next in the "
+                            f"band above the dock tab strip {find_band} "
+                            f"(dock_tab_top={dock_tab_top} from Filer "
+                            f"{filer_tab}; strip search region {strip}; "
+                            f"open pixel diff {open_pixels}): {last_find_error}"
+                        )
+                    await asyncio.sleep(.4)
+                if (
+                    _bounds_inside(prev_bounds, find_band) is None
+                    or _bounds_inside(next_bounds, find_band) is None
+                ):
+                    raise RuntimeError(
+                        "Find Prev/Next are not wholly inside the strip band "
+                        f"{find_band}: Prev {prev_bounds} Next {next_bounds} "
+                        f"(dock_tab_top={dock_tab_top} Filer {filer_tab})"
+                    )
+                print(
+                    f"Find strip open: Prev {prev_bounds} Next {next_bounds} "
+                    f"in {find_band} (dock_tab_top={dock_tab_top} "
+                    f"Filer {filer_tab}); {open_pixels} pixels",
+                    flush=True,
+                )
+
+                # Input owns the keyboard. Arm the watch only after the strip
+                # has painted: the chord can resize the PTY, and resize is not
+                # typed input. Enter is next-hit; Escape closes and must not
+                # become a PTY 0x1b. Do not click a strip button.
+                find_typed = destination / "connected-find-typed.png"
+                probe_state["phase"] = "FIND"
+                try:
+                    typed_before = count("UNEXPECTED_FIND_PTY_INPUT")
+                    command(
+                        "xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "NATIVE_ECHO", env=env,
+                    )
+                    await asyncio.sleep(0.8 * TIME_SCALE)
+                    typed_after = count("UNEXPECTED_FIND_PTY_INPUT")
+                    if typed_after != typed_before:
+                        raise RuntimeError(
+                            "Find input forwarded typing to SSH "
+                            f"(UNEXPECTED_FIND_PTY_INPUT {typed_before} -> {typed_after})"
+                        )
+                    await asyncio.to_thread(screenshot, window, find_typed, env)
+                    typed_pixels = await asyncio.to_thread(
+                        band_changed_pixels, find_open_shot, find_typed, find_band,
+                    )
+                    # Authoritative hit-count check is the OCR counter. The
+                    # band delta is the weaker fact that the strip reacted;
+                    # 40 px is above a 1px caret blink and below a typed
+                    # query. Both fail the run. The error includes the count
+                    # and the raw words so the first run can recalibrate.
+                    counter_words = await asyncio.to_thread(
+                        ocr_words_in_region, find_typed, find_band,
+                    )
+                    parsed = find_hit_counter(counter_words)
+                    observed = [word[0] for word in counter_words][:40]
+                    if (
+                        parsed is None
+                        or parsed[1] < 2
+                        or (parsed[0] == 0 and parsed[1] == 0)
+                    ):
+                        got = None if parsed is None else f"{parsed[0]}/{parsed[1]} from {parsed[2]!r}"
+                        raise RuntimeError(
+                            "Find counter was not a non-zero slash pair with "
+                            f"total >= 2 (not 0/0) in {find_band}; "
+                            f"parsed={got}; words={observed}; "
+                            f"band delta {typed_pixels} "
+                            f"({find_open_shot.name} vs {find_typed.name})"
+                        )
+                    current, total, raw = parsed
+                    if typed_pixels < 40:
+                        raise RuntimeError(
+                            "Find band changed only "
+                            f"{typed_pixels} pixels after typing NATIVE_ECHO "
+                            f"(need >= 40; OCR counter {current}/{total} from "
+                            f"{raw!r} is the hit-count oracle) "
+                            f"words={observed} band {find_band}"
+                        )
+                    print(
+                        f"Find counter {current}/{total} from {raw!r} "
+                        f"(words {observed}); band delta {typed_pixels} "
+                        f"(OCR counter is the hit-count oracle)",
+                        flush=True,
+                    )
+                    command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                    await asyncio.sleep(0.4 * TIME_SCALE)
+                    find_next_shot = destination / "connected-find-next.png"
+                    await asyncio.to_thread(screenshot, window, find_next_shot, env)
+                    advanced_after = count("UNEXPECTED_FIND_PTY_INPUT")
+                    if advanced_after != typed_after:
+                        raise RuntimeError(
+                            "Find Next (Return) forwarded input to SSH "
+                            f"(UNEXPECTED_FIND_PTY_INPUT {typed_after} -> {advanced_after})"
+                        )
+                    command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                    find_closed = destination / "connected-find-closed.png"
+                    gone_deadline = time.monotonic() + 8 * TIME_SCALE
+                    closed_pixels = 0
+                    while True:
+                        if app.poll() is not None:
+                            raise RuntimeError(
+                                "GUI exited before the Find strip closed "
+                                f"(code {app.returncode})"
+                            )
+                        await asyncio.to_thread(screenshot, window, find_closed, env)
+                        closed_pixels = await asyncio.to_thread(
+                            band_changed_pixels, find_next_shot, find_closed, find_band,
+                        )
+                        if closed_pixels >= 200:
+                            break
+                        if time.monotonic() >= gone_deadline:
+                            raise RuntimeError(
+                                "Escape did not change the Find strip band "
+                                f"({closed_pixels} pixels, need >= 200) "
+                                f"{find_band} ({find_next_shot.name} vs "
+                                f"{find_closed.name})"
+                            )
+                        await asyncio.sleep(.3)
+                    try:
+                        still_prev = await asyncio.to_thread(
+                            locate_visible_label, find_closed, "Prev",
+                            region=find_band, budget=1.0,
+                        )
+                    except RuntimeError:
+                        still_prev = None
+                    escaped_after = count("UNEXPECTED_FIND_PTY_INPUT")
+                    if still_prev is not None:
+                        raise RuntimeError(
+                            "Escape did not close the Find strip; "
+                            f"Prev still at {still_prev} in {find_band} "
+                            f"(band delta {closed_pixels})"
+                        )
+                    if escaped_after != advanced_after:
+                        raise RuntimeError(
+                            "Escape from the Find strip forwarded input to SSH "
+                            f"(UNEXPECTED_FIND_PTY_INPUT {advanced_after} -> {escaped_after})"
+                        )
+                    print(
+                        f"Escape closed Find: band delta {closed_pixels} "
+                        f"in {find_band}; Prev absent",
+                        flush=True,
+                    )
+                finally:
+                    probe_state["phase"] = None
+                # Closing the strip must hand the keyboard back with no extra
+                # click. windowfocus is not a click; the pointer stays put.
+                command(
+                    "xdotool", "windowfocus", window, "type",
+                    "--clearmodifiers", "--delay", "25",
+                    "echo:AFTER_FIND", env=env,
+                )
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: "NATIVE_ECHO:AFTER_FIND" in events.path.read_text(encoding="utf-8").splitlines(),
+                    "shell echo after closing Find without clicking the terminal",
                 )
 
                 # The populated queue lives in the Transfer tab. Both completed
