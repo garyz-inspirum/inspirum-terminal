@@ -61,6 +61,46 @@ class FindStripCounterTest(unittest.TestCase):
         parsed = module.find_hit_counter([_row("O/o", (1128, 518, 1151, 530))])
         self.assertEqual(parsed[:2], (0, 0))
 
+    def test_two_hit_and_zero_counters_survive_two_glyph_misreads(self):
+        # Focused-pane oracle reads 2/2, 1/2, and 0/0. A 13px monospace
+        # 2 is misread as Z/z; l/2, Z/Z, 2/Z, and O/O must still parse.
+        cases = (
+            ("2/2", (2, 2)),
+            ("1/2", (1, 2)),
+            ("0/0", (0, 0)),
+            ("l/2", (1, 2)),
+            ("Z/Z", (2, 2)),
+            ("2/Z", (2, 2)),
+            ("z/z", (2, 2)),
+            ("O/O", (0, 0)),
+        )
+        for raw, want in cases:
+            with self.subTest(raw=raw):
+                parsed = module.find_hit_counter([_row(raw, (1128, 518, 1151, 530))])
+                self.assertIsNotNone(parsed, raw)
+                self.assertEqual(parsed[:2], want, raw)
+
+    def test_empty_counter_misread_yields_to_zero_pair(self):
+        # Bordered dark strip: PSM 7 reads an empty counter as 0/9, PSM 11
+        # reads 0/0. A non-zero index keeps a real 9.
+        chosen = [("0/9", (1071, 518, 1094, 529)), ("Prev", (1146, 518, 1176, 527))]
+        labelled = [
+            chosen,
+            [("0/0", (1071, 518, 1094, 529)), ("Prev", (1146, 518, 1176, 527))],
+        ]
+        got = module._prefer_zero_counter(chosen, labelled)
+        self.assertEqual(got[0][0], "0/0")
+        hit = [("1/9", (1071, 518, 1094, 529))]
+        self.assertEqual(
+            module._prefer_zero_counter(hit, [hit, [("0/0", (1071, 518, 1094, 529))]])[0][0],
+            "1/9",
+        )
+        two = [("2/2", (1071, 518, 1094, 529))]
+        self.assertEqual(
+            module._prefer_zero_counter(two, [two, [("0/0", (1071, 518, 1094, 529))]])[0][0],
+            "2/2",
+        )
+
     def test_a_real_nine_is_not_rewritten_to_zero(self):
         # 9/0 was the bad full-band read of an empty counter. Preprocessing
         # must produce 0/0; the parser must not paper over a 9.

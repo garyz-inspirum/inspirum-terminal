@@ -1189,6 +1189,48 @@ def _ocr_strip_pass(image, tesseract, psm):
     return parse_visible_words(tsv)
 
 
+def _prefer_zero_counter(chosen, labelled):
+    """Keep an empty counter as 0/0 when one pass misreads it as 0/9.
+
+    On the bordered dark strip, PSM 7 reads the empty pair as ``0/9`` and
+    PSM 11 reads ``0/0``. Use 0/0 only when every labelled pass has
+    selected index 0. A hit counter (index 1 or 2), including a real 9
+    next to a non-zero index, is left alone — the parser does not rewrite 9.
+    """
+    readings = []
+    for mapped in labelled:
+        token = next(
+            ((text, bounds) for text, bounds in mapped if "/" in text),
+            None,
+        )
+        if token is None:
+            continue
+        text, bounds = token
+        left, top, right, bottom = bounds
+        parsed = find_hit_counter([(
+            text, left, top, max(1, right - left), max(1, bottom - top), 0,
+        )])
+        if parsed is not None:
+            readings.append((parsed, text, bounds))
+    if not readings or any(parsed[0] != 0 for parsed, _text, _bounds in readings):
+        return chosen
+    zero = next((item for item in readings if item[0][:2] == (0, 0)), None)
+    if zero is None or not any(9 in item[0][:2] for item in readings):
+        return chosen
+    text, bounds = zero[1], zero[2]
+    replaced = []
+    swapped = False
+    for old, box in chosen:
+        if not swapped and "/" in old:
+            replaced.append((text, bounds))
+            swapped = True
+        else:
+            replaced.append((old, box))
+    if not swapped:
+        replaced.insert(0, (text, bounds))
+    return replaced
+
+
 def read_strip_words(shot_path, region):
     """Read one chrome strip. Returns ``[(text, bounds), ...]`` in source pixels.
 
@@ -1196,9 +1238,11 @@ def read_strip_words(shot_path, region):
     ``Prey`` and ``Next`` as ``Hest`` because the input outline splits the
     line. This pass crops the right-hand 260px (counter, Prev, Next, close),
     inverts when the median pixel is dark, erases border-length rules, and
-    upscales x4 with LANCZOS before ``--psm 7``. PSM 6 and 11 are tried only
-    when 7 did not yield both labels; words from a losing pass are not
-    merged in, so a closed strip cannot accumulate a false Prev.
+    upscales x4 with LANCZOS before ``--psm 7``. PSM 6 and 11 are tried when
+    7 did not yield both labels, and also when 7's counter token contains a
+    9, so an empty counter read as ``0/9`` can be replaced by PSM 11's
+    ``0/0``. Words from a losing pass are not merged in, so a closed strip
+    cannot accumulate a false Prev.
     """
     tesseract = shutil.which("tesseract")
     if tesseract is None:
@@ -1224,6 +1268,7 @@ def read_strip_words(shot_path, region):
     origin = (x1 + offset, y1)
     chosen = []
     best_hits = -1
+    labelled = []
     for psm in ("7", "6", "11"):
         mapped = []
         for word in _ocr_strip_pass(prepared, tesseract, psm):
@@ -1236,7 +1281,14 @@ def read_strip_words(shot_path, region):
             chosen = mapped
             best_hits = hits
         if hits == 2:
-            break
+            labelled.append(mapped)
+            token = next((text for text, _bounds in mapped if "/" in text), "")
+            # A 9 in the counter is the empty-pair misread (0/9). Keep
+            # going so PSM 11 can supply 0/0. Any other pair stops here.
+            if "9" not in token:
+                break
+    if labelled:
+        chosen = _prefer_zero_counter(labelled[0], labelled)
     return chosen
 
 
@@ -2909,9 +2961,10 @@ async def main() -> int:
                 # strip, and focuses its input. Prev, Next, and the hit
                 # counter are read by read_strip_words (right-hand cluster,
                 # single-line OCR). A label outside find_band does not count.
-                # The left pane was clicked at
-                # (640, 280) for AFTER_CONTEXT_MENU and already holds several
-                # NATIVE_ECHO lines; do not click again. Dock tab top is the
+                # Do not click a pane here. The (640, 280) click for
+                # AFTER_CONTEXT_MENU left the right pane focused; Find counts
+                # that pane only, not the left pane's older NATIVE_ECHO lines.
+                # Dock tab top is the
                 # Filer glyph centre minus 13 (STRIP_HEIGHT / 2). `strip` is
                 # the OCR search band (0.62*height..0.76*height), not the
                 # strip's y — a strip rendered elsewhere fails the band.
@@ -3008,13 +3061,24 @@ async def main() -> int:
                 # has painted: the chord can resize the PTY, and resize is not
                 # typed input. Enter is next-hit; Escape closes and must not
                 # become a PTY 0x1b. Do not click a strip button.
+                #
+                # Find counts the focused pane only. The right pane is focused
+                # (accent) and its history is exactly two lines,
+                # NATIVE_SMOKE_READY and NATIVE_ECHO:AFTER_CONTEXT_MENU.
+                # Query NATIVE matches each of those lines once, so the
+                # counter total is exactly 2 and the selected index is 1 or
+                # 2. The left pane's older NATIVE_ECHO lines are not in the
+                # count (that pane would be 5; both panes would be 7).
+                # NATIVE_ECHO is 1/1 here and is the wrong oracle.
+                # echo:AFTER_FIND is typed only after these counts are read,
+                # so the lines it adds cannot change them.
                 find_typed = destination / "connected-find-typed.png"
                 probe_state["phase"] = "FIND"
                 try:
                     typed_before = count("UNEXPECTED_FIND_PTY_INPUT")
                     command(
                         "xdotool", "type", "--clearmodifiers", "--delay", "25",
-                        "NATIVE_ECHO", env=env,
+                        "NATIVE", env=env,
                     )
                     await asyncio.sleep(0.8 * TIME_SCALE)
                     typed_after = count("UNEXPECTED_FIND_PTY_INPUT")
@@ -3031,7 +3095,7 @@ async def main() -> int:
                     # band delta is the weaker fact that the strip reacted;
                     # 40 px is above a 1px caret blink and below a typed
                     # query. Both fail the run. The error includes the count
-                    # and the raw words so the first run can recalibrate.
+                    # and the raw words so a miss can be recalibrated.
                     counter_words = await asyncio.to_thread(
                         read_strip_words, find_typed, find_band,
                     )
@@ -3039,14 +3103,14 @@ async def main() -> int:
                     observed = [text for text, _bounds in counter_words][:40]
                     if (
                         parsed is None
-                        or parsed[1] < 2
-                        or (parsed[0] == 0 and parsed[1] == 0)
+                        or parsed[1] != 2
+                        or parsed[0] not in (1, 2)
                     ):
                         got = None if parsed is None else f"{parsed[0]}/{parsed[1]} from {parsed[2]!r}"
                         raise RuntimeError(
-                            "Find counter was not a non-zero slash pair with "
-                            f"total >= 2 (not 0/0) in {find_band}; "
-                            f"parsed={got}; words={observed}; "
+                            "Find counter was not exactly total 2 with "
+                            "selected index 1 or 2 (focused pane only) in "
+                            f"{find_band}; parsed={got}; words={observed}; "
                             f"band delta {typed_pixels} "
                             f"({find_open_shot.name} vs {find_typed.name})"
                         )
@@ -3054,7 +3118,7 @@ async def main() -> int:
                     if typed_pixels < 40:
                         raise RuntimeError(
                             "Find band changed only "
-                            f"{typed_pixels} pixels after typing NATIVE_ECHO "
+                            f"{typed_pixels} pixels after typing NATIVE "
                             f"(need >= 40; OCR counter {current}/{total} from "
                             f"{raw!r} is the hit-count oracle) "
                             f"words={observed} band {find_band}"
@@ -3062,19 +3126,109 @@ async def main() -> int:
                     print(
                         f"Find counter {current}/{total} from {raw!r} "
                         f"(words {observed}); band delta {typed_pixels} "
-                        f"(OCR counter is the hit-count oracle)",
+                        f"(OCR counter is the hit-count oracle; focused pane)",
                         flush=True,
                     )
+                    # Return is Next inside the strip, not a newline to the
+                    # PTY. Poll until the selected index moves (1->2 or 2->1)
+                    # with the total still 2.
                     command("xdotool", "key", "--clearmodifiers", "Return", env=env)
-                    await asyncio.sleep(0.4 * TIME_SCALE)
+                    next_deadline = time.monotonic() + 6 * TIME_SCALE
                     find_next_shot = destination / "connected-find-next.png"
-                    await asyncio.to_thread(screenshot, window, find_next_shot, env)
+                    next_parsed = None
+                    next_observed = []
+                    changed = False
+                    while True:
+                        if app.poll() is not None:
+                            raise RuntimeError(
+                                "GUI exited before Find Next updated the "
+                                f"counter (code {app.returncode})"
+                            )
+                        await asyncio.to_thread(screenshot, window, find_next_shot, env)
+                        next_words = await asyncio.to_thread(
+                            read_strip_words, find_next_shot, find_band,
+                        )
+                        next_parsed = find_hit_counter(strip_words_as_rows(next_words))
+                        next_observed = [text for text, _bounds in next_words][:40]
+                        if (
+                            next_parsed is not None
+                            and next_parsed[1] == 2
+                            and next_parsed[0] in (1, 2)
+                            and next_parsed[0] != current
+                        ):
+                            changed = True
+                            break
+                        if time.monotonic() >= next_deadline:
+                            break
+                        await asyncio.sleep(.3)
                     advanced_after = count("UNEXPECTED_FIND_PTY_INPUT")
                     if advanced_after != typed_after:
                         raise RuntimeError(
                             "Find Next (Return) forwarded input to SSH "
                             f"(UNEXPECTED_FIND_PTY_INPUT {typed_after} -> {advanced_after})"
                         )
+                    if not changed:
+                        after_got = (
+                            None if next_parsed is None
+                            else f"{next_parsed[0]}/{next_parsed[1]} from {next_parsed[2]!r}"
+                        )
+                        raise RuntimeError(
+                            "Find Next (Return) did not change the selected "
+                            "index while keeping total 2 "
+                            f"in {find_band}; "
+                            f"before {current}/{total} from {raw!r} "
+                            f"words={observed}; "
+                            f"after {after_got} words={next_observed}"
+                        )
+                    assert next_parsed is not None
+                    print(
+                        f"Find Next moved {current}/{total} -> "
+                        f"{next_parsed[0]}/{next_parsed[1]} from "
+                        f"{next_parsed[2]!r} (words {next_observed}); "
+                        f"Enter is Next, not PTY input",
+                        flush=True,
+                    )
+                    # No-hit: select-all and replace is fiddly with xdotool,
+                    # so append ZZQ. The query becomes NATIVEZZQ, which is
+                    # absent from the focused pane, and the counter must read
+                    # 0/0. Still no PTY input.
+                    command(
+                        "xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "ZZQ", env=env,
+                    )
+                    await asyncio.sleep(0.8 * TIME_SCALE)
+                    nohit_after = count("UNEXPECTED_FIND_PTY_INPUT")
+                    if nohit_after != advanced_after:
+                        raise RuntimeError(
+                            "Find no-hit query forwarded typing to SSH "
+                            f"(UNEXPECTED_FIND_PTY_INPUT {advanced_after} -> {nohit_after})"
+                        )
+                    find_nohit = destination / "connected-find-nohit.png"
+                    await asyncio.to_thread(screenshot, window, find_nohit, env)
+                    nohit_words = await asyncio.to_thread(
+                        read_strip_words, find_nohit, find_band,
+                    )
+                    nohit_parsed = find_hit_counter(strip_words_as_rows(nohit_words))
+                    nohit_observed = [text for text, _bounds in nohit_words][:40]
+                    if (
+                        nohit_parsed is None
+                        or nohit_parsed[0] != 0
+                        or nohit_parsed[1] != 0
+                    ):
+                        got = (
+                            None if nohit_parsed is None
+                            else f"{nohit_parsed[0]}/{nohit_parsed[1]} from {nohit_parsed[2]!r}"
+                        )
+                        raise RuntimeError(
+                            "Find no-hit counter was not 0/0 after appending "
+                            f"ZZQ (query NATIVEZZQ) in {find_band}; "
+                            f"parsed={got}; words={nohit_observed}"
+                        )
+                    print(
+                        f"Find no-hit counter 0/0 from {nohit_parsed[2]!r} "
+                        f"after appending ZZQ (words {nohit_observed})",
+                        flush=True,
+                    )
                     command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
                     find_closed = destination / "connected-find-closed.png"
                     gone_deadline = time.monotonic() + 8 * TIME_SCALE
