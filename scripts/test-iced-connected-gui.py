@@ -136,6 +136,7 @@ async def monitored_shell(
                         "echo:AFTER_MENU",
                         "echo:AFTER_SENDER_ESCAPE",
                         "echo:AFTER_GEAR",
+                        "echo:AFTER_CONTEXT_MENU",
                         "echo:AFTER_EXIT_CANCEL",
                     ):
                         events.write(answer)
@@ -2213,6 +2214,201 @@ async def main() -> int:
                         f"SFTP_LIST_READY {listings_at_sort} -> {listings_after_sort}"
                     )
 
+                # Filer right-click menu on the remote file row. Rows are name
+                # ascending again (111, then 444). Do not choose Rename or
+                # Delete. The popup is clamped inside the window (200px wide,
+                # 6*24+2 px for a remote file), so a click near the bottom
+                # opens upward rather than down from the pointer.
+                context_row = await locate_rendered_label(
+                    window,
+                    destination / "connected-files-context-row.png",
+                    download_name,
+                    env=env,
+                    region=body,
+                    timeout=20,
+                )
+                click_x, click_y = center(context_row)
+                width, height = window_size(window, env)
+                action_band = (0, int(height * .62), width, height - 8)
+                try:
+                    rename_remote = await asyncio.to_thread(
+                        locate_visible_label,
+                        destination / "connected-files-context-row.png",
+                        "Rename remote",
+                        region=action_band,
+                    )
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        "Filer action row 'Rename remote' was not visible "
+                        "before the context-menu probe, so the menu search "
+                        f"box cannot exclude that button (action_band={action_band})"
+                    ) from exc
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    str(click_x), str(click_y), "click", "3", env=env,
+                )
+                # The click is a synthetic X event with no settle. A locate
+                # that captures the pre-redraw frame spends its OCR budget
+                # and reports a miss. Wait until the window actually changes
+                # (selection fill and/or the popup), then search for labels.
+                menu_shot = destination / "connected-files-context-menu.png"
+                row_shot = destination / "connected-files-context-row.png"
+                paint_deadline = time.monotonic() + 8 * TIME_SCALE
+                painted = 0
+                while True:
+                    await asyncio.to_thread(screenshot, window, menu_shot, env)
+                    painted = await asyncio.to_thread(diff, row_shot, menu_shot, env)
+                    if painted >= 50:
+                        break
+                    if time.monotonic() >= paint_deadline:
+                        raise RuntimeError(
+                            "right-click on "
+                            f"{download_name} at ({click_x}, {click_y}) did not "
+                            f"repaint the window ({painted} pixels vs {row_shot.name})"
+                        )
+                    await asyncio.sleep(.3)
+                # Pointer box, clamped to the window. The menu may sit above
+                # the click when the clamp pushes the anchor up.
+                menu_region = (
+                    max(0, click_x - 10),
+                    max(0, click_y - 240),
+                    min(width, click_x + 260),
+                    min(height, click_y + 240),
+                )
+                if menu_region[2] <= menu_region[0] or menu_region[3] <= menu_region[1]:
+                    raise RuntimeError(
+                        "Filer context-menu search box collapsed from click "
+                        f"({click_x}, {click_y}) in {width}x{height}: {menu_region}"
+                    )
+                # "Rename" is the first token of the action-row button
+                # "Rename remote" (and "Delete remote" is the same trap).
+                # If that button's y falls inside the pointer box, search
+                # Rename only above it. Refresh and New Folder are not on
+                # the action row (path-bar refresh is an icon), so Refresh
+                # keeps the full box: the clamped menu's last row can share
+                # y with the action row when the click is near the bottom.
+                rename_region = menu_region
+                if rename_remote[1] < menu_region[3] and rename_remote[3] > menu_region[1]:
+                    cut = rename_remote[1] - 4
+                    if cut <= menu_region[1]:
+                        raise RuntimeError(
+                            "Filer action row 'Rename remote' covers the whole "
+                            f"context-menu search box {menu_region}; "
+                            f"button bounds {rename_remote}"
+                        )
+                    rename_region = (
+                        menu_region[0], menu_region[1], menu_region[2], cut,
+                    )
+                open_deadline = time.monotonic() + 20 * TIME_SCALE
+                rename_item = None
+                refresh_item = None
+                last_open_error = "menu labels not searched"
+                while True:
+                    await asyncio.to_thread(screenshot, window, menu_shot, env)
+                    saw_refresh = False
+                    saw_rename = False
+                    try:
+                        refresh_item = await asyncio.to_thread(
+                            locate_visible_label,
+                            menu_shot, "Refresh", region=menu_region, budget=4,
+                        )
+                        saw_refresh = True
+                    except RuntimeError as exc:
+                        last_open_error = str(exc)
+                    if saw_refresh:
+                        try:
+                            rename_item = await asyncio.to_thread(
+                                locate_visible_label,
+                                menu_shot, "Rename", region=rename_region, budget=4,
+                            )
+                            saw_rename = True
+                        except RuntimeError as exc:
+                            last_open_error = str(exc)
+                    if saw_refresh and saw_rename:
+                        break
+                    if time.monotonic() >= open_deadline:
+                        raise RuntimeError(
+                            "Filer context menu did not render Rename and Refresh "
+                            f"after right-click at ({click_x}, {click_y}) on "
+                            f"{download_name}: {last_open_error}; "
+                            f"refresh region {menu_region}, rename region {rename_region}, "
+                            f"action-row 'Rename remote' at {rename_remote}"
+                        )
+                    await asyncio.sleep(.4)
+                if rename_item is None or refresh_item is None:
+                    raise RuntimeError(
+                        "Filer context menu locate returned no bounds after "
+                        f"finding Rename and Refresh (Rename {rename_item}, "
+                        f"Refresh {refresh_item}, rename region {rename_region}, "
+                        f"refresh region {menu_region})"
+                    )
+
+                # Menu owns the keyboard. Arm the watch only after the
+                # right-click settles: that click selects the row and must
+                # not be scored as typed input. Do not click a menu row.
+                probe_state["phase"] = "CONTEXT"
+                try:
+                    typed_before = count("UNEXPECTED_CONTEXT_PTY_INPUT")
+                    command(
+                        "xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "CONTEXT_LOCAL_SENTINEL", env=env,
+                    )
+                    command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                    await asyncio.sleep(.6)
+                    typed_after = count("UNEXPECTED_CONTEXT_PTY_INPUT")
+                    if typed_after != typed_before:
+                        raise RuntimeError(
+                            "Filer context menu forwarded typing or Return to SSH "
+                            f"(UNEXPECTED_CONTEXT_PTY_INPUT {typed_before} -> {typed_after})"
+                        )
+                    command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                    closed_shot = destination / "connected-files-context-closed.png"
+                    gone_deadline = time.monotonic() + 12 * TIME_SCALE
+                    still_refresh = None
+                    while True:
+                        await asyncio.to_thread(screenshot, window, closed_shot, env)
+                        try:
+                            still_refresh = await asyncio.to_thread(
+                                locate_visible_label,
+                                closed_shot, "Refresh", region=menu_region, budget=1.0,
+                            )
+                        except RuntimeError:
+                            still_refresh = None
+                            break
+                        if time.monotonic() >= gone_deadline:
+                            break
+                        await asyncio.sleep(.4)
+                    escaped_after = count("UNEXPECTED_CONTEXT_PTY_INPUT")
+                    if still_refresh is not None:
+                        raise RuntimeError(
+                            "Escape did not close the Filer context menu; "
+                            f"Refresh still at {still_refresh} in {menu_region}"
+                        )
+                    if escaped_after != typed_after:
+                        raise RuntimeError(
+                            "Escape from the Filer context menu forwarded input to SSH "
+                            f"(UNEXPECTED_CONTEXT_PTY_INPUT {typed_after} -> {escaped_after})"
+                        )
+                finally:
+                    probe_state["phase"] = None
+                # Escape clears the menu and does not restore the terminal
+                # the way the Session menu does. Click the pane the earlier
+                # chrome probes used, then require the shell to answer.
+                command(
+                    "xdotool", "windowfocus", window, "mousemove", "--window", window,
+                    "640", "280", "click", "1", env=env,
+                )
+                await asyncio.sleep(.3)
+                command(
+                    "xdotool", "type", "--clearmodifiers", "--delay", "25",
+                    "echo:AFTER_CONTEXT_MENU", env=env,
+                )
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: "NATIVE_ECHO:AFTER_CONTEXT_MENU" in events.path.read_text(encoding="utf-8").splitlines(),
+                    "shell echo after dismissing Filer context menu",
+                )
+
                 # The populated queue lives in the Transfer tab. Both completed
                 # jobs must be listed; scroll its visible interior and retain
                 # the resulting production screenshot.
@@ -2885,6 +3081,7 @@ async def main() -> int:
                     "PASS: click-driven SFTP upload preserved exact binary bytes in the native-smoke chroot\n"
                     "PASS: click-driven SFTP download preserved exact binary bytes in the visible local directory\n"
                     "PASS: Filer Name header click reversed remote name order and the second click restored it without a new SFTP listing\n"
+                    "PASS: Filer right-click menu rendered Rename and Refresh, consumed typing, Return and Escape, and the shell answered AFTER_CONTEXT_MENU\n"
                     "PASS: exact payloads appeared at the expected disposable remote and local paths\n"
                     f"Connected split screenshot change: {split_pixels} pixels\n"
                     f"Opened utility dock screenshot change: {files_pixels} pixels\n"
