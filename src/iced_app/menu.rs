@@ -73,6 +73,7 @@ impl Menu {
             Menu::Edit => vec![
                 item("Copy", "", Copy),
                 item("Paste", "", Paste),
+                item("Find", "Ctrl+Shift+F", Find),
                 Entry::Separator,
                 item("Command Palette", "", Palette),
                 item("Snippets", "", Tool(Panel::Snippets)),
@@ -141,6 +142,7 @@ pub(super) enum Command {
     Tunnels,
     LockScreen,
     Paste,
+    Find,
     Palette,
     ThemeLight,
     ThemeDark,
@@ -209,6 +211,25 @@ mod tests {
         );
         assert_eq!(Menu::Session.offset(), 0.0);
         assert!(Menu::Edit.offset() > 0.0);
+    }
+
+    #[test]
+    fn edit_menu_find_follows_paste_with_shortcut() {
+        let entries = Menu::Edit.entries();
+        let paste = entries
+            .iter()
+            .position(|entry| matches!(entry, Entry::Item { label: "Paste", .. }));
+        let Some(paste) = paste else {
+            panic!("Edit menu has no Paste");
+        };
+        assert!(matches!(
+            entries.get(paste + 1),
+            Some(Entry::Item {
+                label: "Find",
+                shortcut: "Ctrl+Shift+F",
+                command: Command::Find,
+            })
+        ));
     }
 
     #[test]

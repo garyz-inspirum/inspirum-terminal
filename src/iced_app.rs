@@ -48,6 +48,9 @@ use std::{
 /// The terminal keeps its own dark palette, independent of the chrome theme.
 const TERMINAL_ACCENT: Color = Color::from_rgb8(123, 176, 255);
 
+/// Stable widget id for the Find strip input. Opening the strip focuses it.
+const FIND_INPUT_ID: &str = "find-query";
+
 // Chrome colour lookups against the current WindTerm theme palette.
 fn fg() -> Color {
     theme::palette().text
@@ -429,11 +432,23 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                 {
                     Some(Message::KeyChord(KeyChord::SplitRight))
                 }
+                // Ctrl/Cmd+Shift+F is retained-history Find (terminal-ux). The
+                // files dock moved to Ctrl/Cmd+Shift+O so the chords do not collide.
+                // Ignored-only, like the other viewport chords: a focused text
+                // field, including the Find input, owns its keys.
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if status == event::Status::Ignored
                         && modifiers.command()
                         && modifiers.shift()
                         && matches!(key.as_ref(), keyboard::Key::Character("f" | "F")) =>
+                {
+                    Some(Message::KeyChord(KeyChord::Find))
+                }
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                    if status == event::Status::Ignored
+                        && modifiers.command()
+                        && modifiers.shift()
+                        && matches!(key.as_ref(), keyboard::Key::Character("o" | "O")) =>
                 {
                     Some(Message::KeyChord(KeyChord::ToggleFiles))
                 }
@@ -2178,6 +2193,7 @@ enum KeyChord {
     SplitRight,
     ToggleFiles,
     AuxiliaryShell,
+    Find,
 }
 
 impl KeyChord {
@@ -2190,6 +2206,7 @@ impl KeyChord {
             KeyChord::SplitRight => Message::Split(pane_grid::Axis::Vertical),
             KeyChord::ToggleFiles => Message::ToggleFiles,
             KeyChord::AuxiliaryShell => Message::ToggleAuxiliaryShell,
+            KeyChord::Find => Message::FindOpen,
         }
     }
 }
@@ -2435,6 +2452,16 @@ enum Message {
         index: usize,
     },
     SessionContextChoose(SessionContextAction),
+    /// Open the Find strip for the focused pane and focus its input.
+    /// Does not close an already-open strip (the menu item toggles).
+    FindOpen,
+    /// Edit > Find. Opens the strip, or closes it if it is already open.
+    FindToggle,
+    FindQuery(String),
+    /// Next hit. Also the Find input's Enter submit.
+    FindNext,
+    FindPrev,
+    FindClose,
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -3596,6 +3623,11 @@ struct App {
     last_pointer: iced::Point,
     /// Open right-click menu, if any. File and session rows share this.
     context_menu: Option<ContextMenu>,
+    /// Find strip is visible at the bottom of the centre workspace.
+    find_open: bool,
+    /// True while the Find input owns keyboard input. Cleared when the strip
+    /// closes, on Escape, and when a terminal pane is focused.
+    find_focused: bool,
 }
 
 const FILES_PANELS: [dock::Panel; 3] = [
@@ -3743,6 +3775,8 @@ impl App {
             collapsed_groups: HashSet::new(),
             last_pointer: iced::Point::ORIGIN,
             context_menu: None,
+            find_open: false,
+            find_focused: false,
         }
     }
 
@@ -3849,6 +3883,9 @@ impl App {
     }
 
     fn send_to_focused_terminal(&mut self, bytes: Vec<u8>) {
+        if self.find_focused {
+            return;
+        }
         let Some(id) = self
             .tabs
             .get(self.active)
@@ -3965,6 +4002,7 @@ impl App {
             || self.dialog.is_some()
             || self.remote_editor.is_some()
             || self.sender_focused
+            || self.find_focused
             || !self.remote_keys.contains(&id)
             || !self.focused_pane_matches(id)
             || self.local_navigation.contains(&id)
@@ -3986,6 +4024,9 @@ impl App {
     }
 
     fn send_to_terminal(&mut self, id: u64, bytes: Vec<u8>) -> bool {
+        if self.find_focused {
+            return false;
+        }
         if !self.focused_pane_matches(id)
             || self.local_navigation.contains(&id)
             || self.free_type.contains_key(&id)
@@ -4635,6 +4676,11 @@ impl App {
                 {
                     return Task::none();
                 }
+                // The Find input owns the keyboard. Its own chord may refresh
+                // the strip; every other chord stays out of the terminal.
+                if self.find_focused && !matches!(chord, KeyChord::Find) {
+                    return Task::none();
+                }
                 return self.update(chord.message());
             }
             other => other,
@@ -4643,6 +4689,8 @@ impl App {
             self.privacy_locked = !self.privacy_locked;
             self.ime_cursor = None;
             if self.privacy_locked {
+                // The curtain replaces the tree, so the Find input is gone.
+                self.find_focused = false;
                 self.status = "Workspace hidden by privacy lock.".into();
             } else {
                 if !self.tabs.is_empty() {
@@ -4674,6 +4722,8 @@ impl App {
                     | Message::CommandSend
                     | Message::ToggleFocusMode
                     | Message::ToggleAuxiliaryShell
+                    | Message::FindOpen
+                    | Message::FindToggle
                     | Message::ToggleLocalNavigation
                     | Message::ToggleRemoteKeys(..)
                     | Message::ToggleFocusedRemoteKeys
@@ -4763,11 +4813,19 @@ impl App {
                 // The existing tab, split panes and files dock remain intact.
                 // Focus mode affects presentation only; it never retargets SSH.
                 self.focus_mode = !self.focus_mode;
+                if self.focus_mode {
+                    // Focus mode does not mount the Find strip.
+                    self.find_focused = false;
+                }
                 self.status = if self.focus_mode {
                     "Focus mode: terminal panes only (Alt+Enter to exit).".into()
                 } else {
                     "Full workspace restored.".into()
                 };
+                if !self.focus_mode && self.find_open {
+                    self.find_focused = true;
+                    return operation::focus(FIND_INPUT_ID);
+                }
             }
             return Task::none();
         }
@@ -4792,6 +4850,7 @@ impl App {
                     && self.dialog.is_none()
                     && self.remote_editor.is_none()
                     && !self.sender_focused
+                    && !self.find_focused
                     && !self.free_type.contains_key(&id)
                     && !self.remote_keys.contains(&id) =>
             {
@@ -5162,6 +5221,7 @@ impl App {
                     C::Tunnels => Message::Tunnels,
                     C::LockScreen => Message::TogglePrivacyLock,
                     C::Paste => Message::RequestPaste,
+                    C::Find => Message::FindToggle,
                     C::Palette => Message::Commands,
                     C::ThemeLight => {
                         theme::set(theme::ChromeTheme::Light);
@@ -5453,6 +5513,11 @@ impl App {
                 }
                 // Escape releases the Sender editor so keys reach the terminal.
                 self.sender_focused = false;
+                // Captured Escape (the Find text_input consumes it) closes the
+                // strip here. It must not become a PTY 0x1b.
+                if self.find_focused {
+                    self.close_find_strip();
+                }
             }
             Message::AskClose(index) => {
                 let closing_key = self
@@ -5504,8 +5569,11 @@ impl App {
                         self.refresh_workspace_displays(self.active);
                     }
                 }
-                if self.tabs.is_empty() && self.files_open() {
-                    self.toggle_files();
+                if self.tabs.is_empty() {
+                    self.close_find_strip();
+                    if self.files_open() {
+                        self.toggle_files();
+                    }
                 }
                 self.dialog = None;
                 if self.files_open() && !self.tabs.is_empty() {
@@ -6190,6 +6258,9 @@ impl App {
                 }
             }
             Message::RequestPaste => {
+                if self.find_focused {
+                    return Task::none();
+                }
                 if self
                     .tabs
                     .get(self.active)
@@ -6211,6 +6282,9 @@ impl App {
                     .map(move |contents| Message::ClipboardRead(id, targets.clone(), contents));
             }
             Message::ClipboardRead(id, targets, contents) => {
+                if self.find_focused {
+                    return Task::none();
+                }
                 // A delayed clipboard read cannot create a paste confirmation
                 // for a session that the user has already left.
                 if !self.focused_pane_matches(id)
@@ -6504,6 +6578,7 @@ impl App {
             }
             Message::Focus(pane) => {
                 self.sender_focused = false;
+                self.find_focused = false;
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.focus = pane;
                 }
@@ -6750,6 +6825,15 @@ impl App {
                     && key.as_ref() == keyboard::Key::Named(Named::Escape)
                 {
                     self.sender_focused = false;
+                    return Task::none();
+                }
+                // Ignored Escape (and any other key injected while the Find
+                // input owns the keyboard) must not reach the PTY. Escape
+                // closes the strip; every other key is dropped.
+                if self.find_focused && self.dialog.is_none() {
+                    if key.as_ref() == keyboard::Key::Named(Named::Escape) {
+                        self.close_find_strip();
+                    }
                     return Task::none();
                 }
                 if modifiers.command()
@@ -7118,6 +7202,27 @@ impl App {
                     SessionContextAction::Import => return self.update(Message::ImportProfiles),
                 }
             }
+            Message::FindOpen => return self.open_find_strip(),
+            Message::FindToggle => {
+                if self.find_open {
+                    self.close_find_strip();
+                    return Task::none();
+                }
+                return self.open_find_strip();
+            }
+            Message::FindQuery(query) => {
+                self.find_focused = true;
+                return self.tool_update(tools::Action::HistoryQuery(query));
+            }
+            Message::FindNext => {
+                self.find_focused = true;
+                return self.tool_update(tools::Action::HistoryNext(true));
+            }
+            Message::FindPrev => {
+                self.find_focused = true;
+                return self.tool_update(tools::Action::HistoryNext(false));
+            }
+            Message::FindClose => self.close_find_strip(),
         }
         Task::none()
     }
@@ -7155,6 +7260,7 @@ impl App {
         let target = if self.dialog.is_none()
             && self.remote_editor.is_none()
             && !self.sender_focused
+            && !self.find_focused
             && self.open_menu.is_none()
             && self.dock_menu.is_none()
             && self.context_menu.is_none()
@@ -7893,14 +7999,18 @@ impl App {
 
         let dock = self.terminals();
 
-        container(column![
+        // The strip is omitted when closed so the terminal's computed rows
+        // stay exactly the closed-workspace layout.
+        let mut centre = column![
             container(tab_strip).style(surface),
             container(toolbar).style(surface),
-            container(dock).height(Fill).style(border_fill)
-        ])
-        .height(Fill)
-        .width(Fill)
-        .into()
+            container(dock).height(Fill).style(border_fill),
+        ];
+        if self.find_open {
+            centre = centre.push(self.find_strip());
+        }
+
+        container(centre).height(Fill).width(Fill).into()
     }
 
     /// Mode/state labels and per-pane controls shared by the pane header
@@ -8072,7 +8182,8 @@ impl App {
                     focused: self.focused_terminal_id() == Some(pane.id)
                         && self.dialog.is_none()
                         && self.remote_editor.is_none()
-                        && !self.sender_focused,
+                        && !self.sender_focused
+                        && !self.find_focused,
                     remote_key_mode: self.remote_keys.contains(&pane.id),
                     pane: id,
                     id: pane.id,
@@ -9745,6 +9856,101 @@ impl App {
             ),
         ]
         .into()
+    }
+
+    fn close_find_strip(&mut self) {
+        self.find_open = false;
+        self.find_focused = false;
+    }
+
+    /// Point History search at the focused pane the same way opening the
+    /// History panel does, then show the strip and focus its input.
+    fn open_find_strip(&mut self) -> Task<Message> {
+        if self.dialog.is_some() || self.remote_editor.is_some() {
+            return Task::none();
+        }
+        if self.focus_mode {
+            self.status = "Exit focus mode before searching history.".into();
+            return Task::none();
+        }
+        let Some(id) = self.tabs.get(self.active).and_then(|tab| {
+            tab.panes
+                .get(tab.focus)
+                .filter(|pane| !pane.exited)
+                .map(|pane| pane.id)
+        }) else {
+            self.status = "Focus a terminal pane before searching history.".into();
+            return Task::none();
+        };
+        // history_refresh only records an owner when a live terminal exists.
+        // Set it first so a not-yet-started pane still owns the strip.
+        self.tools.history_owner = Some(id);
+        self.history_refresh();
+        self.find_open = true;
+        self.find_focused = true;
+        operation::focus(FIND_INPUT_ID)
+    }
+
+    fn find_strip(&self) -> Element<'_, Message> {
+        let p = theme::palette();
+        let state = self
+            .tools
+            .history_owner
+            .and_then(|id| self.tools.histories.get(&id));
+        let query = state.map(|state| state.query()).unwrap_or("");
+        let counter = match state {
+            Some(state) if !state.hits().is_empty() => {
+                format!("{}/{}", state.selected_hit_index() + 1, state.hits().len())
+            }
+            _ => "0/0".to_owned(),
+        };
+        let chrome = |label: String| {
+            text(label)
+                .size(theme::metrics::UI_TEXT)
+                .color(p.text)
+                .font(Font::MONOSPACE)
+                .wrapping(iced::widget::text::Wrapping::None)
+        };
+        let flat = |label: &'static str, message: Message| {
+            button(
+                text(label)
+                    .size(theme::metrics::UI_TEXT)
+                    .color(p.text)
+                    .font(Font::MONOSPACE)
+                    .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .padding([2, 6])
+            .style(icon_button)
+            .on_press(message)
+        };
+        let body = row![
+            chrome("Find".to_owned()),
+            text_input("", query)
+                .id(FIND_INPUT_ID)
+                .style(flat_input)
+                .on_input(Message::FindQuery)
+                .on_submit(Message::FindNext)
+                .font(Font::MONOSPACE)
+                .size(theme::metrics::UI_TEXT)
+                .padding([2, 6])
+                .width(Fill),
+            chrome(counter),
+            flat("Prev", Message::FindPrev),
+            flat("Next", Message::FindNext),
+            button(icons::icon(icons::Icon::Close, 10.0, p.text))
+                .padding(3)
+                .style(icon_button)
+                .on_press(Message::FindClose),
+        ]
+        .spacing(6)
+        .padding([0, 8])
+        .height(theme::metrics::STRIP_HEIGHT - 1.0)
+        .align_y(iced::Center);
+        // Toolbar background token (surface -> palette.chrome), 1 px top rule.
+        container(column![hline(), body])
+            .width(Fill)
+            .style(surface)
+            .into()
     }
 }
 
@@ -12452,7 +12658,7 @@ mod tests {
         app
     }
 
-    fn every_key_chord() -> [KeyChord; 7] {
+    fn every_key_chord() -> [KeyChord; 8] {
         [
             KeyChord::FocusMode,
             KeyChord::FreeType,
@@ -12461,6 +12667,7 @@ mod tests {
             KeyChord::SplitRight,
             KeyChord::ToggleFiles,
             KeyChord::AuxiliaryShell,
+            KeyChord::Find,
         ]
     }
 
@@ -13864,5 +14071,150 @@ mod tests {
             "recorder must see Enter once the menu is gone, log={:?}",
             app.pty_write_log
         );
+    }
+
+    fn app_with_focused_pane(label: &str) -> (App, u64) {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-find-{label}-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        let profile = Session {
+            name: "find fixture".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        let id = pane.id;
+        app.tabs.push(Workspace::new(profile, pane));
+        (app, id)
+    }
+
+    #[test]
+    fn find_chord_opens_strip_for_the_focused_pane() {
+        let (mut app, id) = app_with_focused_pane("chord-open");
+        let focus = app.tabs[0].focus;
+        let _ = app.update(Message::KeyChord(KeyChord::Find));
+        assert!(app.find_open, "chord must open the strip");
+        assert!(app.find_focused, "opening the strip focuses its input");
+        assert_eq!(
+            app.tools.history_owner,
+            Some(id),
+            "owner must be the focused pane"
+        );
+        assert_eq!(app.tabs[0].focus, focus, "chord must not move pane focus");
+    }
+
+    #[test]
+    fn find_chord_does_nothing_while_a_menu_is_open() {
+        let (mut app, _id) = app_with_focused_pane("chord-menu");
+        for (open_menu, dock_menu) in [
+            (Some(menu::Menu::Edit), None),
+            (None, Some(dock::Area::Bottom)),
+        ] {
+            app.open_menu = open_menu;
+            app.dock_menu = dock_menu;
+            app.find_open = false;
+            app.find_focused = false;
+            app.tools.history_owner = None;
+            let _ = app.update(Message::KeyChord(KeyChord::Find));
+            assert!(!app.find_open, "menu must drop the Find chord");
+            assert!(
+                app.tools.history_owner.is_none(),
+                "a dropped chord must not retarget history"
+            );
+            assert!(
+                app.open_menu.is_some() || app.dock_menu.is_some(),
+                "the chord must not close the menu"
+            );
+        }
+        app.open_menu = None;
+        app.dock_menu = None;
+        app.privacy_locked = true;
+        let _ = app.update(Message::KeyChord(KeyChord::Find));
+        assert!(!app.find_open, "privacy lock must drop the Find chord");
+    }
+
+    #[test]
+    fn find_focus_blocks_key_and_paste_until_escape_releases_the_terminal() {
+        let (mut app, id) = app_with_focused_pane("chord-keys");
+        app.find_open = true;
+        app.find_focused = true;
+        app.pty_write_log.clear();
+        let _ = app.update(pressed_char("x"));
+        let _ = app.update(pressed_key(
+            keyboard::Key::Character("x".into()),
+            keyboard::Modifiers::default(),
+        ));
+        let _ = app.update(Message::ClipboardRead(id, vec![id], Some("pasted".into())));
+        let _ = app.update(Message::RequestPaste);
+        assert!(
+            app.pty_write_log.is_empty(),
+            "Find focus must drop keys and paste, log={:?}",
+            app.pty_write_log
+        );
+        assert_eq!(app.status, "Ready", "paste must not start a clipboard read");
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(!app.find_open, "Escape must close the strip");
+        assert!(!app.find_focused, "Escape must clear Find focus");
+        assert!(
+            app.pty_write_log.is_empty(),
+            "Find Escape must not be sent to the PTY, log={:?}",
+            app.pty_write_log
+        );
+        app.pty_write_log.clear();
+        let _ = app.update(pressed_char("z"));
+        assert!(
+            app.pty_write_log
+                .iter()
+                .any(|(pane, bytes)| *pane == id && bytes.as_slice() == b"z"),
+            "a key after close must reach the terminal, log={:?}",
+            app.pty_write_log
+        );
+    }
+
+    #[test]
+    fn find_query_and_next_advance_the_shared_history_hit() {
+        let (mut app, id) = app_with_focused_pane("chord-hits");
+        app.tools.history_owner = Some(id);
+        app.tools
+            .histories
+            .entry(id)
+            .or_default()
+            .update_snapshot(vec![
+                "alpha".into(),
+                "needle one".into(),
+                "beta".into(),
+                "needle two".into(),
+            ]);
+        let _ = app.update(Message::FindQuery("needle".into()));
+        let state = app.tools.histories.get(&id).expect("seeded history");
+        assert_eq!(state.query(), "needle");
+        assert_eq!(state.hits().len(), 2);
+        assert_eq!(state.selected_hit_index(), 0);
+        let _ = app.update(Message::FindNext);
+        assert_eq!(
+            app.tools
+                .histories
+                .get(&id)
+                .expect("history")
+                .selected_hit_index(),
+            1
+        );
+        assert!(app.find_focused, "typing and Next keep Find focus");
+    }
+
+    #[test]
+    fn focusing_a_pane_clears_find_focus_without_closing_the_strip() {
+        let (mut app, _id) = app_with_focused_pane("chord-pane-focus");
+        app.find_open = true;
+        app.find_focused = true;
+        let pane = app.tabs[0].focus;
+        let _ = app.update(Message::Focus(pane));
+        assert!(app.find_open, "pane focus must not close the strip");
+        assert!(!app.find_focused, "pane focus must release the Find input");
     }
 }

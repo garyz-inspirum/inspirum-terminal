@@ -1528,7 +1528,7 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
     await step("split", s07)
 
     async def s08():
-        key("ctrl+shift+f")
+        key("ctrl+shift+o")
         await wait_for(lambda: "SFTP_LIST_READY" in log_text(), "remote SFTP listing")
         await asyncio.sleep(1.5)
         shot("tour-08-filer.png")
@@ -2071,7 +2071,7 @@ async def main() -> int:
                 if split_pixels < 3000:
                     raise RuntimeError(f"split screen changed only {split_pixels} pixels")
 
-                command("xdotool", "windowfocus", window, "key", "--clearmodifiers", "ctrl+shift+f", env=env)
+                command("xdotool", "windowfocus", window, "key", "--clearmodifiers", "ctrl+shift+o", env=env)
                 await wait_for(
                     lambda: "SFTP_SUBSYSTEM_STARTED" in events.path.read_text(encoding="utf-8"),
                     "actual SFTP subsystem opened by Iced Files dock",
@@ -2785,7 +2785,7 @@ async def main() -> int:
                 # close either underlying authenticated SSH PTY.
                 command(
                     "xdotool", "windowfocus", window, "key",
-                    "--clearmodifiers", "ctrl+shift+f", env=env,
+                    "--clearmodifiers", "ctrl+shift+o", env=env,
                 )
                 await asyncio.sleep(.7)
                 screenshot(window, destination / "connected-files-closed.png", env)
