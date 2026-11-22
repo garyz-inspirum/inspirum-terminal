@@ -3373,24 +3373,34 @@ async def main() -> int:
                     return x, y
 
                 def find_pane_click():
-                    if not (0 <= 640 < width and 0 <= 280 < height
-                            and not (find_band[0] <= 640 < find_band[2]
-                                     and find_band[1] <= 280 < find_band[3])):
+                    # The split layout has a divider at width/2; click inside the right pane.
+                    x = (width * 3) // 4
+                    y = 280
+                    if not (0 <= x < width and 0 <= y < height
+                            and abs(x - width // 2) >= 100
+                            and not (find_band[0] <= x < find_band[2]
+                                     and find_band[1] <= y < find_band[3])):
                         raise RuntimeError(
-                            f"terminal click (640, 280) not outside Find band "
-                            f"{find_band} in {width}x{height}"
+                            f"terminal click ({x}, {y}) invalid: width={width}, "
+                            f"find_band={find_band}"
                         )
                     command("xdotool", "windowfocus", window, "mousemove",
-                            "--window", window, "640", "280", "click", "1", env=env)
+                            "--window", window, str(x), str(y), "click", "1", env=env)
 
                 async def find_echo(token):
                     command("xdotool", "type", "--clearmodifiers", "--delay", "25",
                             f"echo:{token}", env=env)
                     command("xdotool", "key", "--clearmodifiers", "Return", env=env)
-                    await wait_for(
-                        lambda: f"NATIVE_ECHO:{token}" in events.path.read_text(
-                            encoding="utf-8").splitlines(), f"shell echo {token}",
-                    )
+                    try:
+                        await wait_for(
+                            lambda: f"NATIVE_ECHO:{token}" in events.path.read_text(
+                                encoding="utf-8").splitlines(), f"shell echo {token}",
+                        )
+                    except RuntimeError:
+                        timeout_shot = destination / f"connected-find-echo-{token}-timeout.png"
+                        await asyncio.to_thread(screenshot, window, timeout_shot, env)
+                        print(timeout_shot, flush=True)
+                        raise
 
                 # P1: pane ownership, then click back into unchanged query.
                 p1_open, p1_prev, _p1_next = await open_find_and_locate("p1")
