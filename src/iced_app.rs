@@ -338,6 +338,8 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
         min_size: Some(iced::Size::new(960.0, 640.0)),
         ..Default::default()
     })
+    // OS close must take the same guarded Exit path as Session > Exit.
+    .exit_on_close_request(false)
     .scale_factor(|app: &App| app.scale as f32)
     .subscription(|app: &App| {
         let drag = if app.dock_drag.is_some() {
@@ -358,6 +360,7 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
         Subscription::batch([
             drag,
             iced::window::resize_events().map(|(_, size)| Message::WindowResized(size)),
+            iced::window::close_requests().map(|_| Message::Exit),
             event::listen_with(|event, status, _| match &event {
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if privacy_lock_chord(key, *modifiers) =>
@@ -1103,6 +1106,23 @@ struct FilesState {
     remote_generation: u64,
     local_visible: usize,
     remote_visible: usize,
+    /// Indices into `local_entries` in display order. Rebuilt only when the
+    /// listing or the Explorer sort changes, never during view construction.
+    local_order: Vec<usize>,
+    /// Indices into `remote_entries` in display order. Rebuilt only when the
+    /// listing or the Filer sort changes, never during view construction.
+    remote_order: Vec<usize>,
+    /// Client-local date captured once when the current remote listing was
+    /// stored. Drives both the Date Modified sort key and the displayed date.
+    /// Year inference for `ls` dates that omit a year is an approximation
+    /// against this date, not against the clock at each comparison.
+    remote_sort_reference: chrono::NaiveDate,
+    /// Cheap instrumentation incremented each time local display order is
+    /// recomputed. Tests read this to prove view construction does not re-sort.
+    local_sort_runs: u64,
+    /// Cheap instrumentation incremented each time remote display order is
+    /// recomputed. Tests read this to prove view construction does not re-sort.
+    remote_sort_runs: u64,
     selected_local: Option<PathBuf>,
     selected_remote: Option<sftp::RemoteEntry>,
     name_input: String,
@@ -1130,11 +1150,27 @@ impl FilesState {
             remote_generation: 0,
             local_visible: FILES_PAGE_SIZE,
             remote_visible: FILES_PAGE_SIZE,
+            local_order: Vec::new(),
+            remote_order: Vec::new(),
+            remote_sort_reference: chrono::Local::now().date_naive(),
+            local_sort_runs: 0,
+            remote_sort_runs: 0,
             selected_local: None,
             selected_remote: None,
             name_input: String::new(),
             transfers: Vec::new(),
         }
+    }
+
+    /// The visible date uses the same listing-time reference as the sort key,
+    /// so the label cannot change year between repaints while the row keeps
+    /// its sorted position.
+    fn remote_modified_label(&self, entry: &sftp::RemoteEntry) -> String {
+        entry
+            .modified
+            .as_deref()
+            .map(|raw| windterm_remote_date(raw, self.remote_sort_reference))
+            .unwrap_or_default()
     }
 }
 
@@ -1262,22 +1298,44 @@ fn file_cell<'a>(value: String, width: impl Into<Length>, right: bool) -> Elemen
     }
 }
 
-fn file_listing_header<'a>(table_width: f32) -> Element<'a, Message> {
+fn file_listing_header<'a>(
+    table_width: f32,
+    remote: bool,
+    sort_column: FileSortColumn,
+    ascending: bool,
+) -> Element<'a, Message> {
     let mut header = row![];
     let columns = file_listing_columns();
     let last = columns.len() - 1;
-    for (index, (label, width, right)) in columns.into_iter().enumerate() {
+    debug_assert_eq!(columns.len(), FileSortColumn::COLUMNS.len());
+    for (index, ((label, width, right), column)) in
+        columns.into_iter().zip(FileSortColumn::COLUMNS).enumerate()
+    {
         let width = if index == last {
             Length::Fill
         } else {
             Length::Fixed(width)
         };
-        header = header.push(file_cell(label.into(), width, right)).push(
-            container(text(""))
-                .width(1)
-                .height(Fill)
-                .style(file_divider),
-        );
+        let message = if remote {
+            Message::FilesSortRemote(column)
+        } else {
+            Message::FilesSortLocal(column)
+        };
+        header = header
+            .push(file_header_cell(
+                label,
+                width,
+                right,
+                column == sort_column,
+                ascending,
+                message,
+            ))
+            .push(
+                container(text(""))
+                    .width(1)
+                    .height(Fill)
+                    .style(file_divider),
+            );
     }
     column![
         container(header.height(theme::metrics::TABLE_HEADER_HEIGHT))
@@ -1289,6 +1347,417 @@ fn file_listing_header<'a>(table_width: f32) -> Element<'a, Message> {
             .style(file_divider),
     ]
     .into()
+}
+
+const FILE_SORT_MARK: f32 = 8.0;
+
+/// Flat header cell. Same width, font and padding as the previous label; a
+/// press sorts that column. The sorted column draws a canvas triangle on its
+/// right edge (up = ascending).
+fn file_header_cell<'a>(
+    label: &'static str,
+    width: Length,
+    right: bool,
+    sorted: bool,
+    ascending: bool,
+    message: Message,
+) -> Element<'a, Message> {
+    let label = text(label)
+        .size(theme::metrics::UI_TEXT)
+        .font(Font::MONOSPACE)
+        .color(theme::palette().text_dock)
+        .wrapping(text::Wrapping::None);
+    let label = container(label)
+        .width(Fill)
+        .height(Fill)
+        .align_y(iced::Center)
+        .align_x(if right { iced::Right } else { iced::Left })
+        .clip(true);
+    let mut content = row![label].align_y(iced::Center).width(Fill).height(Fill);
+    if sorted {
+        let glyph = if ascending {
+            icons::Icon::TriangleUp
+        } else {
+            icons::Icon::TriangleDown
+        };
+        content = content.push(icons::icon(
+            glyph,
+            FILE_SORT_MARK,
+            theme::palette().text_dock,
+        ));
+    }
+    button(content)
+        .on_press(message)
+        .padding(if sorted {
+            iced::Padding {
+                top: 0.0,
+                right: 1.0,
+                bottom: 0.0,
+                left: f32::from(FILE_CELL_PAD),
+            }
+        } else {
+            iced::Padding::from([0, FILE_CELL_PAD])
+        })
+        .width(width)
+        .height(Fill)
+        .clip(true)
+        .style(file_header_button)
+        .into()
+}
+
+fn file_header_button(_theme: &Theme, status: button::Status) -> button::Style {
+    let palette = theme::palette();
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => palette.hover,
+        _ => palette.header,
+    };
+    button::Style {
+        background: Some(background.into()),
+        text_color: palette.text_dock,
+        border: Border::default(),
+        ..button::Style::default()
+    }
+}
+
+/// Column a Filer or Explorer table is ordered by. Header order matches
+/// [`file_listing_columns`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileSortColumn {
+    Name,
+    DateModified,
+    Type,
+    Size,
+    Permissions,
+    Owner,
+    Group,
+}
+
+impl FileSortColumn {
+    const COLUMNS: [Self; 7] = [
+        Self::Name,
+        Self::DateModified,
+        Self::Type,
+        Self::Size,
+        Self::Permissions,
+        Self::Owner,
+        Self::Group,
+    ];
+}
+
+/// A new column starts ascending; clicking the active column reverses it.
+fn next_file_sort(
+    current: FileSortColumn,
+    ascending: bool,
+    clicked: FileSortColumn,
+) -> (FileSortColumn, bool) {
+    if current == clicked {
+        (current, !ascending)
+    } else {
+        (clicked, true)
+    }
+}
+
+/// Values a file-table row can be ordered by.
+///
+/// `ModifiedKey` is an `Ord` value derived from the timestamp the entry
+/// already stores. Local rows use `SystemTime` and ignore the reference
+/// date. Remote rows parse the raw `ls -l` date into
+/// `(year, month, day, hour, minute)` against the client-local date captured
+/// when the listing arrived, so Date Modified is chronological. The column
+/// still displays the formatted date, not this key.
+trait FileSortEntry {
+    type ModifiedKey: Ord;
+
+    fn file_is_dir(&self) -> bool;
+    fn file_name(&self) -> &str;
+    fn file_size(&self) -> Option<u64>;
+    fn file_type_key(&self) -> String;
+    fn file_permissions(&self) -> &str;
+    fn file_owner(&self) -> &str;
+    fn file_group(&self) -> &str;
+    /// `reference` is the client-local date captured when a remote listing
+    /// arrived. Local rows ignore it.
+    fn file_modified_key(&self, reference: chrono::NaiveDate) -> Self::ModifiedKey;
+}
+
+impl FileSortEntry for LocalFileEntry {
+    type ModifiedKey = Option<std::time::SystemTime>;
+
+    fn file_is_dir(&self) -> bool {
+        self.is_dir
+    }
+
+    fn file_name(&self) -> &str {
+        &self.name
+    }
+
+    fn file_size(&self) -> Option<u64> {
+        self.size
+    }
+
+    fn file_type_key(&self) -> String {
+        windterm_type(&self.name, self.is_dir)
+    }
+
+    fn file_permissions(&self) -> &str {
+        &self.permissions
+    }
+
+    fn file_owner(&self) -> &str {
+        &self.owner
+    }
+
+    fn file_group(&self) -> &str {
+        &self.group
+    }
+
+    fn file_modified_key(&self, _reference: chrono::NaiveDate) -> Self::ModifiedKey {
+        self.modified
+    }
+}
+
+impl FileSortEntry for sftp::RemoteEntry {
+    type ModifiedKey = Option<(i32, u32, u32, u32, u32)>;
+
+    fn file_is_dir(&self) -> bool {
+        self.is_dir
+    }
+
+    fn file_name(&self) -> &str {
+        &self.name
+    }
+
+    fn file_size(&self) -> Option<u64> {
+        self.size
+    }
+
+    fn file_type_key(&self) -> String {
+        windterm_type(&self.name, self.is_dir)
+    }
+
+    fn file_permissions(&self) -> &str {
+        self.permissions.as_deref().unwrap_or("")
+    }
+
+    fn file_owner(&self) -> &str {
+        self.owner.as_deref().unwrap_or("")
+    }
+
+    fn file_group(&self) -> &str {
+        self.group.as_deref().unwrap_or("")
+    }
+
+    fn file_modified_key(&self, reference: chrono::NaiveDate) -> Self::ModifiedKey {
+        self.modified
+            .as_deref()
+            .and_then(|raw| ls_modified_sort_key(raw, reference))
+    }
+}
+
+impl<T: FileSortEntry + ?Sized> FileSortEntry for &T {
+    type ModifiedKey = T::ModifiedKey;
+
+    fn file_is_dir(&self) -> bool {
+        T::file_is_dir(*self)
+    }
+
+    fn file_name(&self) -> &str {
+        T::file_name(*self)
+    }
+
+    fn file_size(&self) -> Option<u64> {
+        T::file_size(*self)
+    }
+
+    fn file_type_key(&self) -> String {
+        T::file_type_key(*self)
+    }
+
+    fn file_permissions(&self) -> &str {
+        T::file_permissions(*self)
+    }
+
+    fn file_owner(&self) -> &str {
+        T::file_owner(*self)
+    }
+
+    fn file_group(&self) -> &str {
+        T::file_group(*self)
+    }
+
+    fn file_modified_key(&self, reference: chrono::NaiveDate) -> Self::ModifiedKey {
+        T::file_modified_key(*self, reference)
+    }
+}
+
+fn cmp_ignore_case(left: &str, right: &str) -> std::cmp::Ordering {
+    left.to_lowercase().cmp(&right.to_lowercase())
+}
+
+/// Directories stay before files in every sort. `ascending` applies only to
+/// `column`; ties break by lowercase name and do not reverse.
+///
+/// `reference` is the client-local date captured when a remote listing
+/// arrived. Local rows ignore it. Date Modified keys are computed once per
+/// entry, not once per comparison.
+/// Test-only helper that applies `file_display_order` in place.
+#[cfg(test)]
+fn sort_file_entries<T: FileSortEntry>(
+    entries: &mut [T],
+    column: FileSortColumn,
+    ascending: bool,
+    reference: chrono::NaiveDate,
+) {
+    let order = file_display_order(entries, column, ascending, reference);
+    apply_index_order(entries, order);
+}
+
+/// Indices of `entries` in display order. Does not reorder `entries`.
+fn file_display_order<T: FileSortEntry>(
+    entries: &[T],
+    column: FileSortColumn,
+    ascending: bool,
+    reference: chrono::NaiveDate,
+) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    match column {
+        FileSortColumn::DateModified => {
+            let keys: Vec<T::ModifiedKey> = entries
+                .iter()
+                .map(|entry| entry.file_modified_key(reference))
+                .collect();
+            order.sort_by(|&left, &right| {
+                file_sort_cmp(
+                    entries[left].file_is_dir(),
+                    entries[right].file_is_dir(),
+                    keys[left].cmp(&keys[right]),
+                    entries[left].file_name(),
+                    entries[right].file_name(),
+                    ascending,
+                )
+            });
+        }
+        other => {
+            order.sort_by(|&left, &right| {
+                file_sort_cmp(
+                    entries[left].file_is_dir(),
+                    entries[right].file_is_dir(),
+                    non_date_ordering(&entries[left], &entries[right], other),
+                    entries[left].file_name(),
+                    entries[right].file_name(),
+                    ascending,
+                )
+            });
+        }
+    }
+    order
+}
+
+fn file_sort_cmp(
+    left_dir: bool,
+    right_dir: bool,
+    primary: std::cmp::Ordering,
+    left_name: &str,
+    right_name: &str,
+    ascending: bool,
+) -> std::cmp::Ordering {
+    let directories = right_dir.cmp(&left_dir);
+    if directories != std::cmp::Ordering::Equal {
+        return directories;
+    }
+    let primary = if ascending {
+        primary
+    } else {
+        primary.reverse()
+    };
+    primary.then_with(|| cmp_ignore_case(left_name, right_name))
+}
+
+fn non_date_ordering<T: FileSortEntry>(
+    left: &T,
+    right: &T,
+    column: FileSortColumn,
+) -> std::cmp::Ordering {
+    match column {
+        FileSortColumn::Name => cmp_ignore_case(left.file_name(), right.file_name()),
+        FileSortColumn::Type => cmp_ignore_case(&left.file_type_key(), &right.file_type_key()),
+        FileSortColumn::Size => left.file_size().cmp(&right.file_size()),
+        FileSortColumn::Permissions => {
+            cmp_ignore_case(left.file_permissions(), right.file_permissions())
+        }
+        FileSortColumn::Owner => cmp_ignore_case(left.file_owner(), right.file_owner()),
+        FileSortColumn::Group => cmp_ignore_case(left.file_group(), right.file_group()),
+        // Date Modified uses the cached-key path in `file_display_order`.
+        FileSortColumn::DateModified => std::cmp::Ordering::Equal,
+    }
+}
+
+/// `order[dest]` is the source index of the item that belongs at `dest`.
+/// Test-only helper that applies `file_display_order` in place.
+#[cfg(test)]
+fn apply_index_order<T>(items: &mut [T], mut order: Vec<usize>) {
+    let mut index = 0;
+    while index < order.len() {
+        if order[index] != index {
+            let mut current = index;
+            loop {
+                let next = order[current];
+                order[current] = current;
+                if next == index {
+                    break;
+                }
+                items.swap(current, next);
+                current = next;
+            }
+        }
+        index += 1;
+    }
+}
+
+/// Chronological key for an `ls -l` date (`Mon D HH:MM` or `Mon D YYYY`).
+///
+/// `ls` omits the year for files modified within about the last six months.
+/// Year inference for that form is an approximation based on the client's
+/// local date captured when the listing arrived (`now`), not on the clock at
+/// comparison time. That form uses `now`'s year unless the month and day are
+/// still in the future, in which case it is the previous year. A `YYYY` form
+/// has no time and sorts at 00:00. Unparseable text is `None`, which sorts
+/// before every real timestamp; the caller still breaks those ties by name.
+fn ls_modified_sort_key(raw: &str, now: chrono::NaiveDate) -> Option<(i32, u32, u32, u32, u32)> {
+    use chrono::Datelike;
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let mut fields = raw.split_whitespace();
+    let month_name = fields.next()?;
+    let day = fields.next()?;
+    let last = fields.next()?;
+    if fields.next().is_some() {
+        return None;
+    }
+    let month = MONTHS
+        .iter()
+        .position(|name| *name == month_name)
+        .map(|index| index as u32 + 1)?;
+    let day: u32 = day.parse().ok()?;
+    let (year, hour, minute) = if let Some((hour, minute)) = last.split_once(':') {
+        let hour: u32 = hour.parse().ok()?;
+        let minute: u32 = minute.parse().ok()?;
+        if hour > 23 || minute > 59 {
+            return None;
+        }
+        let mut year = now.year();
+        if chrono::NaiveDate::from_ymd_opt(year, month, day)? > now {
+            year -= 1;
+        }
+        chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+        (year, hour, minute)
+    } else {
+        let year: i32 = last.parse().ok()?;
+        chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+        (year, 0, 0)
+    };
+    Some((year, month, day, hour, minute))
 }
 
 fn file_listing_row<'a>(
@@ -1419,6 +1888,7 @@ enum Dialog {
     FileName(FileNameAction),
     ImportProfiles,
     About,
+    Exit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1659,6 +2129,10 @@ enum Message {
     DockDragEnd,
     WindowResized(iced::Size),
     KeyChord(KeyChord),
+    FilesSortLocal(FileSortColumn),
+    FilesSortRemote(FileSortColumn),
+    Exit,
+    ConfirmExit,
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -2794,6 +3268,12 @@ struct App {
     /// `process_command` never fires. Must not change write behaviour.
     #[cfg(test)]
     pty_write_log: Vec<(u64, Vec<u8>)>,
+    /// Explorer (local) column. Independent of the Filer sort.
+    local_file_sort: FileSortColumn,
+    local_file_sort_ascending: bool,
+    /// Filer (remote) column. Independent of the Explorer sort.
+    remote_file_sort: FileSortColumn,
+    remote_file_sort_ascending: bool,
 }
 
 const FILES_PANELS: [dock::Panel; 3] = [
@@ -2931,6 +3411,10 @@ impl App {
             remote_editor_open_generation: 0,
             #[cfg(test)]
             pty_write_log: Vec::new(),
+            local_file_sort: FileSortColumn::Name,
+            local_file_sort_ascending: true,
+            remote_file_sort: FileSortColumn::Name,
+            remote_file_sort_ascending: true,
         }
     }
 
@@ -3432,6 +3916,7 @@ impl App {
             self.files.remote_dir = ".".into();
             self.files.remote_visible = FILES_PAGE_SIZE;
             self.files.remote_entries.clear();
+            self.resort_remote_files();
             self.files.selected_remote = None;
             self.files.remote_error = None;
             self.files.remote_generation = self.files.remote_generation.wrapping_add(1);
@@ -3843,6 +4328,19 @@ impl App {
                     )
             )
         {
+            // Exit confirmation can sit on the curtain. Escape dismisses it;
+            // every other locked input stays dropped.
+            if matches!(self.dialog, Some(Dialog::Exit))
+                && matches!(
+                    &message,
+                    Message::Event(iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                        key,
+                        ..
+                    })) if key.as_ref() == keyboard::Key::Named(keyboard::key::Named::Escape)
+                )
+            {
+                return self.update(Message::CloseDialog);
+            }
             return Task::none();
         }
         // An open menu owns keyboard input, including queued IME and paste
@@ -4288,6 +4786,13 @@ impl App {
             }
             Message::MenuClose => self.open_menu = None,
             Message::MenuCommand(command) => {
+                // The menu is not shown under the privacy curtain or a modal.
+                // A queued Exit must not close the window or replace that modal.
+                if matches!(command, menu::Command::Exit)
+                    && (self.privacy_locked || self.dialog.is_some())
+                {
+                    return Task::none();
+                }
                 self.open_menu = None;
                 use menu::Command as C;
                 let message = match command {
@@ -4362,6 +4867,7 @@ impl App {
                     C::PreviousTab => Message::SelectPreviousTab,
                     C::Tool(panel) => Message::Tool(tools::Action::Open(panel)),
                     C::About => Message::About,
+                    C::Exit => Message::Exit,
                 };
                 return self.update(message);
             }
@@ -5297,6 +5803,7 @@ impl App {
                             self.files.local_error = Some(error);
                         }
                     }
+                    self.resort_local_files();
                 }
             }
             Message::FilesRemoteLoaded(generation, result) => {
@@ -5304,6 +5811,8 @@ impl App {
                     self.files.remote_loading = false;
                     match result {
                         Ok(entries) => {
+                            // Capture once per stored listing, before the sort.
+                            self.files.remote_sort_reference = chrono::Local::now().date_naive();
                             self.files.remote_entries = entries;
                             self.files.remote_error = None;
                         }
@@ -5312,6 +5821,7 @@ impl App {
                             self.files.remote_error = Some(error);
                         }
                     }
+                    self.resort_remote_files();
                 }
             }
             Message::RequestPaste => {
@@ -6084,6 +6594,37 @@ impl App {
                     return self.files_became_visible();
                 }
             }
+            Message::FilesSortLocal(column) => {
+                let (column, ascending) =
+                    next_file_sort(self.local_file_sort, self.local_file_sort_ascending, column);
+                self.local_file_sort = column;
+                self.local_file_sort_ascending = ascending;
+                self.resort_local_files();
+            }
+            Message::FilesSortRemote(column) => {
+                let (column, ascending) = next_file_sort(
+                    self.remote_file_sort,
+                    self.remote_file_sort_ascending,
+                    column,
+                );
+                self.remote_file_sort = column;
+                self.remote_file_sort_ascending = ascending;
+                self.resort_remote_files();
+            }
+            Message::Exit => {
+                self.open_menu = None;
+                self.dock_menu = None;
+                if self.tabs.is_empty() {
+                    return iced::exit();
+                }
+                self.dialog = Some(Dialog::Exit);
+            }
+            Message::ConfirmExit => {
+                if !matches!(self.dialog, Some(Dialog::Exit)) {
+                    return Task::none();
+                }
+                return iced::exit();
+            }
         }
         Task::none()
     }
@@ -6093,7 +6634,7 @@ impl App {
             // Do not render the sensitive workspace behind a translucent
             // modal: the entire view must be replaced, including tabs, host
             // labels, SFTP paths and terminal scrollback.
-            return center(
+            let curtain: Element<'_, Message> = center(
                 column![
                     text("Workspace hidden").size(30).color(fg()),
                     text("SSH connections and transfers continue while this window is hidden.")
@@ -6114,6 +6655,9 @@ impl App {
             .width(Fill)
             .height(Fill)
             .into();
+            // Keep the workspace hidden. Only the exit confirmation may sit
+            // on the curtain, and only after the OS close button asked.
+            return self.cover_with_exit_confirmation(curtain);
         }
         let target = if self.dialog.is_none()
             && self.remote_editor.is_none()
@@ -6142,7 +6686,7 @@ impl App {
             // Do not mutate the underlying dock/grid state. In focus mode the
             // workspace is reduced to the live terminal split panes, with an
             // always-visible exit action and synchronized-input warning.
-            return container(
+            let focused: Element<'_, Message> = container(
                 column![
                     row![
                         text("FOCUS MODE · Alt+Enter to exit")
@@ -6171,6 +6715,7 @@ impl App {
             .height(Fill)
             .style(surface)
             .into();
+            return self.cover_with_exit_confirmation(focused);
         }
         let active_transfers = self
             .files
@@ -7110,9 +7655,41 @@ impl App {
         container(grid).height(Fill).style(border_fill).into()
     }
 
+    /// Rebuild Explorer display order from the current listing and sort.
+    /// Local rows ignore the stored remote reference date. Not called from
+    /// view construction.
+    fn resort_local_files(&mut self) {
+        self.files.local_order = file_display_order(
+            &self.files.local_entries,
+            self.local_file_sort,
+            self.local_file_sort_ascending,
+            self.files.remote_sort_reference,
+        );
+        self.files.local_sort_runs += 1;
+    }
+
+    /// Rebuild Filer display order from the current listing, sort, and the
+    /// reference date captured when that listing was stored.
+    fn resort_remote_files(&mut self) {
+        self.files.remote_order = file_display_order(
+            &self.files.remote_entries,
+            self.remote_file_sort,
+            self.remote_file_sort_ascending,
+            self.files.remote_sort_reference,
+        );
+        self.files.remote_sort_runs += 1;
+    }
+
     /// Local and remote file tables laid out `table_width` wide.
+    ///
+    /// Walks the cached display order and takes the visible page. Does not sort.
     fn file_lists(&self, table_width: f32) -> (Column<'_, Message>, Column<'_, Message>) {
-        let mut local_list = column![file_listing_header(table_width)];
+        let mut local_list = column![file_listing_header(
+            table_width,
+            false,
+            self.local_file_sort,
+            self.local_file_sort_ascending,
+        )];
         if self.files.local_loading {
             local_list =
                 local_list.push(text("Loading local directory...").size(12).color(muted()));
@@ -7121,9 +7698,14 @@ impl App {
         } else if self.files.local_entries.is_empty() {
             local_list = local_list.push(text("Directory is empty.").size(12).color(muted()));
         } else {
-            let mut sorted: Vec<&LocalFileEntry> = self.files.local_entries.iter().collect();
-            sorted.sort_by_cached_key(|entry| (!entry.is_dir, entry.name.to_lowercase()));
-            for entry in sorted.into_iter().take(self.files.local_visible) {
+            let order = &self.files.local_order;
+            let entries = &self.files.local_entries;
+            let visible = self.files.local_visible;
+            for entry in order
+                .iter()
+                .filter_map(|&index| entries.get(index))
+                .take(visible)
+            {
                 let cells = FileListingCells {
                     name: display_leaf(&entry.name),
                     is_dir: entry.is_dir,
@@ -7170,7 +7752,12 @@ impl App {
             }
         }
 
-        let mut remote_list = column![file_listing_header(table_width)];
+        let mut remote_list = column![file_listing_header(
+            table_width,
+            true,
+            self.remote_file_sort,
+            self.remote_file_sort_ascending,
+        )];
         if self.files.remote_loading {
             remote_list =
                 remote_list.push(text("Loading remote directory...").size(12).color(muted()));
@@ -7179,18 +7766,18 @@ impl App {
         } else if self.files.remote_entries.is_empty() {
             remote_list = remote_list.push(text("Directory is empty.").size(12).color(muted()));
         } else {
-            let today = chrono::Local::now().date_naive();
-            let mut sorted: Vec<&sftp::RemoteEntry> = self.files.remote_entries.iter().collect();
-            sorted.sort_by_cached_key(|entry| (!entry.is_dir, entry.name.to_lowercase()));
-            for entry in sorted.into_iter().take(self.files.remote_visible) {
+            let order = &self.files.remote_order;
+            let entries = &self.files.remote_entries;
+            let visible = self.files.remote_visible;
+            for entry in order
+                .iter()
+                .filter_map(|&index| entries.get(index))
+                .take(visible)
+            {
                 let cells = FileListingCells {
                     name: display_leaf(&entry.name),
                     is_dir: entry.is_dir,
-                    modified: entry
-                        .modified
-                        .as_deref()
-                        .map(|raw| windterm_remote_date(raw, today))
-                        .unwrap_or_default(),
+                    modified: self.files.remote_modified_label(entry),
                     kind: windterm_type(&entry.name, entry.is_dir),
                     size: entry
                         .size
@@ -7906,6 +8493,7 @@ impl App {
             Dialog::ImportProfiles => "Import SSH profiles",
             Dialog::Tunnels => "Tunnel",
             Dialog::About => "Inspirum Terminal · Iced",
+            Dialog::Exit => "Exit",
         };
         let body: Element<'_, Message> = match dialog {
             Dialog::Tools => self.tools_view(),
@@ -8565,6 +9153,17 @@ impl App {
             ]
             .spacing(8)
             .into(),
+            Dialog::Exit => column![
+                text(exit_confirm_body(self.tabs.len())).color(fg()),
+                row![
+                    space::horizontal(),
+                    action("Cancel", Message::CloseDialog),
+                    action("Exit", Message::ConfirmExit).style(button::danger),
+                ]
+                .spacing(8),
+            ]
+            .spacing(8)
+            .into(),
         };
 
         dialog_frame(title, container(scrollable(body)).padding(12))
@@ -8575,6 +9174,40 @@ impl App {
             })
             .max_height(720)
             .into()
+    }
+
+    /// Exit confirmation on views that otherwise hide dialogs (privacy curtain,
+    /// focus mode). The workspace underneath is not the normal chrome.
+    fn cover_with_exit_confirmation<'a>(
+        &'a self,
+        under: Element<'a, Message>,
+    ) -> Element<'a, Message> {
+        let Some(dialog) = &self.dialog else {
+            return under;
+        };
+        if !matches!(dialog, Dialog::Exit) {
+            return under;
+        }
+        let content = self.dialog_view(dialog);
+        stack![
+            under,
+            opaque(
+                mouse_area(center(opaque(content)).style(|_| container::Style {
+                    background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.35).into()),
+                    ..Default::default()
+                }))
+                .on_press(Message::CloseDialog)
+            ),
+        ]
+        .into()
+    }
+}
+
+fn exit_confirm_body(open_sessions: usize) -> String {
+    if open_sessions == 1 {
+        "1 session is open. Exit and disconnect it?".to_owned()
+    } else {
+        format!("{open_sessions} sessions are open. Exit and disconnect them?")
     }
 }
 
@@ -11348,5 +11981,531 @@ mod tests {
         let _ = app.update(Message::TogglePrivacyLock);
         assert!(app.privacy_locked);
         assert_eq!(app.open_menu, Some(menu::Menu::Session));
+    }
+
+    fn sort_reference() -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap()
+    }
+
+    fn listing_entry(
+        name: &str,
+        is_dir: bool,
+        size: Option<u64>,
+        modified: Option<std::time::SystemTime>,
+    ) -> LocalFileEntry {
+        LocalFileEntry {
+            path: std::path::PathBuf::from(name),
+            name: name.to_owned(),
+            is_dir,
+            size,
+            permissions: "-rw-r--r--".into(),
+            owner: "owner".into(),
+            group: "group".into(),
+            modified,
+        }
+    }
+
+    fn listing_names(entries: &[LocalFileEntry]) -> Vec<&str> {
+        entries.iter().map(|entry| entry.name.as_str()).collect()
+    }
+
+    #[test]
+    fn file_sort_default_is_directories_then_name_ascending() {
+        let mut entries = vec![
+            listing_entry("b", false, Some(3), None),
+            listing_entry("a", true, None, None),
+            listing_entry("A", false, Some(1), None),
+            listing_entry("B", true, None, None),
+        ];
+        sort_file_entries(&mut entries, FileSortColumn::Name, true, sort_reference());
+        assert_eq!(listing_names(&entries), ["a", "B", "A", "b"]);
+        assert!(entries.iter().take(2).all(|entry| entry.is_dir));
+        assert!(entries.iter().skip(2).all(|entry| !entry.is_dir));
+    }
+
+    #[test]
+    fn file_sort_size_descending_keeps_directories_first() {
+        let mut entries = vec![
+            listing_entry("small-dir", true, Some(1), None),
+            listing_entry("huge", false, Some(100), None),
+            listing_entry("big-dir", true, Some(50), None),
+            listing_entry("tiny", false, Some(2), None),
+        ];
+        sort_file_entries(&mut entries, FileSortColumn::Size, false, sort_reference());
+        assert_eq!(
+            listing_names(&entries),
+            ["big-dir", "small-dir", "huge", "tiny"]
+        );
+        assert!(entries.iter().take(2).all(|entry| entry.is_dir));
+        assert!(entries.iter().skip(2).all(|entry| !entry.is_dir));
+    }
+
+    #[test]
+    fn clicking_the_same_column_twice_reverses_sort() {
+        let once = next_file_sort(FileSortColumn::Name, true, FileSortColumn::Size);
+        assert_eq!(once, (FileSortColumn::Size, true));
+        let twice = next_file_sort(once.0, once.1, FileSortColumn::Size);
+        assert_eq!(twice, (FileSortColumn::Size, false));
+        let third = next_file_sort(twice.0, twice.1, FileSortColumn::Size);
+        assert_eq!(third, (FileSortColumn::Size, true));
+
+        let mut ascending = vec![
+            listing_entry("c", false, Some(3), None),
+            listing_entry("a", false, Some(1), None),
+            listing_entry("b", false, Some(2), None),
+        ];
+        let mut descending = ascending.clone();
+        sort_file_entries(&mut ascending, once.0, once.1, sort_reference());
+        sort_file_entries(&mut descending, twice.0, twice.1, sort_reference());
+        assert_eq!(listing_names(&ascending), ["a", "b", "c"]);
+        assert_eq!(listing_names(&descending), ["c", "b", "a"]);
+    }
+
+    #[test]
+    fn file_sort_breaks_size_ties_by_lowercase_name() {
+        let mut entries = vec![
+            listing_entry("b.txt", false, Some(5), None),
+            listing_entry("A.txt", false, Some(5), None),
+            listing_entry("c.txt", false, Some(9), None),
+        ];
+        sort_file_entries(&mut entries, FileSortColumn::Size, true, sort_reference());
+        assert_eq!(listing_names(&entries), ["A.txt", "b.txt", "c.txt"]);
+
+        // Descending size still breaks the equal-size tie by lowercase name,
+        // not by reversed name.
+        sort_file_entries(&mut entries, FileSortColumn::Size, false, sort_reference());
+        assert_eq!(listing_names(&entries), ["c.txt", "A.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn file_sort_dates_use_stored_timestamp_or_chronological_ls_date() {
+        let earlier = std::time::SystemTime::UNIX_EPOCH;
+        let later = earlier + std::time::Duration::from_secs(60);
+        let mut local = vec![
+            listing_entry("later", false, Some(1), Some(later)),
+            listing_entry("earlier", false, Some(1), Some(earlier)),
+        ];
+        sort_file_entries(
+            &mut local,
+            FileSortColumn::DateModified,
+            true,
+            sort_reference(),
+        );
+        assert_eq!(listing_names(&local), ["earlier", "later"]);
+
+        // "Jan" < "Oct" as text, but January 2024 is after October 2023.
+        let mut remote = vec![
+            {
+                let mut entry = sftp::RemoteEntry::new("jan", false, Some(1));
+                entry.modified = Some("Jan 2 2024".into());
+                entry
+            },
+            {
+                let mut entry = sftp::RemoteEntry::new("oct", false, Some(1));
+                entry.modified = Some("Oct 18 2023".into());
+                entry
+            },
+        ];
+        sort_file_entries(
+            &mut remote,
+            FileSortColumn::DateModified,
+            true,
+            sort_reference(),
+        );
+        assert_eq!(
+            remote
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["oct", "jan"]
+        );
+    }
+
+    #[test]
+    fn ls_modified_sort_key_december_is_previous_year_in_mid_january() {
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let december = ls_modified_sort_key("Dec 30 10:00", now).unwrap();
+        let january = ls_modified_sort_key("Jan 02 09:00", now).unwrap();
+        assert_eq!(december, (2025, 12, 30, 10, 0));
+        assert_eq!(january, (2026, 1, 2, 9, 0));
+        assert!(december < january);
+    }
+
+    #[test]
+    fn ls_modified_sort_key_year_form_sorts_before_recent_time_form() {
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        let march = ls_modified_sort_key("Mar 3 2024", now).unwrap();
+        let october = ls_modified_sort_key("Oct 18 09:41", now).unwrap();
+        assert_eq!(march, (2024, 3, 3, 0, 0));
+        assert_eq!(october, (2026, 10, 18, 9, 41));
+        assert!(march < october);
+    }
+
+    #[test]
+    fn ls_modified_sort_key_accepts_single_and_double_digit_days() {
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        assert_eq!(
+            ls_modified_sort_key("Mar 3 2024", now),
+            Some((2024, 3, 3, 0, 0))
+        );
+        assert_eq!(
+            ls_modified_sort_key("Mar 03 2024", now),
+            Some((2024, 3, 3, 0, 0))
+        );
+        // "Oct 18" < "Oct 8" as text; the day numbers sort the other way.
+        let single = ls_modified_sort_key("Oct 8 09:41", now);
+        let double = ls_modified_sort_key("Oct 18 09:41", now);
+        assert_eq!(single, Some((2026, 10, 8, 9, 41)));
+        assert_eq!(double, Some((2026, 10, 18, 9, 41)));
+        assert!(single < double);
+    }
+
+    #[test]
+    fn ls_modified_sort_key_garbage_sorts_before_parsed_dates() {
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        assert_eq!(ls_modified_sort_key("not-a-date", now), None);
+        assert_eq!(ls_modified_sort_key("", now), None);
+
+        let mut remote = vec![
+            {
+                let mut entry = sftp::RemoteEntry::new("zeta", false, Some(1));
+                entry.modified = Some("Mar 3 2024".into());
+                entry
+            },
+            sftp::RemoteEntry::new("missing", false, Some(1)),
+            {
+                let mut entry = sftp::RemoteEntry::new("garbage", false, Some(1));
+                entry.modified = Some("not-a-date".into());
+                entry
+            },
+        ];
+        sort_file_entries(
+            &mut remote,
+            FileSortColumn::DateModified,
+            true,
+            sort_reference(),
+        );
+        assert_eq!(
+            remote
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["garbage", "missing", "zeta"]
+        );
+    }
+
+    #[test]
+    fn file_column_click_reverses_only_that_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+        std::fs::write(&path, b"[]").unwrap();
+        let mut app = App::boot(path, None);
+        assert_eq!(app.local_file_sort, FileSortColumn::Name);
+        assert!(app.local_file_sort_ascending);
+        assert_eq!(app.remote_file_sort, FileSortColumn::Name);
+        assert!(app.remote_file_sort_ascending);
+
+        let _ = app.update(Message::FilesSortLocal(FileSortColumn::Size));
+        assert_eq!(
+            (app.local_file_sort, app.local_file_sort_ascending),
+            (FileSortColumn::Size, true)
+        );
+        assert_eq!(
+            (app.remote_file_sort, app.remote_file_sort_ascending),
+            (FileSortColumn::Name, true)
+        );
+
+        let _ = app.update(Message::FilesSortLocal(FileSortColumn::Size));
+        assert!(!app.local_file_sort_ascending);
+        assert!(app.remote_file_sort_ascending);
+
+        let _ = app.update(Message::FilesSortRemote(FileSortColumn::Owner));
+        assert_eq!(app.remote_file_sort, FileSortColumn::Owner);
+        assert!(app.remote_file_sort_ascending);
+        assert_eq!(app.local_file_sort, FileSortColumn::Size);
+        assert!(!app.local_file_sort_ascending);
+    }
+
+    fn push_open_session(app: &mut App, name: &str) {
+        let profile = Session {
+            name: name.into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        app.tabs.push(Workspace::new(profile, pane));
+    }
+
+    #[test]
+    fn exit_with_open_tab_opens_confirmation_and_keeps_tabs() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-exit-open-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        push_open_session(&mut app, "exit-open");
+        let _ = app.update(Message::MenuCommand(menu::Command::Exit));
+        assert!(matches!(app.dialog, Some(Dialog::Exit)));
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(
+            exit_confirm_body(1),
+            "1 session is open. Exit and disconnect it?"
+        );
+        assert_eq!(
+            exit_confirm_body(2),
+            "2 sessions are open. Exit and disconnect them?"
+        );
+    }
+
+    #[test]
+    fn exit_confirmation_text_singular_for_one_and_plural_otherwise() {
+        assert_eq!(
+            exit_confirm_body(1),
+            "1 session is open. Exit and disconnect it?"
+        );
+        assert_eq!(
+            exit_confirm_body(3),
+            "3 sessions are open. Exit and disconnect them?"
+        );
+    }
+
+    #[test]
+    fn exit_cancel_leaves_tabs_intact_and_dialog_closed() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-exit-cancel-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        push_open_session(&mut app, "exit-cancel");
+        let _ = app.update(Message::Exit);
+        assert!(matches!(app.dialog, Some(Dialog::Exit)));
+        let _ = app.update(Message::CloseDialog);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.tabs.len(), 1);
+        let _ = app.update(Message::Exit);
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(app.dialog.is_none());
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn exit_with_no_tabs_opens_no_dialog() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-exit-empty-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        assert!(app.tabs.is_empty());
+        // Close task is iced::exit(); this test asserts state only.
+        let _ = app.update(Message::Exit);
+        assert!(app.dialog.is_none());
+        assert!(app.tabs.is_empty());
+        let _ = app.update(Message::MenuCommand(menu::Command::Exit));
+        assert!(app.dialog.is_none());
+        assert!(app.tabs.is_empty());
+    }
+
+    #[test]
+    fn menu_exit_does_not_bypass_privacy_lock_or_modal() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-exit-gated-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        push_open_session(&mut app, "exit-gated");
+        app.privacy_locked = true;
+        app.open_menu = Some(menu::Menu::Session);
+        let _ = app.update(Message::MenuCommand(menu::Command::Exit));
+        assert!(app.dialog.is_none());
+        assert!(app.privacy_locked);
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.open_menu, Some(menu::Menu::Session));
+
+        app.privacy_locked = false;
+        app.dialog = Some(Dialog::About);
+        let _ = app.update(Message::MenuCommand(menu::Command::Exit));
+        assert!(matches!(app.dialog, Some(Dialog::About)));
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    fn boot_sort_app(name: &str) -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!("{name}.json"));
+        std::fs::write(&path, b"[]").unwrap();
+        (dir, App::boot(path, None))
+    }
+
+    #[test]
+    fn view_and_unrelated_updates_do_not_resort_file_lists() {
+        let (_dir, mut app) = boot_sort_app("sort-cache-view");
+        push_open_session(&mut app, "sort-cache");
+        let pane_id = app.tabs[0].panes.iter().next().unwrap().1.id;
+
+        let _ = app.update(Message::FilesLocalLoaded(
+            0,
+            Ok(vec![
+                listing_entry("b", false, Some(2), None),
+                listing_entry("a", true, None, None),
+            ]),
+        ));
+        let mut january = sftp::RemoteEntry::new("january", false, Some(1));
+        january.modified = Some("Jan 02 09:00".into());
+        let mut december = sftp::RemoteEntry::new("december", false, Some(1));
+        december.modified = Some("Dec 30 10:00".into());
+        let _ = app.update(Message::FilesRemoteLoaded(0, Ok(vec![january, december])));
+
+        let local_runs = app.files.local_sort_runs;
+        let remote_runs = app.files.remote_sort_runs;
+        let local_order = app.files.local_order.clone();
+        let remote_order = app.files.remote_order.clone();
+
+        let _ = app.view();
+        let _ = app.file_lists(800.0);
+        let _ = app.view();
+        let _ = app.file_lists(800.0);
+        let _ = app.file_lists(1200.0);
+        let _ = app.update(Message::TerminalFrame);
+        let _ = app.update(Message::PtyEvent(pane_id, terminal_core::PtyEvent::Wakeup));
+        let _ = app.update(Message::PtyEvent(pane_id, terminal_core::PtyEvent::Bell));
+        let _ = app.update(Message::TerminalFrame);
+        let _ = app.view();
+        let _ = app.file_lists(800.0);
+
+        assert_eq!(app.files.local_sort_runs, local_runs);
+        assert_eq!(app.files.remote_sort_runs, remote_runs);
+        assert_eq!(app.files.local_order, local_order);
+        assert_eq!(app.files.remote_order, remote_order);
+    }
+
+    #[test]
+    fn sort_click_resorts_only_that_side_once() {
+        let (_dir, mut app) = boot_sort_app("sort-cache-click");
+        let _ = app.update(Message::FilesLocalLoaded(
+            0,
+            Ok(vec![
+                listing_entry("local-b", false, Some(2), None),
+                listing_entry("local-a", false, Some(8), None),
+            ]),
+        ));
+        let _ = app.update(Message::FilesRemoteLoaded(
+            0,
+            Ok(vec![
+                sftp::RemoteEntry::new("small", false, Some(1)),
+                sftp::RemoteEntry::new("large", false, Some(9)),
+                sftp::RemoteEntry::new("mid", false, Some(4)),
+            ]),
+        ));
+        let local_runs = app.files.local_sort_runs;
+        let remote_runs = app.files.remote_sort_runs;
+
+        let _ = app.update(Message::FilesSortRemote(FileSortColumn::Size));
+
+        assert_eq!(app.files.remote_sort_runs, remote_runs + 1);
+        assert_eq!(app.files.local_sort_runs, local_runs);
+        assert_eq!(app.files.remote_order.len(), app.files.remote_entries.len());
+
+        let cached: Vec<String> = app
+            .files
+            .remote_order
+            .iter()
+            .map(|&index| app.files.remote_entries[index].name.clone())
+            .collect();
+        let mut sorted = app.files.remote_entries.clone();
+        sort_file_entries(
+            &mut sorted,
+            app.remote_file_sort,
+            app.remote_file_sort_ascending,
+            app.files.remote_sort_reference,
+        );
+        let expected: Vec<String> = sorted.into_iter().map(|entry| entry.name).collect();
+        assert_eq!(cached, expected);
+    }
+
+    #[test]
+    fn new_listing_resorts_once_and_order_matches_entry_count() {
+        let (_dir, mut app) = boot_sort_app("sort-cache-listing");
+        let _ = app.update(Message::FilesLocalLoaded(
+            0,
+            Ok(vec![
+                listing_entry("a", false, Some(1), None),
+                listing_entry("b", true, None, None),
+            ]),
+        ));
+        assert_eq!(app.files.local_sort_runs, 1);
+        assert_eq!(app.files.local_order.len(), app.files.local_entries.len());
+
+        let _ = app.update(Message::FilesRemoteLoaded(
+            0,
+            Ok(vec![
+                sftp::RemoteEntry::new("r", false, Some(1)),
+                sftp::RemoteEntry::new("d", true, None),
+            ]),
+        ));
+        assert_eq!(app.files.remote_sort_runs, 1);
+        assert_eq!(app.files.remote_order.len(), app.files.remote_entries.len());
+
+        let _ = app.update(Message::FilesLocalLoaded(0, Err("gone".into())));
+        assert_eq!(app.files.local_sort_runs, 2);
+        assert!(app.files.local_entries.is_empty());
+        assert_eq!(app.files.local_order.len(), app.files.local_entries.len());
+
+        let _ = app.update(Message::FilesRemoteLoaded(0, Err("gone".into())));
+        assert_eq!(app.files.remote_sort_runs, 2);
+        assert!(app.files.remote_entries.is_empty());
+        assert_eq!(app.files.remote_order.len(), app.files.remote_entries.len());
+    }
+
+    #[test]
+    fn remote_date_sort_uses_stored_reference_date() {
+        let (_dir, mut app) = boot_sort_app("sort-cache-reference");
+        let mut january = sftp::RemoteEntry::new("january", false, Some(1));
+        january.modified = Some("Jan 02 09:00".into());
+        let mut december = sftp::RemoteEntry::new("december", false, Some(1));
+        december.modified = Some("Dec 30 10:00".into());
+        app.files.remote_entries = vec![january, december];
+        app.files.remote_sort_reference = chrono::NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        app.remote_file_sort = FileSortColumn::DateModified;
+        app.remote_file_sort_ascending = true;
+        app.resort_remote_files();
+
+        let names: Vec<&str> = app
+            .files
+            .remote_order
+            .iter()
+            .map(|&index| app.files.remote_entries[index].name.as_str())
+            .collect();
+        assert_eq!(names, ["december", "january"]);
+    }
+
+    #[test]
+    fn remote_date_label_and_sort_key_share_the_listing_reference() {
+        let (_dir, mut app) = boot_sort_app("date-label-reference");
+        let mut entry = sftp::RemoteEntry::new("rollover", false, Some(1));
+        entry.modified = Some("Nov 22 00:01".into());
+
+        let before_midnight = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        app.files.remote_sort_reference = before_midnight;
+        let label = app.files.remote_modified_label(&entry);
+        let again = app.files.remote_modified_label(&entry);
+        let key_year = ls_modified_sort_key("Nov 22 00:01", before_midnight)
+            .unwrap()
+            .0;
+        assert_eq!(label, "2025/11/22 00:01");
+        assert_eq!(label, again);
+        assert_eq!(key_year, 2025);
+        assert!(label.starts_with(&format!("{key_year:04}/")));
+
+        let after_midnight = chrono::NaiveDate::from_ymd_opt(2026, 11, 22).unwrap();
+        app.files.remote_sort_reference = after_midnight;
+        let label = app.files.remote_modified_label(&entry);
+        let key_year = ls_modified_sort_key("Nov 22 00:01", after_midnight)
+            .unwrap()
+            .0;
+        assert_eq!(label, "2026/11/22 00:01");
+        assert_eq!(key_year, 2026);
+        assert!(label.starts_with(&format!("{key_year:04}/")));
     }
 }

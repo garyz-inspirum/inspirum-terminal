@@ -24,6 +24,7 @@ pub(super) enum Icon {
     ChevronRight,
     TriangleRight,
     TriangleDown,
+    TriangleUp,
     ArrowUp,
     Refresh,
     ClearPath,
@@ -127,7 +128,7 @@ fn arc(center: (f32, f32), radius: f32, start_deg: f32, end_deg: f32) -> Shape {
 }
 
 impl Icon {
-    pub(super) const ALL: [Icon; 31] = [
+    pub(super) const ALL: [Icon; 32] = [
         Icon::Close,
         Icon::Plus,
         Icon::Minus,
@@ -139,6 +140,7 @@ impl Icon {
         Icon::ChevronRight,
         Icon::TriangleRight,
         Icon::TriangleDown,
+        Icon::TriangleUp,
         Icon::ArrowUp,
         Icon::Refresh,
         Icon::ClearPath,
@@ -201,6 +203,7 @@ impl Icon {
             Icon::ChevronRight => vec![open(&[(6.0, 4.0), (10.0, 8.0), (6.0, 12.0)])],
             Icon::TriangleRight => vec![filled(&[(6.0, 4.5), (10.5, 8.0), (6.0, 11.5)])],
             Icon::TriangleDown => vec![filled(&[(4.5, 6.0), (11.5, 6.0), (8.0, 10.5)])],
+            Icon::TriangleUp => vec![filled(&[(4.5, 10.0), (11.5, 10.0), (8.0, 5.5)])],
             Icon::ArrowUp => vec![
                 line((8.0, 3.0), (8.0, 13.0)),
                 open(&[(4.0, 7.0), (8.0, 3.0), (12.0, 7.0)]),

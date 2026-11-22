@@ -136,6 +136,7 @@ async def monitored_shell(
                         "echo:AFTER_MENU",
                         "echo:AFTER_SENDER_ESCAPE",
                         "echo:AFTER_GEAR",
+                        "echo:AFTER_EXIT_CANCEL",
                     ):
                         events.write(answer)
                     stdout.write(f"{answer}\r\n")
@@ -744,6 +745,29 @@ INVERTED_MIN_S = 10.0 * TIME_SCALE
 TOOLBAR_BOTTOM_Y = 90
 
 
+def _bounds_inside(bounds, region):
+    """Return ``bounds`` only when the box lies wholly inside ``region``.
+
+    ``region`` is ``(left, top, right, bottom)``. ``None`` keeps every box,
+    matching the historical whole-window search. An outside box is not a
+    match: callers skip it and keep searching.
+    """
+    if bounds is None or region is None:
+        return bounds
+    left, top, right, bottom = bounds
+    x1, y1, x2, y2 = region
+    if left >= x1 and top >= y1 and right <= x2 and bottom <= y2:
+        return bounds
+    return None
+
+
+def _word_inside(word, region) -> bool:
+    if region is None:
+        return True
+    left, top, width, height = word[1], word[2], word[3], word[4]
+    return _bounds_inside((left, top, left + width, top + height), region) is not None
+
+
 def _inverted_segment_search(path: Path, tesseract: str, label: str, region, deadline):
     """Last resort: re-read light segments inverted (dark on light grey, x4).
 
@@ -787,11 +811,60 @@ def _inverted_segment_search(path: Path, tesseract: str, label: str, region, dea
                 bounds = match_visible_label(words, label)
                 if bounds is None:
                     bounds = match_visible_segment([words], label)
+                # A band that merely overlaps the region can still OCR the
+                # status line below it. Skip that box and keep scanning.
+                bounds = _bounds_inside(bounds, region)
                 if bounds is not None:
                     return bounds, segments
     finally:
         temporary.unlink(missing_ok=True)
     return None, segments
+
+
+def _region_band_label(path: Path, tesseract: str, label: str, region):
+    """Re-read each light text band inside ``region``, one column at a time.
+
+    A dock-body crop of a 13 px monospace name loses the trailing token
+    (``444_GUI_DOWNLOAD`` plus a 2 px ``FIXTURE.``). The same glyphs as one
+    row band, without the date column beside them, read as the filename.
+    Narrow regions are already one column; wide regions are split on the
+    dark gaps between columns. Returns a box wholly inside ``region``.
+    """
+    width, height, channels, rows = _read_png(path)
+    x1, y1, x2, y2 = region
+    thresh = _text_threshold(width, height, channels, rows)
+    for by1, by2 in _visible_bands(width, height, channels, rows, thresh):
+        if by2 < y1 or by1 >= y2:
+            continue
+        if x2 - x1 <= 360:
+            spans = [(x1, x2)]
+        else:
+            spans = []
+            for sx1, sx2 in _band_segments(width, rows, channels, thresh, by1, by2, 24):
+                left = max(x1, sx1)
+                right = min(x2, sx2 + 1)
+                if right - left >= 24:
+                    spans.append((left, right))
+        for sx1, sx2 in spans:
+            band = (
+                max(0, sx1),
+                max(0, by1 - 2),
+                min(width, sx2),
+                min(height, by2 + 3),
+            )
+            if band[2] - band[0] < 24 or band[3] - band[1] < 8:
+                continue
+            words = region_upscaled_rows(
+                path, tesseract, band, psm="7", scale=4, invert=True,
+            )
+            words = [word for word in words if _word_inside(word, region)]
+            bounds = match_visible_label(words, label)
+            if bounds is None:
+                bounds = match_visible_segment([words], label)
+            bounds = _bounds_inside(bounds, region)
+            if bounds is not None:
+                return bounds
+    return None
 
 
 def locate_visible_label(
@@ -829,40 +902,45 @@ def locate_visible_label(
             bounds = match_visible_label(words, label)
             if bounds is None:
                 bounds = match_visible_segment([words], label)
+            bounds = _bounds_inside(bounds, region)
             if bounds is not None:
                 break
+        # Full-width upscale still drops the trailing token of a 13 px name.
+        # Row bands inside the region recover it; never a box outside region.
+        if bounds is None:
+            bounds = _region_band_label(path, tesseract, label, region)
     else:
         first_words = ocr_rows(path, tesseract, None)
         bounds = match_visible_label(first_words, label)
     if bounds is None and time.monotonic() < deadline:
         pixel_rows = visible_pixel_rows(path, tesseract, clusters=False)
         if region is not None:
-            x1, y1, x2, y2 = region
-            inside = [
-                row for row in pixel_rows
-                if not (
-                    row[1] + row[3] < x1 or row[1] > x2
-                    or row[2] + row[4] < y1 or row[2] > y2
-                )
-            ]
-            bounds = match_visible_label(inside, label)
-        if bounds is None:
-            bounds = match_visible_label(pixel_rows, label)
+            pixel_rows = [row for row in pixel_rows if _word_inside(row, region)]
+        bounds = _bounds_inside(match_visible_label(pixel_rows, label), region)
     if bounds is None and time.monotonic() < deadline:
-        bounds = match_visible_label(
-            visible_pixel_rows(path, tesseract, clusters=True), label,
-        )
+        clustered = visible_pixel_rows(path, tesseract, clusters=True)
+        if region is not None:
+            clustered = [row for row in clustered if _word_inside(row, region)]
+        bounds = _bounds_inside(match_visible_label(clustered, label), region)
     if bounds is None and time.monotonic() < deadline:
         segments = visible_segment_rows(path, tesseract)
+        if region is not None:
+            segments = [
+                [word for word in words if _word_inside(word, region)]
+                for words in segments
+            ]
+            segments = [words for words in segments if words]
         flat = [word for words in segments for word in words]
         bounds = match_visible_label(flat, label)
         if bounds is None:
             bounds = match_visible_segment(segments, label)
+        bounds = _bounds_inside(bounds, region)
     if bounds is None:
         bounds, inverted = _inverted_segment_search(
             path, tesseract, label, region,
             max(deadline, time.monotonic() + INVERTED_MIN_S),
         )
+        bounds = _bounds_inside(bounds, region)
     else:
         inverted = []
     if bounds is None:
@@ -881,6 +959,42 @@ def locate_visible_label(
     return bounds
 
 
+def name_rows_region(first_row_bounds, row_count, *, row_height=23, name_right=None):
+    """Name-column data-row box derived from the located first data row.
+
+    The band does not move when the listing reorders. ``left`` covers the
+    file icon inset from the glyph box; ``bottom`` covers ``row_count``
+    rows of ``row_height``.
+    """
+    first_left, first_top = first_row_bounds[0], first_row_bounds[1]
+    left = max(0, first_left - 36)
+    top = first_top - 6
+    right = name_right if name_right is not None else first_left + 270
+    bottom = first_top + row_count * row_height + 2
+    return (left, top, right, bottom)
+
+
+def name_order_tops(shot, first_label, second_label, rows_region):
+    """Return ``(top_first, top_second)`` only if both boxes are inside the rows.
+
+    Locates both labels with ``region=rows_region``. A miss is ``None``, not
+    an exception. A box that is not wholly inside ``rows_region`` — the
+    transfer status line, for example — is also ``None``.
+    """
+    try:
+        first = locate_visible_label(
+            shot, first_label, region=rows_region, budget=LOCATE_BUDGET_S,
+        )
+        second = locate_visible_label(
+            shot, second_label, region=rows_region, budget=LOCATE_BUDGET_S,
+        )
+    except RuntimeError:
+        return None
+    if _bounds_inside(first, rows_region) is None or _bounds_inside(second, rows_region) is None:
+        return None
+    return (first[1], second[1])
+
+
 def center(bounds):
     return ((bounds[0] + bounds[2]) // 2, (bounds[1] + bounds[3]) // 2)
 
@@ -892,7 +1006,15 @@ def diff(first: Path, second: Path, env: dict[str, str]) -> int:
     )
     if result.returncode not in (0, 1):
         raise RuntimeError(f"ImageMagick screenshot comparison failed: {result.stderr[:200]}")
-    return int(result.stderr.strip().split()[0])
+    # ImageMagick prints large counts in scientific notation ("1.024e+06")
+    # and newer builds append "(fraction)"; keep the first token.
+    token = result.stderr.strip().split()[0] if result.stderr.strip() else ""
+    try:
+        return int(float(token))
+    except ValueError as exc:
+        raise RuntimeError(
+            f"ImageMagick screenshot comparison printed no pixel count: {result.stderr[:200]!r}"
+        ) from exc
 
 
 async def locate_rendered_label(
@@ -1084,6 +1206,150 @@ def reserved_display() -> str:
         if not Path(f"/tmp/.X11-unix/X{value}").exists() and not Path(f"/tmp/.X{value}-lock").exists():
             return f":{value}"
     raise RuntimeError("no disposable Xvfb display number available")
+
+
+def danger_fill_run(path: Path, y: int, x1: int, x2: int, *, min_width: int = 30):
+    """Horizontal extent of the danger button fill on row ``y``.
+
+    The label's dark glyphs interrupt the fill on its text rows, so this is
+    the span from the first to the last strongly red pixel between ``x1`` and
+    ``x2``. Returns ``(left, right)`` in image coordinates, or ``None`` when
+    fewer than ``min_width`` such pixels are on the row.
+    """
+    width, height, channels, rows = _read_png(path)
+    if not 0 <= y < height:
+        return None
+    row = rows[y]
+    red = [
+        x for x in range(max(0, x1), min(width, x2))
+        if row[x * channels] >= 190
+        and row[x * channels + 1] <= 130
+        and row[x * channels + 2] <= 130
+    ]
+    if len(red) < min_width:
+        return None
+    return (red[0], red[-1] + 1)
+
+
+def request_window_close(window: str, env: dict[str, str]) -> None:
+    """Send the ICCCM close a window manager's close button sends.
+
+    ClientMessage type WM_PROTOCOLS, format 32, data.l[0] = WM_DELETE_WINDOW,
+    data.l[1] = CurrentTime, delivered to the window itself with
+    XSendEvent(display, window, False, NoEventMask, &event) then XFlush.
+
+    ctypes, not xdotool: the runners' xdotool is 3.20160805 (no windowquit;
+    windowclose and windowkill destroy the window instead of asking), and no
+    window manager runs under Xvfb so wmctrl cannot deliver this either.
+    """
+    import ctypes
+    import ctypes.util
+
+    try:
+        protocols = command("xprop", "-id", window, "WM_PROTOCOLS", env=env)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        raise RuntimeError(
+            f"xprop WM_PROTOCOLS failed for window {window}: {detail[:300]}"
+        ) from exc
+    if "WM_DELETE_WINDOW" not in protocols:
+        raise RuntimeError(
+            f"window {window} does not advertise WM_DELETE_WINDOW: {protocols!r}"
+        )
+    lib_name = ctypes.util.find_library("X11")
+    if not lib_name:
+        raise RuntimeError("libX11 not found; cannot send WM_DELETE_WINDOW")
+    x11 = ctypes.CDLL(lib_name)
+
+    class _XClientMessageData(ctypes.Union):
+        _fields_ = [
+            ("b", ctypes.c_char * 20),
+            ("s", ctypes.c_short * 10),
+            ("l", ctypes.c_long * 5),
+        ]
+
+    class _XClientMessageEvent(ctypes.Structure):
+        # LP64 layout: int, pad, ulong, int, pad, pointer, ulong, ulong, int,
+        # pad, then the 5-long data union. Window and Atom are unsigned long.
+        _fields_ = [
+            ("type", ctypes.c_int),
+            ("serial", ctypes.c_ulong),
+            ("send_event", ctypes.c_int),
+            ("display", ctypes.c_void_p),
+            ("window", ctypes.c_ulong),
+            ("message_type", ctypes.c_ulong),
+            ("format", ctypes.c_int),
+            ("data", _XClientMessageData),
+        ]
+
+    class _XEvent(ctypes.Union):
+        # XSendEvent copies sizeof(XEvent), which is 24 longs. A bare
+        # XClientMessageEvent is shorter; the pad makes the union that size.
+        _fields_ = [
+            ("xclient", _XClientMessageEvent),
+            ("pad", ctypes.c_long * 24),
+        ]
+
+    if ctypes.sizeof(_XEvent) != 24 * ctypes.sizeof(ctypes.c_long):
+        raise RuntimeError(
+            f"XEvent is {ctypes.sizeof(_XEvent)} bytes, expected 24 longs"
+        )
+
+    x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    x11.XOpenDisplay.restype = ctypes.c_void_p
+    x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    x11.XCloseDisplay.restype = ctypes.c_int
+    x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+    x11.XInternAtom.restype = ctypes.c_ulong
+    x11.XSendEvent.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_int,
+        ctypes.c_long,
+        ctypes.POINTER(_XEvent),
+    ]
+    x11.XSendEvent.restype = ctypes.c_int
+    x11.XFlush.argtypes = [ctypes.c_void_p]
+    x11.XFlush.restype = ctypes.c_int
+
+    display_name = env.get("DISPLAY")
+    if not display_name:
+        raise RuntimeError("DISPLAY is unset; cannot send WM_DELETE_WINDOW")
+    display = x11.XOpenDisplay(display_name.encode())
+    if not display:
+        raise RuntimeError(f"XOpenDisplay failed for {display_name!r}")
+    try:
+        wm_protocols = x11.XInternAtom(display, b"WM_PROTOCOLS", False)
+        wm_delete = x11.XInternAtom(display, b"WM_DELETE_WINDOW", False)
+        if not wm_protocols or not wm_delete:
+            raise RuntimeError(
+                "failed to intern WM_PROTOCOLS or WM_DELETE_WINDOW"
+            )
+        # Nested union assignment through a parent writes a temporary and
+        # would not reach XSendEvent. Build each value, then assign it whole.
+        data = _XClientMessageData()
+        data.l[0] = wm_delete
+        data.l[1] = 0  # CurrentTime
+        client = _XClientMessageEvent()
+        client.type = 33  # ClientMessage
+        client.window = int(window)
+        client.message_type = wm_protocols
+        client.format = 32
+        client.data = data
+        event = _XEvent()
+        event.xclient = client
+        # NoEventMask, propagate False: the creating client receives it.
+        # XSendEvent itself sets send_event, which is what a real WM does.
+        sent = x11.XSendEvent(
+            display, int(window), False, 0, ctypes.byref(event),
+        )
+        if sent == 0:
+            raise RuntimeError(
+                f"XSendEvent WM_DELETE_WINDOW to {window} returned 0"
+            )
+        x11.XFlush(display)
+    finally:
+        x11.XCloseDisplay(display)
 
 
 TOUR = os.environ.get("INSPIRUM_GUI_TOUR") == "1"
@@ -1608,20 +1874,74 @@ async def main() -> int:
                 await asyncio.sleep(.4)
 
                 # No terminal click: the shortcut must work again after Escape.
+                # Both shells are still up. An exit already logged here must
+                # fail now: recording it after the close would hide it inside
+                # the baseline the rest of the run compares against.
+                ended_before_aux_close = count("SHELL_HANDLER_ENDED")
+                eof_before_aux_close = count("SHELL_STREAM_EOF")
+                if ended_before_aux_close != 0 or eof_before_aux_close != 0:
+                    raise RuntimeError(
+                        "SSH shell ended before the intentional auxiliary close: "
+                        f"SHELL_HANDLER_ENDED={ended_before_aux_close} "
+                        f"SHELL_STREAM_EOF={eof_before_aux_close} (expected 0 and 0)"
+                    )
                 press_ctrl_shift_j()
                 await wait_for(
                     lambda: count("SESSION_CLOSED:clean") == closed0 + 1,
                     "auxiliary shell closed by Ctrl+Shift+J after the menu was dismissed",
                 )
+                # One monitored_shell ends once. Empty stdin.read writes exactly
+                # one SHELL_STREAM_EOF and returns; finally then writes exactly
+                # one SHELL_HANDLER_ENDED (and SESSION_CLOSED:clean). The "exit"
+                # line and the exception path omit EOF, but Ctrl+Shift+J closes
+                # the channel — it does not send "exit". One intentional close
+                # is therefore exactly one of each, not whatever has accumulated.
+                def auxiliary_close_ended_once() -> bool:
+                    ended = count("SHELL_HANDLER_ENDED")
+                    eof = count("SHELL_STREAM_EOF")
+                    if ended > 1 or eof > 1:
+                        raise RuntimeError(
+                            "intentional auxiliary close ended more than one shell: "
+                            f"SHELL_HANDLER_ENDED={ended} "
+                            f"SHELL_STREAM_EOF={eof} (expected 1 and 1)"
+                        )
+                    return ended == 1 and eof == 1
+
+                try:
+                    await wait_for(
+                        auxiliary_close_ended_once,
+                        "exactly one SHELL_HANDLER_ENDED and one SHELL_STREAM_EOF "
+                        "after the intentional auxiliary close",
+                    )
+                except RuntimeError as exc:
+                    ended = count("SHELL_HANDLER_ENDED")
+                    eof = count("SHELL_STREAM_EOF")
+                    if (ended == 1 and eof == 1) or "SHELL_HANDLER_ENDED=" in str(exc):
+                        raise
+                    raise RuntimeError(
+                        "intentional auxiliary close did not end exactly one shell: "
+                        f"SHELL_HANDLER_ENDED={ended} "
+                        f"SHELL_STREAM_EOF={eof} (expected 1 and 1)"
+                    ) from exc
+                # Freeze these before the settle sleep. A recount after the
+                # sleep would adopt any extra exit as the accepted baseline.
+                shells_ended_before_split = count("SHELL_HANDLER_ENDED")
+                shell_eof_before_split = count("SHELL_STREAM_EOF")
+                if shells_ended_before_split != 1 or shell_eof_before_split != 1:
+                    raise RuntimeError(
+                        "shell-end baseline after intentional auxiliary close "
+                        "is not exactly one: "
+                        f"SHELL_HANDLER_ENDED={shells_ended_before_split} "
+                        f"SHELL_STREAM_EOF={shell_eof_before_split} (expected 1 and 1)"
+                    )
                 await asyncio.sleep(1)
 
                 # These shortcuts are intentionally exercised through native
                 # Iced keyboard events, never a direct Rust state transition.
                 # The auxiliary shell already added one SESSION_STARTED and one
-                # clean close, so later lifetime counts are relative to here.
+                # clean close. Shell-end baselines were frozen at exactly one
+                # immediately after that close, before this sleep.
                 started_before_split = count("SESSION_STARTED")
-                shells_ended_before_split = count("SHELL_HANDLER_ENDED")
-                shell_eof_before_split = count("SHELL_STREAM_EOF")
                 command("xdotool", "windowfocus", window, "key", "--clearmodifiers", "ctrl+shift+r", env=env)
                 await wait_for(
                     lambda: count("SESSION_STARTED") >= started_before_split + 1,
@@ -1788,6 +2108,97 @@ async def main() -> int:
                     destination / "connected-files-third-selected.png", env,
                 ) < 20:
                     raise RuntimeError("distinct post-transfer file row was not visibly selected")
+
+                # Name-header click reverses the remote listing in place.
+                # Default is name ascending (directories first, then name; this
+                # fixture has no directories), so 111 is above 444. A second
+                # click must restore that order: the 960x640 step needs 111
+                # first. Header clicks must not start another SFTP listing.
+                row_111 = await locate_rendered_label(
+                    window, destination / "connected-files-sort-before.png",
+                    third_name, env=env, region=body, timeout=20,
+                )
+                # Name-column data rows, fixed to the first file row. Reordering
+                # does not move the band, and the transfer status line is outside
+                # it, so a later read of 444 cannot land on "Download 444 …".
+                rows_region = name_rows_region(row_111, 3)
+                default_order = await asyncio.to_thread(
+                    name_order_tops,
+                    destination / "connected-files-sort-before.png",
+                    third_name,
+                    download_name,
+                    rows_region,
+                )
+                if default_order is None or default_order[0] >= default_order[1]:
+                    y_111 = None if default_order is None else default_order[0]
+                    y_444 = None if default_order is None else default_order[1]
+                    raise RuntimeError(
+                        "Filer default name order is not ascending: "
+                        f"y(111)={y_111} y(444)={y_444} rows_region={rows_region}"
+                    )
+                # Band derived from the located 111 row, which is the first
+                # file row. OCR bounds are the filename glyphs (inset 3px),
+                # vertically centred in the 23px row and ~20px right of the
+                # header label (14px file icon + 6px gap). The Name header is
+                # the 20px table header plus a 1px divider immediately above
+                # that row. The strip is therefore just above the glyphs,
+                # shifted left to cover the word Name, and not tall enough to
+                # include the path bar or the filename. It stays put when the
+                # rows reorder, so both clicks use this same band.
+                name_header = (
+                    max(0, row_111[0] - 36),
+                    max(0, row_111[1] - 36),
+                    row_111[0] + 48,
+                    row_111[1] - 2,
+                )
+                if name_header[3] <= name_header[1] or name_header[2] <= name_header[0]:
+                    raise RuntimeError(
+                        f"Name header band collapsed from row bounds {row_111}: {name_header}"
+                    )
+                listings_at_sort = events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY")
+
+                async def wait_name_order(shot: Path, *, descending: bool) -> tuple[int, int]:
+                    deadline = time.monotonic() + 15 * TIME_SCALE
+                    seen = None
+                    while True:
+                        await asyncio.to_thread(screenshot, window, shot, env)
+                        seen = await asyncio.to_thread(
+                            name_order_tops, shot, third_name, download_name, rows_region,
+                        )
+                        if seen is not None:
+                            matched = seen[0] > seen[1] if descending else seen[0] < seen[1]
+                            if matched:
+                                return seen
+                        if time.monotonic() >= deadline:
+                            order = "descending" if descending else "ascending"
+                            y_111 = None if seen is None else seen[0]
+                            y_444 = None if seen is None else seen[1]
+                            raise RuntimeError(
+                                f"Name header click did not produce {order} Filer order: "
+                                f"y(111)={y_111} y(444)={y_444} rows_region={rows_region}"
+                            )
+                        await asyncio.sleep(.5)
+
+                await click_label(
+                    window, destination / "connected-files-sort-header.png",
+                    "Name", env, region=name_header, settle=.4,
+                )
+                await wait_name_order(
+                    destination / "connected-files-sorted-desc.png", descending=True,
+                )
+                await click_label(
+                    window, destination / "connected-files-sort-header-again.png",
+                    "Name", env, region=name_header, settle=.4,
+                )
+                await wait_name_order(
+                    destination / "connected-files-sorted-asc.png", descending=False,
+                )
+                listings_after_sort = events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY")
+                if listings_after_sort != listings_at_sort:
+                    raise RuntimeError(
+                        "Name header click started an SFTP listing: "
+                        f"SFTP_LIST_READY {listings_at_sort} -> {listings_after_sort}"
+                    )
 
                 # The populated queue lives in the Transfer tab. Both completed
                 # jobs must be listed; scroll its visible interior and retain
@@ -2071,6 +2482,8 @@ async def main() -> int:
                 # This is bounded protocol evidence, not a Vim usability claim.
                 command("xdotool", "mousemove", "--window", window,
                         "710", "300", "click", "1", env=env)
+                await asyncio.sleep(.3)
+                screenshot(window, destination / "connected-fullscreen-before.png", env)
                 command("xdotool", "type", "--clearmodifiers", "--delay", "25",
                         "screen-on", env=env)
                 command("xdotool", "key", "--clearmodifiers", "Return", env=env)
@@ -2078,8 +2491,23 @@ async def main() -> int:
                     lambda: "SCREEN_ON" in events.path.read_text(encoding="utf-8"),
                     "live SSH alternate-screen enter",
                 )
-                await asyncio.sleep(.5)
-                screenshot(window, destination / "connected-fullscreen-active.png", env)
+                # SCREEN_ON is a server event too: poll until the alternate
+                # screen is painted, or the "active" frame is the normal screen
+                # and the restore below diffs to nothing.
+                active_deadline = time.monotonic() + 10 * TIME_SCALE
+                while True:
+                    await asyncio.sleep(.5)
+                    screenshot(window, destination / "connected-fullscreen-active.png", env)
+                    active_pixels = diff(
+                        destination / "connected-fullscreen-before.png",
+                        destination / "connected-fullscreen-active.png", env,
+                    )
+                    if active_pixels >= 1500 or time.monotonic() >= active_deadline:
+                        break
+                if active_pixels < 1500:
+                    raise RuntimeError(
+                        f"alternate-screen enter changed only {active_pixels} pixels"
+                    )
                 command("xdotool", "type", "--clearmodifiers", "--delay", "25",
                         "screen-off", env=env)
                 command("xdotool", "key", "--clearmodifiers", "Return", env=env)
@@ -2149,19 +2577,150 @@ async def main() -> int:
                         )
                     ) from exc
 
+                # Session > Exit confirmation. Placed after the remote-key
+                # probe (line above: no menu or dialog is open, focus mode
+                # and remote-keys mode are off, the SSH session is still up)
+                # and before the event_log snapshot so an accidental confirm
+                # also fails the "unexpectedly exited" check. This path clicks
+                # Cancel only. The confirming Exit click is the window-manager
+                # close step after that snapshot.
+                command("xdotool", "mousemove", "--window", window,
+                        "30", "16", "click", "1", env=env)
+                await asyncio.sleep(.3)
+                # Session dropdown hangs from the 32px menu bar at x=0 and is
+                # 240px wide. Exit is the last item: 7*24px rows + 4*1px
+                # separators put it near y=205..229. Search only that
+                # top-left band so the status bar, or a pane-toolbar
+                # "Exit focus" / "Exit keys", cannot match.
+                await click_label(
+                    window, destination / "connected-exit-menu.png",
+                    "Exit", env, region=(0, 140, 270, 280), settle=.6,
+                )
+                width, height = window_size(window, env)
+                # Confirmation body is one line in a 600px dialog centered
+                # on the window. "Exit and disconnect" matches both the
+                # singular and plural wording and avoids the leading session
+                # count (0/O).
+                confirm_region = (
+                    max(0, width // 2 - 340),
+                    max(0, height // 2 - 180),
+                    min(width, width // 2 + 340),
+                    min(height, height // 2 + 180),
+                )
+                confirm = await locate_rendered_label(
+                    window, destination / "connected-exit-confirm.png",
+                    "Exit and disconnect", env=env, region=confirm_region, timeout=15,
+                )
+                # The matched phrase starts further left than "disconnect them"
+                # did; the existing -280px left expansion already covers the
+                # dialog, so it is not widened. The phrase ends ~5 characters
+                # earlier, so Cancel (left of the two right-aligned buttons,
+                # bottom right of the 600px dialog, one row below) sits further
+                # right of confirm[2]. The old +300px covered an ~80-170px gap;
+                # +360px keeps that cover. height-24 keeps the box off the
+                # status bar. Both confirmation paths use this same cover.
+                def exit_dialog_region(phrase_bounds, win_width, win_height):
+                    region = (
+                        max(0, phrase_bounds[0] - 280),
+                        max(0, phrase_bounds[1] - 56),
+                        min(win_width, phrase_bounds[2] + 360),
+                        min(win_height - 24, phrase_bounds[3] + 72),
+                    )
+                    if region[2] <= region[0] or region[3] <= region[1]:
+                        raise RuntimeError(
+                            "Exit confirmation dialog region collapsed from "
+                            f"{phrase_bounds}: {region}"
+                        )
+                    return region
+
+                dialog_region = exit_dialog_region(confirm, width, height)
+                await click_label(
+                    window, destination / "connected-exit-cancel.png",
+                    "Cancel", env, region=dialog_region, settle=.5,
+                )
+                try:
+                    command("xdotool", "getwindowgeometry", "--shell", window, env=env)
+                except subprocess.CalledProcessError as exc:
+                    raise RuntimeError("Exit Cancel closed the application window") from exc
+                # A backdrop click can dismiss the dialog too, so prove it is
+                # gone before the workspace click. Repaint can lag on a
+                # loaded host; a miss is slow, so each attempt is a region
+                # OCR with a small budget.
+                cancel_shot = destination / "connected-after-exit-cancel.png"
+                gone_deadline = time.monotonic() + 8 * TIME_SCALE
+                while True:
+                    await asyncio.to_thread(screenshot, window, cancel_shot, env)
+                    try:
+                        still = await asyncio.to_thread(
+                            locate_visible_label,
+                            cancel_shot,
+                            "Exit and disconnect",
+                            region=confirm_region,
+                            budget=1.0,
+                        )
+                    except RuntimeError:
+                        break
+                    if time.monotonic() >= gone_deadline:
+                        raise RuntimeError(
+                            "Exit confirmation still visible after Cancel "
+                            f"at {still} in {confirm_region}"
+                        )
+                    await asyncio.sleep(.4)
+                removed_pixels = await asyncio.to_thread(
+                    diff,
+                    destination / "connected-exit-confirm.png",
+                    cancel_shot,
+                    env,
+                )
+                print(
+                    f"Exit Cancel dialog removal: {removed_pixels} pixels "
+                    f"(threshold 5000)",
+                    flush=True,
+                )
+                if removed_pixels < 5000:
+                    raise RuntimeError(
+                        "Exit confirmation backdrop still present after Cancel: "
+                        f"{removed_pixels} pixels changed (need >= 5000)"
+                    )
+                # Cancel closes the dialog but, unlike Escape after the
+                # Session menu, does not restore terminal focus. Click the
+                # pane the alternate-screen probe used so this echo proves
+                # the session is still alive, not that focus came back.
+                command(
+                    "xdotool", "windowfocus", window, "mousemove", "--window", window,
+                    "710", "300", "click", "1", env=env,
+                )
+                await asyncio.sleep(.3)
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:AFTER_EXIT_CANCEL", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: "NATIVE_ECHO:AFTER_EXIT_CANCEL" in events.path.read_text(encoding="utf-8").splitlines(),
+                    "shell echo after cancelling Session Exit",
+                )
+
                 event_log = events.path.read_text(encoding="utf-8")
                 if "SHELL_PTY_RESIZE" not in event_log:
                     raise RuntimeError("connected SSH fixture never observed a live PTY resize")
-                # The auxiliary-shell probe closes one shell on purpose. Anything
-                # beyond that baseline is an unexpected exit during the rest.
+                # The auxiliary-shell probe closes one shell on purpose. The
+                # baseline is that one close, frozen before the settle sleep,
+                # not a later sample. Anything beyond it is an unexpected exit.
+                ended_during_rest = sum(
+                    line == "SHELL_HANDLER_ENDED" for line in event_log.splitlines()
+                )
+                eof_during_rest = sum(
+                    line == "SHELL_STREAM_EOF" for line in event_log.splitlines()
+                )
                 if (
-                    sum(line == "SHELL_HANDLER_ENDED" for line in event_log.splitlines())
-                    > shells_ended_before_split
-                    or sum(line == "SHELL_STREAM_EOF" for line in event_log.splitlines())
-                    > shell_eof_before_split
+                    ended_during_rest > shells_ended_before_split
+                    or eof_during_rest > shell_eof_before_split
                 ):
                     raise RuntimeError(
                         "SSH terminal unexpectedly exited during split/dock/focus acceptance: "
+                        f"SHELL_HANDLER_ENDED={ended_during_rest} "
+                        f"(baseline {shells_ended_before_split}) "
+                        f"SHELL_STREAM_EOF={eof_during_rest} "
+                        f"(baseline {shell_eof_before_split}): "
                         + repr(event_log[-900:])
                     )
                 if "UNEXPECTED_LOCKED_PTY_INPUT" in event_log:
@@ -2181,12 +2740,138 @@ async def main() -> int:
                     raise RuntimeError(
                         "three sessions (main, auxiliary, split) were not authenticated"
                     )
+                # Window-manager close. After the event-log snapshot so shells
+                # ending on exit do not trip the "unexpectedly exited" checks.
+                # Confirming Exit is the last click; the process must exit 0
+                # by itself before teardown.
+                if app.poll() is not None:
+                    raise RuntimeError(
+                        "application already exited before window-manager close "
+                        f"(code {app.returncode})"
+                    )
+                await asyncio.to_thread(
+                    screenshot,
+                    window,
+                    destination / "connected-before-wm-close.png",
+                    env,
+                )
+                await asyncio.to_thread(request_window_close, window, env)
+                # A locate call can spend its whole OCR budget on one frame,
+                # so wait for the repaint the request causes before reading it.
+                requested_shot = destination / "connected-close-requested.png"
+                repaint_deadline = time.monotonic() + 10 * TIME_SCALE
+                while True:
+                    await asyncio.sleep(.4)
+                    if app.poll() is not None:
+                        raise RuntimeError(
+                            "window-manager close exited without confirmation "
+                            f"(code {app.returncode})"
+                        )
+                    await asyncio.to_thread(screenshot, window, requested_shot, env)
+                    close_pixels = await asyncio.to_thread(
+                        diff, destination / "connected-before-wm-close.png", requested_shot, env,
+                    )
+                    if close_pixels >= 5000:
+                        break
+                    if time.monotonic() >= repaint_deadline:
+                        raise RuntimeError(
+                            "window-manager close request changed nothing on screen: "
+                            f"{close_pixels} pixels (need >= 5000)"
+                        )
+                print(f"window-manager close request repaint: {close_pixels} pixels", flush=True)
+                try:
+                    close_confirm = await locate_rendered_label(
+                        window,
+                        destination / "connected-close-confirm.png",
+                        "Exit and disconnect",
+                        env=env,
+                        region=confirm_region,
+                        timeout=15,
+                    )
+                except RuntimeError:
+                    if app.poll() is not None:
+                        raise RuntimeError(
+                            "window-manager close exited without confirmation "
+                            f"(code {app.returncode})"
+                        ) from None
+                    raise
+                if app.poll() is not None:
+                    raise RuntimeError(
+                        "window-manager close exited without waiting for confirmation "
+                        f"(code {app.returncode})"
+                    )
+                close_dialog = exit_dialog_region(close_confirm, width, height)
+                cancel_bounds = await locate_rendered_label(
+                    window,
+                    destination / "connected-close-cancel.png",
+                    "Cancel",
+                    env=env,
+                    region=close_dialog,
+                    timeout=15,
+                )
+                cancel_top = cancel_bounds[1]
+                cancel_right = cancel_bounds[2]
+                cancel_bottom = cancel_bounds[3]
+                exit_box = (
+                    cancel_right + 8,
+                    cancel_top - 8,
+                    min(width, cancel_right + 200),
+                    cancel_bottom + 8,
+                )
+                if exit_box[2] <= exit_box[0] or exit_box[3] <= exit_box[1]:
+                    raise RuntimeError(
+                        "confirming Exit button box collapsed from "
+                        f"Cancel {cancel_bounds}: {exit_box}"
+                    )
+                # The confirming button is dark text on the danger fill, which
+                # the light-text OCR cannot read. Find the fill itself on
+                # Cancel's row, right of Cancel, and click its centre.
+                exit_shot = destination / "connected-close-exit.png"
+                await asyncio.to_thread(screenshot, window, exit_shot, env)
+                exit_run = danger_fill_run(
+                    exit_shot, (cancel_top + cancel_bottom) // 2, exit_box[0], exit_box[2],
+                )
+                if exit_run is None:
+                    raise RuntimeError(
+                        "confirming Exit button fill not found right of Cancel "
+                        f"{cancel_bounds} in {exit_box}"
+                    )
+                exit_x = (exit_run[0] + exit_run[1]) // 2
+                exit_y = (cancel_top + cancel_bottom) // 2
+                print(f"confirming Exit button fill x={exit_run} click=({exit_x}, {exit_y})", flush=True)
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    str(exit_x), str(exit_y), "click", "1", env=env,
+                )
+                close_started = time.monotonic()
+                close_deadline = close_started + 20 * TIME_SCALE
+                while app.poll() is None and time.monotonic() < close_deadline:
+                    await asyncio.sleep(.2)
+                close_elapsed = time.monotonic() - close_started
+                close_code = app.poll()
+                print(
+                    f"window-manager close: process "
+                    f"{'exited' if close_code is not None else 'still running'} "
+                    f"after {close_elapsed:.1f}s"
+                    + (f" code {close_code}" if close_code is not None else ""),
+                    flush=True,
+                )
+                if close_code is None:
+                    raise RuntimeError(
+                        "window-manager close: application still running "
+                        f"after {close_elapsed:.1f}s"
+                    )
+                if close_code != 0:
+                    raise RuntimeError(
+                        f"window-manager close: application exit code {close_code}"
+                    )
                 (destination / "connected-acceptance.txt").write_text(
                     "PASS: two authenticated independent OpenSSH PTYs through production Iced\n"
                     "PASS: native Files dock established actual isolated SSH SFTP subsystem\n"
                     "PASS: PTY resize events preserved both SSH shell sessions through the test\n"
                     "PASS: click-driven SFTP upload preserved exact binary bytes in the native-smoke chroot\n"
                     "PASS: click-driven SFTP download preserved exact binary bytes in the visible local directory\n"
+                    "PASS: Filer Name header click reversed remote name order and the second click restored it without a new SFTP listing\n"
                     "PASS: exact payloads appeared at the expected disposable remote and local paths\n"
                     f"Connected split screenshot change: {split_pixels} pixels\n"
                     f"Opened utility dock screenshot change: {files_pixels} pixels\n"
@@ -2203,6 +2888,11 @@ async def main() -> int:
                     "PASS: shell answered AFTER_MENU, AFTER_SENDER_ESCAPE and AFTER_GEAR without terminal re-click\n"
                     "PASS: Ctrl+Shift+J under the Session and dock gear menus left the auxiliary SSH shell connected; it closed it after Escape\n"
                     "PASS: privacy-locked and free-type synthetic text never reached SSH\n"
+                    "PASS: Session Exit asked for confirmation and Cancel left the shell answering AFTER_EXIT_CANCEL\n"
+                    "PASS: Exit Cancel removed the confirmation before the workspace was clicked\n"
+                    "PASS: window-manager close request asked for confirmation; confirming Exit ended the process with exit code 0\n"
+                    f"Exit Cancel dialog removal: {removed_pixels} pixels\n"
+                    f"Window-manager close exit: {close_elapsed:.1f}s code {close_code}\n"
                     "All keys generated in isolated temporary fixture; no real host or credential.\n",
                     encoding="utf-8",
                 )

@@ -67,6 +67,8 @@ impl Menu {
                 item("Close Session", "", CloseSession),
                 Entry::Separator,
                 item("Lock Screen", "Ctrl+Shift+L", LockScreen),
+                Entry::Separator,
+                item("Exit", "", Exit),
             ],
             Menu::Edit => vec![
                 item("Copy", "", Copy),
@@ -165,6 +167,7 @@ pub(super) enum Command {
     About,
     LayoutBottomTabs,
     LayoutWindTerm,
+    Exit,
 }
 
 #[cfg(test)]
@@ -206,5 +209,22 @@ mod tests {
         );
         assert_eq!(Menu::Session.offset(), 0.0);
         assert!(Menu::Edit.offset() > 0.0);
+    }
+
+    #[test]
+    fn session_menu_ends_with_ungrouped_exit() {
+        let entries = Menu::Session.entries();
+        assert!(matches!(
+            entries.get(entries.len().saturating_sub(2)),
+            Some(Entry::Separator)
+        ));
+        match entries.last() {
+            Some(Entry::Item {
+                label: "Exit",
+                shortcut: "",
+                command: Command::Exit,
+            }) => {}
+            other => panic!("Session menu must end with Exit and no shortcut, got {other:?}"),
+        }
     }
 }
