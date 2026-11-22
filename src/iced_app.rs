@@ -5525,9 +5525,15 @@ impl App {
                     return self.update(Message::CloseDialog);
                 }
                 // Captured Escape may arrive before the click-focus probe's
-                // result. Sender and free-type editors retain their Escape.
+                // result. A focused sender or free-type editor retains its
+                // Escape, but drafts in other panes do not own this key.
                 let sender_owned = std::mem::take(&mut self.sender_focused);
-                if !sender_owned && self.find_open && self.free_type.is_empty() {
+                let active_free_type = self
+                    .tabs
+                    .get(self.active)
+                    .and_then(|tab| tab.panes.get(tab.focus))
+                    .is_some_and(|pane| self.free_type.contains_key(&pane.id));
+                if !sender_owned && self.find_open && (self.find_focused || !active_free_type) {
                     self.close_find_strip();
                 }
             }
@@ -14360,22 +14366,66 @@ mod tests {
     }
 
     #[test]
-    fn find_stale_flag_escape_respects_sender_and_free_type() {
-        let (mut app, _id) = app_with_focused_pane("stale-escape");
+    fn find_captured_escape_ignores_draft_in_another_tab() {
+        let (mut app, first_id) = app_with_focused_pane("remote-draft-escape");
+        let _ = app.update(Message::ToggleFreeType(first_id));
+        app.free_type.insert(
+            first_id,
+            text_editor::Content::with_text("unsent draft in tab A"),
+        );
+        let profile = Session {
+            name: "second".into(),
+            host: "other.invalid".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        let second_id = pane.id;
+        app.tabs.push(Workspace::new(profile, pane));
+        let _ = app.update(Message::SelectTab(1));
+        let _ = app.update(Message::FindOpen);
+        assert_eq!(app.tools.history_owner, Some(second_id));
+        assert!(app.find_open && app.find_focused);
+
+        app.pty_write_log.clear();
+        let _ = app.update(Message::DismissModalKey);
+        assert!(!app.find_open, "a remote draft must not veto Find Escape");
+        assert!(!app.find_focused);
+        assert_eq!(
+            app.free_type.get(&first_id).map(|draft| draft.text()),
+            Some("unsent draft in tab A".into())
+        );
+        assert!(app.pty_write_log.is_empty());
+
+        // A delayed focus probe may have released the flag; the tab-A draft
+        // still cannot claim a captured Escape from tab B.
+        let _ = app.update(Message::FindOpen);
+        let _ = app.update(Message::FindFocusSynced(false));
+        let _ = app.update(Message::DismissModalKey);
+        assert!(!app.find_open);
+        assert_eq!(
+            app.free_type.get(&first_id).map(|draft| draft.text()),
+            Some("unsent draft in tab A".into())
+        );
+        assert!(app.pty_write_log.is_empty());
+    }
+
+    #[test]
+    fn find_stale_flag_escape_respects_sender_and_focused_free_type() {
+        let (mut app, id) = app_with_focused_pane("stale-escape");
         let _ = app.update(Message::FindOpen);
         let _ = app.update(Message::FindFocusSynced(false));
         app.sender_focused = true;
         let _ = app.update(Message::DismissModalKey);
         assert!(app.find_open);
         assert!(!app.sender_focused);
-        let pane = app.tabs[0].focus;
-        let id = app.tabs[0].panes.get(pane).expect("pane").id;
-        app.free_type.insert(id, text_editor::Content::new());
+        let _ = app.update(Message::ToggleFreeType(id));
+        assert!(app.free_type.contains_key(&id));
         let _ = app.update(Message::DismissModalKey);
-        assert!(app.find_open);
-        app.free_type.clear();
+        assert!(app.find_open, "focused free-type editor owns Escape");
+        let _ = app.update(Message::FindFocusSynced(true));
         let _ = app.update(Message::DismissModalKey);
-        assert!(!app.find_open);
+        assert!(!app.find_open, "Find focus owns Escape despite a draft");
+        assert!(app.free_type.contains_key(&id));
         assert!(app.pty_write_log.is_empty());
     }
 
