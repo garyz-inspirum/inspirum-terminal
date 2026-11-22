@@ -51,6 +51,7 @@ LOGGED_ECHO_LINES = (
     "echo:FIND_P1_AFTER",
     "echo:FIND_P2_PANE",
     "echo:FIND_P2_AFTER",
+    "echo:FIND_P3_PANE",
     "echo:FIND_P3_AFTER",
     "echo:AFTER_EXIT_CANCEL",
 )
@@ -3530,9 +3531,11 @@ async def main() -> int:
                       f"close pixels={p2_closed}, PTY={p2_before}->{p2_after}"
                       f"->{p2_escaped}", flush=True)
 
-                # P3: Ctrl+Shift+P opens Commands (src/iced_app.rs:6889-6890,
-                # 5075-5078). Dismissal must return focus to Find's input.
-                p3_open, _p3_prev, _p3_next = await open_find_and_locate("p3")
+                # P3: Find swallows other chords. Edit > Command Palette is a
+                # mouse path; dismissing it gives the terminal keyboard ownership
+                # until the input is clicked again (src/iced_app/menu.rs:73-79).
+                p3_open, p3_prev, _p3_next = await open_find_and_locate("p3")
+                p3_input = find_input_point(p3_prev)
                 probe_state["phase"] = "FIND"
                 try:
                     p3_initial = count("UNEXPECTED_FIND_PTY_INPUT")
@@ -3542,57 +3545,103 @@ async def main() -> int:
                     p3_typed = count("UNEXPECTED_FIND_PTY_INPUT")
                     if p3_typed != p3_initial:
                         raise RuntimeError(f"P3 query reached PTY: {p3_initial}->{p3_typed}")
+                    p3_chord_before = destination / "connected-find-p3-before-chord.png"
+                    p3_chord_after = destination / "connected-find-p3-after-chord.png"
+                    await asyncio.to_thread(screenshot, window, p3_chord_before, env)
+                    command("xdotool", "windowfocus", window, "key",
+                            "--clearmodifiers", "ctrl+shift+p", env=env)
+                    await asyncio.sleep(1.0 * TIME_SCALE)
+                    await asyncio.to_thread(screenshot, window, p3_chord_after, env)
+                    p3_chord_pixels = await asyncio.to_thread(
+                        diff, p3_chord_before, p3_chord_after, env,
+                    )
+                    p3_chord_pty = count("UNEXPECTED_FIND_PTY_INPUT")
+                    if p3_chord_pixels >= 2000 or p3_chord_pty != p3_initial:
+                        raise RuntimeError(
+                            f"P3 Find did not swallow Ctrl+Shift+P: whole-window "
+                            f"pixels={p3_chord_pixels} (need <2000), "
+                            f"PTY={p3_initial}->{p3_chord_pty}"
+                        )
+                    print(f"P3 swallowed chord: whole-window pixels={p3_chord_pixels}, "
+                          f"PTY={p3_initial}->{p3_chord_pty}", flush=True)
                 finally:
                     probe_state["phase"] = None
-                await asyncio.sleep(.5 * TIME_SCALE)
+
+                # Locate the top-menu title and its dropdown item on screen;
+                # the strip remains open but a mouse click releases its focus.
                 p3_frame = destination / "connected-find-p3-before-dialog.png"
                 await asyncio.to_thread(screenshot, window, p3_frame, env)
-                command("xdotool", "windowfocus", window, "key",
-                        "--clearmodifiers", "ctrl+shift+p", env=env)
-                p3_dialog = destination / "connected-find-p3-dialog.png"
+                await click_label(
+                    window, destination / "connected-find-p3-edit-menu.png",
+                    "Edit", env, region=(0, 0, width, 32), settle=.5 * TIME_SCALE,
+                )
+                await click_label(
+                    window, destination / "connected-find-p3-palette-item.png",
+                    "Palette", env, region=(0, 32, min(width, 360), min(height, 320)),
+                    settle=.5 * TIME_SCALE,
+                )
+                p3_dialog = destination / "connected-find-p3-palette.png"
                 p3_dialog_pixels = 0
                 p3_deadline = time.monotonic() + 8 * TIME_SCALE
                 while True:
                     if app.poll() is not None:
-                        raise RuntimeError(f"P3 GUI exited opening Commands ({app.returncode})")
+                        raise RuntimeError(f"P3 GUI exited opening Command Palette ({app.returncode})")
                     await asyncio.to_thread(screenshot, window, p3_dialog, env)
-                    p3_dialog_pixels = await asyncio.to_thread(
-                        diff, p3_frame, p3_dialog, env,
-                    )
+                    p3_dialog_pixels = await asyncio.to_thread(diff, p3_frame, p3_dialog, env)
                     if p3_dialog_pixels >= 2000:
                         break
                     if time.monotonic() >= p3_deadline:
                         raise RuntimeError(
-                            f"P3 Commands did not open: whole-window pixels="
-                            f"{p3_dialog_pixels} (need >=2000)"
+                            f"P3 Command Palette did not open by menu: whole-window "
+                            f"pixels={p3_dialog_pixels} (need >=2000), "
+                            f"chord pixels={p3_chord_pixels}, PTY={p3_initial}->{p3_chord_pty}"
                         )
                     await asyncio.sleep(.3 * TIME_SCALE)
-                await asyncio.sleep(.5 * TIME_SCALE)
-                await asyncio.to_thread(screenshot, window, p3_dialog, env)
+
                 command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
-                p3_a = destination / "connected-find-p3-dismissed-before-type.png"
+                p3_dismissed = destination / "connected-find-p3-dismissed.png"
                 p3_dismiss_pixels = p3_dialog_pixels
                 p3_words = []
                 p3_deadline = time.monotonic() + 8 * TIME_SCALE
                 while True:
                     if app.poll() is not None:
-                        raise RuntimeError(f"P3 GUI exited dismissing Commands ({app.returncode})")
-                    await asyncio.to_thread(screenshot, window, p3_a, env)
-                    p3_dismiss_pixels = await asyncio.to_thread(diff, p3_frame, p3_a, env)
-                    # OCR only once the dialog image has changed substantially.
+                        raise RuntimeError(f"P3 GUI exited dismissing Command Palette ({app.returncode})")
+                    await asyncio.to_thread(screenshot, window, p3_dismissed, env)
+                    p3_dismiss_pixels = await asyncio.to_thread(
+                        diff, p3_frame, p3_dismissed, env,
+                    )
+                    # Avoid costly OCR until the dialog has visibly disappeared.
                     if p3_dismiss_pixels < 2000:
-                        p3_words = await asyncio.to_thread(read_strip_words, p3_a, find_band)
+                        p3_words = await asyncio.to_thread(
+                            read_strip_words, p3_dismissed, find_band,
+                        )
                         if (match_strip_label(p3_words, "Prev", find_band) is not None
                                 and match_strip_label(p3_words, "Next", find_band) is not None):
                             break
                     if time.monotonic() >= p3_deadline:
                         raise RuntimeError(
-                            f"P3 Commands did not dismiss: pixels vs pre-dialog="
+                            f"P3 Command Palette did not dismiss: pixels vs pre-dialog="
                             f"{p3_dismiss_pixels} (need <2000), "
                             f"band={find_band} words={p3_words[:40]}"
                         )
                     await asyncio.sleep(.3 * TIME_SCALE)
+
+                # No terminal click: a dialog dismissal must return keys to SSH.
+                await find_echo("FIND_P3_PANE")
+                p3_relocated = destination / "connected-find-p3-relocated.png"
+                await asyncio.to_thread(screenshot, window, p3_relocated, env)
+                p3_words = await asyncio.to_thread(read_strip_words, p3_relocated, find_band)
+                p3_prev = match_strip_label(p3_words, "Prev", find_band)
+                if p3_prev is None:
+                    raise RuntimeError(
+                        f"P3 Prev absent after pane echo: band={find_band}, "
+                        f"words={p3_words[:40]}"
+                    )
+                p3_input = find_input_point(p3_prev)
+                command("xdotool", "windowfocus", window, "mousemove", "--window",
+                        window, str(p3_input[0]), str(p3_input[1]), "click", "1", env=env)
                 await asyncio.sleep(.5 * TIME_SCALE)
+                p3_a = destination / "connected-find-p3-clickback-before-type.png"
                 await asyncio.to_thread(screenshot, window, p3_a, env)
                 probe_state["phase"] = "FIND"
                 try:
@@ -3600,25 +3649,24 @@ async def main() -> int:
                     command("xdotool", "type", "--clearmodifiers", "--delay", "25",
                             "ZZQ", env=env)
                     await asyncio.sleep(.5 * TIME_SCALE)
-                    p3_b = destination / "connected-find-p3-dismissed-after-type.png"
+                    p3_b = destination / "connected-find-p3-clickback-after-type.png"
                     await asyncio.to_thread(screenshot, window, p3_b, env)
                     p3_pixels = await asyncio.to_thread(
                         band_changed_pixels, p3_a, p3_b, find_band,
                     )
                     p3_after = count("UNEXPECTED_FIND_PTY_INPUT")
-                    # Three query glyphs must change at least 30 band pixels.
                     if p3_after != p3_before or p3_pixels < 30:
                         raise RuntimeError(
-                            f"P3 Commands dismissal lost Find focus: band pixels="
+                            f"P3 click-back did not re-own Find: band pixels="
                             f"{p3_pixels} (need >=30), PTY={p3_before}->{p3_after}, "
-                            f"dialog pixels={p3_dialog_pixels}, "
+                            f"palette pixels={p3_dialog_pixels}, "
                             f"dismiss pixels={p3_dismiss_pixels}"
                         )
                     command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
                     p3_closed, _p3_closed_words = await wait_find_strip_closed(
                         app, window, p3_b,
                         destination / "connected-find-p3-closed.png", find_band, env,
-                        label="Escape after Commands dismissal",
+                        label="P3 Escape after dialog and click-back",
                     )
                     p3_escaped = count("UNEXPECTED_FIND_PTY_INPUT")
                     if p3_escaped != p3_before:
@@ -3629,10 +3677,11 @@ async def main() -> int:
                 finally:
                     probe_state["phase"] = None
                 await find_echo("FIND_P3_AFTER")
-                print(f"P3 Commands hand-back: dialog pixels={p3_dialog_pixels}, "
-                      f"dismiss pixels={p3_dismiss_pixels}, band pixels={p3_pixels}, "
-                      f"close pixels={p3_closed}, PTY={p3_before}->{p3_after}"
-                      f"->{p3_escaped}", flush=True)
+                print(f"P3 dialog hand-back: chord pixels={p3_chord_pixels}, "
+                      f"palette pixels={p3_dialog_pixels}, dismiss pixels={p3_dismiss_pixels}, "
+                      f"input={p3_input}, band pixels={p3_pixels}, close pixels={p3_closed}, "
+                      f"PTY={p3_initial}->{p3_typed}->{p3_chord_pty}"
+                      f"->{p3_before}->{p3_after}->{p3_escaped}", flush=True)
 
                 # The populated queue lives in the Transfer tab. Both completed
                 # jobs must be listed; scroll its visible interior and retain
@@ -4301,7 +4350,7 @@ async def main() -> int:
                     )
                 find_echo_tokens = (
                     "FIND_P1_PANE", "FIND_P1_AFTER", "FIND_P2_PANE",
-                    "FIND_P2_AFTER", "FIND_P3_AFTER",
+                    "FIND_P2_AFTER", "FIND_P3_PANE", "FIND_P3_AFTER",
                 )
                 logged_lines = set(events.path.read_text(encoding="utf-8").splitlines())
                 missing_find_echoes = [
@@ -4335,7 +4384,7 @@ async def main() -> int:
                     "PASS: terminal owned the keyboard before chrome menu probes\n"
                     "PASS: Session menu, Sender and dock gear consumed typing, Return and Escape without SSH input\n"
                     "PASS: shell answered AFTER_MENU, AFTER_SENDER_ESCAPE and AFTER_GEAR without terminal re-click\n"
-                    "PASS: Find ownership probes: click-back then Escape closed Find; Next then typing stayed in Find; Commands dismiss handed the keyboard back to Find; shell answered FIND_P1_AFTER, FIND_P2_AFTER and FIND_P3_AFTER without a terminal click\n"
+                    "PASS: Find ownership probes: click-back then Escape closed Find; Next then typing stayed in Find; Command Palette opened by mouse and dismissed released the keyboard to the terminal and a click re-owned Find; shell answered FIND_P1_AFTER, FIND_P2_AFTER and FIND_P3_AFTER without a terminal click\n"
                     "PASS: Ctrl+Shift+J under the Session and dock gear menus left the auxiliary SSH shell connected; it closed it after Escape\n"
                     "PASS: privacy-locked and free-type synthetic text never reached SSH\n"
                     "PASS: Session Exit asked for confirmation and Cancel left the shell answering AFTER_EXIT_CANCEL\n"
