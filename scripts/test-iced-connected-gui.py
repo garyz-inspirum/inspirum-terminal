@@ -2514,28 +2514,38 @@ async def main() -> int:
                     # still the frame where Refresh and New Folder were found.
                     closed_shot = destination / "connected-files-context-closed.png"
                     gone_deadline = time.monotonic() + 12 * TIME_SCALE
-                    still_refresh = None
+                    still_refresh = "not searched: popup pixels never changed"
                     closed_pixels = 0
                     restored_row = None
                     row_restored = False
+                    # Cheap pixel poll first: the frame right after the key
+                    # predates the repaint, and one OCR miss on it can outlast
+                    # the whole deadline. OCR only frames that changed.
                     while True:
                         await asyncio.to_thread(screenshot, window, closed_shot, env)
-                        try:
-                            still_refresh = await asyncio.to_thread(
-                                locate_visible_label,
-                                closed_shot, "Refresh", region=menu_region, budget=1.0,
-                            )
-                        except RuntimeError:
-                            still_refresh = None
                         closed_pixels = await asyncio.to_thread(
                             diff, menu_shot, closed_shot, env,
                         )
-                        restored_row = None
-                        row_restored = False
+                        if closed_pixels >= 2000:
+                            try:
+                                still_refresh = await asyncio.to_thread(
+                                    locate_visible_label,
+                                    closed_shot, "Refresh", region=menu_region, budget=1.0,
+                                )
+                            except RuntimeError:
+                                still_refresh = None
+                                break
+                        if time.monotonic() >= gone_deadline:
+                            break
+                        await asyncio.sleep(.4)
+                    # The row is located once, on the frame that passed both
+                    # checks above, with the default budget and outside the
+                    # deadline: a miss here walks every fallback stage.
+                    if still_refresh is None:
                         try:
                             restored_row = await asyncio.to_thread(
                                 locate_visible_label,
-                                closed_shot, download_name, region=body, budget=1.0,
+                                closed_shot, download_name, region=body,
                             )
                             row_restored = all(
                                 abs(restored_row[edge] - context_row[edge]) <= 6
@@ -2543,16 +2553,6 @@ async def main() -> int:
                             )
                         except RuntimeError:
                             restored_row = None
-                            row_restored = False
-                        if (
-                            still_refresh is None
-                            and closed_pixels >= 2000
-                            and row_restored
-                        ):
-                            break
-                        if time.monotonic() >= gone_deadline:
-                            break
-                        await asyncio.sleep(.4)
                     escaped_after = count("UNEXPECTED_CONTEXT_PTY_INPUT")
                     if still_refresh is not None:
                         raise RuntimeError(
