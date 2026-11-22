@@ -2151,34 +2151,42 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
             await asyncio.sleep(1)
             panel_frame = tour_dir / "tour-sync-workspace-targets.png"
             screenshot(window, panel_frame, env)
-            header_box = await asyncio.to_thread(
-                locate_visible_label, panel_frame, "Synchronized input targets",
+            # At 1280x800 the controls are small light text near the bottom of
+            # the panel. Whole-window OCR drops them; upscale this panel slice.
+            targets_region = (205, 560, 900, 680)
+            rows = await asyncio.to_thread(
+                region_upscaled_rows, panel_frame, tesseract, targets_region, psm="6",
             )
+            header_box = match_visible_label(rows, "Synchronized input targets")
             if header_box is None:
                 raise RuntimeError("Workspace synchronized-input controls not visible")
             # The checkboxes precede each profile name. Distinguish the three
             # identical names by their 'pane <id>' suffix and vertical order.
-            rows = await asyncio.to_thread(ocr_rows, panel_frame, tesseract)
             pane_rows = []
             for line in _group_lines(rows):
                 text = " ".join(word[0] for word in line).lower()
-                if re.search(r"\bpane\s*\d+\b", text):
+                match = re.search(r"\bpane\s*([123])\b", text)
+                if match:
                     left = min(word[1] for word in line)
                     y = (min(word[2] for word in line) + max(word[2] + word[4] for word in line)) // 2
-                    if y > header_box[3] and left > 180:
-                        pane_rows.append((y, left))
+                    if y > header_box[3] and left > targets_region[0]:
+                        pane_rows.append((y, left, int(match.group(1))))
             pane_rows.sort()
-            if len(pane_rows) != 3 or len({y for y, _ in pane_rows}) != 3:
+            if len(pane_rows) != 3 or [pane for _, _, pane in pane_rows] != [1, 2, 3]:
                 raise RuntimeError(f"expected three visible Workspace pane rows, got {pane_rows}")
-            for y, left in pane_rows[:2]:
+            for y, left, _ in pane_rows[:2]:
                 click(left - 16, y)  # Iced checkbox before its label.
                 await asyncio.sleep(.4)
-            arm_box = await asyncio.to_thread(
-                locate_visible_label, panel_frame, "ARM synchronized input",
+            # Checkbox changes can redraw the panel; target ARM from fresh pixels.
+            arm_frame = tour_dir / "tour-sync-workspace-arm.png"
+            screenshot(window, arm_frame, env)
+            arm_rows = await asyncio.to_thread(
+                region_upscaled_rows, arm_frame, tesseract, targets_region, psm="6",
             )
+            arm_box = match_visible_label(arm_rows, "ARM synchronized input")
             if arm_box is None or arm_box[1] <= pane_rows[-1][0]:
                 raise RuntimeError("ARM synchronized input checkbox not visible below targets")
-            click(arm_box[0] - 16, centre(arm_box)[1])
+            click(arm_box[0] - 20, centre(arm_box)[1])
             armed = True
             await asyncio.sleep(.5)
             key("Escape")
