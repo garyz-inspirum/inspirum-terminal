@@ -9898,12 +9898,12 @@ impl App {
             .history_owner
             .and_then(|id| self.tools.histories.get(&id));
         let query = state.map(|state| state.query()).unwrap_or("");
-        let counter = match state {
-            Some(state) if !state.hits().is_empty() => {
-                format!("{}/{}", state.selected_hit_index() + 1, state.hits().len())
-            }
-            _ => "0/0".to_owned(),
-        };
+        let (counter, danger) = find_counter(
+            query,
+            state.map(|state| state.selected_hit_index()).unwrap_or(0),
+            state.map(|state| state.hits().len()).unwrap_or(0),
+        );
+        let counter_color = if danger { p.danger } else { p.text };
         let chrome = |label: String| {
             text(label)
                 .size(theme::metrics::UI_TEXT)
@@ -9911,20 +9911,21 @@ impl App {
                 .font(Font::MONOSPACE)
                 .wrapping(iced::widget::text::Wrapping::None)
         };
-        let flat = |label: &'static str, message: Message| {
-            button(
-                text(label)
-                    .size(theme::metrics::UI_TEXT)
-                    .color(p.text)
-                    .font(Font::MONOSPACE)
-                    .wrapping(iced::widget::text::Wrapping::None),
-            )
-            .padding([2, 6])
-            .style(icon_button)
-            .on_press(message)
+        let counter_glyph = |label: String, color: Color| {
+            text(label)
+                .size(theme::metrics::UI_TEXT)
+                .color(color)
+                .font(Font::MONOSPACE)
+                .wrapping(iced::widget::text::Wrapping::None)
         };
+        // Seven monospace columns (`123/456`) so Prev/Next do not jump.
+        let counter_slot = stack![
+            counter_glyph(FIND_COUNTER_MIN.to_owned(), Color::TRANSPARENT),
+            counter_glyph(counter, counter_color),
+        ];
         let body = row![
             chrome("Find".to_owned()),
+            space::horizontal().width(6),
             text_input("", query)
                 .id(FIND_INPUT_ID)
                 .style(flat_input)
@@ -9934,15 +9935,20 @@ impl App {
                 .size(theme::metrics::UI_TEXT)
                 .padding([2, 6])
                 .width(Fill),
-            chrome(counter),
-            flat("Prev", Message::FindPrev),
-            flat("Next", Message::FindNext),
-            button(icons::icon(icons::Icon::Close, 10.0, p.text))
-                .padding(3)
+            space::horizontal().width(8),
+            counter_slot,
+            space::horizontal().width(10),
+            action("Prev", Message::FindPrev),
+            space::horizontal().width(6),
+            action("Next", Message::FindNext),
+            space::horizontal().width(8),
+            // Dock strip close: 12 px icon, 4 px padding (20 px hit), normal text.
+            button(icons::icon(icons::Icon::Close, 12.0, p.text))
+                .padding(4)
                 .style(icon_button)
                 .on_press(Message::FindClose),
         ]
-        .spacing(6)
+        .spacing(0)
         .padding([0, 8])
         .height(theme::metrics::STRIP_HEIGHT - 1.0)
         .align_y(iced::Center);
@@ -9952,6 +9958,18 @@ impl App {
             .style(surface)
             .into()
     }
+}
+
+/// Width reservation for the Find counter (`123/456` is seven columns).
+const FIND_COUNTER_MIN: &str = "123/456";
+
+/// Counter label, and whether it uses the danger colour.
+/// Danger only when `query` is non-empty and there are no hits.
+fn find_counter(query: &str, selected_index: usize, hit_count: usize) -> (String, bool) {
+    if hit_count == 0 {
+        return ("0/0".to_owned(), !query.is_empty());
+    }
+    (format!("{}/{}", selected_index + 1, hit_count), false)
 }
 
 fn exit_confirm_body(open_sessions: usize) -> String {
@@ -14216,5 +14234,22 @@ mod tests {
         let _ = app.update(Message::Focus(pane));
         assert!(app.find_open, "pane focus must not close the strip");
         assert!(!app.find_focused, "pane focus must release the Find input");
+    }
+
+    #[test]
+    fn find_counter_is_danger_only_when_a_query_misses() {
+        let (label, danger) = super::find_counter("", 0, 0);
+        assert_eq!(label, "0/0");
+        assert!(!danger, "an empty query with no hits stays normal");
+        let (label, danger) = super::find_counter("needle", 0, 0);
+        assert_eq!(label, "0/0");
+        assert!(danger, "a miss must use the danger colour");
+        let (label, danger) = super::find_counter("needle", 1, 2);
+        assert_eq!(label, "2/2");
+        assert!(!danger, "a hit must stay normal");
+        let (label, danger) = super::find_counter("", 0, 3);
+        assert_eq!(label, "1/3");
+        assert!(!danger);
+        assert_eq!(super::FIND_COUNTER_MIN.chars().count(), 7);
     }
 }
