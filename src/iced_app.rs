@@ -359,6 +359,14 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
         };
         Subscription::batch([
             drag,
+            // Kept because MouseArea::on_move is skipped when a child captured
+            // the event (`shell.is_event_captured()`). Drags over a capturing
+            // widget still need `last_pointer`. Context-menu anchors do not
+            // use this path: the root `on_move` in `view` publishes
+            // PointerMoved as a widget message during CursorMoved, and that
+            // message is applied before the later ButtonPressed's right-press
+            // message. Subscription output from this listener is broadcast
+            // only after that widget batch.
             event::listen_with(|event, _, _| match event {
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
                     Some(Message::PointerMoved(position))
@@ -3550,7 +3558,9 @@ struct App {
     /// Group names whose session rows are hidden. Not written to UI state.
     /// A non-empty filter still shows matching rows inside a collapsed group.
     collapsed_groups: HashSet<String>,
-    /// Last pointer position. The file context menu anchors here.
+    /// Last pointer position. Context menus copy this into `anchor`.
+    /// Updated by `Message::PointerMoved`, from the root `on_move` (press
+    /// path) and from the CursorMoved subscription (captured drags).
     last_pointer: iced::Point,
     /// Open right-click menu, if any. File and session rows share this.
     context_menu: Option<ContextMenu>,
@@ -7129,7 +7139,14 @@ impl App {
             .ime_cursor
             .filter(|(id, _)| Some(*id) == target)
             .map(|(_, cursor)| cursor);
-        terminal_ime::wrap(self.view_content(), target, cursor)
+        // Outermost wrap on every non-privacy return, including menu and
+        // dialog stacks built inside `view_content`. `on_move` reports a
+        // point relative to this widget (`cursor.position_in`); the root is
+        // laid out at the window origin, so that matches the absolute cursor.
+        // It does not capture the event and does not change layout size.
+        mouse_area(terminal_ime::wrap(self.view_content(), target, cursor))
+            .on_move(Message::PointerMoved)
+            .into()
     }
 
     fn view_content(&self) -> Element<'_, Message> {
@@ -13575,6 +13592,32 @@ mod tests {
             app.session_click
                 .as_ref()
                 .is_some_and(|(_, key)| key == &key_b)
+        );
+    }
+
+    #[test]
+    fn context_menu_anchor_uses_pointer_message_delivered_before_press() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::PointerMoved(iced::Point::new(400.0, 300.0)));
+        let _ = app.update(Message::PointerMoved(iced::Point::new(12.0, 18.0)));
+        let _ = app.update(Message::OpenSessionContext { index: 0 });
+        assert_eq!(
+            app.context_menu.as_ref().map(ContextMenu::anchor),
+            Some(iced::Point::new(12.0, 18.0))
+        );
+
+        let mut app = app_with_one_pane_and_auxiliary_shell("filer-context-anchor-order");
+        let file = sftp::RemoteEntry::new("notes.txt", false, Some(12));
+        app.files.remote_entries = vec![file.clone()];
+        let _ = app.update(Message::PointerMoved(iced::Point::new(400.0, 300.0)));
+        let _ = app.update(Message::PointerMoved(iced::Point::new(22.0, 28.0)));
+        let _ = app.update(Message::OpenRemoteFileContext {
+            entry: file,
+            open_path: "/srv/notes.txt".into(),
+        });
+        assert_eq!(
+            app.context_menu.as_ref().map(ContextMenu::anchor),
+            Some(iced::Point::new(22.0, 28.0))
         );
     }
 
