@@ -2321,11 +2321,11 @@ async def main() -> int:
                 # 6*24+2 px for a remote file), so a click near the bottom
                 # opens upward rather than down from the pointer.
                 # No-pause gesture is the regression case for a popup anchored
-                # at a stale pointer. Park in the terminal pane (the point the
-                # later chrome probes click), let that become the last known
-                # pointer, then move and right-press in one command with no
-                # sleep between motion and the press.
-                parked_x, parked_y = 640, 280
+                # at a stale pointer. Park at the top right of the terminal
+                # pane, far from the bottom-dock row on the x axis, let that
+                # become the last known pointer, then move and right-press in
+                # one command with no sleep between motion and the press.
+                parked_x, parked_y = 1100, 200
                 command(
                     "xdotool", "mousemove", "--window", window,
                     str(parked_x), str(parked_y), env=env,
