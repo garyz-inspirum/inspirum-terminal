@@ -378,9 +378,9 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
             }),
             // Delivered after widgets process the click, including text input focus.
             event::listen_with(|event, _, _| match event {
-                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
-                    Some(Message::FindFocusProbe)
-                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
+                    iced::mouse::Button::Left,
+                )) => Some(Message::FindFocusProbe),
                 _ => None,
             }),
             iced::window::resize_events().map(|(_, size)| Message::WindowResized(size)),
@@ -14296,8 +14296,11 @@ mod tests {
         let _ = app.update(Message::FindOpen);
         let _ = app.update(Message::FindFocusSynced(false));
         let _ = app.update(pressed_char("x"));
-        assert!(app.pty_write_log.iter().any(|(pane, bytes)|
-            *pane == id && bytes.as_slice() == b"x"));
+        assert!(
+            app.pty_write_log
+                .iter()
+                .any(|(pane, bytes)| *pane == id && bytes.as_slice() == b"x")
+        );
     }
 
     #[test]
@@ -14328,8 +14331,9 @@ mod tests {
             app.pty_write_log.clear();
             let _ = app.update(pressed_char("x"));
             assert_eq!(
-                app.pty_write_log.iter().any(|(pane, bytes)|
-                    *pane == id && bytes.as_slice() == b"x"),
+                app.pty_write_log
+                    .iter()
+                    .any(|(pane, bytes)| *pane == id && bytes.as_slice() == b"x"),
                 pane_owned
             );
         }
