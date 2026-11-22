@@ -376,6 +376,13 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                 }
                 _ => None,
             }),
+            // Delivered after widgets process the click, including text input focus.
+            event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
+                    Some(Message::FindFocusProbe)
+                }
+                _ => None,
+            }),
             iced::window::resize_events().map(|(_, size)| Message::WindowResized(size)),
             iced::window::close_requests().map(|_| Message::Exit),
             event::listen_with(|event, status, _| match &event {
@@ -2462,6 +2469,8 @@ enum Message {
     FindNext,
     FindPrev,
     FindClose,
+    FindFocusProbe,
+    FindFocusSynced(bool),
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -4179,6 +4188,7 @@ impl App {
         self.sender_focused = false;
         if index < self.tabs.len() {
             if self.active != index {
+                self.close_find_strip();
                 self.tools.sync.set_armed(false);
             }
             self.active = index;
@@ -4690,7 +4700,7 @@ impl App {
             self.ime_cursor = None;
             if self.privacy_locked {
                 // The curtain replaces the tree, so the Find input is gone.
-                self.find_focused = false;
+                self.close_find_strip();
                 self.status = "Workspace hidden by privacy lock.".into();
             } else {
                 if !self.tabs.is_empty() {
@@ -4815,17 +4825,13 @@ impl App {
                 self.focus_mode = !self.focus_mode;
                 if self.focus_mode {
                     // Focus mode does not mount the Find strip.
-                    self.find_focused = false;
+                    self.close_find_strip();
                 }
                 self.status = if self.focus_mode {
                     "Focus mode: terminal panes only (Alt+Enter to exit).".into()
                 } else {
                     "Full workspace restored.".into()
                 };
-                if !self.focus_mode && self.find_open {
-                    self.find_focused = true;
-                    return operation::focus(FIND_INPUT_ID);
-                }
             }
             return Task::none();
         }
@@ -5499,6 +5505,7 @@ impl App {
                 self.editing_profile = None;
                 self.form = ConnectionForm::default();
                 self.files.name_input.clear();
+                return self.restore_find_focus();
             }
             Message::DismissModalKey => {
                 let closed_context = self.context_menu.take().is_some();
@@ -5511,11 +5518,10 @@ impl App {
                 if self.dialog.is_some() {
                     return self.update(Message::CloseDialog);
                 }
-                // Escape releases the Sender editor so keys reach the terminal.
-                self.sender_focused = false;
-                // Captured Escape (the Find text_input consumes it) closes the
-                // strip here. It must not become a PTY 0x1b.
-                if self.find_focused {
+                // Captured Escape may arrive before the click-focus probe's
+                // result. Sender and free-type editors retain their Escape.
+                let sender_owned = std::mem::take(&mut self.sender_focused);
+                if !sender_owned && self.find_open && self.free_type.is_empty() {
                     self.close_find_strip();
                 }
             }
@@ -7216,13 +7222,30 @@ impl App {
             }
             Message::FindNext => {
                 self.find_focused = true;
-                return self.tool_update(tools::Action::HistoryNext(true));
+                return Task::batch([
+                    self.tool_update(tools::Action::HistoryNext(true)),
+                    operation::focus(FIND_INPUT_ID),
+                ]);
             }
             Message::FindPrev => {
                 self.find_focused = true;
-                return self.tool_update(tools::Action::HistoryNext(false));
+                return Task::batch([
+                    self.tool_update(tools::Action::HistoryNext(false)),
+                    operation::focus(FIND_INPUT_ID),
+                ]);
             }
             Message::FindClose => self.close_find_strip(),
+            Message::FindFocusProbe => {
+                if self.find_open && self.dialog.is_none() && !self.privacy_locked {
+                    return operation::is_focused(FIND_INPUT_ID).map(Message::FindFocusSynced);
+                }
+            }
+            Message::FindFocusSynced(focused) => {
+                self.find_focused = focused && self.find_open;
+                if self.find_focused {
+                    self.sender_focused = false;
+                }
+            }
         }
         Task::none()
     }
@@ -9861,6 +9884,14 @@ impl App {
     fn close_find_strip(&mut self) {
         self.find_open = false;
         self.find_focused = false;
+    }
+
+    fn restore_find_focus(&self) -> Task<Message> {
+        if self.find_open && self.find_focused && self.dialog.is_none() && !self.privacy_locked {
+            operation::focus(FIND_INPUT_ID)
+        } else {
+            Task::none()
+        }
     }
 
     /// Point History search at the focused pane the same way opening the
@@ -14234,6 +14265,44 @@ mod tests {
         let _ = app.update(Message::Focus(pane));
         assert!(app.find_open, "pane focus must not close the strip");
         assert!(!app.find_focused, "pane focus must release the Find input");
+    }
+
+    #[test]
+    fn find_click_back_then_captured_escape_closes_strip() {
+        let (mut app, _id) = app_with_focused_pane("click-back-escape");
+        let pane = app.tabs[0].focus;
+        let _ = app.update(Message::FindOpen);
+        let _ = app.update(Message::Focus(pane));
+        assert!(!app.find_focused);
+        let _ = app.update(Message::FindFocusSynced(true));
+        assert!(app.find_focused);
+        app.pty_write_log.clear();
+        let _ = app.update(Message::DismissModalKey);
+        assert!(!app.find_open);
+        assert!(app.pty_write_log.is_empty());
+    }
+
+    #[test]
+    fn find_focus_sync_false_releases_keys_to_terminal() {
+        let (mut app, id) = app_with_focused_pane("sync-release");
+        let _ = app.update(Message::FindOpen);
+        let _ = app.update(Message::FindFocusSynced(false));
+        let _ = app.update(pressed_char("x"));
+        assert!(app.pty_write_log.iter().any(|(pane, bytes)|
+            *pane == id && bytes.as_slice() == b"x"));
+    }
+
+    #[test]
+    fn find_nav_after_pane_click_reclaims_keyboard() {
+        let (mut app, _id) = app_with_focused_pane("nav-reclaim");
+        let pane = app.tabs[0].focus;
+        let _ = app.update(Message::FindOpen);
+        let _ = app.update(Message::Focus(pane));
+        let _ = app.update(Message::FindNext);
+        assert!(app.find_focused);
+        app.pty_write_log.clear();
+        let _ = app.update(pressed_char("x"));
+        assert!(app.pty_write_log.is_empty());
     }
 
     #[test]
