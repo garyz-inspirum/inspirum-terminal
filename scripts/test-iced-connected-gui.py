@@ -68,6 +68,13 @@ class MonitoredServer(fixture.NativeServer):
 # Exists only to prove the tour fails when the echo is missing.
 # Must not suppress any other echo.
 TOUR_WITHHOLD_ECHO = os.environ.get("INSPIRUM_GUI_TOUR_WITHHOLD_ECHO") == "1"
+FIND_INJECT_PTY_BYTE = os.environ.get("INSPIRUM_GUI_FIND_INJECT_PTY_BYTE") == "1"
+
+
+def observe_pty_chunk(events: fixture.EventLog, probe_state: dict[str, str | None], chunk: str) -> None:
+    """Record any PTY input while a chrome probe is armed, without logging bytes."""
+    if chunk and probe_state["phase"] is not None:
+        events.write(f"UNEXPECTED_{probe_state['phase']}_PTY_INPUT")
 
 
 async def monitored_shell(
@@ -103,8 +110,7 @@ async def monitored_shell(
             # Phase names: MENU, SENDER, GEAR, CONTEXT, FIND. The marker is
             # UNEXPECTED_<PHASE>_PTY_INPUT, so FIND is
             # UNEXPECTED_FIND_PTY_INPUT.
-            if probe_state["phase"] is not None:
-                events.write(f"UNEXPECTED_{probe_state['phase']}_PTY_INPUT")
+            observe_pty_chunk(events, probe_state, chunk)
             buffer += chunk.replace("\r\n", "\n").replace("\r", "\n")
             # Cursor-key escape sequences are unbuffered PTY input, not
             # newline-terminated shell commands. Detect them as bytes arrive;
@@ -3076,6 +3082,10 @@ async def main() -> int:
                 probe_state["phase"] = "FIND"
                 try:
                     typed_before = count("UNEXPECTED_FIND_PTY_INPUT")
+                    if FIND_INJECT_PTY_BYTE:
+                        # Feed the observation gate, never the shell parser.
+                        observe_pty_chunk(events, probe_state, " ")
+                        print("FIND_INJECT_PTY_BYTE: injected one harmless byte", flush=True)
                     command(
                         "xdotool", "type", "--clearmodifiers", "--delay", "25",
                         "NATIVE", env=env,
