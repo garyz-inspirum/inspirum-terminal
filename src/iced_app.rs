@@ -10544,10 +10544,24 @@ mod tests {
         let selected = super::selected_button(&theme, Status::Active);
         assert_eq!(selected.border.color, super::blue());
         assert_eq!(selected.text_color, super::fg());
-        assert_eq!(
-            super::primary(&theme, Status::Active).text_color,
-            iced::Color::WHITE
-        );
+        let primary_text = super::primary(&theme, Status::Active).text_color;
+        assert_eq!(primary_text, iced::Color::BLACK);
+        let luminance = |color: iced::Color| {
+            let linear = |channel: f32| {
+                if channel <= 0.04045 {
+                    channel / 12.92
+                } else {
+                    ((channel + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+        };
+        for palette in [super::theme::LIGHT, super::theme::DARK] {
+            let foreground = luminance(primary_text);
+            let background = luminance(palette.accent);
+            let ratio = (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05);
+            assert!(ratio >= 4.5, "primary action contrast: {ratio}");
+        }
     }
 
     #[test]
