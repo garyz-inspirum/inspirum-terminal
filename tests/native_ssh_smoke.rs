@@ -1,6 +1,7 @@
 //! Cross-platform native SSH acceptance using scripts/test-native-ssh-smoke.py.
 use inspirum_terminal::{
-    Session, SshOptions, terminal::connect, terminal_ux::source_first_synced_write,
+    Session, SshOptions, load_sessions, save_sessions, session_profile_key, terminal::connect,
+    terminal_ux::source_first_synced_write, tunnels,
 };
 use std::{
     fs,
@@ -456,6 +457,66 @@ fn round_trip(stream: &mut TcpStream, message: &[u8]) {
     let mut response = vec![0u8; message.len()];
     stream.read_exact(&mut response).unwrap();
     assert_eq!(response, message, "forwarded loopback echo changed");
+}
+
+/// Exercise the same saved-profile store and tunnel manager used by Iced.
+#[test]
+#[ignore = "requires disposable AsyncSSH fixture: scripts/test-native-ssh-smoke.py"]
+fn saved_profile_tunnel_manager_releases_and_reuses_local_port() {
+    let fixture = fixture();
+    let local_port = ephemeral_port();
+    let echo_port = fixture_port(&fixture, "echo-port");
+    let path = fixture.join(format!("manager-profiles-{}.json", std::process::id()));
+    let profile = Session {
+        name: "Disposable manager profile".into(),
+        host: "native-smoke".into(),
+        strict: true,
+        ssh: SshOptions {
+            local_forwards: vec![format!("127.0.0.1:{local_port}:127.0.0.1:{echo_port}")],
+            ..SshOptions::default()
+        },
+        ..Session::default()
+    };
+    save_sessions(&path, &[profile]).expect("save profile using Iced profile store");
+    let loaded = load_sessions(&path).expect("load profile using Iced profile store");
+    assert_eq!(loaded.len(), 1);
+    let loaded = &loaded[0];
+    let key = session_profile_key(loaded);
+    let mut manager = tunnels::Manager::default();
+    // On panic, Manager drops TunnelProcess, which kills and reaps the child.
+    for attempt in 1..=2 {
+        let status = manager
+            .start(loaded, Some(&fixture.join("config")))
+            .unwrap();
+        assert!(status.is_running(), "manager start {attempt}: {status:?}");
+        assert!(manager.status(&key).is_running());
+        round_trip(
+            &mut connect_loopback(local_port),
+            b"MANAGER_SAVED_PROFILE_ECHO",
+        );
+        assert_eq!(manager.stop(&key).unwrap(), tunnels::Status::Stopped);
+        assert_eq!(manager.status(&key), tunnels::Status::Stopped);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if matches!(
+                TcpStream::connect_timeout(
+                    &([127, 0, 0, 1], local_port).into(),
+                    Duration::from_millis(100)
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused
+            ) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "manager stop {attempt} did not release {local_port}"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+    println!(
+        "PASS saved-profile Tunnel Manager echo, stop/refusal, same-port restart and stop/refusal"
+    );
 }
 
 #[test]
