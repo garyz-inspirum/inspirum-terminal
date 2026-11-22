@@ -4264,9 +4264,9 @@ impl App {
     fn open_profile(&mut self, index: usize) -> Task<Message> {
         self.open(index);
         if self.files_open() {
-            self.reload_files()
+            Task::batch([self.reload_files(), self.restore_find_focus()])
         } else {
-            Task::none()
+            self.restore_find_focus()
         }
     }
 
@@ -5068,6 +5068,7 @@ impl App {
                             self.import_path.clear();
                             self.status =
                                 format!("Imported {added} validated non-secret SSH profile(s).");
+                            return self.restore_find_focus();
                         }
                         Err(error) => {
                             self.status = format!("Cannot save imported profiles: {error:#}");
@@ -5555,7 +5556,7 @@ impl App {
                         self.status =
                             "Session close cancelled because the remote editor has unsaved changes."
                                 .into();
-                        return Task::none();
+                        return self.restore_find_focus();
                     }
                     if self
                         .remote_editor
@@ -5565,6 +5566,7 @@ impl App {
                         self.remote_editor = None;
                     }
                     self.tabs.remove(index);
+                    self.close_find_strip();
                     self.prune_tool_panes();
                     self.prune_free_type();
                     if index < self.active {
@@ -6704,6 +6706,7 @@ impl App {
                             self.status =
                                 "Profile saved and opened using the existing validated profile store.".into();
                         }
+                        return self.restore_find_focus();
                     }
                     Err(error) => self.form.error = Some(format!("{error:#}")),
                 }
@@ -14303,6 +14306,82 @@ mod tests {
         app.pty_write_log.clear();
         let _ = app.update(pressed_char("x"));
         assert!(app.pty_write_log.is_empty());
+    }
+
+    #[test]
+    fn find_dialog_dismiss_keeps_prior_owner() {
+        for pane_owned in [false, true] {
+            let (mut app, id) = app_with_focused_pane("dialog-owner");
+            let _ = app.update(Message::FindOpen);
+            if pane_owned {
+                let pane = app.tabs[0].focus;
+                let _ = app.update(Message::Focus(pane));
+            }
+            let _ = app.update(Message::Commands);
+            let _ = app.update(Message::CloseDialog);
+            assert_eq!(app.find_focused, !pane_owned);
+            app.pty_write_log.clear();
+            let _ = app.update(pressed_char("x"));
+            assert_eq!(
+                app.pty_write_log.iter().any(|(pane, bytes)|
+                    *pane == id && bytes.as_slice() == b"x"),
+                pane_owned
+            );
+        }
+    }
+
+    #[test]
+    fn find_tab_switch_and_lock_close_strip() {
+        let (mut app, _id) = app_with_focused_pane("tab-lock");
+        let profile = Session {
+            name: "second".into(),
+            host: "other.invalid".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        app.tabs.push(Workspace::new(profile, pane));
+        let _ = app.update(Message::FindOpen);
+        let _ = app.update(Message::SelectTab(1));
+        assert!(!app.find_open);
+        assert!(!app.find_focused);
+        let _ = app.update(Message::FindOpen);
+        let _ = app.update(Message::TogglePrivacyLock);
+        assert!(!app.find_open);
+        assert!(!app.find_focused);
+    }
+
+    #[test]
+    fn find_stale_flag_escape_respects_sender_and_free_type() {
+        let (mut app, _id) = app_with_focused_pane("stale-escape");
+        let _ = app.update(Message::FindOpen);
+        let _ = app.update(Message::FindFocusSynced(false));
+        app.sender_focused = true;
+        let _ = app.update(Message::DismissModalKey);
+        assert!(app.find_open);
+        assert!(!app.sender_focused);
+        let pane = app.tabs[0].focus;
+        let id = app.tabs[0].panes.get(pane).expect("pane").id;
+        app.free_type.insert(id, text_editor::Content::new());
+        let _ = app.update(Message::DismissModalKey);
+        assert!(app.find_open);
+        app.free_type.clear();
+        let _ = app.update(Message::DismissModalKey);
+        assert!(!app.find_open);
+        assert!(app.pty_write_log.is_empty());
+    }
+
+    #[test]
+    fn find_focus_mode_and_tab_close_drop_strip() {
+        let (mut app, _id) = app_with_focused_pane("mode-close");
+        let _ = app.update(Message::FindOpen);
+        let _ = app.update(Message::ToggleFocusMode);
+        assert!(!app.find_open);
+        assert!(!app.find_focused);
+        let _ = app.update(Message::ToggleFocusMode);
+        let _ = app.update(Message::FindOpen);
+        let _ = app.update(Message::ConfirmClose(0));
+        assert!(!app.find_open);
+        assert!(!app.find_focused);
     }
 
     #[test]
