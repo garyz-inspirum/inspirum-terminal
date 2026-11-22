@@ -6,6 +6,7 @@ release binary) in a container on any Linux docker host, instead of spending Git
 It mirrors CI; the single source of truth stays `.github/workflows/iced-design.yml` (step
 `Smoke-test production Iced window`, whose `run:` block is extracted and executed verbatim) and
 `scripts/test-iced-connected-gui.py` (the connected SSH acceptance). Only the dependencies live here.
+Pinned Python packages: `asyncssh==2.24.0`, `Pillow==13.0.0`.
 
     cargo build --release --locked --features iced-ui
     docker build -t inspirum-gui-test -f scripts/local-gui/Dockerfile scripts/local-gui
