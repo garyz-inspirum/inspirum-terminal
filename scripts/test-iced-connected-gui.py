@@ -2125,6 +2125,117 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
         await asyncio.sleep(.5)
     await step("tools", s14)
 
+    # Optional hard gate: do not put this in step(), which swallows failures.
+    if os.environ.get("INSPIRUM_GUI_SYNC_BADGE_PROBE") == "1":
+        original_size = window_size(window, env)
+        armed = False
+        try:
+            tesseract = shutil.which("tesseract")
+            if tesseract is None:
+                raise RuntimeError("sync badge probe requires tesseract")
+            if original_size != (1280, 800):
+                raise RuntimeError(f"sync badge probe requires 1280x800 setup: {original_size}")
+            key("ctrl+shift+r")  # Tour already split once; focus is in pane B.
+            await asyncio.sleep(2)
+            menu_frame = tour_dir / "tour-sync-workspace-menu.png"
+            click(245, 16)  # Window spans x212..275, per menu.rs title widths.
+            await asyncio.sleep(.5)
+            screenshot(window, menu_frame, env)
+            menu_box = await asyncio.to_thread(
+                locate_visible_label, menu_frame, "Workspace",
+                region=(245, 24, 510, 540),
+            )
+            if menu_box is None:
+                raise RuntimeError("Window menu Workspace entry not visible")
+            click(*centre(menu_box))
+            await asyncio.sleep(1)
+            panel_frame = tour_dir / "tour-sync-workspace-targets.png"
+            screenshot(window, panel_frame, env)
+            header_box = await asyncio.to_thread(
+                locate_visible_label, panel_frame, "Synchronized input targets",
+            )
+            if header_box is None:
+                raise RuntimeError("Workspace synchronized-input controls not visible")
+            # The checkboxes precede each profile name. Distinguish the three
+            # identical names by their 'pane <id>' suffix and vertical order.
+            rows = await asyncio.to_thread(ocr_rows, panel_frame, tesseract)
+            pane_rows = []
+            for line in _group_lines(rows):
+                text = " ".join(word[0] for word in line).lower()
+                if re.search(r"\bpane\s*\d+\b", text):
+                    left = min(word[1] for word in line)
+                    y = (min(word[2] for word in line) + max(word[2] + word[4] for word in line)) // 2
+                    if y > header_box[3] and left > 180:
+                        pane_rows.append((y, left))
+            pane_rows.sort()
+            if len(pane_rows) != 3 or len({y for y, _ in pane_rows}) != 3:
+                raise RuntimeError(f"expected three visible Workspace pane rows, got {pane_rows}")
+            for y, left in pane_rows[:2]:
+                click(left - 16, y)  # Iced checkbox before its label.
+                await asyncio.sleep(.4)
+            arm_box = await asyncio.to_thread(
+                locate_visible_label, panel_frame, "ARM synchronized input",
+            )
+            if arm_box is None or arm_box[1] <= pane_rows[-1][0]:
+                raise RuntimeError("ARM synchronized input checkbox not visible below targets")
+            click(arm_box[0] - 16, centre(arm_box)[1])
+            armed = True
+            await asyncio.sleep(.5)
+            key("Escape")
+            if await resize_tour(640, 480) != (640, 480):
+                raise RuntimeError("sync badge probe was not rendered at actual 640x480")
+
+            async def badge_frame(name: str, expected: str, x: int) -> None:
+                click(x, 160)  # Terminal canvas, clear of toolbar and footer.
+                await asyncio.sleep(.8)
+                path = tour_dir / name
+                shot(name)
+                crop = tour_dir / name.replace(".png", "-status.png")
+                await asyncio.to_thread(_region_crop_upscaled, path, (0, 440, 640, 480), 3, crop)
+                written.append(crop)
+                for psm, invert in (("6", False), ("11", False), ("6", True)):
+                    words = await asyncio.to_thread(
+                        region_upscaled_rows, path, tesseract, (0, 440, 640, 480),
+                        psm=psm, invert=invert,
+                    )
+                    words = [(w[0].upper(), *w[1:]) for w in words]
+                    count = match_visible_label(words, "2 SELECTED")
+                    state = match_visible_label(words, expected)
+                    if count and state and count[1] < state[3] and state[1] < count[3] \
+                            and state[2] < 638:
+                        print(f"tour: {name}: visible 2 SELECTED and {expected}", flush=True)
+                        return
+                raise RuntimeError(f"{name}: badge missing full 2 SELECTED / {expected} in bottom 40px")
+
+            # Newly split C occupies the right edge; A occupies the left half
+            # of the terminal area after the session sidebar. OCR is the gate
+            # for both focused-source states, never an app-state substitute.
+            await badge_frame("tour-sync-badge-unselected-640x480.png", "THIS PANE ONLY", 600)
+            await badge_frame("tour-sync-badge-selected-640x480.png", "MIRRORING", 290)
+        except Exception as error:
+            print(f"tour: FAILED sync badge probe: {error}", flush=True)
+            return 1
+        finally:
+            if armed:
+                try:
+                    # The same Mode > Sync Input command toggles an armed group off.
+                    key("Escape")
+                    click(207, 16)
+                    await asyncio.sleep(.3)
+                    mode_frame = tour_dir / "tour-sync-mode-menu.png"
+                    screenshot(window, mode_frame, env)
+                    disarm_box = await asyncio.to_thread(
+                        locate_visible_label, mode_frame, "Sync Input",
+                        region=(170, 24, 450, 220),
+                    )
+                    if disarm_box:
+                        click(*centre(disarm_box))
+                except Exception as error:
+                    print(f"tour: WARNING sync badge cleanup: {error}", flush=True)
+            restored = await resize_tour(*original_size)
+            if restored != original_size:
+                raise RuntimeError(f"tour size not restored after sync probe: {restored}")
+
     print(f"tour: {len(written)} screenshots written:", flush=True)
     for path in written:
         print(f"  {path}", flush=True)
