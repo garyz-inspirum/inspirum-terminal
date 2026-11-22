@@ -3427,6 +3427,76 @@ async def main() -> int:
                       f"PTY count={p1_initial}->{p1_typed}, "
                       f"Escape count={p1_before_escape}->{p1_after_escape}", flush=True)
 
+                # P2: a navigation button must focus the query, not steal keys.
+                p2_open, _p2_prev, p2_next = await open_find_and_locate("p2")
+                probe_state["phase"] = "FIND"
+                try:
+                    p2_initial = count("UNEXPECTED_FIND_PTY_INPUT")
+                    command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                            "NATIVE_ECHO", env=env)
+                    await asyncio.sleep(.5 * TIME_SCALE)
+                    p2_typed = count("UNEXPECTED_FIND_PTY_INPUT")
+                    if p2_typed != p2_initial:
+                        raise RuntimeError(f"P2 query reached PTY: {p2_initial}->{p2_typed}")
+                finally:
+                    probe_state["phase"] = None
+                find_pane_click()
+                await asyncio.sleep(.5 * TIME_SCALE)
+                await find_echo("FIND_P2_PANE")
+                await asyncio.sleep(.5 * TIME_SCALE)
+                p2_relocated = destination / "connected-find-p2-relocated.png"
+                await asyncio.to_thread(screenshot, window, p2_relocated, env)
+                p2_words = await asyncio.to_thread(read_strip_words, p2_relocated, find_band)
+                p2_next = match_strip_label(p2_words, "Next", find_band)
+                if p2_next is None:
+                    raise RuntimeError(
+                        f"P2 Next absent after pane echo: band={find_band}, "
+                        f"words={p2_words[:40]}"
+                    )
+                p2_nav = center(p2_next)
+                command("xdotool", "windowfocus", window, "mousemove", "--window",
+                        window, str(p2_nav[0]), str(p2_nav[1]), "click", "1", env=env)
+                await asyncio.sleep(.5 * TIME_SCALE)
+                p2_a = destination / "connected-find-p2-nav-before-type.png"
+                await asyncio.to_thread(screenshot, window, p2_a, env)
+                probe_state["phase"] = "FIND"
+                try:
+                    p2_before = count("UNEXPECTED_FIND_PTY_INPUT")
+                    command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                            "ZZQ", env=env)
+                    await asyncio.sleep(.5 * TIME_SCALE)
+                    p2_b = destination / "connected-find-p2-nav-after-type.png"
+                    await asyncio.to_thread(screenshot, window, p2_b, env)
+                    p2_pixels = await asyncio.to_thread(
+                        band_changed_pixels, p2_a, p2_b, find_band,
+                    )
+                    p2_after = count("UNEXPECTED_FIND_PTY_INPUT")
+                    # 30 changed band pixels assumes three query glyphs exceed caret noise.
+                    if p2_after != p2_before or p2_pixels < 30:
+                        raise RuntimeError(
+                            f"P2 Next did not focus query: band pixels={p2_pixels} "
+                            f"(need >=30), PTY={p2_before}->{p2_after}, "
+                            f"Next={p2_next} band={find_band}"
+                        )
+                    command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                    p2_closed, _p2_words = await wait_find_strip_closed(
+                        app, window, p2_b,
+                        destination / "connected-find-p2-closed.png", find_band, env,
+                        label="Escape after Next then typing",
+                    )
+                    p2_escaped = count("UNEXPECTED_FIND_PTY_INPUT")
+                    if p2_escaped != p2_before:
+                        raise RuntimeError(
+                            f"P2 Escape reached PTY: {p2_before}->{p2_escaped}; "
+                            f"band pixels={p2_pixels}, close pixels={p2_closed}"
+                        )
+                finally:
+                    probe_state["phase"] = None
+                await find_echo("FIND_P2_AFTER")
+                print(f"P2 Next then type: Next={p2_next}, band pixels={p2_pixels}, "
+                      f"close pixels={p2_closed}, PTY={p2_before}->{p2_after}"
+                      f"->{p2_escaped}", flush=True)
+
                 # The populated queue lives in the Transfer tab. Both completed
                 # jobs must be listed; scroll its visible interior and retain
                 # the resulting production screenshot.
