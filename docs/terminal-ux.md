@@ -152,6 +152,6 @@ The UI intentionally uses compact pane headers, restrained separators, dark neut
 
 ### Split-pane chrome
 
-The split-terminal workspace uses compact pane headers rather than full control panels. The focused pane is visually distinguished and carries the active marker; close is a small pane-local control. Workspace save/restore, split creation and synchronized-input targeting remain available under the collapsed **Workspace** section so they do not consume terminal space during ordinary use.
+The split-terminal workspace uses compact pane headers rather than full control panels. The focused pane is visually distinguished and carries the active marker; close is a small pane-local control. Open **Window → Workspace** for layout save/restore and synchronized-input target selection, and **Mode → Sync Input...** to arm or disarm mirroring. Split creation remains under **Window**, so these controls do not consume terminal space during ordinary use.
 
 When two panes are active, a small split-mode indicator shows whether they are side-by-side or stacked and whether synchronized input is armed.
