@@ -1825,12 +1825,22 @@ fn file_listing_row<'a>(
     }
 }
 
-/// Right-click menu on a Filer row. Explorer adds its own side in a later change.
+/// Which file panel owns the open context menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileContextSide {
+    Remote,
+    Local,
+}
+
+/// Right-click menu on a Filer or Explorer row.
 #[derive(Clone, Debug)]
 struct FileContextMenu {
+    side: FileContextSide,
     is_dir: bool,
-    /// Remote path used by Open. Files leave this unused; they have no open message.
+    /// Display/remote path used by Open. Files leave this unused.
     open_path: String,
+    /// Original local path for Open. Avoids a lossy string round-trip.
+    local_path: Option<PathBuf>,
     anchor: iced::Point,
 }
 
@@ -1838,6 +1848,7 @@ struct FileContextMenu {
 enum FileContextAction {
     Open,
     Download,
+    Upload,
     Edit,
     NewFolder,
     Rename,
@@ -1859,17 +1870,24 @@ fn clamp_file_context_anchor(anchor: iced::Point, window: iced::Size, height: f3
     iced::Point::new(anchor.x.clamp(0.0, max_x), anchor.y.clamp(0.0, max_y))
 }
 
-/// Spec 5.2 items that already have a Filer message. Open is directories only
-/// (`FilesOpenRemote` navigates). Edit is files only. Files have no separate
-/// open message, so Open is omitted for them.
+/// Spec 5.2 items that already have a panel message. Open is directories only.
+/// Edit is remote files only. Local rows have no edit message, and neither side
+/// has an open-file message, so those items are omitted.
 fn file_context_entries(menu: &FileContextMenu) -> Vec<(&'static str, FileContextAction)> {
     let mut items = Vec::new();
     if menu.is_dir {
         items.push(("Open", FileContextAction::Open));
     }
-    items.push(("Download", FileContextAction::Download));
-    if !menu.is_dir {
-        items.push(("Edit", FileContextAction::Edit));
+    match menu.side {
+        FileContextSide::Remote => {
+            items.push(("Download", FileContextAction::Download));
+            if !menu.is_dir {
+                items.push(("Edit", FileContextAction::Edit));
+            }
+        }
+        FileContextSide::Local => {
+            items.push(("Upload", FileContextAction::Upload));
+        }
     }
     items.push(("New Folder", FileContextAction::NewFolder));
     items.push(("Rename", FileContextAction::Rename));
@@ -1882,18 +1900,43 @@ fn file_context_action_message(
     menu: &FileContextMenu,
     action: FileContextAction,
 ) -> Option<Message> {
-    match action {
-        FileContextAction::Open if menu.is_dir => {
+    match (menu.side, action) {
+        (FileContextSide::Remote, FileContextAction::Open) if menu.is_dir => {
             Some(Message::FilesOpenRemote(menu.open_path.clone()))
         }
-        FileContextAction::Open => None,
-        FileContextAction::Download => Some(Message::FilesRequestDownload),
-        FileContextAction::Edit if !menu.is_dir => Some(Message::FilesRequestEditRemote),
-        FileContextAction::Edit => None,
-        FileContextAction::NewFolder => Some(Message::FilesRequestMkdirRemote),
-        FileContextAction::Rename => Some(Message::FilesRequestRenameRemote),
-        FileContextAction::Delete => Some(Message::FilesRequestDeleteRemote),
-        FileContextAction::Refresh => Some(Message::FilesRefresh),
+        (FileContextSide::Local, FileContextAction::Open) if menu.is_dir => {
+            menu.local_path.clone().map(Message::FilesOpenLocal)
+        }
+        (_, FileContextAction::Open) => None,
+        (FileContextSide::Remote, FileContextAction::Download) => {
+            Some(Message::FilesRequestDownload)
+        }
+        (FileContextSide::Local, FileContextAction::Upload) => Some(Message::FilesRequestUpload),
+        (FileContextSide::Remote, FileContextAction::Edit) if !menu.is_dir => {
+            Some(Message::FilesRequestEditRemote)
+        }
+        (FileContextSide::Remote, FileContextAction::NewFolder) => {
+            Some(Message::FilesRequestMkdirRemote)
+        }
+        (FileContextSide::Local, FileContextAction::NewFolder) => {
+            Some(Message::FilesRequestMkdirLocal)
+        }
+        (FileContextSide::Remote, FileContextAction::Rename) => {
+            Some(Message::FilesRequestRenameRemote)
+        }
+        (FileContextSide::Local, FileContextAction::Rename) => {
+            Some(Message::FilesRequestRenameLocal)
+        }
+        (FileContextSide::Remote, FileContextAction::Delete) => {
+            Some(Message::FilesRequestDeleteRemote)
+        }
+        (FileContextSide::Local, FileContextAction::Delete) => {
+            Some(Message::FilesRequestDeleteLocal)
+        }
+        (_, FileContextAction::Refresh) => Some(Message::FilesRefresh),
+        // Cross-side items (local Download, remote Upload) and Edit on a
+        // directory or a local row are not offered. Drop a stale message.
+        _ => None,
     }
 }
 
@@ -2279,6 +2322,11 @@ enum Message {
     },
     FileContextChoose(FileContextAction),
     FileContextDismiss,
+    /// Right-click on an Explorer row. Selects the row, then opens the menu.
+    OpenLocalFileContext {
+        path: PathBuf,
+        is_dir: bool,
+    },
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -6806,8 +6854,29 @@ impl App {
                 self.open_menu = None;
                 self.dock_menu = None;
                 self.context_menu = Some(FileContextMenu {
+                    side: FileContextSide::Remote,
                     is_dir,
                     open_path,
+                    local_path: None,
+                    anchor: self.last_pointer,
+                });
+                return select;
+            }
+            Message::OpenLocalFileContext { path, is_dir } => {
+                if self.privacy_locked || self.dialog.is_some() {
+                    return Task::none();
+                }
+                // Same rule as Filer: select, do not navigate. Open does that.
+                let open_path = path.to_string_lossy().into_owned();
+                let local_path = path.clone();
+                let select = self.update(Message::FilesSelectLocal(path));
+                self.open_menu = None;
+                self.dock_menu = None;
+                self.context_menu = Some(FileContextMenu {
+                    side: FileContextSide::Local,
+                    is_dir,
+                    open_path,
+                    local_path: Some(local_path),
                     anchor: self.last_pointer,
                 });
                 return select;
@@ -7924,24 +7993,22 @@ impl App {
                     owner: entry.owner.clone(),
                     group: entry.group.clone(),
                 };
-                if entry.is_dir {
-                    local_list = local_list.push(file_listing_row(
-                        cells,
-                        Message::FilesOpenLocal(entry.path.clone()),
-                        false,
-                        table_width,
-                        None,
-                    ));
+                let selected = self.files.selected_local.as_ref() == Some(&entry.path);
+                let activate = if entry.is_dir {
+                    Message::FilesOpenLocal(entry.path.clone())
                 } else {
-                    let selected = self.files.selected_local.as_ref() == Some(&entry.path);
-                    local_list = local_list.push(file_listing_row(
-                        cells,
-                        Message::FilesSelectLocal(entry.path.clone()),
-                        selected,
-                        table_width,
-                        None,
-                    ));
-                }
+                    Message::FilesSelectLocal(entry.path.clone())
+                };
+                local_list = local_list.push(file_listing_row(
+                    cells,
+                    activate,
+                    selected,
+                    table_width,
+                    Some(Message::OpenLocalFileContext {
+                        path: entry.path.clone(),
+                        is_dir: entry.is_dir,
+                    }),
+                ));
             }
             if self.files.local_visible < self.files.local_entries.len() {
                 local_list = local_list.push(
@@ -12717,8 +12784,10 @@ mod tests {
 
     fn remote_context_labels(is_dir: bool) -> Vec<&'static str> {
         file_context_entries(&FileContextMenu {
+            side: FileContextSide::Remote,
             is_dir,
             open_path: "/srv/item".into(),
+            local_path: None,
             anchor: iced::Point::ORIGIN,
         })
         .into_iter()
@@ -12886,5 +12955,123 @@ mod tests {
         let inside = clamp_file_context_anchor(iced::Point::new(10.0, 20.0), window, height);
         assert_eq!(inside.x, 10.0);
         assert_eq!(inside.y, 20.0);
+    }
+
+    fn local_context_labels(is_dir: bool) -> Vec<&'static str> {
+        file_context_entries(&FileContextMenu {
+            side: FileContextSide::Local,
+            is_dir,
+            open_path: "/tmp/item".into(),
+            local_path: None,
+            anchor: iced::Point::ORIGIN,
+        })
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect()
+    }
+
+    #[test]
+    fn local_context_menu_selects_the_row_and_escape_closes_it() {
+        let mut app = app_with_one_pane_and_auxiliary_shell("explorer-context-select");
+        let local_dir = app.files.local_dir.clone();
+        let path = std::path::PathBuf::from("/tmp/notes.txt");
+        let _ = app.update(Message::PointerMoved(iced::Point::new(30.0, 40.0)));
+        let _ = app.update(Message::OpenLocalFileContext {
+            path: path.clone(),
+            is_dir: false,
+        });
+        assert!(app.context_menu.is_some(), "right-click opens the menu");
+        assert_eq!(
+            app.context_menu
+                .as_ref()
+                .map(|menu| (menu.side, menu.anchor.x, menu.anchor.y)),
+            Some((FileContextSide::Local, 30.0, 40.0))
+        );
+        assert_eq!(app.files.selected_local.as_deref(), Some(path.as_path()));
+        assert!(!local_context_labels(false).contains(&"Open"));
+        assert!(!local_context_labels(false).contains(&"Edit"));
+        assert!(local_context_labels(false).contains(&"Upload"));
+        assert!(!local_context_labels(false).contains(&"Download"));
+        let _ = app.update(pressed_key(
+            keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::default(),
+        ));
+        assert!(app.context_menu.is_none(), "Escape closes the context menu");
+        assert!(
+            app.pty_write_log.is_empty(),
+            "Escape must not reach the terminal"
+        );
+
+        let dir = std::path::PathBuf::from("/tmp/src");
+        let _ = app.update(Message::OpenLocalFileContext {
+            path: dir.clone(),
+            is_dir: true,
+        });
+        assert_eq!(
+            app.files.local_dir, local_dir,
+            "right-click must not navigate"
+        );
+        assert_eq!(app.files.selected_local.as_deref(), Some(dir.as_path()));
+        assert!(local_context_labels(true).contains(&"Open"));
+        assert!(!local_context_labels(true).contains(&"Edit"));
+        let open = file_context_action_message(
+            app.context_menu.as_ref().expect("menu"),
+            FileContextAction::Open,
+        );
+        assert!(matches!(
+            open,
+            Some(Message::FilesOpenLocal(path)) if path == dir
+        ));
+    }
+
+    #[test]
+    fn local_context_menu_blocks_terminal_keys_and_chords() {
+        let (mut app, first_id, _second_id) = arm_synced_pair("explorer-context-keys");
+        let focus_mode = app.focus_mode;
+        let _ = app.update(Message::OpenLocalFileContext {
+            path: std::path::PathBuf::from("/tmp/notes.txt"),
+            is_dir: false,
+        });
+        assert!(app.context_menu.is_some());
+        app.pty_write_log.clear();
+        let status = app.status.clone();
+        let _ = app.update(pressed_char("x"));
+        let _ = app.update(Message::KeyChord(KeyChord::FocusMode));
+        let _ = app.update(Message::TerminalImeCommit(first_id, "x".into()));
+        let _ = app.update(Message::RequestPaste);
+        assert!(
+            app.pty_write_log.is_empty(),
+            "open context menu must not write to a pane, log={:?}",
+            app.pty_write_log
+        );
+        assert_eq!(app.focus_mode, focus_mode, "chords must not run");
+        assert_eq!(app.status, status, "paste must not start");
+        assert!(
+            app.context_menu.is_some(),
+            "non-Escape keys leave the menu open"
+        );
+    }
+
+    #[test]
+    fn local_context_menu_delete_opens_confirmation_without_deleting() {
+        let mut app = app_with_one_pane_and_auxiliary_shell("explorer-context-delete");
+        let path = std::path::PathBuf::from("/tmp/notes.txt");
+        app.files.local_entries = vec![listing_entry("notes.txt", false, Some(4), None)];
+        app.files.local_entries[0].path = path.clone();
+        let _ = app.update(Message::OpenLocalFileContext {
+            path: path.clone(),
+            is_dir: false,
+        });
+        let _ = app.update(Message::FileContextChoose(FileContextAction::Delete));
+        assert!(
+            app.context_menu.is_none(),
+            "choosing an item closes the menu"
+        );
+        assert!(
+            matches!(&app.dialog, Some(Dialog::FileDeleteLocal(pending)) if pending == &path),
+            "Delete must open the existing confirmation"
+        );
+        assert_eq!(app.files.local_entries.len(), 1);
+        assert_eq!(app.files.local_entries[0].path, path);
     }
 }
