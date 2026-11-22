@@ -1140,7 +1140,12 @@ def _erase_strip_rules(grey, median, dark_background):
 
 def _prepare_strip_cluster(crop):
     """Greyscale, invert a dark strip, drop rules, LANCZOS x4, autocontrast."""
-    from PIL import Image, ImageOps
+    try:
+        from PIL import Image, ImageOps
+    except ImportError as exc:
+        raise RuntimeError(
+            "Find strip OCR requires Pillow (pip install Pillow==13.0.0; see scripts/local-gui/Dockerfile)"
+        ) from exc
 
     median, grey, dark_background = _strip_luma(crop)
     cleaned = _erase_strip_rules(grey, median, dark_background)
@@ -1201,7 +1206,9 @@ def read_strip_words(shot_path, region):
     try:
         from PIL import Image
     except ImportError as exc:
-        raise RuntimeError("Find strip OCR requires Pillow") from exc
+        raise RuntimeError(
+            "Find strip OCR requires Pillow (pip install Pillow==13.0.0; see scripts/local-gui/Dockerfile)"
+        ) from exc
     image = Image.open(shot_path).convert("RGB")
     width, height = image.size
     x1, y1, x2, y2 = (int(edge) for edge in region)

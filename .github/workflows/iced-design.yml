@@ -207,7 +207,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          python3 -m pip install --disable-pip-version-check "asyncssh==2.24.0"
+          python3 -m pip install --disable-pip-version-check "asyncssh==2.24.0" "Pillow==13.0.0"
           python3 -B scripts/test-iced-connected-gui.py \
             target/release/inspirum-terminal preview-artifacts/connected
       - name: Prepare preview artifact

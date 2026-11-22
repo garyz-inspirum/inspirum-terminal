@@ -8,7 +8,7 @@ RUN apt-get update \
       libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libfreetype6 libx11-6 libx11-xcb1 libxcb1 \
       libxcursor1 libxi6 libxrandr2 libgl1 libegl1 libvulkan1 mesa-vulkan-drivers libwayland-client0 \
  && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir --break-system-packages asyncssh==2.24.0
+RUN pip install --no-cache-dir --break-system-packages asyncssh==2.24.0 Pillow==13.0.0
 # Non-root default user; override the uid at run time with
 #   docker run --user $(id -u):$(id -g) -e HOME=/tmp/home ...
 # so files written to bind mounts belong to the invoking host user.
