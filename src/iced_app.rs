@@ -2136,6 +2136,8 @@ enum Message {
     /// Single click on a session row. The `usize` is an index into `profiles`
     /// (the value stored in `profile_matches`), not a visible-row offset.
     SelectSession(usize),
+    /// Toggle a session-tree group. Not persisted.
+    ToggleSessionGroup(String),
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -3287,6 +3289,9 @@ struct App {
     /// within `SESSION_DOUBLE_CLICK` opens it, then this is cleared so one
     /// double-click gesture cannot open twice.
     session_click_at: Option<Instant>,
+    /// Group names whose session rows are hidden. Not written to UI state.
+    /// A non-empty filter still shows matching rows inside a collapsed group.
+    collapsed_groups: HashSet<String>,
 }
 
 const FILES_PANELS: [dock::Panel; 3] = [
@@ -3431,6 +3436,7 @@ impl App {
             selected_profile: None,
             selected_profile_key: None,
             session_click_at: None,
+            collapsed_groups: HashSet::new(),
         }
     }
 
@@ -6674,6 +6680,11 @@ impl App {
                     }
                 }
             }
+            Message::ToggleSessionGroup(group) => {
+                if !self.collapsed_groups.remove(&group) {
+                    self.collapsed_groups.insert(group);
+                }
+            }
         }
         Task::none()
     }
@@ -7044,9 +7055,15 @@ impl App {
             } else {
                 profile.folder.as_str()
             };
+            let folded =
+                session_group_hides_rows(self.collapsed_groups.contains(group), &self.query);
             if current_group.as_deref() != Some(group) {
-                list = list.push(Self::session_group_row(group));
+                list = list.push(Self::session_group_row(group, folded));
                 current_group = Some(group.to_owned());
+            }
+            count += 1;
+            if folded {
+                continue;
             }
             let open = self
                 .tabs
@@ -7058,7 +7075,6 @@ impl App {
                 && self.selected_profile_key.as_deref()
                     == Some(session_profile_key(profile).as_str());
             list = list.push(Self::session_tree_row(index, profile, open, selected));
-            count += 1;
         }
 
         if count == 0 {
@@ -7109,11 +7125,16 @@ impl App {
     }
 
     /// WindTerm session tree: group row (disclosure triangle + folder + name).
-    fn session_group_row<'a>(group: &str) -> Element<'a, Message> {
+    fn session_group_row<'a>(group: &str, collapsed: bool) -> Element<'a, Message> {
         let p = theme::palette();
-        container(
+        let triangle = if collapsed {
+            icons::Icon::TriangleRight
+        } else {
+            icons::Icon::TriangleDown
+        };
+        button(
             row![
-                icons::icon(icons::Icon::TriangleDown, 8.0, p.muted),
+                icons::icon(triangle, 8.0, p.muted),
                 icons::icon(icons::Icon::Folder, 13.0, Color::from_rgb8(230, 200, 110)),
                 text(group.to_owned())
                     .size(theme::metrics::UI_TEXT)
@@ -7126,7 +7147,8 @@ impl App {
         .width(Fill)
         .height(theme::metrics::ROW_HEIGHT)
         .padding([0, 4])
-        .align_y(iced::Center)
+        .style(session_row)
+        .on_press(Message::ToggleSessionGroup(group.to_owned()))
         .into()
     }
 
@@ -9902,6 +9924,12 @@ const SESSION_DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// True when `now` is at most [`SESSION_DOUBLE_CLICK`] after `previous`.
 fn session_double_click(previous: Instant, now: Instant) -> bool {
     now.saturating_duration_since(previous) <= SESSION_DOUBLE_CLICK
+}
+
+/// Collapsed groups hide their rows only while the filter is empty.
+/// A query that matched a session (the caller already filtered) shows it.
+fn session_group_hides_rows(collapsed: bool, query: &str) -> bool {
+    collapsed && query.trim().is_empty()
 }
 
 #[cfg(test)]
@@ -12707,5 +12735,35 @@ mod tests {
         app.refresh_profile_matches();
         assert_eq!(app.selected_profile, None);
         assert!(app.selected_profile_key.is_none());
+    }
+
+    #[test]
+    fn collapsing_a_session_group_hides_its_rows_until_a_filter_matches() {
+        assert!(session_group_hides_rows(true, ""));
+        assert!(session_group_hides_rows(true, "   "));
+        assert!(!session_group_hides_rows(false, ""));
+        assert!(!session_group_hides_rows(true, "beta"));
+
+        let mut app = session_click_app();
+        app.profiles[0].folder = "Work".into();
+        app.refresh_profile_matches();
+        let _ = app.update(Message::ToggleSessionGroup("Work".into()));
+        assert!(app.collapsed_groups.contains("Work"));
+        assert!(session_group_hides_rows(
+            app.collapsed_groups.contains("Work"),
+            &app.query,
+        ));
+
+        // The collapse flag stays, but a matching filter shows the rows.
+        let _ = app.update(Message::Search("alpha".into()));
+        assert!(app.collapsed_groups.contains("Work"));
+        assert!(!session_group_hides_rows(
+            app.collapsed_groups.contains("Work"),
+            &app.query,
+        ));
+
+        let _ = app.update(Message::ToggleSessionGroup("Work".into()));
+        assert!(!app.collapsed_groups.contains("Work"));
+        assert!(!session_group_hides_rows(false, ""));
     }
 }
