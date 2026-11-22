@@ -1908,11 +1908,30 @@ fn file_context_menu_height(item_count: usize) -> f32 {
     item_count as f32 * FILE_CONTEXT_ITEM_HEIGHT + 2.0
 }
 
-/// Keep the whole popup inside the window. A menu taller than the window pins to the top.
-fn clamp_file_context_anchor(anchor: iced::Point, window: iced::Size, height: f32) -> iced::Point {
-    let max_x = (window.width - FILE_CONTEXT_MENU_WIDTH).max(0.0);
-    let max_y = (window.height - height).max(0.0);
-    iced::Point::new(anchor.x.clamp(0.0, max_x), anchor.y.clamp(0.0, max_y))
+/// Visual popup size, including the 1px padding that holds the border.
+/// The column itself stays [`FILE_CONTEXT_MENU_WIDTH`] by [`FILE_CONTEXT_ITEM_HEIGHT`].
+fn context_menu_popup_size(item_count: usize) -> iced::Size {
+    iced::Size::new(
+        FILE_CONTEXT_MENU_WIDTH + 2.0,
+        file_context_menu_height(item_count),
+    )
+}
+
+/// Keep a file or session context menu inside the window: at least 2px from the
+/// left and right, at or below the menu bar, and at least 2px above the status
+/// bar. `window` is the logical size from `WindowResized`; Iced applies `scale`
+/// on its own, so this does not divide by it. A menu larger than that region
+/// pins to the region's top-left.
+fn clamp_context_menu_anchor(
+    anchor: iced::Point,
+    window: iced::Size,
+    menu: iced::Size,
+) -> iced::Point {
+    let min_x = 2.0;
+    let min_y = theme::metrics::MENU_BAR_HEIGHT;
+    let max_x = (window.width - 2.0 - menu.width).max(min_x);
+    let max_y = (window.height - theme::metrics::STATUS_BAR_HEIGHT - 2.0 - menu.height).max(min_y);
+    iced::Point::new(anchor.x.clamp(min_x, max_x), anchor.y.clamp(min_y, max_y))
 }
 
 /// Spec 5.2 items that already have a panel message. Open is directories only.
@@ -2045,8 +2064,8 @@ fn file_context_overlay<'a>(
             .map(|(label, action)| (label, Message::SessionContextChoose(action)))
             .collect(),
     };
-    let height = file_context_menu_height(items.len());
-    let anchor = clamp_file_context_anchor(menu.anchor(), window, height);
+    let anchor =
+        clamp_context_menu_anchor(menu.anchor(), window, context_menu_popup_size(items.len()));
     let popup = context_popup(items);
     stack![
         body,
@@ -13376,14 +13395,39 @@ mod tests {
 
     #[test]
     fn file_context_anchor_stays_inside_the_window() {
-        let window = iced::Size::new(400.0, 300.0);
-        let height = file_context_menu_height(2);
-        let clamped = clamp_file_context_anchor(iced::Point::new(390.0, 290.0), window, height);
-        assert_eq!(clamped.x, window.width - FILE_CONTEXT_MENU_WIDTH);
-        assert_eq!(clamped.y, window.height - height);
-        let inside = clamp_file_context_anchor(iced::Point::new(10.0, 20.0), window, height);
-        assert_eq!(inside.x, 10.0);
-        assert_eq!(inside.y, 20.0);
+        let window = iced::Size::new(1280.0, 800.0);
+        let menu = context_menu_popup_size(6);
+        let bottom_limit = window.height - theme::metrics::STATUS_BAR_HEIGHT - 2.0;
+
+        // A click on the bottom dock must sit above the status bar.
+        let low = clamp_context_menu_anchor(iced::Point::new(135.0, 655.0), window, menu);
+        assert!(
+            low.y + menu.height <= bottom_limit,
+            "menu bottom {} exceeds {}",
+            low.y + menu.height,
+            bottom_limit
+        );
+        assert!(low.y >= theme::metrics::MENU_BAR_HEIGHT);
+        assert!(low.x >= 2.0);
+        assert_eq!(low.x, 135.0);
+
+        // Near the right edge the whole menu, border included, stays inside.
+        let right = clamp_context_menu_anchor(iced::Point::new(1270.0, 400.0), window, menu);
+        assert!(right.x >= 2.0);
+        assert!(
+            right.x + menu.width <= window.width - 2.0,
+            "menu right {} exceeds {}",
+            right.x + menu.width,
+            window.width - 2.0
+        );
+        assert_eq!(right.y, 400.0);
+
+        let inside = iced::Point::new(135.0, 400.0);
+        assert_eq!(
+            clamp_context_menu_anchor(inside, window, menu),
+            inside,
+            "an anchor already inside the free region is unchanged"
+        );
     }
 
     fn local_context_labels(is_dir: bool) -> Vec<&'static str> {
