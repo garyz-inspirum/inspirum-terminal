@@ -71,7 +71,7 @@ TOUR_WITHHOLD_ECHO = os.environ.get("INSPIRUM_GUI_TOUR_WITHHOLD_ECHO") == "1"
 FIND_INJECT_PTY_BYTE = os.environ.get("INSPIRUM_GUI_FIND_INJECT_PTY_BYTE") == "1"
 
 
-def observe_pty_chunk(events: fixture.EventLog, probe_state: dict[str, str | None], chunk: str) -> None:
+def observe_pty_chunk(events, probe_state: dict[str, str | None], chunk: str) -> None:
     """Record any PTY input while a chrome probe is armed, without logging bytes."""
     if chunk and probe_state["phase"] is not None:
         events.write(f"UNEXPECTED_{probe_state['phase']}_PTY_INPUT")
@@ -1298,6 +1298,19 @@ def read_strip_words(shot_path, region):
     return chosen
 
 
+def find_strip_residue(words, find_band) -> dict:
+    """Return bounds of surviving controls and parsed hit counter, or None each."""
+    inside = [
+        (text, bounds) for text, bounds in words
+        if _bounds_inside(bounds, find_band) is not None
+    ]
+    return {
+        "Prev": match_strip_label(inside, "Prev", find_band),
+        "Next": match_strip_label(inside, "Next", find_band),
+        "counter": find_hit_counter(strip_words_as_rows(inside)),
+    }
+
+
 def name_rows_region(first_row_bounds, row_count, *, row_height=23, name_right=None):
     """Name-column data-row box derived from the located first data row.
 
@@ -1392,6 +1405,50 @@ def band_changed_pixels(first: Path, second: Path, box) -> int:
             ):
                 changed += 1
     return changed
+
+
+async def wait_find_strip_closed(
+    app, window, open_frame: Path, closed_shot: Path, find_band, env,
+    *, label: str = "Escape",
+) -> tuple[int, list]:
+    """Poll closed_shot until the Find strip is gone from find_band vs open_frame.
+
+    open_frame is an OPEN-strip frame taken just before the closing action.
+    Return (changed_pixels, words). Raise RuntimeError(f"{label} did not close
+    the Find strip; ...") on deadline (8 * TIME_SCALE s) or app exit.
+    """
+    started = time.monotonic()
+    deadline = started + 8 * TIME_SCALE
+    changed_pixels = 0
+    words = []
+    while True:
+        if app.poll() is not None:
+            raise RuntimeError(
+                f"{label} did not close the Find strip; GUI exited (code {app.returncode})"
+            )
+        await asyncio.to_thread(screenshot, window, closed_shot, env)
+        changed_pixels = await asyncio.to_thread(
+            band_changed_pixels, open_frame, closed_shot, find_band,
+        )
+        # A pre-repaint OCR call can consume the deadline; check pixels first.
+        if changed_pixels >= 200:
+            words = await asyncio.to_thread(read_strip_words, closed_shot, find_band)
+            if all(value is None for value in find_strip_residue(words, find_band).values()):
+                return changed_pixels, words
+        if time.monotonic() >= deadline:
+            # Include the last frame's words even if its band never moved.
+            if changed_pixels < 200:
+                words = await asyncio.to_thread(read_strip_words, closed_shot, find_band)
+            residue = find_strip_residue(words, find_band)
+            observed = [text for text, _bounds in words][:40]
+            raise RuntimeError(
+                f"{label} did not close the Find strip; "
+                f"Prev={residue['Prev']} Next={residue['Next']} "
+                f"counter={residue['counter']} in {find_band}; "
+                f"band delta {changed_pixels} vs {open_frame.name} (need >= 200); "
+                f"words={observed}; elapsed {time.monotonic() - started:.1f}s"
+            )
+        await asyncio.sleep(.3)
 
 
 async def locate_rendered_label(
@@ -3239,67 +3296,13 @@ async def main() -> int:
                         f"after appending ZZQ (words {nohit_observed})",
                         flush=True,
                     )
-                    # find_next_shot predates the ZZQ append, so the open strip
-                    # already differs from it by the query and the red 0/0.
-                    # The frame right after Escape is that same open strip
-                    # until the repaint. Compare with the settled no-hit
-                    # frame, and accept a close only when that band has moved
-                    # and Prev is gone. OCR waits for the pixel change: a
-                    # read of every pre-repaint frame can eat the deadline
-                    # and report a slow close as a strip that stayed open.
-                    # connected-find-closed.png is overwritten each iteration,
-                    # so the file is the last frame examined.
+                    # Compare against the settled OPEN strip immediately before
+                    # Escape; the helper checks pixels before reading controls.
                     command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
                     find_closed = destination / "connected-find-closed.png"
-                    close_started = time.monotonic()
-                    gone_deadline = close_started + 8 * TIME_SCALE
-                    closed_pixels = 0
-                    closed_words = []
-                    still_prev = None
-                    while True:
-                        if app.poll() is not None:
-                            raise RuntimeError(
-                                "GUI exited before the Find strip closed "
-                                f"(code {app.returncode})"
-                            )
-                        await asyncio.to_thread(screenshot, window, find_closed, env)
-                        closed_pixels = await asyncio.to_thread(
-                            band_changed_pixels, find_nohit, find_closed, find_band,
-                        )
-                        if closed_pixels >= 200:
-                            closed_words = await asyncio.to_thread(
-                                read_strip_words, find_closed, find_band,
-                            )
-                            still_prev = match_strip_label(
-                                closed_words, "Prev", find_band,
-                            )
-                            if still_prev is None:
-                                break
-                        if time.monotonic() >= gone_deadline:
-                            # Words of this frame, including a band that never
-                            # moved. A stuck-open strip then shows Prev and a
-                            # small delta; a slow repaint that did close
-                            # would have broken above.
-                            if closed_pixels < 200:
-                                closed_words = await asyncio.to_thread(
-                                    read_strip_words, find_closed, find_band,
-                                )
-                                still_prev = match_strip_label(
-                                    closed_words, "Prev", find_band,
-                                )
-                            elapsed = time.monotonic() - close_started
-                            closed_observed = [
-                                text for text, _bounds in closed_words
-                            ][:40]
-                            raise RuntimeError(
-                                "Escape did not close the Find strip; "
-                                f"Prev still at {still_prev} in {find_band} "
-                                f"(band delta {closed_pixels} vs "
-                                f"{find_nohit.name}, need >= 200); "
-                                f"words={closed_observed}; "
-                                f"elapsed {elapsed:.1f}s"
-                            )
-                        await asyncio.sleep(.3)
+                    closed_pixels, closed_words = await wait_find_strip_closed(
+                        app, window, find_nohit, find_closed, find_band, env,
+                    )
                     escaped_after = count("UNEXPECTED_FIND_PTY_INPUT")
                     if escaped_after != advanced_after:
                         raise RuntimeError(
@@ -3308,7 +3311,7 @@ async def main() -> int:
                         )
                     print(
                         f"Escape closed Find: band delta {closed_pixels} "
-                        f"in {find_band}; Prev absent",
+                        f"in {find_band}; Prev, Next and counter absent",
                         flush=True,
                     )
                 finally:
