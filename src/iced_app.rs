@@ -3897,6 +3897,7 @@ impl App {
         if !self.tools.sync.armed() {
             return None;
         }
+        let selected_count = self.tools.sync.selected_count();
         let focused = self
             .tabs
             .get(self.active)
@@ -3905,10 +3906,10 @@ impl App {
             .map(|pane| pane.id);
         Some(match focused {
             Some(id) if self.tools.sync.is_target(id) => {
-                format!("INPUT TO {} PANES", self.paste_targets(id).len())
+                format!("SYNC: {selected_count} SELECTED · MIRRORING")
             }
-            Some(_) => "ARMED · 1 PANE".to_string(),
-            None => "ARMED · NO PANE".to_string(),
+            Some(_) => format!("SYNC: {selected_count} SELECTED · THIS PANE ONLY"),
+            None => format!("SYNC: {selected_count} SELECTED · NO ACTIVE PANE"),
         })
     }
 
@@ -7473,7 +7474,7 @@ impl App {
                     }),
             )
             .padding([2, 7])
-            .width(160)
+            .width(240)
             .align_x(iced::Center)
             .style(|theme| container::Style {
                 background: Some(Color::from_rgb8(245, 190, 80).into()),
@@ -12487,9 +12488,21 @@ mod tests {
         assert!(!app.tools.sync.is_target(third_id));
 
         for (focused_id, expected_warning, expected_destinations) in [
-            (first_id, "INPUT TO 2 PANES", vec![first_id, second_id]),
-            (third_id, "ARMED · 1 PANE", vec![third_id]),
-            (second_id, "INPUT TO 2 PANES", vec![first_id, second_id]),
+            (
+                first_id,
+                "SYNC: 2 SELECTED · MIRRORING",
+                vec![first_id, second_id],
+            ),
+            (
+                third_id,
+                "SYNC: 2 SELECTED · THIS PANE ONLY",
+                vec![third_id],
+            ),
+            (
+                second_id,
+                "SYNC: 2 SELECTED · MIRRORING",
+                vec![first_id, second_id],
+            ),
         ] {
             let pane = app.tabs[0]
                 .panes
@@ -12521,6 +12534,13 @@ mod tests {
                 let _ = app.update(Message::ToggleFocusMode);
             }
         }
+        let active = app.active;
+        app.active = app.tabs.len();
+        assert_eq!(
+            app.sync_input_warning().as_deref(),
+            Some("SYNC: 2 SELECTED · NO ACTIVE PANE")
+        );
+        app.active = active;
         let _ = app.update(Message::Tool(tools::Action::SyncArm(false)));
         assert_eq!(app.sync_input_warning(), None);
     }
