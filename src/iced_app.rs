@@ -7520,16 +7520,18 @@ impl App {
         } else {
             icons::Icon::TriangleDown
         };
+        // 10 px triangle is 2 px wider than the old 8 px glyph. Spacing 4
+        // (was 5) keeps the group name at the same x: 10+4+13+4 == 8+5+13+5.
         button(
             row![
-                icons::icon(triangle, 8.0, p.muted),
+                icons::icon(triangle, 10.0, p.text_dock),
                 icons::icon(icons::Icon::Folder, 13.0, Color::from_rgb8(230, 200, 110)),
                 text(group.to_owned())
                     .size(theme::metrics::UI_TEXT)
                     .font(iced::Font::MONOSPACE)
                     .color(p.text_dock),
             ]
-            .spacing(5)
+            .spacing(4)
             .align_y(iced::Center),
         )
         .width(Fill)
@@ -7561,6 +7563,9 @@ impl App {
             suffix.push_str(" #");
             suffix.push_str(tag);
         }
+        // Selected fill is `selected_row`. `text_dock` on that fill is 8.9:1
+        // (light) and 8.2:1 (dark); `muted` on the same fill is under 4.5:1.
+        let suffix_color = if selected { p.text_dock } else { p.muted };
         let label = row![
             icons::dot(p.magenta, 7.0),
             text(profile.name.clone())
@@ -7570,7 +7575,7 @@ impl App {
             text(suffix)
                 .size(theme::metrics::UI_TEXT)
                 .font(iced::Font::MONOSPACE)
-                .color(p.muted)
+                .color(suffix_color)
                 .wrapping(iced::widget::text::Wrapping::None),
             space::horizontal(),
         ]
@@ -7594,7 +7599,12 @@ impl App {
             .padding(iced::Padding::new(0.0).left(24.0).right(4.0))
             .on_press(Message::SelectSession(index))
             .style(row_style);
-        let edit = button(icons::icon(icons::Icon::Edit, 11.0, p.muted))
+        let edit_color = if selected || open {
+            p.text_dock
+        } else {
+            p.muted
+        };
+        let edit = button(icons::icon(icons::Icon::Edit, 12.0, edit_color))
             .height(theme::metrics::ROW_HEIGHT)
             .padding([0, 5])
             .style(row_style)
