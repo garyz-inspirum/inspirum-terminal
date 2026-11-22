@@ -1916,8 +1916,10 @@ fn clamp_file_context_anchor(anchor: iced::Point, window: iced::Size, height: f3
 }
 
 /// Spec 5.2 items that already have a panel message. Open is directories only.
-/// Edit is remote files only. Local rows have no edit message, and neither side
-/// has an open-file message, so those items are omitted.
+/// Edit is remote files only. Download is remote files only and Upload is
+/// local files only: both are always rejected for directories, so they are
+/// omitted rather than shown. Local rows have no edit message, and neither
+/// side has an open-file message, so those items are omitted too.
 fn file_context_entries(menu: &FileContextMenu) -> Vec<(&'static str, FileContextAction)> {
     let mut items = Vec::new();
     if menu.is_dir {
@@ -1925,13 +1927,15 @@ fn file_context_entries(menu: &FileContextMenu) -> Vec<(&'static str, FileContex
     }
     match menu.side {
         FileContextSide::Remote => {
-            items.push(("Download", FileContextAction::Download));
             if !menu.is_dir {
+                items.push(("Download", FileContextAction::Download));
                 items.push(("Edit", FileContextAction::Edit));
             }
         }
         FileContextSide::Local => {
-            items.push(("Upload", FileContextAction::Upload));
+            if !menu.is_dir {
+                items.push(("Upload", FileContextAction::Upload));
+            }
         }
     }
     items.push(("New Folder", FileContextAction::NewFolder));
@@ -13149,8 +13153,17 @@ mod tests {
                 .map(|entry| entry.name.as_str()),
             Some("notes.txt")
         );
-        assert!(!remote_context_labels(false).contains(&"Open"));
-        assert!(remote_context_labels(false).contains(&"Edit"));
+        assert_eq!(
+            remote_context_labels(false),
+            vec![
+                "Download",
+                "Edit",
+                "New Folder",
+                "Rename",
+                "Delete",
+                "Refresh",
+            ]
+        );
         let _ = app.update(pressed_key(
             keyboard::Key::Named(keyboard::key::Named::Escape),
             keyboard::Modifiers::default(),
@@ -13176,10 +13189,9 @@ mod tests {
                 .as_ref()
                 .is_some_and(|entry| entry.name == "src" && entry.is_dir)
         );
-        assert!(remote_context_labels(true).contains(&"Open"));
-        assert!(
-            !remote_context_labels(true).contains(&"Edit"),
-            "Edit is omitted for directories"
+        assert_eq!(
+            remote_context_labels(true),
+            vec!["Open", "New Folder", "Rename", "Delete", "Refresh"]
         );
         let open = file_context_action_message(
             app.context_menu
@@ -13406,10 +13418,10 @@ mod tests {
             Some((FileContextSide::Local, 30.0, 40.0))
         );
         assert_eq!(app.files.selected_local.as_deref(), Some(path.as_path()));
-        assert!(!local_context_labels(false).contains(&"Open"));
-        assert!(!local_context_labels(false).contains(&"Edit"));
-        assert!(local_context_labels(false).contains(&"Upload"));
-        assert!(!local_context_labels(false).contains(&"Download"));
+        assert_eq!(
+            local_context_labels(false),
+            vec!["Upload", "New Folder", "Rename", "Delete", "Refresh"]
+        );
         let _ = app.update(pressed_key(
             keyboard::Key::Named(keyboard::key::Named::Escape),
             keyboard::Modifiers::default(),
@@ -13430,8 +13442,10 @@ mod tests {
             "right-click must not navigate"
         );
         assert_eq!(app.files.selected_local.as_deref(), Some(dir.as_path()));
-        assert!(local_context_labels(true).contains(&"Open"));
-        assert!(!local_context_labels(true).contains(&"Edit"));
+        assert_eq!(
+            local_context_labels(true),
+            vec!["Open", "New Folder", "Rename", "Delete", "Refresh"]
+        );
         let open = file_context_action_message(
             app.context_menu
                 .as_ref()
@@ -13443,6 +13457,55 @@ mod tests {
             open,
             Some(Message::FilesOpenLocal(path)) if path == dir
         ));
+    }
+
+    #[test]
+    fn directory_context_menu_omits_transfer_actions() {
+        let remote_file = remote_context_labels(false);
+        assert_eq!(
+            remote_file,
+            vec![
+                "Download",
+                "Edit",
+                "New Folder",
+                "Rename",
+                "Delete",
+                "Refresh",
+            ]
+        );
+        let remote_dir = remote_context_labels(true);
+        assert_eq!(
+            remote_dir,
+            vec!["Open", "New Folder", "Rename", "Delete", "Refresh"]
+        );
+        assert!(!remote_dir.contains(&"Download"));
+        assert_eq!(
+            file_context_menu_height(remote_dir.len()),
+            remote_dir.len() as f32 * FILE_CONTEXT_ITEM_HEIGHT + 2.0
+        );
+        assert!(
+            file_context_menu_height(remote_dir.len())
+                < file_context_menu_height(remote_file.len())
+        );
+
+        let local_file = local_context_labels(false);
+        assert_eq!(
+            local_file,
+            vec!["Upload", "New Folder", "Rename", "Delete", "Refresh"]
+        );
+        let local_dir = local_context_labels(true);
+        assert_eq!(
+            local_dir,
+            vec!["Open", "New Folder", "Rename", "Delete", "Refresh"]
+        );
+        assert!(!local_dir.contains(&"Upload"));
+        assert_eq!(
+            file_context_menu_height(local_dir.len()),
+            local_dir.len() as f32 * FILE_CONTEXT_ITEM_HEIGHT + 2.0
+        );
+        assert!(
+            file_context_menu_height(local_dir.len()) < file_context_menu_height(local_file.len())
+        );
     }
 
     #[test]
