@@ -1871,13 +1871,111 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
         await asyncio.sleep(.5)
     await step("menu-view", s03)
 
+    async def tour_label(path: Path, label: str, region=None):
+        """Probe a saved frame only; never replace its evidence on an OCR miss."""
+        try:
+            return await asyncio.to_thread(
+                locate_visible_label, path, label, region=region,
+            )
+        except RuntimeError as error:
+            print(f"tour: WARNING {path.name}: {label!r} OCR miss: {error}", flush=True)
+            return None
+
+    def centre(box):
+        return ((box[0] + box[2]) // 2, (box[1] + box[3]) // 2)
+
+    async def resize_tour(w: int, h: int) -> tuple[int, int]:
+        command("xdotool", "windowsize", window, str(w), str(h), env=env)
+        await asyncio.sleep(1)
+        actual = window_size(window, env)
+        print(f"tour: requested window {w}x{h}; actual {actual[0]}x{actual[1]}", flush=True)
+        return actual
+
     async def s04():
+        # The 1280x800 fallback is measured from production-new-connection.png:
+        # Advanced control [353,549,552,572]. Prefer its live OCR box.
+        if window_size(window, env) != (1280, 800):
+            raise RuntimeError("tour-04 baseline requires actual 1280x800 window")
         key("ctrl+n")
-        await asyncio.sleep(1.5)
-        shot("tour-04-new-connection.png")
-        key("Escape")
-        await asyncio.sleep(.5)
+        try:
+            await asyncio.sleep(1.5)
+            shot("tour-04-new-connection.png")
+            collapsed = tour_dir / "tour-04-new-connection.png"
+            box = await tour_label(collapsed, "Advanced SSH options")
+            if box:
+                click(*centre(box))
+            elif window_size(window, env) == (1280, 800):
+                click(452, 560)
+            else:
+                raise RuntimeError("Advanced control not located at non-baseline size")
+            await asyncio.sleep(1)
+            shot("tour-04a-advanced-ssh-1280x800.png")
+            expanded = tour_dir / "tour-04a-advanced-ssh-1280x800.png"
+            await tour_label(expanded, "New SSH Connection")
+            await tour_label(expanded, "Advanced SSH options")
+        finally:
+            key("Escape")
+            await asyncio.sleep(.5)
     await step("new-connection", s04)
+
+    async def s04_min():
+        try:
+            min_width, min_height = await resize_tour(640, 480)
+            size_tag = f"{min_width}x{min_height}"
+            # iced may clamp the requested size to its configured 960x640.
+            # Every artifact name records the *observed* native dimensions.
+            key("ctrl+n")
+            try:
+                await asyncio.sleep(1)
+                collapsed = tour_dir / f"tour-04b-connection-{size_tag}.png"
+                shot(collapsed.name)
+                box = await tour_label(collapsed, "Advanced SSH options")
+                # At minimum height the disclosure may be below the fold.
+                # Scroll inside the dialog to find it, never use (452,560).
+                form_x, form_y = min_width // 2, min_height * 3 // 4
+                for _ in range(6):
+                    if box:
+                        break
+                    command("xdotool", "mousemove", "--window", window,
+                            str(form_x), str(form_y), "click", "5", env=env)
+                    await asyncio.sleep(.3)
+                    probe = tour_dir / "tour-04-min-locator.png"
+                    await asyncio.to_thread(screenshot, window, probe, env)
+                    box = await tour_label(probe, "Advanced SSH options")
+                if box:
+                    click(*centre(box))
+                    await asyncio.sleep(.8)
+                else:
+                    print("tour: WARNING minimum-size advanced control not found", flush=True)
+                # Return to the top so the selected authentication controls
+                # remain in the unscrolled expanded frame.
+                for _ in range(8):
+                    command("xdotool", "mousemove", "--window", window,
+                            str(form_x), str(form_y), "click", "4", env=env)
+                await asyncio.sleep(.7)
+                expanded = tour_dir / f"tour-04c-advanced-ssh-{size_tag}.png"
+                shot(expanded.name)
+                await tour_label(expanded, "New SSH Connection")
+                await tour_label(expanded, "Advanced SSH options")
+                for _ in range(6):
+                    command("xdotool", "mousemove", "--window", window,
+                            str(form_x), str(form_y), "click", "5", env=env)
+                await asyncio.sleep(.7)
+                scrolled = tour_dir / f"tour-04d-advanced-ssh-scrolled-{size_tag}.png"
+                shot(scrolled.name)
+                # OCR is only a visibility hint, not proof of keyboard or
+                # pointer accessibility; parent must inspect the actual PNG.
+                visible = [label for label in ("Save", "Connect", "Cancel", "Proxy")
+                           if await tour_label(scrolled, label)]
+                print(f"tour: min-size scrolled visible controls (OCR): {visible}", flush=True)
+            finally:
+                key("Escape")
+                await asyncio.sleep(.5)
+        finally:
+            restored = await resize_tour(1280, 800)
+            if restored != (1280, 800):
+                raise RuntimeError(f"tour baseline not restored: {restored}")
+    await step("new-connection-minimum", s04_min)
 
     # Steps 4-5 are mandatory: a real SSH session must start.
     if "SESSION_STARTED" not in log_text():
@@ -1897,6 +1995,24 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
         return 1
     await asyncio.sleep(2)
     shot("tour-05-terminal.png")
+
+    async def s05_tunnels():
+        # Only target the top-right control if its live label is there.
+        before = tour_dir / "tour-05-terminal.png"
+        box = await tour_label(before, "Tunnels", region=(width - 180, 0, width, 42))
+        if not box:
+            raise RuntimeError("top-right Tunnels button not visible")
+        click(*centre(box))
+        try:
+            await asyncio.sleep(1)
+            shot("tour-05a-tunnels-open.png")
+            await tour_label(tour_dir / "tour-05a-tunnels-open.png", "Tunnel Manager")
+        finally:
+            key("Escape")
+            await asyncio.sleep(.5)
+            # Escape closes the manager; focus remains with the connected
+            # terminal. The mandatory echo below proves input routing.
+    await step("tunnels-manager", s05_tunnels)
 
     # Required: a missed echo fails the tour. INSPIRUM_GUI_TOUR_WITHHOLD_ECHO=1
     # makes the fixture stay silent so this path can be proven.
