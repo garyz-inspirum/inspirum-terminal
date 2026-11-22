@@ -976,7 +976,7 @@ _FIND_COUNTER_DIGIT = str.maketrans({
     "B": "8",
 })
 _FIND_COUNTER_RE = re.compile(
-    r"^([0-9OlI|ZzSsB]{1,3})\s*/\s*([0-9OlI|ZzSsB]{1,3})$"
+    r"^([0-9OoIlI|ZzSsB]{1,3})\s*/\s*([0-9OoIlI|ZzSsB]{1,3})$"
 )
 
 
@@ -1032,6 +1032,205 @@ def find_hit_counter(words):
                 if parsed is not None:
                     return parsed
     return None
+
+
+# Right-hand control cluster of the Find strip. 170px clips a shifted
+# counter once Prev/Next become padded buttons; 260px still excludes the
+# long input, whose outline otherwise owns the segmentation.
+_STRIP_CLUSTER_PX = 260
+_STRIP_SCALE = 4
+_STRIP_PAD = 12
+# 13px glyphs are shorter than a 1px button border or the input's vertical
+# edge. Horizontal runs of this length are the input outline or a button's
+# top and bottom, not a letter.
+_STRIP_VERT_RULE = 18
+_STRIP_HORIZ_RULE = 36
+_STRIP_INK_MARGIN = 28
+
+
+def match_strip_label(words, label, region=None):
+    """Return bounds for an exact, case-sensitive strip label inside ``region``.
+
+    ``words`` is ``[(text, bounds), ...]`` from ``read_strip_words``.
+    ``Prey`` is not ``Prev`` and a box below the band is not a hit. These two
+    labels have no confusion table: the single-line pass has to read them.
+    """
+    if not label:
+        return None
+    for text, bounds in words:
+        if text != label:
+            continue
+        inside = _bounds_inside(bounds, region)
+        if inside is not None:
+            return inside
+    return None
+
+
+def strip_words_as_rows(words):
+    """Adapt ``(text, bounds)`` words to the ``find_hit_counter`` row shape."""
+    rows = []
+    for text, bounds in words:
+        left, top, right, bottom = bounds
+        rows.append((
+            text, left, top, max(1, right - left), max(1, bottom - top), 0,
+        ))
+    return rows
+
+
+def _strip_luma(image):
+    """Return ``(median, greyscale, dark_background)`` for one crop."""
+    grey = image.convert("L")
+    histogram = grey.histogram()
+    total = sum(histogram)
+    seen = 0
+    median = 0
+    for value, count in enumerate(histogram):
+        seen += count
+        if seen * 2 >= total:
+            median = value
+            break
+    return median, grey, median < 128
+
+
+def _erase_strip_rules(grey, median, dark_background):
+    """Paint out ink runs longer than a glyph so 1px borders are not strokes.
+
+    Measured on the dark Find strip: the input's blue edge and a button
+    rectangle span most of the 44px search band, while Prev/Next glyphs are
+    13px. Erasing those runs is what turns ``9/0`` / ``Hest`` into ``0/0``
+    and ``Next``, and what keeps a closed button border from gluing onto
+    the counter. Glyph columns are left alone.
+    """
+    width, height = grey.size
+    pixels = grey.load()
+
+    def ink(value):
+        if dark_background:
+            return value >= median + _STRIP_INK_MARGIN
+        return value <= median - _STRIP_INK_MARGIN
+
+    for x in range(width):
+        y = 0
+        while y < height:
+            if not ink(pixels[x, y]):
+                y += 1
+                continue
+            end = y + 1
+            while end < height and ink(pixels[x, end]):
+                end += 1
+            if end - y >= _STRIP_VERT_RULE:
+                for row in range(y, end):
+                    pixels[x, row] = median
+            y = end
+    for y in range(height):
+        x = 0
+        while x < width:
+            if not ink(pixels[x, y]):
+                x += 1
+                continue
+            end = x + 1
+            while end < width and ink(pixels[end, y]):
+                end += 1
+            if end - x >= _STRIP_HORIZ_RULE:
+                for column in range(x, end):
+                    pixels[column, y] = median
+            x = end
+    return grey
+
+
+def _prepare_strip_cluster(crop):
+    """Greyscale, invert a dark strip, drop rules, LANCZOS x4, autocontrast."""
+    from PIL import Image, ImageOps
+
+    median, grey, dark_background = _strip_luma(crop)
+    cleaned = _erase_strip_rules(grey, median, dark_background)
+    if dark_background:
+        cleaned = ImageOps.invert(cleaned)
+    lanczos = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+    scaled = cleaned.resize(
+        (cleaned.width * _STRIP_SCALE, cleaned.height * _STRIP_SCALE),
+        lanczos,
+    )
+    scaled = ImageOps.autocontrast(scaled, cutoff=1)
+    # After invert, both themes are dark text on a light ground.
+    return ImageOps.expand(scaled, border=_STRIP_PAD, fill=255)
+
+
+def _map_strip_box(word, origin, region):
+    """Map one upscaled TSV word back into the source screenshot."""
+    _text, left, top, width, height, _confidence = word
+    origin_x, origin_y = origin
+    x1 = origin_x + (left - _STRIP_PAD) / _STRIP_SCALE
+    y1 = origin_y + (top - _STRIP_PAD) / _STRIP_SCALE
+    x2 = x1 + width / _STRIP_SCALE
+    y2 = y1 + height / _STRIP_SCALE
+    rx1, ry1, rx2, ry2 = region
+    if not (rx1 <= (x1 + x2) / 2 < rx2 and ry1 <= (y1 + y2) / 2 < ry2):
+        return None
+    left = max(rx1, min(rx2 - 1, int(round(x1))))
+    top = max(ry1, min(ry2 - 1, int(round(y1))))
+    right = max(left + 1, min(rx2, int(round(x2))))
+    bottom = max(top + 1, min(ry2, int(round(y2))))
+    return (left, top, right, bottom)
+
+
+def _ocr_strip_pass(image, tesseract, psm):
+    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    try:
+        image.save(temporary)
+        tsv = _ocr_tsv(tesseract, temporary, psm)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return parse_visible_words(tsv)
+
+
+def read_strip_words(shot_path, region):
+    """Read one chrome strip. Returns ``[(text, bounds), ...]`` in source pixels.
+
+    The Find strip is a single 13px line. Full-band PSM 6 reads ``Prev`` as
+    ``Prey`` and ``Next`` as ``Hest`` because the input outline splits the
+    line. This pass crops the right-hand 260px (counter, Prev, Next, close),
+    inverts when the median pixel is dark, erases border-length rules, and
+    upscales x4 with LANCZOS before ``--psm 7``. PSM 6 and 11 are tried only
+    when 7 did not yield both labels; words from a losing pass are not
+    merged in, so a closed strip cannot accumulate a false Prev.
+    """
+    tesseract = shutil.which("tesseract")
+    if tesseract is None:
+        raise RuntimeError("visible label targeting requires tesseract")
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError("Find strip OCR requires Pillow") from exc
+    image = Image.open(shot_path).convert("RGB")
+    width, height = image.size
+    x1, y1, x2, y2 = (int(edge) for edge in region)
+    x1 = max(0, min(width - 1, x1))
+    y1 = max(0, min(height - 1, y1))
+    x2 = max(x1 + 1, min(width, x2))
+    y2 = max(y1 + 1, min(height, y2))
+    clamped = (x1, y1, x2, y2)
+    band = image.crop(clamped)
+    cluster = min(_STRIP_CLUSTER_PX, band.width)
+    offset = band.width - cluster
+    prepared = _prepare_strip_cluster(band.crop((offset, 0, band.width, band.height)))
+    origin = (x1 + offset, y1)
+    chosen = []
+    best_hits = -1
+    for psm in ("7", "6", "11"):
+        mapped = []
+        for word in _ocr_strip_pass(prepared, tesseract, psm):
+            bounds = _map_strip_box(word, origin, clamped)
+            if bounds is None:
+                continue
+            mapped.append((word[0], bounds))
+        hits = sum(text in ("Prev", "Next") for text, _bounds in mapped)
+        if hits > best_hits:
+            chosen = mapped
+            best_hits = hits
+        if hits == 2:
+            break
+    return chosen
 
 
 def name_rows_region(first_row_bounds, row_count, *, row_height=23, name_right=None):
@@ -2700,7 +2899,10 @@ async def main() -> int:
 
                 # Find strip: Ctrl+Shift+F opens a 26px bar at the bottom of
                 # the centre workspace, directly above the bottom dock tab
-                # strip, and focuses its input. The left pane was clicked at
+                # strip, and focuses its input. Prev, Next, and the hit
+                # counter are read by read_strip_words (right-hand cluster,
+                # single-line OCR). A label outside find_band does not count.
+                # The left pane was clicked at
                 # (640, 280) for AFTER_CONTEXT_MENU and already holds several
                 # NATIVE_ECHO lines; do not click again. Dock tab top is the
                 # Filer glyph centre minus 13 (STRIP_HEIGHT / 2). `strip` is
@@ -2754,20 +2956,22 @@ async def main() -> int:
                 last_find_error = "Find labels not searched"
                 while True:
                     await asyncio.to_thread(screenshot, window, find_open_shot, env)
-                    try:
-                        prev_bounds = await asyncio.to_thread(
-                            locate_visible_label, find_open_shot, "Prev",
-                            region=find_band, budget=4,
-                        )
-                        next_bounds = await asyncio.to_thread(
-                            locate_visible_label, find_open_shot, "Next",
-                            region=find_band, budget=4,
-                        )
+                    strip_words = await asyncio.to_thread(
+                        read_strip_words, find_open_shot, find_band,
+                    )
+                    prev_bounds = match_strip_label(strip_words, "Prev", find_band)
+                    next_bounds = match_strip_label(strip_words, "Next", find_band)
+                    if prev_bounds is not None and next_bounds is not None:
                         break
-                    except RuntimeError as exc:
-                        last_find_error = str(exc)
-                        prev_bounds = None
-                        next_bounds = None
+                    seen = [text for text, _bounds in strip_words][:40]
+                    missing = "Prev" if prev_bounds is None else "Next"
+                    last_find_error = (
+                        f"visible label not found in screenshot: {missing} "
+                        f"(screenshot: {find_open_shot}, region={find_band}) "
+                        f"words={seen}"
+                    )
+                    prev_bounds = None
+                    next_bounds = None
                     if time.monotonic() >= label_deadline:
                         raise RuntimeError(
                             "Find strip did not render Prev and Next in the "
@@ -2822,10 +3026,10 @@ async def main() -> int:
                     # query. Both fail the run. The error includes the count
                     # and the raw words so the first run can recalibrate.
                     counter_words = await asyncio.to_thread(
-                        ocr_words_in_region, find_typed, find_band,
+                        read_strip_words, find_typed, find_band,
                     )
-                    parsed = find_hit_counter(counter_words)
-                    observed = [word[0] for word in counter_words][:40]
+                    parsed = find_hit_counter(strip_words_as_rows(counter_words))
+                    observed = [text for text, _bounds in counter_words][:40]
                     if (
                         parsed is None
                         or parsed[1] < 2
@@ -2888,13 +3092,10 @@ async def main() -> int:
                                 f"{find_closed.name})"
                             )
                         await asyncio.sleep(.3)
-                    try:
-                        still_prev = await asyncio.to_thread(
-                            locate_visible_label, find_closed, "Prev",
-                            region=find_band, budget=1.0,
-                        )
-                    except RuntimeError:
-                        still_prev = None
+                    closed_words = await asyncio.to_thread(
+                        read_strip_words, find_closed, find_band,
+                    )
+                    still_prev = match_strip_label(closed_words, "Prev", find_band)
                     escaped_after = count("UNEXPECTED_FIND_PTY_INPUT")
                     if still_prev is not None:
                         raise RuntimeError(
