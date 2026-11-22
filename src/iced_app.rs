@@ -5108,7 +5108,12 @@ impl App {
                             }
                             "close-active" if !self.tabs.is_empty() => {
                                 self.dialog = None;
-                                return self.update(Message::AskClose(self.active));
+                                let task = self.update(Message::AskClose(self.active));
+                                return if self.dialog.is_none() {
+                                    Task::batch([task, self.restore_find_focus()])
+                                } else {
+                                    task
+                                };
                             }
                             "quick-switch" => {
                                 return self
