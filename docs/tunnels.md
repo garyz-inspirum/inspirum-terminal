@@ -4,7 +4,7 @@ Inspirum can run the local (`-L`), remote (`-R`) and dynamic SOCKS (`-D`) forwar
 
 ## Where it lives in the Iced GUI
 
-- **Tunnels** in the top toolbar opens the centralised manager. The layout follows a WindTerm-class list-and-editor workflow: saved tunnel entries are on the left and the selected tunnel's structured editor is on the right.
+- **Tunnels** at the top right of the menu bar, or **Session → Tunnels**, opens the centralised manager. The layout follows a WindTerm-class list-and-editor workflow: saved tunnel entries are on the left and the selected tunnel's structured editor is on the right.
 - Press **+** beside a profile to add a tunnel directly in the manager. Select **Local**, **Remote** or **Dynamic**, give the entry a label, and edit its bind address/listen port plus destination host/port where applicable. Existing raw OpenSSH forward specs are converted into the structured editor automatically.
 - Select an existing entry to edit or delete it. **Save** validates the resulting OpenSSH specification through the same session validation used elsewhere. A profile's running tunnel process must be stopped before its forward definitions can be changed.
 - Each profile retains its own **Start** / **Stop** control; one forwarding-only `ssh -N -T` process serves all enabled forwards for that profile. Status and startup failure information remain visible beside the profile.

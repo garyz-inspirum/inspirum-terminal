@@ -44,8 +44,8 @@ Each session has a clear tab. A workspace can split into resizable panes with in
 
 ### Pane-local remote cursor keys and synchronized-input acceptance (#64)
 
-**Remote keys** in an Iced SSH pane header (or Ctrl/Cmd+Shift+M in the
-focused SSH pane) enters an explicit **REMOTE KEYS** mode. The pane visibly
+**Mode → Remote Keys** (or Ctrl/Cmd+Shift+M while focused in an SSH pane)
+enters an explicit **REMOTE KEYS** mode for that pane. The pane visibly
 shows Left/Up/Down/Right and Home/End/PgUp/PgDn controls. Keyboard
 **h/j/k/l**, **0/$**, **u/d** map to these real remote terminal cursor-key
 sequences; **Escape** or **Exit keys** returns to normal typing. Keys use
@@ -61,9 +61,15 @@ free-type composer remains an isolated local draft. Remote/local navigation
 and free-type are mutually exclusive. No PTY input is delivered if privacy
 lock, a dialog, an unsafe pane focus change or a disconnected source blocks it.
 
+Select pane targets in **Window → Workspace** and arm them there, or use
+**Mode → Sync Input...** (which opens Workspace with fewer than two selected
+targets and toggles arm/disarm otherwise). Selection does not arm sync by itself.
 When synchronized input is explicitly armed with at least two selected
-terminal IDs, remote navigation is delivered **source first** to selected
-mirrors. If the focused source write fails, no mirror is written. Each
+terminal IDs, remote navigation from a **selected focused source** is delivered
+**source first** to selected mirrors. An unselected focused pane receives only
+its own input even if other panes remain armed; the status badge counts selected
+targets, not guaranteed deliveries. If the focused source write fails, no
+mirror is written. Each
 destination's cursor-key mode is encoded separately; changes to sync targets
 or split/close disarm input by the existing policy. Live native OpenSSH
 acceptance opens two individually authenticated PTYs with disposable host
@@ -98,7 +104,7 @@ curtain blocks re-docking.
 
 ### Auxiliary SSH shell beside the main terminal
 
-The **Shell** session-toolbar action (also View > Shell) (Ctrl/Cmd+Shift+J while no text
+**View → Shell** (Ctrl/Cmd+Shift+J while no text
 editor has captured the keys) opens an independent authenticated SSH PTY for
 the active session in a right-hand split. It is identified as **AUX SHELL**
 and receives input only when explicitly focused. The main terminal remains
@@ -121,7 +127,7 @@ The Filer (remote) and Explorer (local) dock panels and the Transfer panel sit i
 
 ### Find a command or a less-common feature
 
-Use the command palette and contextual menus. Distinguish application actions from text that will be sent to a server. Snippets/completion stage text rather than execute it. Broadcast controls require explicit target selection and a persistent warning, not a quiet toolbar toggle.
+Use the command palette and application menus. Distinguish application actions from text that will be sent to a server. Snippets/completion stage text rather than execute it. Broadcast requires explicit target selection and arming in **Window → Workspace** or via **Mode → Sync Input...**; an armed-target badge persists in the status bar until disarmed.
 
 ### Recover from an error
 
@@ -132,7 +138,7 @@ Connecting, authentication requested, connected, disconnected, host-key conflict
 Superseded by [windterm-ui-spec.md](windterm-ui-spec.md) (issue #140). In summary:
 
 - A menu bar (Session, Edit, View, Mode, Window, Help) replaces the earlier top action bar; native window chrome is retained.
-- The centre workspace holds a flat session tab strip, a session toolbar with a breadcrumb, and terminal panes; pane headers appear only on split tabs.
+- The current centre workspace holds a flat session tab strip and terminal panes; pane headers appear only on split tabs. The session toolbar and breadcrumb in the linked design target are not present after PR #145; their actions live in the menus.
 - Session, Sender, Transfer, Filer (remote files) and Explorer (local files) are dock panels in Left, Right and Bottom dock areas with tab strips, a gear menu (Move to Left/Right/Bottom, Close) and drag-resizable splitters. The default preset places all panels as bottom tabs.
 - A status bar shows mode, terminal size, `ssh`, running counts and local date-time.
 - Dock layout and theme are persisted in `ui-state.json` next to the profiles file.
@@ -158,10 +164,10 @@ This is a migration map, not a claim that every mapped feature has been implemen
 | Host, user, port and configuration path | Basic connection dialog | Validated argv construction; no local shell interpretation |
 | Identity/authentication/GSSAPI | Authentication section | Inherit/enable/disable policies; no secret persistence |
 | ProxyJump, authenticated proxies, SSH algorithms | Advanced connection sections | Routing policy, warnings, credential boundaries and no unsafe fallback |
-| Tunnels, forwarding and ControlMaster | Session tools / connection sections | Explicit lifecycle, listener status and risk acknowledgement |
+| Tunnels, forwarding and ControlMaster | Top-right Tunnels / Session → Tunnels; connection sections | Explicit lifecycle, listener status and risk acknowledgement |
 | Host trust / known_hosts management | Connection security dialog | Changed-key rejection and explicit destructive confirmation |
 | Tabs, split panes and workspace restore | Central workspace | Stable session/pane IDs and independent lifecycle |
-| Synchronized input | Explicit sender/broadcast panel | Named targets, prominent armed state, disarm on lifecycle changes |
+| Synchronized input | Window → Workspace targets/arm; Mode → Sync Input... toggle | Named targets, prominent armed state, disarm on lifecycle changes |
 | History search, marks, timestamps, folding | Terminal search/navigation tools | Correct retained-buffer behaviour and bounded work |
 | Appearance and pointer/copy settings | Preferences with profile overrides | Independent terminal settings and safe paste policy |
 | Command palette, snippets, completion | Palette and sender tools | Separate app actions from remote text; no auto-execute |
@@ -187,7 +193,7 @@ The Iced terminal canvas underlines detected `http://` and `https://` addresses 
 
 ### Inline free-type composer (issue #64)
 
-The terminal pane header offers **Free type**, with **Ctrl/Cmd+Shift+E** as a keyboard shortcut. On entry the matching pane's text editor immediately receives keyboard focus (a unique editor ID prevents another split pane taking focus). This opens a compact, editable multiline text area directly beneath that pane's terminal viewport; the terminal remains visible and its resize sensor measures only the terminal viewport. The pane header reads **FREE TYPE** while active. The composer is a local draft **not an editable remote terminal or a movable remote cursor**: the user can position the editing caret freely in the draft, but remote PTY writes and mouse-report commands for that pane are blocked until the draft is explicitly sent or discarded. Drafts are isolated per terminal ID and dropped on pane closure/reconnection; draft content stays in memory and is never persisted.
+**Mode → Free Type Mode**, with **Ctrl/Cmd+Shift+E** as a keyboard shortcut, opens the composer for the focused pane. On entry the matching pane's text editor immediately receives keyboard focus (a unique editor ID prevents another split pane taking focus). This opens a compact, editable multiline text area directly beneath that pane's terminal viewport; the terminal remains visible and its resize sensor measures only the terminal viewport. A split-pane header shows **FREE TYPE** as a state label while active, not an action button. The composer is a local draft **not an editable remote terminal or a movable remote cursor**: the user can position the editing caret freely in the draft, but remote PTY writes and mouse-report commands for that pane are blocked until the draft is explicitly sent or discarded. Drafts are isolated per terminal ID and dropped on pane closure/reconnection; draft content stays in memory and is never persisted.
 
 **Send explicitly** checks the same paste policy as the normal terminal paste path. If the draft contains multiple lines, the existing preview/normalization confirmation is required, and confirming validates the original text, focused pane and synchronized target IDs again. Cancel preserves the draft; discarding is explicit. An empty or policy-blocked payload is never sent. The model deliberately does **not** claim arbitrary shell cursor positioning, Vim editing, or free-text placement inside the remote PTY: those capabilities require separate scope and live GUI acceptance.
 
