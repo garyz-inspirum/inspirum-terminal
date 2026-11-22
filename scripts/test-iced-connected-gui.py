@@ -1018,6 +1018,44 @@ def diff(first: Path, second: Path, env: dict[str, str]) -> int:
         ) from exc
 
 
+def band_changed_pixels(first: Path, second: Path, box) -> int:
+    """Pixels in ``box`` whose RGB differs by more than 24 on any channel.
+
+    ``_read_png`` returns ``(width, height, channels, rows)``. Each row is
+    ``width * channels`` bytes (3 for RGB, 4 for RGBA). Alpha is ignored.
+    """
+    width1, height1, channels1, rows1 = _read_png(first)
+    width2, height2, channels2, rows2 = _read_png(second)
+    if (width1, height1) != (width2, height2):
+        raise RuntimeError(
+            f"band pixel compare size mismatch: {first.name} {width1}x{height1} "
+            f"vs {second.name} {width2}x{height2}"
+        )
+    left, top, right, bottom = (int(edge) for edge in box)
+    if (
+        left < 0 or top < 0 or right > width1 or bottom > height1
+        or right <= left or bottom <= top
+    ):
+        raise RuntimeError(
+            f"band pixel compare box {box} is outside {width1}x{height1} "
+            f"({first.name} vs {second.name})"
+        )
+    changed = 0
+    for y in range(top, bottom):
+        row1 = rows1[y]
+        row2 = rows2[y]
+        for x in range(left, right):
+            i1 = x * channels1
+            i2 = x * channels2
+            if (
+                abs(row1[i1] - row2[i2]) > 24
+                or abs(row1[i1 + 1] - row2[i2 + 1]) > 24
+                or abs(row1[i1 + 2] - row2[i2 + 2]) > 24
+            ):
+                changed += 1
+    return changed
+
+
 async def locate_rendered_label(
     window: str, path: Path, label: str, *, env: dict[str, str], timeout: float = 22,
     region=None,
@@ -1679,8 +1717,16 @@ async def main() -> int:
                 # so the double click below cannot combine with this one.
                 # The tour path stays coordinate-driven and is not changed.
                 # count() is defined later in this function, so read the log.
+                # connected-session-list.png is taken inside click_label before
+                # the click, with the pointer not on the row. Assumption: the
+                # pointer starts wherever Xvfb put it; park it in the terminal
+                # pane so the before-shot is not a hover fill.
+                command(
+                    "xdotool", "mousemove", "--window", window, "640", "280", env=env,
+                )
+                await asyncio.sleep(0.3)
                 try:
-                    await click_label(
+                    session_row = await click_label(
                         window, destination / "connected-session-list.png",
                         "CI connected fixture", env, timeout=8, settle=0,
                         clicks=1,
@@ -1691,7 +1737,6 @@ async def main() -> int:
                         "'CI connected fixture' before the opening double click"
                     ) from exc
                 await asyncio.sleep(1.2 * TIME_SCALE)
-                screenshot(window, destination / "connected-session-selected.png", env)
                 started_before_open = events.path.read_text(encoding="utf-8").splitlines().count(
                     "SESSION_STARTED"
                 )
@@ -1700,6 +1745,36 @@ async def main() -> int:
                         "single click on 'CI connected fixture' opened a session "
                         f"({started_before_open} SESSION_STARTED) before the double click"
                     )
+                # Hover fill also changes pixels. Move off the row without
+                # clicking, then measure the selected-row fill in the row band.
+                command(
+                    "xdotool", "mousemove", "--window", window, "640", "280", env=env,
+                )
+                await asyncio.sleep(0.5 * TIME_SCALE)
+                list_shot = destination / "connected-session-list.png"
+                selected_shot = destination / "connected-session-selected.png"
+                await asyncio.to_thread(screenshot, window, selected_shot, env)
+                win_w, _ = window_size(window, env)
+                band = (
+                    8,
+                    session_row[1] - 4,
+                    min(win_w, session_row[2] + 120),
+                    session_row[3] + 4,
+                )
+                highlight = await asyncio.to_thread(
+                    band_changed_pixels, list_shot, selected_shot, band,
+                )
+                if highlight < 150:
+                    raise RuntimeError(
+                        "single click did not highlight the session row "
+                        f"({highlight} pixels changed in band {band}; "
+                        f"{list_shot.name} vs {selected_shot.name})"
+                    )
+                print(
+                    f"single click highlighted the session row: {highlight} pixels "
+                    f"in band {band}",
+                    flush=True,
+                )
                 try:
                     await click_label(
                         window, destination / "connected-session-list.png",
@@ -3216,7 +3291,7 @@ async def main() -> int:
                     f"Alternate-screen screenshot change: {fullscreen_pixels} pixels\n"
                     f"Remote-key mode screenshot change: {remote_keys_pixels} pixels\n"
                     "PASS: real remote-key Left arrow reached the isolated SFTP-capable SSH shell\n"
-                    "PASS: a single click on the saved session selected it without SESSION_STARTED; the double click still opened it\n"
+                    "PASS: a single click on the saved session selected it (row highlight measured) without SESSION_STARTED; the double click still opened it\n"
                     "PASS: terminal owned the keyboard before chrome menu probes\n"
                     "PASS: Session menu, Sender and dock gear consumed typing, Return and Escape without SSH input\n"
                     "PASS: shell answered AFTER_MENU, AFTER_SENDER_ESCAPE and AFTER_GEAR without terminal re-click\n"
