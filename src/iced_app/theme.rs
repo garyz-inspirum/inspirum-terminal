@@ -99,7 +99,7 @@ pub(super) const DARK: Palette = Palette {
     tab_inactive: hex(0x333333),
     raised: hex(0x333333),
     hover: hex(0x2A2A2A),
-    selected_row: hex(0x262626),
+    selected_row: hex(0x3A3A3A),
     border: hex(0x444444),
     text: hex(0xBFBFBF),
     text_dock: hex(0xBFBFBF),
@@ -251,6 +251,17 @@ mod tests {
     fn small_chrome_text_meets_wcag_aa_on_all_relevant_surfaces() {
         // Direct constants avoid changing the process-global runtime theme in parallel tests.
         for p in [LIGHT, DARK] {
+            // A selected row must remain visibly distinct from its list background.
+            for (list, selected) in [
+                (p.list.r, p.selected_row.r),
+                (p.list.g, p.selected_row.g),
+                (p.list.b, p.selected_row.b),
+            ] {
+                assert!(
+                    (list - selected).abs() * 255.0 >= 25.0,
+                    "selected row visibility"
+                );
+            }
             for surface in [p.chrome, p.dock, p.list, p.raised, p.hover, p.selected_row] {
                 assert!(contrast(p.muted, surface) >= 4.5, "muted on {surface:?}");
             }
