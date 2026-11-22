@@ -13503,8 +13503,11 @@ mod tests {
             file_context_menu_height(local_dir.len()),
             local_dir.len() as f32 * FILE_CONTEXT_ITEM_HEIGHT + 2.0
         );
-        assert!(
-            file_context_menu_height(local_dir.len()) < file_context_menu_height(local_file.len())
+        // Open replaces Upload, so the local popup stays the same height.
+        // Remote drops Download and Edit and adds only Open, so it shrinks.
+        assert_eq!(
+            file_context_menu_height(local_dir.len()),
+            file_context_menu_height(local_file.len())
         );
     }
 
