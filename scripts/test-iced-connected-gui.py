@@ -3229,10 +3229,23 @@ async def main() -> int:
                         f"after appending ZZQ (words {nohit_observed})",
                         flush=True,
                     )
+                    # find_next_shot predates the ZZQ append, so the open strip
+                    # already differs from it by the query and the red 0/0.
+                    # The frame right after Escape is that same open strip
+                    # until the repaint. Compare with the settled no-hit
+                    # frame, and accept a close only when that band has moved
+                    # and Prev is gone. OCR waits for the pixel change: a
+                    # read of every pre-repaint frame can eat the deadline
+                    # and report a slow close as a strip that stayed open.
+                    # connected-find-closed.png is overwritten each iteration,
+                    # so the file is the last frame examined.
                     command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
                     find_closed = destination / "connected-find-closed.png"
-                    gone_deadline = time.monotonic() + 8 * TIME_SCALE
+                    close_started = time.monotonic()
+                    gone_deadline = close_started + 8 * TIME_SCALE
                     closed_pixels = 0
+                    closed_words = []
+                    still_prev = None
                     while True:
                         if app.poll() is not None:
                             raise RuntimeError(
@@ -3241,29 +3254,43 @@ async def main() -> int:
                             )
                         await asyncio.to_thread(screenshot, window, find_closed, env)
                         closed_pixels = await asyncio.to_thread(
-                            band_changed_pixels, find_next_shot, find_closed, find_band,
+                            band_changed_pixels, find_nohit, find_closed, find_band,
                         )
                         if closed_pixels >= 200:
-                            break
+                            closed_words = await asyncio.to_thread(
+                                read_strip_words, find_closed, find_band,
+                            )
+                            still_prev = match_strip_label(
+                                closed_words, "Prev", find_band,
+                            )
+                            if still_prev is None:
+                                break
                         if time.monotonic() >= gone_deadline:
+                            # Words of this frame, including a band that never
+                            # moved. A stuck-open strip then shows Prev and a
+                            # small delta; a slow repaint that did close
+                            # would have broken above.
+                            if closed_pixels < 200:
+                                closed_words = await asyncio.to_thread(
+                                    read_strip_words, find_closed, find_band,
+                                )
+                                still_prev = match_strip_label(
+                                    closed_words, "Prev", find_band,
+                                )
+                            elapsed = time.monotonic() - close_started
+                            closed_observed = [
+                                text for text, _bounds in closed_words
+                            ][:40]
                             raise RuntimeError(
-                                "Escape did not change the Find strip band "
-                                f"({closed_pixels} pixels, need >= 200) "
-                                f"{find_band} ({find_next_shot.name} vs "
-                                f"{find_closed.name})"
+                                "Escape did not close the Find strip; "
+                                f"Prev still at {still_prev} in {find_band} "
+                                f"(band delta {closed_pixels} vs "
+                                f"{find_nohit.name}, need >= 200); "
+                                f"words={closed_observed}; "
+                                f"elapsed {elapsed:.1f}s"
                             )
                         await asyncio.sleep(.3)
-                    closed_words = await asyncio.to_thread(
-                        read_strip_words, find_closed, find_band,
-                    )
-                    still_prev = match_strip_label(closed_words, "Prev", find_band)
                     escaped_after = count("UNEXPECTED_FIND_PTY_INPUT")
-                    if still_prev is not None:
-                        raise RuntimeError(
-                            "Escape did not close the Find strip; "
-                            f"Prev still at {still_prev} in {find_band} "
-                            f"(band delta {closed_pixels})"
-                        )
                     if escaped_after != advanced_after:
                         raise RuntimeError(
                             "Escape from the Find strip forwarded input to SSH "
