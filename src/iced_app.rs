@@ -8505,7 +8505,7 @@ impl App {
                     } else {
                         "Saved through the existing validated, non-secret profile store."
                     })
-                    .color(muted()),
+                    .color(if editing { fg() } else { muted() }),
                     field(
                         "Session name",
                         "Optional; defaults to host",
@@ -8957,7 +8957,7 @@ impl App {
             }
             Dialog::Close(index) => column![
                 text("This disconnects the live SSH/PTY session and closes its Iced workspace tab.")
-                    .color(muted()),
+                    .color(fg()),
                 row![
                     space::horizontal(),
                     action("Cancel", Message::CloseDialog),
@@ -8980,7 +8980,8 @@ impl App {
                         "Paste {} bytes across approximately {} line(s)?",
                         prepared.len(),
                         line_count
-                    )),
+                    ))
+                    .color(fg()),
                     text("Review carefully. Multiline terminal pastes can execute several commands immediately.")
                         .size(13)
                         .color(muted()),
@@ -9032,7 +9033,7 @@ impl App {
                     text(format!(
                         "A file already exists at the {direction} destination."
                     ))
-                    .color(muted()),
+                    .color(fg()),
                     container(
                         column![
                             text("Source").size(11).color(fg()),
@@ -9065,7 +9066,7 @@ impl App {
                     .size(12),
                 text("This action is permanent. Directories are removed only when empty.")
                     .size(12)
-                    .color(muted()),
+                    .color(fg()),
                 row![
                     space::horizontal(),
                     action("Cancel", Message::CloseDialog),
@@ -9083,7 +9084,7 @@ impl App {
                     "This action is permanent and uses the validated SFTP delete path."
                 })
                 .size(12)
-                .color(muted()),
+                .color(fg()),
                 row![
                     space::horizontal(),
                     action("Cancel", Message::CloseDialog),
@@ -9122,7 +9123,7 @@ impl App {
             }
             Dialog::ImportProfiles => column![
                 text("Merge a validated non-secret Inspirum profile JSON file into the current library. Existing profiles are never overwritten by import.")
-                    .color(muted()),
+                    .color(fg()),
                 column![
                     text("Import file").size(13).color(theme::palette().text),
                     text_input("/path/to/profiles.json", &self.import_path)
