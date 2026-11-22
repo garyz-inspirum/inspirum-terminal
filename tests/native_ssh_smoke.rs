@@ -459,6 +459,32 @@ fn round_trip(stream: &mut TcpStream, message: &[u8]) {
     assert_eq!(response, message, "forwarded loopback echo changed");
 }
 
+// An absent loopback listener must produce an actual refusal, not merely a
+// timeout or a reset. Probe with the same blocking connect path as the echo
+// check, rather than connect_timeout's separate nonblocking socket path.
+fn wait_loopback_refused(port: u16, context: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let result = TcpStream::connect(("127.0.0.1", port));
+        if matches!(&result, Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{context} did not refuse connections on {port}; last probe: {result:?}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn closed_loopback_listener_reports_connection_refused() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    wait_loopback_refused(port, "closed fixture listener");
+}
+
 /// Exercise the same saved-profile store and tunnel manager used by Iced.
 #[test]
 #[ignore = "requires disposable AsyncSSH fixture: scripts/test-native-ssh-smoke.py"]
@@ -496,23 +522,7 @@ fn saved_profile_tunnel_manager_releases_and_reuses_local_port() {
         );
         assert_eq!(manager.stop(&key).unwrap(), tunnels::Status::Stopped);
         assert_eq!(manager.status(&key), tunnels::Status::Stopped);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if matches!(
-                TcpStream::connect_timeout(
-                    &([127, 0, 0, 1], local_port).into(),
-                    Duration::from_millis(100)
-                ),
-                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused
-            ) {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "manager stop {attempt} did not release {local_port}"
-            );
-            thread::sleep(Duration::from_millis(25));
-        }
+        wait_loopback_refused(local_port, &format!("manager stop {attempt}"));
     }
     println!(
         "PASS saved-profile Tunnel Manager echo, stop/refusal, same-port restart and stop/refusal"
