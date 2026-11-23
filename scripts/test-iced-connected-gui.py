@@ -54,6 +54,7 @@ LOGGED_ECHO_LINES = (
     "echo:FIND_P3_PANE",
     "echo:FIND_P3_AFTER",
     "echo:AFTER_EXIT_CANCEL",
+    "echo:AFTER_TUNNEL_SETTINGS",
 )
 
 
@@ -4484,6 +4485,60 @@ async def main() -> int:
                     "shell echo after cancelling Session Exit",
                 )
 
+                # Mandatory Tunnels probe: top-right Tunnels control opens a
+                # right-hand popup offering "Tunnel Settings...", which opens
+                # the Tunnel Manager; Escape closes it and the terminal must
+                # still own the keyboard (no terminal re-click). Saved
+                # forwards are not guaranteed by the fixture, so no toggles.
+                tun_width, tun_height = window_size(window, env)
+                tunnels_bounds = await click_label(
+                    window, destination / "connected-tunnels-button.png", "Tunnels", env,
+                    region=(max(0, tun_width - 220), 0, tun_width, 42), timeout=15,
+                )
+                popup_region = (
+                    max(0, tun_width - 440),
+                    tunnels_bounds[1],
+                    tun_width,
+                    min(tun_height, tunnels_bounds[3] + 420),
+                )
+                settings_bounds = await locate_rendered_label(
+                    window, destination / "connected-tunnels-popup.png",
+                    "Tunnel Settings...", env=env, region=popup_region, timeout=15,
+                )
+                if not _bounds_inside(settings_bounds, popup_region):
+                    raise RuntimeError(
+                        f"Tunnel Settings... {settings_bounds} outside right-hand "
+                        f"Tunnels popup region {popup_region}"
+                    )
+                command(
+                    "xdotool", "mousemove", "--window", window,
+                    *map(str, center(settings_bounds)), "click", "1", env=env,
+                )
+                await asyncio.sleep(.6)
+                await locate_rendered_label(
+                    window, destination / "connected-tunnels-settings.png",
+                    "Tunnel Manager", env=env, timeout=15,
+                )
+                command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                await asyncio.sleep(.6)
+                tunnels_closed = destination / "connected-tunnels-closed.png"
+                await asyncio.to_thread(screenshot, window, tunnels_closed, env)
+                try:
+                    await asyncio.to_thread(
+                        locate_visible_label, tunnels_closed, "Tunnel Manager",
+                    )
+                except RuntimeError:
+                    pass
+                else:
+                    raise RuntimeError("Escape did not close the Tunnel Manager")
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:AFTER_TUNNEL_SETTINGS", env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: "NATIVE_ECHO:AFTER_TUNNEL_SETTINGS" in events.path.read_text(encoding="utf-8").splitlines(),
+                    "shell echo after closing Tunnel Manager without terminal click",
+                )
+
                 event_log = events.path.read_text(encoding="utf-8")
                 if "SHELL_PTY_RESIZE" not in event_log:
                     raise RuntimeError("connected SSH fixture never observed a live PTY resize")
@@ -4691,6 +4746,7 @@ async def main() -> int:
                     "PASS: privacy-locked and free-type synthetic text never reached SSH\n"
                     "PASS: Session Exit asked for confirmation and Cancel left the shell answering AFTER_EXIT_CANCEL\n"
                     "PASS: Exit Cancel removed the confirmation before the workspace was clicked\n"
+                    "PASS: top-right Tunnels popup showed Tunnel Settings..., which opened Tunnel Manager; Escape closed it and the shell answered AFTER_TUNNEL_SETTINGS without a terminal click\n"
                     "PASS: window-manager close request asked for confirmation; confirming Exit ended the process with exit code 0\n"
                     f"Exit Cancel dialog removal: {removed_pixels} pixels\n"
                     f"Window-manager close exit: {close_elapsed:.1f}s code {close_code}\n"
