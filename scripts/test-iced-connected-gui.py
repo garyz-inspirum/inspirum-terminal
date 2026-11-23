@@ -917,6 +917,40 @@ INVERTED_MIN_S = 10.0 * TIME_SCALE
 TOOLBAR_BOTTOM_Y = 90
 
 
+def editor_form_region(width: int, height: int):
+    """Right-hand Tunnel Manager form: right half of the window below the
+    toolbar. The list sits on the left, so a list-row label can never prove
+    which forward the form is editing."""
+    return (width // 2, 42, width, height)
+
+
+def require_editor_selection(path, port: int, sibling_port: int, form_region, *,
+                             locate=None):
+    """Prove the editor form shows ``port`` and NOT ``sibling_port``.
+
+    A no-op click leaves the previous selection's port in the form, so the
+    sibling must be absent; the port must be inside ``form_region``, not just
+    anywhere (e.g. a list subtitle). Returns the port's bounds.
+    """
+    locate = locate or locate_visible_label
+    try:
+        box = locate(path, str(port), region=form_region)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"editor form {form_region} does not show selected listen port {port}"
+        ) from exc
+    if _bounds_inside(box, form_region) is None:
+        raise RuntimeError(f"listen port {port} box {box} outside editor form {form_region}")
+    try:
+        stale = locate(path, str(sibling_port), region=form_region)
+    except RuntimeError:
+        return box
+    raise RuntimeError(
+        f"editor form still shows sibling port {sibling_port} at {stale}; "
+        f"selection click was a no-op"
+    )
+
+
 def _bounds_inside(bounds, region):
     """Return ``bounds`` only when the box lies wholly inside ``region``.
 
@@ -4685,16 +4719,34 @@ async def main() -> int:
                     "Tunnel Manager", env=env, timeout=15,
                 )
                 if POPULATED:
-                    # Select the first saved tunnel in the editor list and
-                    # require its label to stay rendered (selected state).
-                    await click_label(
-                        window, destination / "connected-tunnels-settings.png",
-                        POPULATED_LABELS[0], env, timeout=15, settle=.8,
-                    )
-                    await locate_rendered_label(
-                        window, destination / "connected-tunnels-editor-selected.png",
-                        POPULATED_LABELS[0], env=env, timeout=15,
-                    )
+                    # Select each saved tunnel in the editor list. The list
+                    # label renders regardless of selection, so proof is the
+                    # selected forward's unique listen port in the right-hand
+                    # form with the sibling's port absent (no-op click fails).
+                    ed_w, ed_h = window_size(window, env)
+                    form_region = editor_form_region(ed_w, ed_h)
+                    list_region = (0, 42, ed_w // 2, ed_h)
+                    for idx, (label, name) in enumerate(
+                        zip(POPULATED_LABELS, ("alpha", "bravo"))
+                    ):
+                        await click_label(
+                            window, destination / f"connected-tunnels-editor-pre-{name}.png",
+                            label, env, region=list_region, timeout=15, settle=.8,
+                        )
+                        shot = destination / f"connected-tunnels-editor-selected-{name}.png"
+                        deadline = time.monotonic() + 15 * TIME_SCALE
+                        while True:
+                            await asyncio.to_thread(screenshot, window, shot, env)
+                            try:
+                                await asyncio.to_thread(
+                                    require_editor_selection, shot,
+                                    forward_ports[idx], forward_ports[1 - idx], form_region,
+                                )
+                                break
+                            except RuntimeError:
+                                if time.monotonic() >= deadline:
+                                    raise
+                                await asyncio.sleep(.5)
                 command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
                 await asyncio.sleep(.6)
                 tunnels_closed = destination / "connected-tunnels-closed.png"
