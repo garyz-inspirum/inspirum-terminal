@@ -11232,10 +11232,6 @@ fn border_fill(_: &Theme) -> container::Style {
     fill_style(theme::palette().border)
 }
 
-fn accent_fill(_: &Theme) -> container::Style {
-    fill_style(theme::palette().accent)
-}
-
 fn tab_active_fill(_: &Theme) -> container::Style {
     fill_style(theme::palette().tab_active)
 }
