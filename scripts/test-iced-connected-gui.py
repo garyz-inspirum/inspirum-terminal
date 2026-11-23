@@ -917,30 +917,76 @@ INVERTED_MIN_S = 10.0 * TIME_SCALE
 TOOLBAR_BOTTOM_Y = 90
 
 
+# Tunnel Settings dialog geometry (src/iced_app.rs): width is
+# clamp(window - 2*24, 600, 840), centred; 12 px padding; the 300 px list
+# card, a 12 px gap, then the editor card. Measured on the 1280x800 populated
+# dark frame (connected-tunnels-editor-selected.png): dialog x 220..1060,
+# list card 245..545, editor card 557..1035, "Listen Port" label x 569..650,
+# its input 719..1023 x 287..310 with digits at y 295..304, Destination Port
+# input y 357..380; OCR puts the "Tunnel Manager" heading top at y 151.
+TUNNEL_DIALOG_MAX_W = 840
+TUNNEL_DIALOG_MIN_W = 600
+TUNNEL_DIALOG_MARGIN = 24
+# Editor card left edge relative to the dialog's left edge (557 - 220).
+TUNNEL_EDITOR_CARD_DX = 337
+# Listen Port input left edge (719 - 220) at the widest label column; the
+# label column can shrink to 128 px (22 px less) on narrow dialogs.
+TUNNEL_LISTEN_INPUT_DX = 499 - 22 - 6
+# Listen Port row relative to the heading's OCR top: digits at +144..+153.
+# The band stops above the Destination Host input (+171) and far above the
+# Destination Port digits (+216), so a form showing the port in another row
+# cannot satisfy it.
+TUNNEL_LISTEN_ROW_DY = (124, 170)
+
+
+def tunnel_dialog_left(width: int) -> tuple[int, int]:
+    """``(left, dialog_width)`` of the centred Tunnel Settings dialog."""
+    dialog = max(TUNNEL_DIALOG_MIN_W, min(TUNNEL_DIALOG_MAX_W, width - 2 * TUNNEL_DIALOG_MARGIN))
+    return max(0, (width - dialog) // 2), dialog
+
+
 def editor_form_region(width: int, height: int):
-    """Right-hand Tunnel Manager form: right half of the window below the
-    toolbar. The list sits on the left, so a list-row label can never prove
-    which forward the form is editing."""
-    return (width // 2, 42, width, height)
+    """Tunnel Manager editor card: right of the 300 px list card, inside the
+    dialog. The list sits on the left, so a list-row label can never prove
+    which forward the form is editing. Used for "sibling port absent"."""
+    left, dialog = tunnel_dialog_left(width)
+    return (left + TUNNEL_EDITOR_CARD_DX - 6, 42, min(width, left + dialog), height)
+
+
+def listen_port_row_region(heading_bounds, width: int):
+    """Tight box around the Listen Port input, anchored to the located
+    "Tunnel Manager" heading. Only digits here prove the selected forward:
+    the editor card also shows the destination port (the shared echo
+    service), so the whole card would accept a port from the wrong row."""
+    left, dialog = tunnel_dialog_left(width)
+    top = heading_bounds[1]
+    return (
+        left + TUNNEL_LISTEN_INPUT_DX,
+        top + TUNNEL_LISTEN_ROW_DY[0],
+        min(width, left + dialog - 20),
+        top + TUNNEL_LISTEN_ROW_DY[1],
+    )
 
 
 def require_editor_selection(path, port: int, sibling_port: int, form_region, *,
-                             locate=None):
+                             row_region=None, locate=None):
     """Prove the editor form shows ``port`` and NOT ``sibling_port``.
 
     A no-op click leaves the previous selection's port in the form, so the
-    sibling must be absent; the port must be inside ``form_region``, not just
-    anywhere (e.g. a list subtitle). Returns the port's bounds.
+    sibling must be absent anywhere in ``form_region``. The selected port
+    must be inside ``row_region`` (the Listen Port input) when given, else
+    inside ``form_region`` -- never a list subtitle. Returns its bounds.
     """
     locate = locate or locate_visible_label
+    where = row_region or form_region
     try:
-        box = locate(path, str(port), region=form_region)
+        box = locate(path, str(port), region=where)
     except RuntimeError as exc:
         raise RuntimeError(
-            f"editor form {form_region} does not show selected listen port {port}"
+            f"editor form {where} does not show selected listen port {port}"
         ) from exc
-    if _bounds_inside(box, form_region) is None:
-        raise RuntimeError(f"listen port {port} box {box} outside editor form {form_region}")
+    if _bounds_inside(box, where) is None:
+        raise RuntimeError(f"listen port {port} box {box} outside editor row {where}")
     try:
         stale = locate(path, str(sibling_port), region=form_region)
     except RuntimeError:
@@ -4714,7 +4760,7 @@ async def main() -> int:
                     *map(str, center(settings_bounds)), "click", "1", env=env,
                 )
                 await asyncio.sleep(.6)
-                await locate_rendered_label(
+                heading_bounds = await locate_rendered_label(
                     window, destination / "connected-tunnels-settings.png",
                     "Tunnel Manager", env=env, timeout=15,
                 )
@@ -4725,6 +4771,7 @@ async def main() -> int:
                     # form with the sibling's port absent (no-op click fails).
                     ed_w, ed_h = window_size(window, env)
                     form_region = editor_form_region(ed_w, ed_h)
+                    listen_row = listen_port_row_region(heading_bounds, ed_w)
                     list_region = (0, 42, ed_w // 2, ed_h)
                     for idx, (label, name) in enumerate(
                         zip(POPULATED_LABELS, ("alpha", "bravo"))
@@ -4741,6 +4788,7 @@ async def main() -> int:
                                 await asyncio.to_thread(
                                     require_editor_selection, shot,
                                     forward_ports[idx], forward_ports[1 - idx], form_region,
+                                    row_region=listen_row,
                                 )
                                 break
                             except RuntimeError:
