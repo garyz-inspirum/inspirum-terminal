@@ -1426,10 +1426,11 @@ fn file_header_cell<'a>(
     ascending: bool,
     message: Message,
 ) -> Element<'a, Message> {
+    // Header captions use primary `text`, a step darker than row cells.
     let label = text(label)
         .size(theme::metrics::UI_TEXT)
         .font(Font::MONOSPACE)
-        .color(theme::palette().text_dock)
+        .color(theme::palette().text)
         .wrapping(text::Wrapping::None);
     let label = container(label)
         .width(Fill)
@@ -1444,11 +1445,7 @@ fn file_header_cell<'a>(
         } else {
             icons::Icon::TriangleDown
         };
-        content = content.push(icons::icon(
-            glyph,
-            FILE_SORT_MARK,
-            theme::palette().text_dock,
-        ));
+        content = content.push(icons::icon(glyph, FILE_SORT_MARK, theme::palette().text));
     }
     button(content)
         .on_press(message)
@@ -2576,11 +2573,17 @@ fn file_listing_footer<'a>(count: usize, total: u64) -> Element<'a, Message> {
         text(file_listing_summary(count, total))
             .size(theme::metrics::UI_TEXT)
             .font(Font::MONOSPACE)
-            .color(theme::palette().muted),
+            .color(file_summary_color(theme::palette())),
     )
     .height(16)
     .padding([0, FILE_CELL_PAD])
     .into()
+}
+
+/// Footer summary (`1 item 2.0 KB`) uses dock body text; `muted` is
+/// reserved for placeholders and disabled controls.
+fn file_summary_color(p: &theme::Palette) -> Color {
+    p.text_dock
 }
 
 /// Footer summary under a file table: `1 item 2.0 KB`, `3 items 6.0 KB`.
@@ -8408,12 +8411,13 @@ impl App {
         // Selected fill is `selected_row`. `text_dock` on that fill is 8.9:1
         // (light) and 8.2:1 (dark); `muted` on the same fill is under 4.5:1.
         let suffix_color = if selected { p.text_dock } else { p.muted };
+        let name_color = if selected { p.text } else { p.text_dock };
         let label = row![
             icons::dot(p.magenta, 7.0),
             text(profile.name.clone())
                 .size(theme::metrics::UI_TEXT)
                 .font(iced::Font::MONOSPACE)
-                .color(p.text_dock),
+                .color(name_color),
             text(suffix)
                 .size(theme::metrics::UI_TEXT)
                 .font(iced::Font::MONOSPACE)
@@ -8453,7 +8457,20 @@ impl App {
             .on_press(Message::EditProfile(index));
         // Right presses are not captured by the row buttons, so a wrapping
         // mouse_area receives them (same pattern as file rows).
-        mouse_area(row![item, edit].width(Fill).spacing(0))
+        let body: Element<'a, Message> = if selected {
+            // Overlay, not a sibling: the row keeps its width and indent.
+            stack![
+                row![item, edit].width(Fill).spacing(0),
+                container(space::vertical())
+                    .width(2)
+                    .height(theme::metrics::ROW_HEIGHT)
+                    .style(selection_marker),
+            ]
+            .into()
+        } else {
+            row![item, edit].width(Fill).spacing(0).into()
+        };
+        mouse_area(body)
             .on_right_press(Message::OpenSessionContext { index })
             .into()
     }
@@ -9108,12 +9125,33 @@ impl App {
             return self.files_unavailable();
         }
         let (_, remote_panel) = self.file_listing_panels();
+        let eligible = remote_file_actions(self.files.selected_remote.as_ref());
         let actions = files_action_row(vec![
-            action("<- Download", Message::FilesRequestDownload).into(),
+            action_when(
+                "<- Download",
+                eligible.transfer,
+                Message::FilesRequestDownload,
+            )
+            .into(),
             action("New remote folder", Message::FilesRequestMkdirRemote).into(),
-            action("Rename remote", Message::FilesRequestRenameRemote).into(),
-            action("Edit remote", Message::FilesRequestEditRemote).into(),
-            action("Delete remote", Message::FilesRequestDeleteRemote).into(),
+            action_when(
+                "Rename remote",
+                eligible.rename,
+                Message::FilesRequestRenameRemote,
+            )
+            .into(),
+            action_when(
+                "Edit remote",
+                eligible.edit,
+                Message::FilesRequestEditRemote,
+            )
+            .into(),
+            action_when(
+                "Delete remote",
+                eligible.delete,
+                Message::FilesRequestDeleteRemote,
+            )
+            .into(),
         ]);
         column![remote_panel, actions, self.remote_editor_section()]
             .height(Fill)
@@ -9127,11 +9165,22 @@ impl App {
             return self.files_unavailable();
         }
         let (local_panel, _) = self.file_listing_panels();
+        let eligible = local_file_actions(self.files.selected_local.as_deref());
         let actions = files_action_row(vec![
-            action("Upload ->", Message::FilesRequestUpload).into(),
+            action_when("Upload ->", eligible.transfer, Message::FilesRequestUpload).into(),
             action("New local folder", Message::FilesRequestMkdirLocal).into(),
-            action("Rename local", Message::FilesRequestRenameLocal).into(),
-            action("Delete local", Message::FilesRequestDeleteLocal).into(),
+            action_when(
+                "Rename local",
+                eligible.rename,
+                Message::FilesRequestRenameLocal,
+            )
+            .into(),
+            action_when(
+                "Delete local",
+                eligible.delete,
+                Message::FilesRequestDeleteLocal,
+            )
+            .into(),
         ]);
         column![local_panel, actions]
             .height(Fill)
@@ -10935,10 +10984,54 @@ fn policy_field<'a>(
 }
 
 fn action<'a>(label: impl Into<String>, message: Message) -> button::Button<'a, Message> {
+    action_when(label, true, message)
+}
+
+/// Same control as [`action`]; without `enabled` it has no `on_press`, so
+/// Iced reports `Status::Disabled` and `quiet` draws the unavailable look.
+fn action_when<'a>(
+    label: impl Into<String>,
+    enabled: bool,
+    message: Message,
+) -> button::Button<'a, Message> {
     button(text(label.into()).size(13))
         .padding([3, 10])
         .style(quiet)
-        .on_press(message)
+        .on_press_maybe(enabled.then_some(message))
+}
+
+/// Which selection-dependent file actions apply to the current selection.
+/// Mirrors the request handlers: they reject a missing selection, and
+/// Download/Edit also reject a directory. The handlers keep those status
+/// messages for the context menu, keyboard and drop paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileActionEligibility {
+    /// Download (remote) or Upload (local).
+    transfer: bool,
+    edit: bool,
+    rename: bool,
+    delete: bool,
+}
+
+fn remote_file_actions(selected: Option<&sftp::RemoteEntry>) -> FileActionEligibility {
+    let file = selected.is_some_and(|entry| !entry.is_dir);
+    FileActionEligibility {
+        transfer: file,
+        edit: file,
+        rename: selected.is_some(),
+        delete: selected.is_some(),
+    }
+}
+
+/// Local selection is a path; `request_upload` itself rejects non-files.
+fn local_file_actions(selected: Option<&std::path::Path>) -> FileActionEligibility {
+    let any = selected.is_some();
+    FileActionEligibility {
+        transfer: any,
+        edit: false,
+        rename: any,
+        delete: any,
+    }
 }
 
 fn surface(_: &Theme) -> container::Style {
@@ -11002,12 +11095,17 @@ fn menu_item(_: &Theme, status: button::Status) -> button::Style {
 }
 
 fn quiet(_: &Theme, status: button::Status) -> button::Style {
-    let p = theme::palette();
+    quiet_style(theme::palette(), status)
+}
+
+fn quiet_style(p: &theme::Palette, status: button::Status) -> button::Style {
     let (background, border_color, text_color) = match status {
         button::Status::Hovered => (p.hover, p.accent, p.text),
         button::Status::Pressed => (p.selected_row, p.accent, p.text),
+        // Disabled sinks into the dock fill with the faint divider; an
+        // available control is a raised field with the 3:1 control outline.
         button::Status::Disabled => (p.dock, p.border, p.muted),
-        button::Status::Active => (p.list, p.border, p.text),
+        button::Status::Active => (p.list, p.control_outline, p.text),
     };
     button::Style {
         background: Some(background.into()),
@@ -11158,7 +11256,10 @@ fn tab_button(theme: &Theme, status: button::Status) -> button::Style {
 }
 
 fn file_row(_theme: &Theme, status: button::Status) -> button::Style {
-    let palette = theme::palette();
+    file_row_style(theme::palette(), status)
+}
+
+fn file_row_style(palette: &theme::Palette, status: button::Status) -> button::Style {
     let background = match status {
         button::Status::Hovered | button::Status::Pressed => palette.hover,
         _ => palette.list,
@@ -11171,12 +11272,22 @@ fn file_row(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// Selected row: neutral `selected_row` fill plus a square 1px
+/// `selection_indicator` outline (drawn inside the bounds, so the row keeps
+/// its 23px height and column widths). Hover alone never draws the outline.
 fn file_row_selected(_theme: &Theme, _status: button::Status) -> button::Style {
-    let palette = theme::palette();
+    file_row_selected_style(theme::palette())
+}
+
+fn file_row_selected_style(palette: &theme::Palette) -> button::Style {
     button::Style {
         background: Some(palette.selected_row.into()),
         text_color: palette.text_dock,
-        border: Border::default(),
+        border: Border {
+            color: palette.selection_indicator,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
         ..button::Style::default()
     }
 }
@@ -11447,7 +11558,8 @@ fn transfer_progress(_: &Theme) -> progress_bar::Style {
     }
 }
 
-/// Selected session row: palette `selected_row` fill, full width, no border.
+/// Selected session row: palette `selected_row` fill; the row also draws a
+/// [`selection_marker`] bar that open (connected) rows do not.
 fn session_row_selected(_theme: &Theme, _status: button::Status) -> button::Style {
     let p = theme::palette();
     button::Style {
@@ -11456,6 +11568,11 @@ fn session_row_selected(_theme: &Theme, _status: button::Status) -> button::Styl
         border: Border::default(),
         ..button::Style::default()
     }
+}
+
+/// 2px square `selection_indicator` bar on the left edge of a selected row.
+fn selection_marker(_theme: &Theme) -> container::Style {
+    fill_style(theme::palette().selection_indicator)
 }
 
 const SESSION_DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -11545,6 +11662,149 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn selected_file_row_is_outlined_unlike_hover_rest_or_disabled() {
+        use iced::widget::button::Status;
+        for p in [theme::LIGHT, theme::DARK] {
+            let selected = file_row_selected_style(&p);
+            assert_eq!(selected.background, Some(p.selected_row.into()));
+            assert_eq!(selected.border.color, p.selection_indicator);
+            assert!(selected.border.width >= 1.0, "selection needs an outline");
+            let radius = selected.border.radius;
+            assert!(
+                [
+                    radius.top_left,
+                    radius.top_right,
+                    radius.bottom_right,
+                    radius.bottom_left
+                ]
+                .iter()
+                .all(|corner| *corner == 0.0),
+                "WindTerm rows are square"
+            );
+            for status in [Status::Active, Status::Hovered, Status::Pressed] {
+                let row = file_row_style(&p, status);
+                assert_eq!(
+                    row.border.width, 0.0,
+                    "{status:?} row must not look selected"
+                );
+                assert_ne!(row.background, selected.background, "{status:?} fill");
+            }
+            // A disabled action (unavailable) shares neither cue.
+            let disabled = quiet_style(&p, Status::Disabled);
+            assert_ne!(disabled.background, selected.background);
+            assert_ne!(disabled.border.color, selected.border.color);
+        }
+    }
+
+    #[test]
+    fn disabled_file_action_is_visibly_unavailable_against_enabled() {
+        use iced::widget::button::Status;
+        for p in [theme::LIGHT, theme::DARK] {
+            let enabled = quiet_style(&p, Status::Active);
+            let disabled = quiet_style(&p, Status::Disabled);
+            assert_eq!(enabled.text_color, p.text);
+            assert_eq!(disabled.text_color, p.muted);
+            assert_eq!(enabled.border.color, p.control_outline);
+            assert_eq!(disabled.border.color, p.border);
+            assert_ne!(enabled.background, disabled.background);
+            assert_eq!(disabled.background, Some(p.dock.into()));
+            // Enabled stays legible and outlined on the dock surface.
+            assert!(contrast_ratio(enabled.text_color, p.list) >= 7.0);
+            assert!(contrast_ratio(enabled.border.color, p.dock) >= 3.0);
+            // Disabled is quieter than enabled but still readable for OCR.
+            assert!(contrast_ratio(disabled.text_color, p.dock) >= 4.5);
+            assert!(
+                contrast_ratio(disabled.text_color, p.dock)
+                    < contrast_ratio(enabled.text_color, p.list)
+            );
+        }
+        assert_eq!(file_summary_color(&theme::LIGHT), theme::LIGHT.text_dock);
+        assert!(contrast_ratio(file_summary_color(&theme::LIGHT), theme::LIGHT.list) >= 7.0);
+    }
+
+    fn contrast_ratio(a: iced::Color, b: iced::Color) -> f32 {
+        let luminance = |color: iced::Color| {
+            let linear = |channel: f32| {
+                if channel <= 0.04045 {
+                    channel / 12.92
+                } else {
+                    ((channel + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+        };
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn file_actions_follow_the_actual_selection_model() {
+        let mut app = app_with_one_pane_and_auxiliary_shell("filer-action-eligibility");
+        let none = FileActionEligibility {
+            transfer: false,
+            edit: false,
+            rename: false,
+            delete: false,
+        };
+        assert_eq!(
+            remote_file_actions(app.files.selected_remote.as_ref()),
+            none
+        );
+        assert_eq!(
+            local_file_actions(app.files.selected_local.as_deref()),
+            none
+        );
+
+        // Handlers keep their no-selection feedback (context menu / keys).
+        let _ = app.update(Message::FilesRequestDownload);
+        assert_eq!(app.status, "Select a remote file to download.");
+        let _ = app.update(Message::FilesRequestDeleteLocal);
+        assert_eq!(app.status, "Select a local file to delete.");
+
+        let file = sftp::RemoteEntry::new("notes.txt", false, Some(12));
+        app.files.remote_entries = vec![file.clone()];
+        let _ = app.update(Message::FilesSelectRemote(file));
+        assert_eq!(
+            remote_file_actions(app.files.selected_remote.as_ref()),
+            FileActionEligibility {
+                transfer: true,
+                edit: true,
+                rename: true,
+                delete: true,
+            }
+        );
+
+        // Right-click selects a directory: Download/Edit would only report
+        // "not a directory", so they are unavailable; Rename/Delete apply.
+        let dir = sftp::RemoteEntry::new("src", true, None);
+        let _ = app.update(Message::OpenRemoteFileContext {
+            entry: dir,
+            open_path: "/srv/src".into(),
+        });
+        assert_eq!(
+            remote_file_actions(app.files.selected_remote.as_ref()),
+            FileActionEligibility {
+                transfer: false,
+                edit: false,
+                rename: true,
+                delete: true,
+            }
+        );
+
+        let _ = app.update(Message::FilesSelectLocal(PathBuf::from("/tmp/upload.bin")));
+        assert_eq!(
+            local_file_actions(app.files.selected_local.as_deref()),
+            FileActionEligibility {
+                transfer: true,
+                edit: false,
+                rename: true,
+                delete: true,
+            }
+        );
+        let _ = app.view();
+    }
 
     #[test]
     fn flat_input_uses_control_outline_not_divider_in_both_themes() {
