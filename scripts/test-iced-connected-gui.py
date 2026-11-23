@@ -2049,7 +2049,18 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
         try:
             await asyncio.sleep(1)
             shot("tour-05a-tunnels-open.png")
-            await tour_label(tour_dir / "tour-05a-tunnels-open.png", "Tunnel Manager")
+            # Top Tunnels opens a quick popup; its footer opens the manager.
+            popup = (max(0, width - 340), 32, width, min(height, 400))
+            settings = await tour_label(
+                tour_dir / "tour-05a-tunnels-open.png", "Tunnel Settings...",
+                region=popup,
+            )
+            if not settings:
+                raise RuntimeError("Tunnel Settings... not visible in tunnels popup")
+            click(*centre(settings))
+            await asyncio.sleep(1)
+            shot("tour-05b-tunnel-settings.png")
+            await tour_label(tour_dir / "tour-05b-tunnel-settings.png", "Tunnel Manager")
         finally:
             key("Escape")
             await asyncio.sleep(.5)
