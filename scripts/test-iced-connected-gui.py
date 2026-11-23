@@ -2041,14 +2041,20 @@ def filer_action_buttons(frame, band) -> list[dict]:
     return buttons
 
 
-def filer_action_enabled(buttons: list[dict]) -> list[bool]:
-    """Enabled == same border and face as the always-enabled reference button."""
-    reference = buttons[FILER_REFERENCE_ACTION]
-    return [
-        not _far(button["border"], reference["border"], 24)
-        and not _far(button["face"], reference["face"], 8)
-        for button in buttons
-    ]
+def _same_look(a: dict, b: dict) -> bool:
+    """Same button appearance: border within 24, face within 8."""
+    return not _far(a["border"], b["border"], 24) and not _far(a["face"], b["face"], 8)
+
+
+def filer_action_enabled(buttons: list[dict], anchor: dict | None = None) -> list[bool]:
+    """Enabled == same border and face as ``anchor``.
+
+    ``anchor`` defaults to this frame's New remote folder; selected_filer_verdict
+    passes the BEFORE frame's New remote folder so an after frame whose
+    reference also went disabled cannot redefine "enabled".
+    """
+    reference = anchor if anchor is not None else buttons[FILER_REFERENCE_ACTION]
+    return [_same_look(button, reference) for button in buttons]
 
 
 def filer_row_outline(frame, label_box, *, reach: int = 12, coverage: float = .95) -> dict:
@@ -2104,7 +2110,9 @@ def selected_filer_verdict(unselected, selected, label_box, action_band) -> str:
 
     unselected must show no outline and Download/Rename/Edit/Delete disabled;
     selected must show the outline and those four enabled, with the same five
-    button geometries in both frames.
+    button geometries in both frames. "Enabled" is the unselected frame's New
+    remote folder look, which must be unchanged in the selected frame; every
+    target must differ from it before, match it after, and visibly change.
     """
     unselected, selected = _frame(unselected), _frame(selected)
     if unselected[:2] != selected[:2]:
@@ -2123,7 +2131,18 @@ def selected_filer_verdict(unselected, selected, label_box, action_band) -> str:
             f"action button geometry moved: {[b['box'] for b in before]} -> "
             f"{[b['box'] for b in after]}"
         )
-    before_on, after_on = filer_action_enabled(before), filer_action_enabled(after)
+    # Anchor "enabled" to New remote folder in the BEFORE frame (it needs no
+    # selection), and require it unchanged after, so a frame where every
+    # button went disabled cannot pass by matching a reference that moved.
+    anchor = before[FILER_REFERENCE_ACTION]
+    reference_after = after[FILER_REFERENCE_ACTION]
+    if not _same_look(reference_after, anchor):
+        raise RuntimeError(
+            f"reference New remote folder changed: border {anchor['border']}->"
+            f"{reference_after['border']} face {anchor['face']}->{reference_after['face']}"
+        )
+    before_on = filer_action_enabled(before, anchor)
+    after_on = filer_action_enabled(after, anchor)
     still_on = [name for i, name in FILER_SELECTION_ACTIONS.items() if before_on[i]]
     if still_on:
         raise RuntimeError(f"unselected frame shows {still_on} enabled")
@@ -2135,9 +2154,14 @@ def selected_filer_verdict(unselected, selected, label_box, action_band) -> str:
                 f"{FILER_SELECTION_ACTIONS[i]} border {after[i]['border']} face {after[i]['face']}"
                 for i in FILER_SELECTION_ACTIONS
             )
-            + f"; reference border {after[FILER_REFERENCE_ACTION]['border']} "
-            f"face {after[FILER_REFERENCE_ACTION]['face']}"
+            + f"; anchor (before New remote folder) border {anchor['border']} "
+            f"face {anchor['face']}"
         )
+    unchanged = [
+        name for i, name in FILER_SELECTION_ACTIONS.items() if _same_look(before[i], after[i])
+    ]
+    if unchanged:
+        raise RuntimeError(f"selection did not change {unchanged} appearance")
     return (
         f"outline {outline['box']} fill {outline['fill']}; "
         + ", ".join(

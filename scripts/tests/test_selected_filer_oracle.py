@@ -62,6 +62,55 @@ def splice_box(base, donor, box):
     return out
 
 
+def disable_reference(frame):
+    """frame with New remote folder recoloured to the real disabled look.
+
+    Enabled border/face pixels become tour-08's disabled Download border/face
+    (191 on 240); label pixels are left as they are.
+    """
+    out = clone(frame)
+    disabled = module.filer_action_buttons(UNSELECTED, ACTION_BAND)[0]
+    reference = module.filer_action_buttons(out, ACTION_BAND)[module.FILER_REFERENCE_ACTION]
+    x0, top, x1, bottom = reference["box"]
+    channels = out[2]
+    for y in range(top, bottom + 1):
+        row = out[3][y]
+        for x in range(x0, x1 + 1):
+            i = x * channels
+            pixel = tuple(row[i:i + 3])
+            if pixel == reference["border"]:
+                row[i:i + 3] = bytes(disabled["border"])
+            elif pixel == reference["face"]:
+                row[i:i + 3] = bytes(disabled["face"])
+    return out
+
+
+def recolour_buttons(frame, indices, mapping):
+    """frame with exact pixel colours remapped inside the given action buttons."""
+    out = clone(frame)
+    channels = out[2]
+    for index in indices:
+        x0, top, x1, bottom = module.filer_action_buttons(frame, ACTION_BAND)[index]["box"]
+        for y in range(top, bottom + 1):
+            row = out[3][y]
+            for x in range(x0, x1 + 1):
+                i = x * channels
+                pixel = tuple(row[i:i + 3])
+                if pixel in mapping:
+                    row[i:i + 3] = bytes(mapping[pixel])
+    return out
+
+
+TARGETS = list(module.FILER_SELECTION_ACTIONS)
+GREY = lambda v: (v, v, v)  # noqa: E731
+
+
+def all_disabled_composite():
+    """Quill's second control: selected row, tour-08 strip, New remote folder disabled."""
+    forged = splice_rows(SELECTED, UNSELECTED, ACTION_BAND[1], ACTION_BAND[3])
+    return disable_reference(forged)
+
+
 def verdict(unselected, selected):
     return module.selected_filer_verdict(unselected, selected, LABEL, ACTION_BAND)
 
@@ -117,6 +166,62 @@ class SelectedFilerOracleTest(unittest.TestCase):
                     RuntimeError, rf"selected frame shows \['{name}'\] disabled",
                 ):
                     verdict(UNSELECTED, forged)
+
+    def test_all_disabled_after_frame_fails(self):
+        # Quill: none of the four targets changes, only the reference goes
+        # disabled; the old oracle passed with 191->191 / 240->240.
+        forged = all_disabled_composite()
+        module.filer_row_outline(forged, LABEL)
+        after = module.filer_action_buttons(forged, ACTION_BAND)
+        self.assertEqual(
+            {(b["border"], b["face"]) for b in after}, {((191,) * 3, (240,) * 3)},
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"reference New remote folder changed: border \(118, 118, 118\)->\(191, 191, 191\) "
+            r"face \(255, 255, 255\)->\(240, 240, 240\)",
+        ):
+            verdict(UNSELECTED, forged)
+
+    def test_enabled_anchor_is_the_before_reference(self):
+        forged = all_disabled_composite()
+        before = module.filer_action_buttons(UNSELECTED, ACTION_BAND)
+        after = module.filer_action_buttons(forged, ACTION_BAND)
+        anchor = before[module.FILER_REFERENCE_ACTION]
+        # Self-referenced, the forged strip looks all "enabled"; anchored, none is.
+        self.assertEqual(module.filer_action_enabled(after), [True] * 5)
+        self.assertEqual(module.filer_action_enabled(after, anchor), [False] * 5)
+
+    def test_reference_disabled_alone_fails(self):
+        # Targets really enabled, but the anchor must stay stable too.
+        forged = disable_reference(SELECTED)
+        with self.assertRaisesRegex(RuntimeError, "reference New remote folder changed"):
+            verdict(UNSELECTED, forged)
+
+    def test_targets_measured_against_before_anchor_not_drifted_reference(self):
+        # Reference drifts 118->138 (inside the 24 tolerance, so "stable") and
+        # the targets land at 158: close to the after reference, 40 from the
+        # before anchor. Anchoring to the after reference would chain the drift.
+        forged = recolour_buttons(SELECTED, [module.FILER_REFERENCE_ACTION], {GREY(118): GREY(138)})
+        forged = recolour_buttons(forged, TARGETS, {GREY(118): GREY(158)})
+        with self.assertRaisesRegex(
+            RuntimeError, r"selected frame shows \['Download', 'Rename', 'Edit', 'Delete'\] disabled",
+        ):
+            verdict(UNSELECTED, forged)
+
+    def test_each_target_must_change(self):
+        # Tolerance edge: before targets 143 on 255 (25 from the 118 anchor,
+        # so "disabled"), after 130 on 255 (12 from the anchor, so "enabled"),
+        # yet before->after is only 13: no visible change, so not a selection.
+        before = recolour_buttons(
+            UNSELECTED, TARGETS, {GREY(191): GREY(143), GREY(240): GREY(255)},
+        )
+        after = recolour_buttons(SELECTED, TARGETS, {GREY(118): GREY(130)})
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"selection did not change \['Download', 'Rename', 'Edit', 'Delete'\] appearance",
+        ):
+            verdict(before, after)
 
     def test_hover_only_row_fails(self):
         # Hover = fill-only row; give it the selected action strip so only the
