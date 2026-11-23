@@ -14,6 +14,12 @@ targets; only a selected focused source can mirror to them. An unselected
 focused source receives input only to itself. Tunnels opens from the top-right
 menu-bar button or **Session → Tunnels**.
 
+Reading this document: numbered sections describe the **target**. Paragraphs
+headed **Current build** describe what the code does today (branch state after
+PR #146 plus the #140 Light readability commits `8439728` and `69b70ba`); where
+the two differ, the target is unchanged and still open. Section 11 is a
+historical PR #141 snapshot with later corrections marked inline.
+
 The owner's instruction: the previous UI is hard to read and not intuitive;
 **copy the WindTerm UI and mimic it exactly**. Where this document is silent,
 do what WindTerm does. Never invent a control for a feature that does not
@@ -82,6 +88,13 @@ Default = **Light chrome + dark terminal** (what the owner runs).
 | `danger` | `#D32F2F` | `#FF5C5C` |
 | `status_bg` / `status_text` | `#007ACC` / `#FFFFFF` | `#007ACC` / `#FFFFFF` |
 
+Current build: `src/iced_app/theme.rs` adds tokens not in this table and some
+values differ from it (for example Light `muted`). The state cues below use
+`selection_indicator` (Light `#0066B3`, Dark `#70B8FF`), `selected_row` and
+`control_outline` (Light `#767676`, Dark `#8A8A8A`). Source and its contrast
+tests are authoritative for exact current values; this table remains the
+WindTerm reference.
+
 Panel marker colours (11x11 px square before each dock title, both themes):
 Sender `#A16BE8`, Session `#009FFF`, Outline `#91DDF2`, Transfer `#00CCCC`,
 Filer `#555BA9`, Explorer `#7CB342`, Shell `#FF0099`, Tunnels `#F6A623`.
@@ -108,6 +121,16 @@ at least one working item. Clicking a title opens a flat drop-down (1 px
 border, `list` background, 24 px rows, shortcut text right-aligned and muted,
 separators as 1 px lines); clicking elsewhere or Escape closes it; hovering
 another title while one is open switches menus.
+
+Current build (Light): the open menu title (including the top-right Tunnels
+title) has a `selected_row` fill plus a 2 px `selection_indicator` underline;
+the open state wins over hover. Drop-down row hover uses `selected_row`.
+**View → Theme → Light / Dark** show a marker in the shortcut column instead
+of shortcut text: filled dot = current theme, hollow circle = available.
+Labels and commands are unchanged. Dark keeps its previous open/hover fill
+(`hover`, no underline); the theme marker is drawn in both themes. Menu items
+have no disabled gating; unavailable commands still report through the status
+bar.
 
 Mapping of existing actions (every current button must appear here or in a
 toolbar/context menu):
@@ -157,6 +180,12 @@ is hidden. Persisted with the workspace.
     Session above Outline; Bottom = Sender, Transfer, Shell.
 - Dock splitters are 1 px lines with a 5 px invisible grab zone.
 
+Current build (dock tab state): the active dock tab has a `tab_active` fill,
+`text` label and a 2 px `selection_indicator` top line; inactive tabs keep the
+`text_dock` label (never `muted`, which marks disabled controls). Strip icons
+use `text`. These are palette-driven, so Dark draws the same cues with its own
+tokens; only Light was the readability review target.
+
 Current build: the dock panels are Sender, Session, Transfer, Filer and
 Explorer. Outline and Shell are not available as dock panels (the auxiliary
 shell opens as a split pane) and Tunnels remains a dialog. The presets are
@@ -173,8 +202,15 @@ Single click selects, double click or Enter opens. Selected row uses
 `selected_row` full width. Right-click / gear: Open, Edit, New Session,
 Import. Favourites and tags stay visible as muted suffix text.
 
-Current build: a single click on a session row opens it. Groups are not
-collapsible and there is no right-click menu.
+Current build (PR #143 and #140): a single left click selects a session row;
+a second left click on the same row within 400 ms opens it. Enter does not
+open a selected row. Group rows collapse and expand (a non-empty `Filter`
+shows all matches regardless). Right-click selects the row without starting a
+double-click and opens a menu with Open, Edit, New Session, Import (no
+separator). The selected row has a `selected_row` fill, a 2 px
+`selection_indicator` left bar and `text` name colour, so it differs from
+rows that are merely open/connected. The gear menu holds only the dock
+placement items, not the session items.
 
 ### 5.2 Filer and Explorer panels
 
@@ -201,8 +237,29 @@ Explorer the local file system.
   other side's current directory), Edit (remote), New Folder, Rename, Delete,
   Refresh. Destructive actions keep their confirmation dialogs.
 
-Current build: the Up control shows an arrow plus the word `Up`. Context
-(right-click) menus are not implemented.
+Current build: the Up control shows an arrow plus the word `Up`. There is no
+history drop-down or three-dot menu. A single left click on a **directory**
+row opens it immediately; a single left click on a file selects it (no
+double-click gesture). Right-click (PR #143) selects the row, directories
+included, and opens a context menu: Open (directories), Download and Edit
+(remote files), Upload (local files), New Folder, Rename, Delete, Refresh.
+The selected row has a `selected_row` fill and a square 1 px
+`selection_indicator` outline drawn inside the 23 px row (hover never draws
+the outline). Column header captions and the sort mark use `text`; the footer
+summary uses `text_dock`.
+
+Below each table the build keeps an action-button row (not in the WindTerm
+reference). Since #140 the selection-dependent buttons are disabled when
+they cannot act: Filer Download and Edit need a selected remote file (not a
+directory); Filer Rename/Delete and Explorer Upload/Rename/Delete need any
+selected item. New folder is always enabled. Disabled buttons use the `dock`
+fill, `border` outline and `muted` text; enabled buttons use `list` fill,
+`control_outline` and `text`. Request handlers still report "Select a ..."
+in the status bar for keyboard/context paths. The disabled look itself is not
+new: `quiet` (shared by these and other text buttons, including dialogs)
+already styles any button without `on_press` as `Status::Disabled`. What #140
+adds is conditional `on_press_maybe` gating for these selection-dependent
+file actions. Menu items have no disabled gating.
 
 ### 5.3 Transfer panel
 
@@ -236,6 +293,15 @@ three-line menu icon (tab list). Connection state is shown by the marker
 (filled = connected, hollow = connecting, `danger` = failed/closed) and a
 tooltip, not by words such as LIVE SSH / CONNECTED / PTY / FOCUSED.
 
+Current build (Light, #140): the active session tab uses the `list` fill
+(`#FFFFFF`) against `tab_inactive` (`#DDDDDD`) and a **3 px**
+`selection_indicator` (`#0066B3`) top rule, replacing the 2 px `accent`
+line, which measured about 3.0:1 and read as a hairline. This is a deliberate
+readability deviation from the 2 px WindTerm line. Dark is unchanged:
+`tab_active` fill, 2 px `accent` line. WindTerm-style per-session tab
+colours are not built; a Window → Workspace tab label adds only a coloured
+marker glyph before the tab title.
+
 ### 6.2 Session toolbar
 
 Left group of flat icon buttons: split right, split down, close pane, shell.
@@ -254,6 +320,13 @@ only drawn when the tab has more than one pane (name + close `x`, 22 px).
 The terminal canvas itself (text grid, colours, cursor) is unchanged in this
 pass. WindTerm's timestamp / line-number / fold gutter is a later phase.
 
+Current build (Light, #140): a focused split pane's header gets a pale blue
+tint (`#D9E8F5`) and its 2 px rule strip switches to `selection_indicator`;
+unfocused headers keep `header` and the strip is drawn in the same `header`
+colour (no visible rule). The strip stays 2 px, so the terminal grid height
+does not change on focus. Dark keeps the `header` fill with a 2 px `accent`
+rule. There is still no pane outline.
+
 ### 6.4 Empty workspace
 
 No welcome card. Blank `list`-coloured area with one muted centred line:
@@ -267,6 +340,9 @@ existing status text). Right, in order, 16 px apart: active mode
 `<cols>x<rows>` of the focused pane, `ssh`, running-transfer and
 running-tunnel counts when non-zero, local date-time `YYYY/MM/DD HH:MM`.
 No implementation words (`ICED`, "event bridge").
+
+Current build: unchanged by #140. Both themes keep white text on `#007ACC`
+as in the WindTerm reference; a test pins these values and 4.5:1 contrast.
 
 ## 8. Dialogs
 
@@ -329,6 +405,9 @@ script (updated to the new labels and layout, not weakened).
 Terminal gutter (timestamps, line numbers, folding), per-split-group tab
 strips, quick bar, Find strip, drag-and-drop docking, session tab colours.
 
+Later: the Find strip was implemented in PR #144; the other items remain
+unbuilt (see 11.1).
+
 ## 11. Implementation status
 
 The table records the issue #140 / PR #141 implementation snapshot; it is not
@@ -336,23 +415,46 @@ a current-control inventory or an acceptance claim. In particular, the
 session toolbar and breadcrumb recorded below were removed by PR #145. For
 current menu locations use the note at the top of this document and
 [`workspace.md`](../workspace.md).
+Rows whose PR #141 note has since been contradicted by merged code carry a
+bracketed **Later** correction; the **Current build** paragraphs in the
+sections above are the fuller description.
 
 | Spec section | Status | Note |
 | --- | --- | --- |
 | 1. Window structure | Changed after snapshot | Menu bar, session tab strip, dock areas and status bar remain; no session toolbar after PR #145. |
 | 2. Themes | Implemented | Light (default) and Dark, View > Theme, `INSPIRUM_THEME` override; persisted in `ui-state.json`. |
 | 3. Typography and metrics | Partly | Not measured against every value in the table. |
-| 4. Menu bar | Implemented | Session, Edit, View, Mode, Window, Help with drop-downs (items in `src/iced_app/menu.rs`). |
+| 4. Menu bar | Implemented | Session, Edit, View, Mode, Window, Help with drop-downs (items in `src/iced_app/menu.rs`). [Later, #140: Light open-title fill + underline; filled/hollow Theme marker.] |
 | 5. Dock system | Partly | Left/Right/Bottom areas, tab strips, gear menu (Move to Left/Right/Bottom, Close), both presets, drag-resizable splitters, persistence. No drag-and-drop docking. |
-| 5.1 Session panel | Partly | Single click opens; no collapsible groups, no context menu. |
-| 5.2 Filer and Explorer | Partly | WindTerm columns (Name, Date Modified, Type, Size, Permissions, Owner, Group). No context menus. |
+| 5.1 Session panel | Partly | Single click opens; no collapsible groups, no context menu. [Later, PR #143: single click selects, double click opens, collapsible groups, right-click menu. #140: selected-row left bar. Enter-to-open not built.] |
+| 5.2 Filer and Explorer | Partly | WindTerm columns (Name, Date Modified, Type, Size, Permissions, Owner, Group). No context menus. [Later, PR #143: right-click menus. #140: outlined selected row, selection-gated action buttons. Directories still open on single click; no three-dot or history menu.] |
 | 5.3 Transfer panel | Implemented | Transfer queue as a dock panel. |
 | 5.4 Shell, Sender, Outline | Partly | Sender is a dock panel. Shell opens as a split pane, not a dock panel. Outline not implemented. |
-| 6.1 Session tab strip | Partly | Tab strip present; no per-session tab colours. |
+| 6.1 Session tab strip | Partly | Tab strip present; no per-session tab colours. [Later, #140: Light active tab white + 3 px rule.] |
 | 6.2 Session toolbar | Target only; removed from current build | Toolbar with breadcrumb describes the original design, not PR #145's menu-driven UI. |
-| 6.3 Terminal panes | Partly | Pane headers only for split tabs. No timestamp/line-number/fold gutter. |
+| 6.3 Terminal panes | Partly | Pane headers only for split tabs. No timestamp/line-number/fold gutter. [Later, #140: Light focused header tint.] |
 | 6.4 Empty workspace | Implemented | Muted centred hint line. |
 | 7. Status bar | Implemented | Mode, `<cols>x<rows>`, `ssh`, counts, date-time. |
 | 8. Dialogs | Partly | Restyling not reviewed dialog by dialog. |
 | 9. Things that must keep working | Not yet verified | GUI acceptance on the new layout is pending; a local container harness is in `scripts/local-gui/`. |
-| 10. Not in this pass | Not yet | Gutter, per-split-group tab strips, quick bar, Find strip, drag-and-drop docking, session tab colours. |
+| 10. Not in this pass | Not yet | Gutter, per-split-group tab strips, quick bar, Find strip, drag-and-drop docking, session tab colours. [Later, PR #144: Find strip implemented. Window → Workspace tab labels add a coloured marker, not WindTerm tab colours.] |
+
+### 11.1 #140 Light readability pass (open)
+
+Commits `69b70ba` and `8439728` (on top of merged PR #146) add Light state
+cues for: open menu title, Theme marker, menu hover, session tab, focused pane
+header, dock tab, selected session/file row, and selection-gated file action
+buttons. Contrast targets (4.5:1 text, 3:1 indicators/outlines) are enforced
+by unit tests in `src/iced_app/theme.rs` and `src/iced_app.rs`; that is not a
+screenshot or user acceptance. #140 is not complete. Dark receives only the
+palette-driven dock/row/button cues and the Theme marker; its menu title,
+menu hover, session tab and pane header cues are deliberately unchanged. The
+status bar is unchanged in both themes.
+
+Still not built (target remains): Shell and Outline dock panels (Shell is a
+split pane; Outline absent); Tunnels as a dock panel (dialog/menu only);
+Enter to open a session row; double-click-to-open and three-dot/history
+menus in Filer/Explorer; session toolbar and breadcrumb (removed by PR #145);
+WindTerm-style per-session tab colours (only a coloured label marker exists);
+terminal gutter, per-split-group tab strips, quick bar and drag-and-drop
+docking; disabled gating for menu items. The Find strip is built (PR #144).
