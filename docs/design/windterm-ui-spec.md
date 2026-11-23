@@ -251,11 +251,18 @@ summary uses `text_dock`.
 Below each table the build keeps an action-button row (not in the WindTerm
 reference). Since #140 the selection-dependent buttons are disabled when
 they cannot act: Filer Download and Edit need a selected remote file (not a
-directory); Filer Rename/Delete and Explorer Upload/Rename/Delete need any
-selected item. New folder is always enabled. Disabled buttons use the `dock`
+directory); Filer Rename/Delete need any selected item. Explorer eligibility
+comes from the listed row matching the selected path: Upload needs a selected
+regular file (a selected directory leaves Upload disabled), Rename/Delete
+need any listed item, and a selection with no listed row enables none of
+them. When a listing reloads, a selection still present in the new listing
+is kept (the remote selection is refreshed to the new entry, so type checks
+follow it) and a missing one is cleared; a listing error clears it. New
+folder is always enabled. Disabled buttons use the `dock`
 fill, `border` outline and `muted` text; enabled buttons use `list` fill,
 `control_outline` and `text`. Request handlers still report "Select a ..."
-in the status bar for keyboard/context paths. The disabled look itself is not
+in the status bar for keyboard/context paths; the upload handler also
+rejects a listed directory with "Select a local file to upload.". The disabled look itself is not
 new: `quiet` (shared by these and other text buttons, including dialogs)
 already styles any button without `on_press` as `Status::Disabled`. What #140
 adds is conditional `on_press_maybe` gating for these selection-dependent
