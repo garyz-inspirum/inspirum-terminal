@@ -58,6 +58,25 @@ pub(super) struct Palette {
     pub status_text: Color,
 }
 
+impl Palette {
+    /// Primary field captions and entered values, distinct from supporting copy.
+    pub fn field_label(self) -> Color {
+        self.text
+    }
+
+    pub fn field_help(self) -> Color {
+        self.muted
+    }
+
+    pub fn input_value(self) -> Color {
+        self.field_label()
+    }
+
+    pub fn input_placeholder(self) -> Color {
+        self.field_help()
+    }
+}
+
 const fn hex(value: u32) -> Color {
     Color::from_rgb8(
         ((value >> 16) & 0xff) as u8,
@@ -245,6 +264,30 @@ mod tests {
     fn contrast(a: Color, b: Color) -> f32 {
         let (low, high) = (luminance(a), luminance(b));
         (high.max(low) + 0.05) / (high.min(low) + 0.05)
+    }
+
+    #[test]
+    fn field_hierarchy_is_readable_and_distinct_in_both_themes() {
+        for p in [LIGHT, DARK] {
+            assert_eq!(p.field_label(), p.text);
+            assert_eq!(p.field_help(), p.muted);
+            assert_ne!(p.field_label(), p.field_help());
+            for surface in [p.chrome, p.dock, p.list, p.raised, p.hover, p.selected_row] {
+                assert!(
+                    contrast(p.field_label(), surface) >= 4.5,
+                    "label on {surface:?}"
+                );
+                assert!(
+                    contrast(p.field_help(), surface) >= 4.5,
+                    "help on {surface:?}"
+                );
+            }
+            assert_eq!(p.input_value(), p.field_label());
+            assert_eq!(p.input_placeholder(), p.field_help());
+            assert_ne!(p.input_value(), p.input_placeholder());
+        }
+        assert_eq!(LIGHT.field_label(), hex(0x151515));
+        assert_eq!(LIGHT.field_help(), hex(0x5C5C5C));
     }
 
     #[test]
