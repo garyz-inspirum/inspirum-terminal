@@ -126,43 +126,76 @@ def free_loopback_port(exclude=()) -> int:
     raise RuntimeError("no distinct free loopback port")
 
 
+# Quick-menu toggle slot geometry (src/iced_app.rs): the popup sits 4 px from
+# the window's right edge with a 1 px border, rows have 10 px padding, and the
+# action is a 28 px `toggler(..).size(14)` at the row's right end, so the
+# switch spans [W-43, W-15] with its centre at W-29.
+TOGGLER_WIDTH = 28
+TOGGLER_RIGHT_INSET = 4 + 1 + 10
+# Pixel refinement may only nudge the click inside the slot, never leave it.
+TOGGLER_SLOT_SLACK = 6
+
+
+def toggler_slot(window_width: int) -> tuple[int, int]:
+    """Inclusive x range of the per-forward toggle in the right-hand popup."""
+    right = window_width - TOGGLER_RIGHT_INSET
+    return right - TOGGLER_WIDTH, right
+
+
 def toggler_target(path: Path, label_box, window_width: int):
     """Click point of the per-forward toggle on the row titled by ``label_box``.
 
     The quick-menu control is an iced ``toggler`` with no text, at the right
-    end of the row whose title OCR located. Scan that row band, right of the
-    title, for the rightmost run of columns that differ from the row
-    background; fall back to the geometry in src/iced_app.rs (popup inset 4+1,
-    row padding 10, 28 px toggler) when no run is found.
+    end of the row whose title OCR located. Only the fixed right-hand toggle
+    slot (``toggler_slot``) is scanned: the row's grey subtitle runs under and
+    past the title, and on Ubuntu run 45110697617 a per-row background sampled
+    on a subtitle glyph turned the whole band into "foreground", so the old
+    long-band scan picked a run at x=1157 in the subtitle instead of the
+    switch at x~1251 and the toggle was never clicked. The background is the
+    band's dominant colour (the popup fill), not any single pixel. A run is
+    accepted only when it is switch-sized and centred on the slot; anything
+    else falls back to the slot centre. The result is always inside the slot.
     """
     width, height, channels, rows = _read_png(path)
+    slot_left, slot_right = toggler_slot(window_width)
+    centre = (slot_left + slot_right) // 2
     y1 = max(0, label_box[1] - 2)
     y2 = min(height, label_box[3] + 16)
-    x1 = min(width - 1, label_box[2] + 8)
-    x2 = min(width, window_width - 6)
     cy = (label_box[1] + label_box[3]) // 2 + 7
+    x1 = max(0, slot_left - TOGGLER_SLOT_SLACK)
+    x2 = min(width, slot_right + TOGGLER_SLOT_SLACK + 1, window_width - 6)
+    counts: dict[bytes, int] = {}
+    for y in range(y1, y2):
+        row = rows[y]
+        for x in range(x1, x2):
+            px = bytes(row[x * channels: x * channels + 3])
+            counts[px] = counts.get(px, 0) + 1
+    if not counts:
+        raise RuntimeError(f"toggle slot {x1}..{x2} outside {path} ({width}x{height})")
+    bg = max(counts, key=counts.get)
     columns = []
     for x in range(x1, x2):
-        hit = False
         for y in range(y1, y2):
-            row = rows[y]
-            bg = row[x1 * channels: x1 * channels + 3]
-            px = row[x * channels: x * channels + 3]
+            px = rows[y][x * channels: x * channels + 3]
             if sum(abs(a - b) for a, b in zip(px, bg)) > 60:
-                hit = True
+                columns.append(x)
                 break
-        if hit:
-            columns.append(x)
     runs = []
     for x in columns:
         if runs and x - runs[-1][1] <= 2:
             runs[-1][1] = x
         else:
             runs.append([x, x])
-    for left, right in reversed(runs):
-        if 10 <= right - left + 1 <= 60:
-            return ((left + right) // 2, cy), "pixels"
-    return (window_width - 29, cy), "geometry"
+    target, source = (centre, cy), "geometry"
+    for left, right in runs:
+        mid = (left + right) // 2
+        if (TOGGLER_WIDTH - 8 <= right - left + 1 <= TOGGLER_WIDTH + 8
+                and abs(mid - centre) <= TOGGLER_SLOT_SLACK):
+            target, source = (mid, cy), "pixels"
+            break
+    if not slot_left <= target[0] <= slot_right:
+        raise RuntimeError(f"toggle click {target} outside slot {slot_left}..{slot_right}")
+    return target, source
 
 
 def populated_profile_ssh(ports, echo_port: int) -> dict:
@@ -5603,7 +5636,13 @@ async def main() -> int:
                 xvfb.kill()
                 await asyncio.to_thread(xvfb.wait)
             server.close()
-            await server.wait_closed()
+            # Python >= 3.12.1 asyncio servers wait for every open connection;
+            # a tunnel ssh child that outlives the app would hang this forever
+            # and swallow the real failure until the job timeout.
+            try:
+                await asyncio.wait_for(server.wait_closed(), 10)
+            except asyncio.TimeoutError:
+                print("fixture SSH server still had open connections at exit", flush=True)
             # Always retain only synthetic lifecycle markers. This is critical
             # when a PTY appears then unexpectedly exits before GUI assertions.
             (destination / "ssh-fixture-events.txt").write_text(
