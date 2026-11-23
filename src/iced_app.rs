@@ -11289,6 +11289,95 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_counts_individual_forwards_not_only_aggregate_profiles() {
+        let alpha = quick_session("alpha", &["8080:127.0.0.1:80", "8081:127.0.0.1:81"]);
+        let mut first = quick_row(&alpha, "8080:127.0.0.1:80");
+        first.running = true;
+        let second = quick_row(&alpha, "8081:127.0.0.1:81");
+        let mut aggregate = std::collections::BTreeMap::new();
+        aggregate.insert(first.row.profile_key.clone(), tunnels::Status::Stopped);
+        assert_eq!(
+            running_tunnel_processes(&aggregate, &[first.clone(), second.clone()]),
+            1,
+            "individually running Alpha forward must show in the status bar"
+        );
+        // A whole-profile process covering both rows is one process.
+        aggregate.insert(
+            first.row.profile_key.clone(),
+            tunnels::Status::Running { pid: 7 },
+        );
+        let owned: Vec<_> = [first, second]
+            .into_iter()
+            .map(|mut quick| {
+                quick.running = true;
+                quick.aggregate = true;
+                quick
+            })
+            .collect();
+        assert_eq!(running_tunnel_processes(&aggregate, &owned), 1);
+    }
+
+    #[test]
+    fn session_tunnel_operation_is_disabled_while_individual_forwards_run() {
+        assert_eq!(session_tunnel_op(true, true, 0), SessionTunnelOp::Stop);
+        assert_eq!(session_tunnel_op(false, true, 0), SessionTunnelOp::Start);
+        let SessionTunnelOp::Unavailable(reason) = session_tunnel_op(false, true, 1) else {
+            panic!("manager rejects whole-profile start while a forward runs");
+        };
+        assert!(reason.contains("individual"), "{reason}");
+        assert!(matches!(
+            session_tunnel_op(false, false, 0),
+            SessionTunnelOp::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn selected_forward_status_reports_row_state_and_ownership() {
+        let alpha = quick_session("alpha", &["8080:127.0.0.1:80"]);
+        let mut row = quick_row(&alpha, "8080:127.0.0.1:80");
+        let key = row.row.profile_key.clone();
+        let original = Some((row.row.kind, row.row.spec.clone()));
+        assert_eq!(
+            selected_forward_status(&[row.clone()], &key, original.as_ref()),
+            ("Stopped".to_string(), false)
+        );
+        row.running = true;
+        let (label, running) = selected_forward_status(&[row.clone()], &key, original.as_ref());
+        assert!(running);
+        assert!(label.contains("individual"), "{label}");
+        row.aggregate = true;
+        let (label, _) = selected_forward_status(&[row.clone()], &key, original.as_ref());
+        assert!(label.contains("whole session"), "{label}");
+        row.running = false;
+        row.aggregate = false;
+        row.failed = Some("ssh exited".into());
+        let (label, running) = selected_forward_status(&[row], &key, original.as_ref());
+        assert!(!running);
+        assert!(label.contains("ssh exited"), "{label}");
+        assert_eq!(
+            selected_forward_status(&[], &key, None),
+            ("Not saved".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn open_tunnel_ui_polls_status_and_reports_unexpected_exit() {
+        assert!(tunnel_status_poll_active(true, false));
+        assert!(tunnel_status_poll_active(false, true));
+        assert!(!tunnel_status_poll_active(false, false));
+
+        let alpha = quick_session("alpha", &["8080:127.0.0.1:80"]);
+        let mut before = quick_row(&alpha, "8080:127.0.0.1:80");
+        before.running = true;
+        let mut after = before.clone();
+        after.running = false;
+        after.failed = Some("ssh exited".into());
+        let notice = tunnel_exit_notice(&[before.clone()], &[after]).expect("exit notice");
+        assert!(notice.contains("ssh exited"), "{notice}");
+        assert_eq!(tunnel_exit_notice(&[before.clone()], &[before]), None);
+    }
+
+    #[test]
     fn quick_forward_action_routes_each_state() {
         let session = quick_session("alpha", &["8080:127.0.0.1:80", "0.0.0.0:9090:db:5432"]);
         let mut loopback = quick_row(&session, "8080:127.0.0.1:80");
