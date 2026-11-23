@@ -32,7 +32,7 @@ Main now contains a live production-backend Iced implementation rather than only
 
 ### Open a saved server
 
-Search or browse the left session library. The main screen contains saved sessions, folders/favourites and New connection, not an SSH settings form. The production design should distinguish selection from an explicit connection action where needed, and make duplicate/open-existing behaviour predictable. The prototype uses one click to open or focus an existing simulated workspace.
+Search or browse the left session library. The main screen contains saved sessions, folders/favourites and New connection, not an SSH settings form. The production design should distinguish selection from an explicit connection action where needed, and make duplicate/open-existing behaviour predictable. The prototype uses one click to open or focus an existing simulated workspace (historical). In the current build (PR #143) the Session dock panel selects on a single click and opens on a double click or its right-click **Open** item; groups are collapsible.
 
 ### Create or edit a connection
 
@@ -142,6 +142,9 @@ Superseded by [windterm-ui-spec.md](windterm-ui-spec.md) (issue #140). In summar
 - Session, Sender, Transfer, Filer (remote files) and Explorer (local files) are dock panels in Left, Right and Bottom dock areas with tab strips, a gear menu (Move to Left/Right/Bottom, Close) and drag-resizable splitters. The default preset places all panels as bottom tabs.
 - A status bar shows mode, terminal size, `ssh`, running counts and local date-time.
 - Dock layout and theme are persisted in `ui-state.json` next to the profiles file.
+- Session rows: single click selects, double click opens, right-click menu (Open, Edit, New Session, Import), collapsible groups (PR #143). Filer/Explorer rows have right-click menus; a single click on a directory still opens it.
+- #140 Light readability cues (open, not complete): open menu title has a light fill and underline; View → Theme shows a filled (current) or hollow (available) marker; the active session tab is white with a 3 px blue top rule; a focused split pane header is tinted pale blue; the active dock tab has a darker label and blue top line; selected session rows have a blue left bar and selected file rows a 1 px blue outline; file action buttons that need a selection are disabled without one. The status bar stays white on `#007ACC` as in WindTerm. Dark keeps its earlier menu, tab and pane cues, and menu items/other buttons have no general disabled styling. Details: the **Current build** paragraphs and section 11.1 of the specification.
+- Still not built: Shell and Outline dock panels, Tunnels as a dock panel, session toolbar/breadcrumb, per-session tab colours, terminal gutter, Find strip, drag-and-drop docking.
 
 See [section 11 of the specification](windterm-ui-spec.md#11-implementation-status) for what is implemented.
 
