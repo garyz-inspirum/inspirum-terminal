@@ -133,3 +133,31 @@ class SavedForwardsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PopulatedMinimumWindowTest(unittest.TestCase):
+    """s05c populated LIGHT Tunnel Manager must be captured at the product
+    minimum 960x640 (src/iced_app.rs), never a WM-forced clipped 640x480."""
+
+    def test_min_window_matches_product(self):
+        product = (Path(__file__).resolve().parents[2] / "src" / "iced_app.rs").read_text()
+        self.assertIn("min_size: Some(iced::Size::new(960.0, 640.0))", product)
+        self.assertEqual(module.MIN_WINDOW, (960, 640))
+
+    def test_rejects_clipped_and_wrong_sizes(self):
+        for size in ((640, 480), (959, 640), (960, 639), (1280, 800)):
+            with self.assertRaises(RuntimeError):
+                module.require_min_window(size)
+        self.assertEqual(module.require_min_window((960, 640)), "960x640")
+
+    def test_tour_requests_and_gates_supported_minimum(self):
+        src = SOURCE.read_text()
+        start = src.index("async def s05_tunnels_min")
+        body = src[start:src.index("if POPULATED:", start)]
+        self.assertNotRegex(body, r"resize_tour\(\s*640\s*,\s*480\s*\)")
+        self.assertIn("resize_tour(*MIN_WINDOW)", body)
+        self.assertIn("require_min_window((min_w, min_h))", body)
+        # Gate sits inside try so a wrong size reaches FAILED and restores.
+        self.assertLess(body.index("try:"), body.index("require_min_window"))
+        self.assertIn("light_locate", body)
+        self.assertIn("require_editor_selection", body)

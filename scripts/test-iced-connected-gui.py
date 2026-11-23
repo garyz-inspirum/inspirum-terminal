@@ -96,6 +96,22 @@ FIND_INJECT_PTY_BYTE = os.environ.get("INSPIRUM_GUI_FIND_INJECT_PTY_BYTE") == "1
 # Tunnels quick menu. Default mode keeps the empty-tunnel profile.
 POPULATED = os.environ.get("INSPIRUM_GUI_POPULATED") == "1"
 POPULATED_LABELS = ("Alpha forward", "Bravo forward")
+# Product minimum (src/iced_app.rs window min_size). The X window manager in
+# the tour honours any xdotool size, bypassing iced's min_size, so a smaller
+# request yields a clipped frame the app never supports. Minimum-size evidence
+# must be captured at exactly this size.
+MIN_WINDOW = (960, 640)
+
+
+def require_min_window(actual: tuple[int, int]) -> str:
+    """Return the WxH tag for a minimum-size capture, or raise unless the
+    actual window is exactly the supported minimum."""
+    if tuple(actual) != MIN_WINDOW:
+        raise RuntimeError(
+            f"minimum-size evidence requires actual {MIN_WINDOW[0]}x{MIN_WINDOW[1]} "
+            f"window; actual was {actual[0]}x{actual[1]}"
+        )
+    return f"{actual[0]}x{actual[1]}"
 
 
 def free_loopback_port(exclude=()) -> int:
@@ -2408,9 +2424,9 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
         own listen port in the Listen Port row with Bravo's absent. All OCR
         is dark-on-light (light_locate), never the dark-theme pipeline.
         """
-        min_w, min_h = await resize_tour(640, 480)
-        tag = f"{min_w}x{min_h}"
+        min_w, min_h = await resize_tour(*MIN_WINDOW)
         try:
+            tag = require_min_window((min_w, min_h))
             await asyncio.sleep(.8)
             base = tour_dir / f"tour-05c-terminal-{tag}.png"
             shot(base.name)
@@ -2473,7 +2489,10 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
         except Exception as error:
             print(f"tour: FAILED populated minimum Tunnel Manager: {error}", flush=True)
             return 1
-        print("tour: PASS populated LIGHT Tunnel Manager at minimum size", flush=True)
+        print(
+            f"tour: PASS populated LIGHT Tunnel Manager at minimum size "
+            f"{MIN_WINDOW[0]}x{MIN_WINDOW[1]}", flush=True,
+        )
 
     # Required: a missed echo fails the tour. INSPIRUM_GUI_TOUR_WITHHOLD_ECHO=1
     # makes the fixture stay silent so this path can be proven.
