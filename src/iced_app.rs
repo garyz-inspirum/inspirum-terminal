@@ -4882,6 +4882,15 @@ impl App {
             self.status = "Select a local file to upload.".into();
             return Task::none();
         };
+        if self
+            .files
+            .local_entries
+            .iter()
+            .any(|entry| entry.path == local && entry.is_dir)
+        {
+            self.status = "Select a local file to upload.".into();
+            return Task::none();
+        }
         let Some(profile) = self.tabs.get(self.active).map(|tab| tab.profile.clone()) else {
             return Task::none();
         };
@@ -6864,11 +6873,19 @@ impl App {
                     self.files.local_loading = false;
                     match result {
                         Ok(entries) => {
+                            let selected_listed =
+                                self.files.selected_local.as_ref().is_some_and(|selected| {
+                                    entries.iter().any(|entry| &entry.path == selected)
+                                });
+                            if !selected_listed {
+                                self.files.selected_local = None;
+                            }
                             self.files.local_entries = entries;
                             self.files.local_error = None;
                         }
                         Err(error) => {
                             self.files.local_entries.clear();
+                            self.files.selected_local = None;
                             self.files.local_error = Some(error);
                         }
                     }
@@ -6882,11 +6899,22 @@ impl App {
                         Ok(entries) => {
                             // Capture once per stored listing, before the sort.
                             self.files.remote_sort_reference = chrono::Local::now().date_naive();
+                            // Rows match the selection by name (as the view
+                            // highlights); keep the fresh entry so type/size
+                            // eligibility follows the new listing.
+                            self.files.selected_remote =
+                                self.files.selected_remote.take().and_then(|selected| {
+                                    entries
+                                        .iter()
+                                        .find(|entry| entry.name == selected.name)
+                                        .cloned()
+                                });
                             self.files.remote_entries = entries;
                             self.files.remote_error = None;
                         }
                         Err(error) => {
                             self.files.remote_entries.clear();
+                            self.files.selected_remote = None;
                             self.files.remote_error = Some(error);
                         }
                     }
@@ -9154,7 +9182,10 @@ impl App {
             return self.files_unavailable();
         }
         let (local_panel, _) = self.file_listing_panels();
-        let eligible = local_file_actions(self.files.selected_local.as_deref());
+        let eligible = local_file_actions(
+            self.files.selected_local.as_deref(),
+            &self.files.local_entries,
+        );
         let actions = files_action_row(vec![
             action_when("Upload ->", eligible.transfer, Message::FilesRequestUpload).into(),
             action("New local folder", Message::FilesRequestMkdirLocal).into(),
@@ -11012,14 +11043,19 @@ fn remote_file_actions(selected: Option<&sftp::RemoteEntry>) -> FileActionEligib
     }
 }
 
-/// Local selection is a path; `request_upload` itself rejects non-files.
-fn local_file_actions(selected: Option<&std::path::Path>) -> FileActionEligibility {
-    let any = selected.is_some();
+/// Local selection is a path; eligibility comes from the listed row with that
+/// path, so a selected directory cannot offer Upload (`request_upload`
+/// rejects non-files) and a selection without a row offers nothing.
+fn local_file_actions(
+    selected: Option<&std::path::Path>,
+    entries: &[LocalFileEntry],
+) -> FileActionEligibility {
+    let entry = selected.and_then(|path| entries.iter().find(|entry| entry.path == path));
     FileActionEligibility {
-        transfer: any,
+        transfer: entry.is_some_and(|entry| !entry.is_dir),
         edit: false,
-        rename: any,
-        delete: any,
+        rename: entry.is_some(),
+        delete: entry.is_some(),
     }
 }
 
@@ -11826,7 +11862,10 @@ mod tests {
             none
         );
         assert_eq!(
-            local_file_actions(app.files.selected_local.as_deref()),
+            local_file_actions(
+                app.files.selected_local.as_deref(),
+                &app.files.local_entries
+            ),
             none
         );
 
@@ -11866,9 +11905,17 @@ mod tests {
             }
         );
 
+        let mut upload = listing_entry("upload.bin", false, Some(3), None);
+        upload.path = PathBuf::from("/tmp/upload.bin");
+        let mut local_dir = listing_entry("build", true, None, None);
+        local_dir.path = PathBuf::from("/tmp/build");
+        app.files.local_entries = vec![upload, local_dir];
         let _ = app.update(Message::FilesSelectLocal(PathBuf::from("/tmp/upload.bin")));
         assert_eq!(
-            local_file_actions(app.files.selected_local.as_deref()),
+            local_file_actions(
+                app.files.selected_local.as_deref(),
+                &app.files.local_entries
+            ),
             FileActionEligibility {
                 transfer: true,
                 edit: false,
@@ -11876,7 +11923,153 @@ mod tests {
                 delete: true,
             }
         );
+
+        // A selected local directory cannot be uploaded (`request_upload`
+        // rejects non-files) but can still be renamed or deleted.
+        let _ = app.update(Message::FilesSelectLocal(PathBuf::from("/tmp/build")));
+        assert_eq!(
+            local_file_actions(
+                app.files.selected_local.as_deref(),
+                &app.files.local_entries
+            ),
+            FileActionEligibility {
+                transfer: false,
+                edit: false,
+                rename: true,
+                delete: true,
+            }
+        );
+        let _ = app.update(Message::FilesRequestUpload);
+        assert_eq!(app.status, "Select a local file to upload.");
+        assert!(app.files.transfers.is_empty());
         let _ = app.view();
+    }
+
+    #[test]
+    fn local_listing_refresh_keeps_present_selection_and_clears_missing() {
+        let (_dir, mut app) = boot_sort_app("selection-local-refresh");
+        let _ = app.update(Message::FilesLocalLoaded(
+            0,
+            Ok(vec![
+                listing_entry("a.txt", false, Some(1), None),
+                listing_entry("b.txt", false, Some(2), None),
+            ]),
+        ));
+        let _ = app.update(Message::FilesSelectLocal(PathBuf::from("b.txt")));
+
+        // Reordered listing that still contains the selection keeps it.
+        let _ = app.update(Message::FilesLocalLoaded(
+            0,
+            Ok(vec![
+                listing_entry("c.txt", false, Some(3), None),
+                listing_entry("b.txt", false, Some(2), None),
+                listing_entry("a.txt", false, Some(1), None),
+            ]),
+        ));
+        assert_eq!(
+            app.files.selected_local.as_deref(),
+            Some(std::path::Path::new("b.txt"))
+        );
+        assert!(
+            local_file_actions(
+                app.files.selected_local.as_deref(),
+                &app.files.local_entries
+            )
+            .transfer
+        );
+
+        // A stale generation neither replaces the listing nor clears it.
+        let stale = app.files.local_generation.wrapping_add(1);
+        let _ = app.update(Message::FilesLocalLoaded(stale, Err("late".into())));
+        let _ = app.update(Message::FilesLocalLoaded(
+            stale,
+            Ok(vec![listing_entry("z.txt", false, Some(9), None)]),
+        ));
+        assert_eq!(
+            app.files.selected_local.as_deref(),
+            Some(std::path::Path::new("b.txt"))
+        );
+        assert_eq!(app.files.local_entries.len(), 3);
+
+        // Refreshed listing without the selected row clears it.
+        let _ = app.update(Message::FilesLocalLoaded(
+            0,
+            Ok(vec![listing_entry("a.txt", false, Some(1), None)]),
+        ));
+        assert!(app.files.selected_local.is_none());
+        assert!(
+            !local_file_actions(
+                app.files.selected_local.as_deref(),
+                &app.files.local_entries
+            )
+            .rename
+        );
+
+        // A load error always clears the selection.
+        let _ = app.update(Message::FilesSelectLocal(PathBuf::from("a.txt")));
+        let _ = app.update(Message::FilesLocalLoaded(0, Err("gone".into())));
+        assert!(app.files.selected_local.is_none());
+    }
+
+    #[test]
+    fn remote_listing_refresh_keeps_present_selection_and_clears_missing() {
+        let (_dir, mut app) = boot_sort_app("selection-remote-refresh");
+        let _ = app.update(Message::FilesRemoteLoaded(
+            0,
+            Ok(vec![
+                sftp::RemoteEntry::new("a.log", false, Some(1)),
+                sftp::RemoteEntry::new("b.log", false, Some(2)),
+            ]),
+        ));
+        let _ = app.update(Message::FilesSelectRemote(sftp::RemoteEntry::new(
+            "b.log",
+            false,
+            Some(2),
+        )));
+
+        // Reordered listing keeps the selection, refreshed to the new entry.
+        let _ = app.update(Message::FilesRemoteLoaded(
+            0,
+            Ok(vec![
+                sftp::RemoteEntry::new("b.log", false, Some(20)),
+                sftp::RemoteEntry::new("a.log", false, Some(1)),
+            ]),
+        ));
+        assert_eq!(
+            app.files.selected_remote,
+            Some(sftp::RemoteEntry::new("b.log", false, Some(20)))
+        );
+        assert!(remote_file_actions(app.files.selected_remote.as_ref()).transfer);
+
+        // A stale generation leaves listing and selection alone.
+        let stale = app.files.remote_generation.wrapping_add(1);
+        let _ = app.update(Message::FilesRemoteLoaded(stale, Err("late".into())));
+        let _ = app.update(Message::FilesRemoteLoaded(stale, Ok(Vec::new())));
+        assert_eq!(
+            app.files
+                .selected_remote
+                .as_ref()
+                .map(|entry| entry.name.as_str()),
+            Some("b.log")
+        );
+        assert_eq!(app.files.remote_entries.len(), 2);
+
+        // Refreshed listing without the selected row clears it.
+        let _ = app.update(Message::FilesRemoteLoaded(
+            0,
+            Ok(vec![sftp::RemoteEntry::new("a.log", false, Some(1))]),
+        ));
+        assert!(app.files.selected_remote.is_none());
+        assert!(!remote_file_actions(app.files.selected_remote.as_ref()).delete);
+
+        // A load error always clears the selection.
+        let _ = app.update(Message::FilesSelectRemote(sftp::RemoteEntry::new(
+            "a.log",
+            false,
+            Some(1),
+        )));
+        let _ = app.update(Message::FilesRemoteLoaded(0, Err("gone".into())));
+        assert!(app.files.selected_remote.is_none());
     }
 
     #[test]
