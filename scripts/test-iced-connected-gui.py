@@ -1086,6 +1086,68 @@ def light_locate(path: Path, label: str, *, region, budget=None, tesseract=None)
     raise RuntimeError(f"light label {label!r} not in {region} of {path}; words: {words[:40]}")
 
 
+# Tunnels quick popup row (src/iced_app.rs tunnel_quick_row): title line,
+# then the "<profile> . port N" subtitle. Measured on the populated 960x640
+# light frame: rows are 36 px apart, title OCR top 83/121, subtitle 101/137.
+POPUP_ROW_ABOVE = 4
+POPUP_ROW_BELOW = 32
+# Row-band OCR passes, cheapest first. Small grey digits flip 0 -> 6 at
+# some scales (55057 read 55657), so several are tried; a pass only counts
+# when it reads the exact port.
+POPUP_ROW_PASSES = (("6", 3), ("6", 2), ("11", 2), ("11", 3), ("6", 4), ("7", 2))
+
+
+def _light_rows(path, region, *, psm, scale):
+    tesseract = shutil.which("tesseract")
+    if tesseract is None:
+        raise RuntimeError("tesseract unavailable")
+    return region_upscaled_rows(path, tesseract, region, psm=psm, scale=scale)
+
+
+def light_popup_row(path: Path, name: str, port: int, sibling_port: int, *,
+                    region, footer_top: int, ocr=None):
+    """Prove a LIGHT Tunnels popup row shows ``name`` with its own ``port``.
+
+    The full title ("Bravo forward") is not required: tesseract reads its
+    second word inconsistently (``Torward``). Instead the exact first word
+    ``name`` must be inside ``region`` above ``footer_top``, AND that word's
+    row band (its title line plus the subtitle below, cut at the footer)
+    must contain the exact ``port`` without ``sibling_port``. A label or a
+    port elsewhere (another row, below the footer) never proves the row.
+    Returns bounds spanning the name word and the port.
+    """
+    ocr = ocr or _light_rows
+    want = _key(name)
+    words, seen = [], set()
+    for psm in ("6", "11"):
+        rows = ocr(path, region, psm=psm, scale=3)
+        words.extend(row[0] for row in rows[:30])
+        for row in rows:
+            if _key(row[0]) != want or not _word_inside(row, region):
+                continue
+            if row[2] + row[4] > footer_top or (row[1], row[2]) in seen:
+                continue
+            seen.add((row[1], row[2]))
+            band = (row[1] - 6, row[2] - POPUP_ROW_ABOVE, region[2],
+                    min(footer_top, row[2] + POPUP_ROW_BELOW))
+            for band_psm, scale in POPUP_ROW_PASSES:
+                band_rows = [w for w in ocr(path, band, psm=band_psm, scale=scale)
+                             if _word_inside(w, band)]
+                keys = [_key(w[0]) for w in band_rows]
+                if str(sibling_port) in keys:
+                    break  # sibling's port in this row: not this forward
+                hits = [w for w in band_rows if _key(w[0]) == str(port)]
+                if hits:
+                    hit = hits[0]
+                    return (min(row[1], hit[1]), row[2],
+                            max(row[1] + row[3], hit[1] + hit[3]),
+                            max(row[2] + row[4], hit[2] + hit[4]))
+    raise RuntimeError(
+        f"popup row {name!r} with listen port {port} not in {region} above "
+        f"footer y={footer_top} of {path}; words: {words[:40]}"
+    )
+
+
 def require_editor_selection(path, port: int, sibling_port: int, form_region, *,
                              row_region=None, locate=None):
     """Prove the editor form shows ``port`` and NOT ``sibling_port``.
@@ -2441,10 +2503,18 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
             settings = await asyncio.to_thread(
                 light_locate, popup_shot, "Tunnel Settings...", region=popup,
             )
-            for label in POPULATED_LABELS:
-                row = await asyncio.to_thread(light_locate, popup_shot, label, region=popup)
-                if row[3] > settings[1]:
-                    raise RuntimeError(f"{label} {row} below the popup footer {settings}")
+            if len(forward_ports) != 2:
+                raise RuntimeError(f"populated tour needs two forwards, got {forward_ports}")
+            # Each row: its exact first word plus its own listen port in the
+            # same row band, above the footer (populated_profile_ssh pairs
+            # POPULATED_LABELS[i] with forward_ports[i]).
+            for idx, label in enumerate(POPULATED_LABELS):
+                row = await asyncio.to_thread(
+                    light_popup_row, popup_shot, label.split()[0], forward_ports[idx],
+                    forward_ports[1 - idx], region=popup, footer_top=settings[1],
+                )
+                print(f"tour: {tag} popup row {label} port {forward_ports[idx]} at {row}",
+                      flush=True)
             click(*centre(settings))
             await asyncio.sleep(1.2)
             manager = tour_dir / f"tour-05e-tunnel-manager-{tag}.png"
