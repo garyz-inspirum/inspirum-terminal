@@ -794,7 +794,16 @@ def _band_clusters(width, rows, channels, thresh, y1, y2, gap: int):
     return clusters
 
 
+# Only a read whose every tesseract call completed is cached. A starved stage
+# holds missing words; cached, a later ABSENCE check would hit it without any
+# OCR call, the timeout/failure counters around that check would stay still,
+# and the missing words would pass as "not rendered".
 _PIXEL_CACHE: dict[tuple, list] = {}
+
+
+def _ocr_starved_count() -> int:
+    """Tesseract calls so far that produced no real read (timeout or exit != 0)."""
+    return OCR_TIMEOUTS + OCR_FAILURES
 
 
 def _band_segments(width, rows, channels, thresh, y1, y2, gap: int):
@@ -843,6 +852,7 @@ def visible_segment_rows(path: Path, tesseract: str, *, invert: bool = False):
     width, height, channels, rows = _read_png(path)
     thresh = _text_threshold(width, height, channels, rows)
     segments = []
+    starved = _ocr_starved_count()
     temporary = Path(tempfile.mkstemp(suffix=".png")[1])
     try:
         for y1, y2 in _visible_bands(width, height, channels, rows, thresh):
@@ -863,7 +873,8 @@ def visible_segment_rows(path: Path, tesseract: str, *, invert: bool = False):
                 ))
     finally:
         temporary.unlink(missing_ok=True)
-    _PIXEL_CACHE[key] = segments
+    if _ocr_starved_count() == starved:
+        _PIXEL_CACHE[key] = segments
     return segments
 
 
@@ -883,6 +894,7 @@ def visible_pixel_rows(path: Path, tesseract: str, *, clusters: bool = False):
     width, height, channels, rows = _read_png(path)
     thresh = _text_threshold(width, height, channels, rows)
     words = []
+    starved = _ocr_starved_count()
     temporary = Path(tempfile.mkstemp(suffix=".png")[1])
     try:
         for y1, y2 in _visible_bands(width, height, channels, rows, thresh):
@@ -914,7 +926,8 @@ def visible_pixel_rows(path: Path, tesseract: str, *, clusters: bool = False):
                 ))
     finally:
         temporary.unlink(missing_ok=True)
-    _PIXEL_CACHE[key] = words
+    if _ocr_starved_count() == starved:
+        _PIXEL_CACHE[key] = words
     return words
 
 
