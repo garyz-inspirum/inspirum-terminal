@@ -38,10 +38,20 @@ except ImportError:
     sys.modules["asyncssh"] = _stub
 
 SOURCE = Path(__file__).resolve().parents[1] / "test-iced-connected-gui.py"
+BUDGET_ENV = "INSPIRUM_GUI_OCR_BUDGET"
 spec = importlib.util.spec_from_file_location("iced_connected_gui_button_row", SOURCE)
 assert spec and spec.loader
 module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
+# The GUI runner honours a budget override; this copy must load the default
+# budget, so hide the override for the import only and put it back even if
+# the import raises.
+_saved_budget = os.environ.pop(BUDGET_ENV, None)
+try:
+    spec.loader.exec_module(module)
+finally:
+    if _saved_budget is not None:
+        os.environ[BUDGET_ENV] = _saved_budget
+    del _saved_budget
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 CANCEL = FIXTURES / "connected-profile-rename-cancel.png"
@@ -104,7 +114,6 @@ class SaveOnlyLocatorTest(unittest.TestCase):
                         f"{box} not inside Save only button {SAVE_ONLY_BUTTON}")
 
     def test_default_budget_is_in_force(self):
-        self.assertNotIn("INSPIRUM_GUI_OCR_BUDGET", os.environ)
         self.assertEqual(module.LOCATE_BUDGET_S, 12.0)
 
     def test_after_refused_rename_frame(self):
