@@ -43,6 +43,8 @@ pub(super) struct Palette {
     pub hover: Color,
     pub selected_row: Color,
     pub border: Color,
+    /// Outline for interactive controls (text fields), >= 3:1 on all fills.
+    pub control_outline: Color,
     pub text: Color,
     pub text_dock: Color,
     pub muted: Color,
@@ -56,6 +58,36 @@ pub(super) struct Palette {
     pub danger: Color,
     pub status_bg: Color,
     pub status_text: Color,
+}
+
+impl Palette {
+    /// Primary field captions and entered values, distinct from supporting copy.
+    pub fn field_label(self) -> Color {
+        self.text
+    }
+
+    pub fn field_help(self) -> Color {
+        self.muted
+    }
+
+    pub fn input_value(self) -> Color {
+        self.field_label()
+    }
+
+    pub fn input_placeholder(self) -> Color {
+        self.field_help()
+    }
+
+    /// Resting text-field outline. The shared `border` divider is too faint
+    /// (1.61:1 on the light dock); controls need 3:1 against every fill.
+    pub fn input_border(self) -> Color {
+        self.control_outline
+    }
+
+    /// Focused text-field outline; `accent` misses 3:1 on the light dock.
+    pub fn input_focus_border(self) -> Color {
+        self.selection_indicator
+    }
 }
 
 const fn hex(value: u32) -> Color {
@@ -77,6 +109,7 @@ pub(super) const LIGHT: Palette = Palette {
     hover: hex(0xE4E4E4),
     selected_row: hex(0xD8D8D8),
     border: hex(0xBFBFBF),
+    control_outline: hex(0x767676),
     text: hex(0x151515),
     text_dock: hex(0x333333),
     muted: hex(0x5C5C5C),
@@ -101,6 +134,7 @@ pub(super) const DARK: Palette = Palette {
     hover: hex(0x2A2A2A),
     selected_row: hex(0x3A3A3A),
     border: hex(0x444444),
+    control_outline: hex(0x8A8A8A),
     text: hex(0xBFBFBF),
     text_dock: hex(0xBFBFBF),
     muted: hex(0xAAAAAA),
@@ -245,6 +279,51 @@ mod tests {
     fn contrast(a: Color, b: Color) -> f32 {
         let (low, high) = (luminance(a), luminance(b));
         (high.max(low) + 0.05) / (high.min(low) + 0.05)
+    }
+
+    #[test]
+    fn field_hierarchy_is_readable_and_distinct_in_both_themes() {
+        for p in [LIGHT, DARK] {
+            assert_eq!(p.field_label(), p.text);
+            assert_eq!(p.field_help(), p.muted);
+            assert_ne!(p.field_label(), p.field_help());
+            for surface in [p.chrome, p.dock, p.list, p.raised, p.hover, p.selected_row] {
+                assert!(
+                    contrast(p.field_label(), surface) >= 4.5,
+                    "label on {surface:?}"
+                );
+                assert!(
+                    contrast(p.field_help(), surface) >= 4.5,
+                    "help on {surface:?}"
+                );
+            }
+            assert_eq!(p.input_value(), p.field_label());
+            assert_eq!(p.input_placeholder(), p.field_help());
+            assert_ne!(p.input_value(), p.input_placeholder());
+        }
+        assert_eq!(LIGHT.field_label(), hex(0x151515));
+        assert_eq!(LIGHT.field_help(), hex(0x5C5C5C));
+    }
+
+    #[test]
+    fn input_outlines_meet_non_text_contrast_on_neighbouring_fills() {
+        // WCAG 1.4.11: a text field's boundary must reach 3:1 against both
+        // its own fill and every surface it sits on, in both themes.
+        for p in [LIGHT, DARK] {
+            for surface in [p.chrome, p.dock, p.list, p.raised, p.hover, p.selected_row] {
+                assert!(
+                    contrast(p.input_border(), surface) >= 3.0,
+                    "input outline on {surface:?}"
+                );
+                assert!(
+                    contrast(p.input_focus_border(), surface) >= 3.0,
+                    "focused input outline on {surface:?}"
+                );
+            }
+            assert_ne!(p.input_border(), p.input_focus_border());
+        }
+        // Regression: the shared divider token is too faint for inputs.
+        assert!(contrast(LIGHT.border, LIGHT.dock) < 3.0);
     }
 
     #[test]

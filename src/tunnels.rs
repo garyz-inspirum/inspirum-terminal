@@ -1,9 +1,7 @@
 //! Centralised SSH tunnel manager model.
 //!
-//! One forwarding-only OpenSSH process per saved profile runs that profile's
-//! `-L`/`-R`/`-D` forwards (see [`crate::terminal::start_tunnels`]). This
-//! module owns the GUI-facing state: a flat list of every forward across every
-//! saved profile, the per-profile process, and the status each row shows.
+//! Forwarding-only OpenSSH processes can own either a whole saved profile or
+//! one saved forward. The manager tracks their lifetimes independently.
 //! It deliberately contains no Iced types so it can be unit tested.
 
 use std::collections::BTreeMap;
@@ -17,7 +15,7 @@ use crate::{
 };
 
 /// Which OpenSSH forwarding flag a row came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ForwardKind {
     Local,
     Remote,
@@ -354,42 +352,107 @@ impl Status {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ProcessKey {
+    Profile(String),
+    Forward {
+        profile: String,
+        kind: ForwardKind,
+        spec: String,
+    },
+}
+
+impl ProcessKey {
+    fn forward(profile: &str, kind: ForwardKind, spec: &str) -> Self {
+        Self::Forward {
+            profile: profile.to_owned(),
+            kind,
+            spec: spec.to_owned(),
+        }
+    }
+
+    fn belongs_to(&self, profile: &str) -> bool {
+        match self {
+            Self::Profile(key) => key == profile,
+            Self::Forward { profile: key, .. } => key == profile,
+        }
+    }
+}
+
+/// Remote (`-R`) listeners bind on the SSH server, so their port namespace
+/// is per server; local and dynamic listeners all share this machine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ServerIdentity {
+    host: String,
+    port: Option<u16>,
+}
+
+impl ServerIdentity {
+    fn of(session: &Session) -> Self {
+        Self {
+            host: session.host.trim().to_ascii_lowercase(),
+            port: session.port,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Manager {
-    processes: BTreeMap<String, TunnelProcess>,
-    failures: BTreeMap<String, String>,
+    processes: BTreeMap<ProcessKey, TunnelProcess>,
+    /// Server each managed process connected to, for remote conflicts.
+    servers: BTreeMap<ProcessKey, ServerIdentity>,
+    failures: BTreeMap<ProcessKey, String>,
     /// Per-start acknowledgement for non-loopback binds, keyed by profile.
     /// UI state only; never persisted (docs/tunnels.md).
     acknowledged: BTreeMap<String, bool>,
 }
 
 impl Manager {
-    pub fn status(&mut self, profile_key: &str) -> Status {
-        if let Some(process) = self.processes.get_mut(profile_key) {
+    fn status_for(&mut self, key: &ProcessKey) -> Status {
+        if let Some(process) = self.processes.get_mut(key) {
             match process.is_running() {
                 Ok(true) => return Status::Running { pid: process.id() },
                 Ok(false) => {
-                    self.processes.remove(profile_key);
-                    self.failures
-                        .insert(profile_key.to_owned(), "ssh exited".to_owned());
+                    self.processes.remove(key);
+                    self.servers.remove(key);
+                    self.failures.insert(key.clone(), "ssh exited".into());
                 }
                 Err(error) => {
-                    self.processes.remove(profile_key);
-                    self.failures
-                        .insert(profile_key.to_owned(), format!("{error:#}"));
+                    self.processes.remove(key);
+                    self.servers.remove(key);
+                    self.failures.insert(key.clone(), format!("{error:#}"));
                 }
             }
         }
-        match self.failures.get(profile_key) {
-            Some(error) => Status::Failed(error.clone()),
-            None => Status::Stopped,
+        self.failures
+            .get(key)
+            .map_or(Status::Stopped, |error| Status::Failed(error.clone()))
+    }
+
+    /// Status of the legacy aggregate profile process only. Individual
+    /// forwards must not trigger UI edit paths that stop the entire profile.
+    pub fn status(&mut self, profile_key: &str) -> Status {
+        self.status_for(&ProcessKey::Profile(profile_key.to_owned()))
+    }
+
+    pub fn forward_status(&mut self, profile_key: &str, kind: ForwardKind, spec: &str) -> Status {
+        let key = ProcessKey::forward(profile_key, kind, spec);
+        let own = self.status_for(&key);
+        if own.is_running() {
+            return own;
+        }
+        let aggregate = self.status_for(&ProcessKey::Profile(profile_key.to_owned()));
+        if aggregate.is_running() {
+            aggregate
+        } else {
+            own
         }
     }
 
     pub fn running_count(&mut self) -> usize {
-        let keys: Vec<String> = self.processes.keys().cloned().collect();
+        let keys: Vec<_> = self.processes.keys().cloned().collect();
         keys.into_iter()
-            .filter(|key| self.status(key).is_running())
+            .filter(|key| self.status_for(key).is_running())
             .count()
     }
 
@@ -401,24 +464,36 @@ impl Manager {
         self.acknowledged.insert(profile_key.to_owned(), value);
     }
 
-    /// Start the forwarding process for one profile. Fails closed when the
-    /// profile binds beyond loopback and the user has not acknowledged it.
+    /// The aggregate process cannot coexist with independently managed rows:
+    /// stopping one row must never kill an unrelated listener.
     pub fn start(&mut self, session: &Session, config: Option<&Path>) -> Result<Status> {
-        let key = session_profile_key(session);
-        if self.status(&key).is_running() {
-            return Ok(self.status(&key));
+        let profile = session_profile_key(session);
+        let key = ProcessKey::Profile(profile.clone());
+        if self.status_for(&key).is_running() {
+            return Ok(self.status_for(&key));
+        }
+        let active: Vec<_> = self
+            .processes
+            .keys()
+            .filter(|key| key.belongs_to(&profile))
+            .cloned()
+            .collect();
+        for other in active {
+            ensure!(
+                !self.status_for(&other).is_running(),
+                "stop individual forwards before starting the whole profile"
+            );
         }
         ensure!(
-            !session_requires_forward_risk_ack(session) || self.acknowledged(&key),
+            !session_requires_forward_risk_ack(session) || self.acknowledged(&profile),
             "non-loopback tunnel binds require explicit risk acknowledgement"
         );
         self.failures.remove(&key);
         match crate::terminal::start_tunnels(session, config) {
             Ok(process) => {
                 let pid = process.id();
-                self.processes.insert(key.clone(), process);
-                // Acknowledgement is per start, as in the previous manager.
-                self.acknowledged.remove(&key);
+                self.processes.insert(key, process);
+                self.acknowledged.remove(&profile);
                 Ok(Status::Running { pid })
             }
             Err(error) => {
@@ -429,20 +504,147 @@ impl Manager {
         }
     }
 
-    pub fn stop(&mut self, profile_key: &str) -> Result<Status> {
-        if let Some(mut process) = self.processes.remove(profile_key) {
+    /// Start exactly one saved forward, leaving every other process untouched.
+    pub fn start_forward(
+        &mut self,
+        session: &Session,
+        kind: ForwardKind,
+        spec: &str,
+        config: Option<&Path>,
+    ) -> Result<Status> {
+        let profile = session_profile_key(session);
+        let key = ProcessKey::forward(&profile, kind, spec);
+        session.ssh_args()?;
+        ensure!(
+            rows_for(session)
+                .iter()
+                .any(|row| row.kind == kind && row.spec == spec),
+            "tunnel entry no longer exists"
+        );
+        if self.status_for(&key).is_running() {
+            return Ok(self.status_for(&key));
+        }
+        ensure!(
+            !self
+                .status_for(&ProcessKey::Profile(profile.clone()))
+                .is_running(),
+            "stop the whole profile before starting an individual forward"
+        );
+        // Reject conflicting listeners before spawning; OpenSSH also enforces
+        // ExitOnForwardFailure for conflicts with external processes.
+        // Remote listeners only conflict on the same SSH server.
+        let listener = split_spec(kind, spec).0;
+        let server = ServerIdentity::of(session);
+        let active: Vec<_> = self.processes.keys().cloned().collect();
+        for other in active {
+            if !self.status_for(&other).is_running() {
+                continue;
+            }
+            if let ProcessKey::Forward {
+                kind: other_kind,
+                spec: other_spec,
+                ..
+            } = &other
+            {
+                let same_namespace = match (
+                    kind == ForwardKind::Remote,
+                    *other_kind == ForwardKind::Remote,
+                ) {
+                    (false, false) => true,
+                    // Unknown server: stay conservative and treat as shared.
+                    (true, true) => self
+                        .servers
+                        .get(&other)
+                        .is_none_or(|other| *other == server),
+                    _ => false,
+                };
+                ensure!(
+                    !same_namespace || split_spec(*other_kind, other_spec).0 != listener,
+                    "tunnel listener is already managed by another forward"
+                );
+            }
+        }
+        let selected = isolated_forward(session, kind, spec);
+        // Assess only the selected bind; unrelated exposed forwards do not
+        // require acknowledgement for this launch.
+        ensure!(
+            !session_requires_forward_risk_ack(&selected) || self.acknowledged(&profile),
+            "non-loopback tunnel binds require explicit risk acknowledgement"
+        );
+        selected.ssh_args()?;
+        self.failures.remove(&key);
+        match crate::terminal::start_tunnels(&selected, config) {
+            Ok(process) => {
+                let pid = process.id();
+                self.servers.insert(key.clone(), server);
+                self.processes.insert(key, process);
+                self.acknowledged.remove(&profile);
+                Ok(Status::Running { pid })
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                self.failures.insert(key, message.clone());
+                Ok(Status::Failed(message))
+            }
+        }
+    }
+
+    pub fn stop_forward(
+        &mut self,
+        profile_key: &str,
+        kind: ForwardKind,
+        spec: &str,
+    ) -> Result<Status> {
+        let key = ProcessKey::forward(profile_key, kind, spec);
+        ensure!(
+            !self
+                .status_for(&ProcessKey::Profile(profile_key.to_owned()))
+                .is_running(),
+            "stop the whole profile before stopping an individual forward"
+        );
+        self.stop_key(&key)?;
+        Ok(Status::Stopped)
+    }
+
+    fn stop_key(&mut self, key: &ProcessKey) -> Result<()> {
+        self.servers.remove(key);
+        if let Some(mut process) = self.processes.remove(key) {
             process.stop()?;
         }
-        self.failures.remove(profile_key);
+        self.failures.remove(key);
+        Ok(())
+    }
+
+    pub fn stop(&mut self, profile_key: &str) -> Result<Status> {
+        let keys: Vec<_> = self
+            .processes
+            .keys()
+            .chain(self.failures.keys())
+            .filter(|key| key.belongs_to(profile_key))
+            .cloned()
+            .collect();
+        for key in keys {
+            self.stop_key(&key)?;
+        }
         Ok(Status::Stopped)
     }
 
     pub fn stop_all(&mut self) {
-        let keys: Vec<String> = self.processes.keys().cloned().collect();
+        let keys: Vec<_> = self.processes.keys().cloned().collect();
         for key in keys {
-            let _ = self.stop(&key);
+            let _ = self.stop_key(&key);
         }
+        self.failures.clear();
     }
+}
+
+fn isolated_forward(session: &Session, kind: ForwardKind, spec: &str) -> Session {
+    let mut selected = session.clone();
+    selected.ssh.local_forwards.clear();
+    selected.ssh.remote_forwards.clear();
+    selected.ssh.dynamic_forwards.clear();
+    specs_mut(&mut selected, kind).push(spec.to_owned());
+    selected
 }
 
 /// Forward specs separated by newlines or `;` (the connection dialog uses a
@@ -530,11 +732,95 @@ mod tests {
     fn status_starts_stopped_and_stop_clears_failures() {
         let mut manager = Manager::default();
         assert_eq!(manager.status("none"), Status::Stopped);
-        manager.failures.insert("x".into(), "boom".into());
+        manager
+            .failures
+            .insert(ProcessKey::Profile("x".into()), "boom".into());
         assert_eq!(manager.status("x"), Status::Failed("boom".into()));
         assert_eq!(manager.stop("x").unwrap(), Status::Stopped);
         assert_eq!(manager.status("x"), Status::Stopped);
         assert_eq!(manager.running_count(), 0);
+    }
+
+    #[test]
+    fn individual_state_is_isolated_by_profile_kind_and_spec() {
+        let mut manager = Manager::default();
+        let a = ForwardKind::Local;
+        let b = ForwardKind::Dynamic;
+        manager.failures.insert(
+            ProcessKey::forward("one", a, "127.0.0.1:8000:web:80"),
+            "failed".into(),
+        );
+        assert_eq!(
+            manager.forward_status("one", a, "127.0.0.1:8000:web:80"),
+            Status::Failed("failed".into())
+        );
+        assert_eq!(
+            manager.forward_status("two", a, "127.0.0.1:8000:web:80"),
+            Status::Stopped
+        );
+        assert_eq!(
+            manager.forward_status("one", b, "127.0.0.1:8000:web:80"),
+            Status::Stopped
+        );
+        manager
+            .stop_forward("one", b, "127.0.0.1:8000:web:80")
+            .unwrap();
+        assert_eq!(
+            manager.forward_status("one", a, "127.0.0.1:8000:web:80"),
+            Status::Failed("failed".into())
+        );
+        manager.stop("one").unwrap();
+        assert_eq!(
+            manager.forward_status("one", a, "127.0.0.1:8000:web:80"),
+            Status::Stopped
+        );
+    }
+
+    #[test]
+    fn isolated_forward_rejects_absent_spec_without_launching() {
+        let session = Session {
+            name: "srv".into(),
+            host: "srv.example".into(),
+            ..Default::default()
+        };
+        let mut manager = Manager::default();
+        assert!(
+            manager
+                .start_forward(&session, ForwardKind::Local, "127.0.0.1:8080:web:80", None)
+                .is_err()
+        );
+        assert_eq!(manager.running_count(), 0);
+    }
+
+    #[test]
+    fn isolated_launch_preserves_ssh_options_and_only_selected_listener() {
+        let session = Session {
+            name: "srv".into(),
+            host: "srv.example".into(),
+            ssh: crate::SshOptions {
+                local_forwards: vec![
+                    "127.0.0.1:8080:web:80".into(),
+                    "127.0.0.1:8081:db:5432".into(),
+                ],
+                dynamic_forwards: vec!["127.0.0.1:1080".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let selected = isolated_forward(&session, ForwardKind::Local, "127.0.0.1:8081:db:5432");
+        let argv = crate::terminal::tunnel_launch_args(&selected, None).unwrap();
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair[0] == "-L" && pair[1] == "127.0.0.1:8081:db:5432")
+        );
+        assert!(
+            !argv
+                .iter()
+                .any(|arg| arg == "127.0.0.1:8080:web:80" || arg == "127.0.0.1:1080")
+        );
+        assert!(argv.iter().any(|arg| arg == "ExitOnForwardFailure=yes"));
+        assert!(argv.iter().any(|arg| arg == "-N"));
+        assert_eq!(selected.host, session.host);
     }
 
     #[test]
@@ -601,5 +887,66 @@ mod tests {
         .unwrap();
         assert!(rows_for(&session).is_empty());
         assert!(session.ssh.tunnel_labels.is_empty());
+    }
+
+    /// Forwarding-only `ssh -N` that stays alive without any server: the
+    /// ProxyCommand never sends a banner, so no listener is ever bound.
+    fn hung_ssh_config(dir: &Path) -> std::path::PathBuf {
+        let config = dir.join("ssh_config");
+        std::fs::write(&config, "Host *\n  ProxyCommand sleep 30\n").unwrap();
+        config
+    }
+
+    #[test]
+    fn remote_listener_conflicts_are_scoped_to_the_ssh_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = hung_ssh_config(dir.path());
+        let config = Some(config.as_path());
+        let remote = "127.0.0.1:9000:127.0.0.1:3000";
+        let local = "127.0.0.1:18080:web:80";
+        let profile = |name: &str, host: &str| Session {
+            name: name.into(),
+            host: host.into(),
+            ssh: crate::SshOptions {
+                local_forwards: vec![local.into()],
+                remote_forwards: vec![remote.into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let one = profile("one", "one.invalid");
+        let two = profile("two", "two.invalid");
+        let one_again = profile("one again", "ONE.invalid");
+        let mut manager = Manager::default();
+        let (r, l) = (ForwardKind::Remote, ForwardKind::Local);
+
+        let first = manager.start_forward(&one, r, remote, config).unwrap();
+        assert!(first.is_running(), "{first:?}");
+        // A distinct server has its own remote port namespace.
+        let second = manager.start_forward(&two, r, remote, config).unwrap();
+        assert!(second.is_running(), "distinct server: {second:?}");
+        // Same server through another profile: that remote port is taken.
+        let error = manager
+            .start_forward(&one_again, r, remote, config)
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("already managed"),
+            "{error:#}"
+        );
+        // Local listeners share this machine whatever the server.
+        assert!(
+            manager
+                .start_forward(&one, l, local, config)
+                .unwrap()
+                .is_running()
+        );
+        let error = manager.start_forward(&two, l, local, config).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("already managed"),
+            "{error:#}"
+        );
+        assert_eq!(manager.running_count(), 3);
+        manager.stop_all();
+        assert_eq!(manager.running_count(), 0);
     }
 }

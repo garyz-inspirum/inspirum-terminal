@@ -529,6 +529,165 @@ fn saved_profile_tunnel_manager_releases_and_reuses_local_port() {
     );
 }
 
+fn assert_forward_echo(port: u16, message: &[u8]) {
+    round_trip(&mut connect_loopback(port), message);
+}
+
+/// Two saved `-L` rows of one reloaded profile run as independent OpenSSH
+/// processes: stopping either leaves the other listener echoing.
+#[test]
+#[ignore = "requires disposable AsyncSSH fixture: scripts/test-native-ssh-smoke.py"]
+fn saved_profile_individual_forwards_start_and_stop_independently() {
+    let fixture = fixture();
+    let config = fixture.join("config");
+    let echo_port = fixture_port(&fixture, "echo-port");
+    let port_a = ephemeral_port();
+    let mut port_b = ephemeral_port();
+    while port_b == port_a {
+        port_b = ephemeral_port();
+    }
+    let spec_a = format!("127.0.0.1:{port_a}:127.0.0.1:{echo_port}");
+    let spec_b = format!("127.0.0.1:{port_b}:127.0.0.1:{echo_port}");
+    let path = fixture.join(format!(
+        "manager-forward-profiles-{}.json",
+        std::process::id()
+    ));
+    let profile = Session {
+        name: "Disposable forward profile".into(),
+        host: "native-smoke".into(),
+        strict: true,
+        ssh: SshOptions {
+            local_forwards: vec![spec_a.clone(), spec_b.clone()],
+            ..SshOptions::default()
+        },
+        ..Session::default()
+    };
+    // Same name in another folder: a distinct profile key, never started.
+    let namesake = Session {
+        folder: "Other folder".into(),
+        ..profile.clone()
+    };
+    save_sessions(&path, &[profile, namesake]).expect("save profiles using Iced profile store");
+    let loaded = load_sessions(&path).expect("load profiles using Iced profile store");
+    assert_eq!(loaded.len(), 2);
+    let (loaded, namesake) = (&loaded[0], &loaded[1]);
+    assert!(loaded.folder.is_empty());
+    assert_eq!(namesake.folder, "Other folder");
+    assert_eq!(namesake.name, loaded.name);
+    assert_eq!(
+        loaded.ssh.local_forwards,
+        vec![spec_a.clone(), spec_b.clone()]
+    );
+    let key = session_profile_key(loaded);
+    let other_key = session_profile_key(namesake);
+    assert_ne!(key, other_key, "same-name profiles must not share a key");
+    let local = tunnels::ForwardKind::Local;
+    // On panic, Manager drops every TunnelProcess, which kills and reaps it.
+    let mut manager = tunnels::Manager::default();
+
+    let a = manager
+        .start_forward(loaded, local, &spec_a, Some(&config))
+        .unwrap();
+    assert!(a.is_running(), "start A: {a:?}");
+    assert_eq!(
+        manager.forward_status(&key, local, &spec_b),
+        tunnels::Status::Stopped,
+        "starting A must not start B"
+    );
+    let b = manager
+        .start_forward(loaded, local, &spec_b, Some(&config))
+        .unwrap();
+    assert!(b.is_running(), "start B: {b:?}");
+    assert_ne!(a, b, "A and B must be separate ssh processes");
+    assert_eq!(manager.forward_status(&key, local, &spec_a), a);
+    assert_eq!(manager.forward_status(&key, local, &spec_b), b);
+    assert_eq!(manager.status(&key), tunnels::Status::Stopped);
+    assert_eq!(manager.running_count(), 2);
+    assert_forward_echo(port_a, b"FORWARD_A_ECHO");
+    assert_forward_echo(port_b, b"FORWARD_B_ECHO");
+
+    // The aggregate profile process is refused and kills nothing.
+    let error = manager
+        .start(loaded, Some(&config))
+        .expect_err("aggregate start must be rejected while a forward runs");
+    assert!(
+        format!("{error:#}").contains("stop individual forwards"),
+        "unexpected aggregate rejection: {error:#}"
+    );
+    assert_eq!(manager.status(&key), tunnels::Status::Stopped);
+    assert_eq!(manager.forward_status(&key, local, &spec_a), a);
+    assert_eq!(manager.forward_status(&key, local, &spec_b), b);
+    assert_forward_echo(port_a, b"FORWARD_A_AFTER_AGGREGATE_REJECT");
+    assert_forward_echo(port_b, b"FORWARD_B_AFTER_AGGREGATE_REJECT");
+
+    // The namesake profile owns neither process; stopping it is a no-op.
+    assert_eq!(
+        manager.forward_status(&other_key, local, &spec_a),
+        tunnels::Status::Stopped
+    );
+    assert_eq!(
+        manager.stop_forward(&other_key, local, &spec_a).unwrap(),
+        tunnels::Status::Stopped
+    );
+    assert_eq!(manager.stop(&other_key).unwrap(), tunnels::Status::Stopped);
+    assert_eq!(manager.forward_status(&key, local, &spec_a), a);
+    assert_eq!(manager.forward_status(&key, local, &spec_b), b);
+    assert_forward_echo(port_a, b"FORWARD_A_AFTER_NAMESAKE_STOP");
+    assert_forward_echo(port_b, b"FORWARD_B_AFTER_NAMESAKE_STOP");
+
+    // Stop A: A refuses, B keeps echoing.
+    assert_eq!(
+        manager.stop_forward(&key, local, &spec_a).unwrap(),
+        tunnels::Status::Stopped
+    );
+    assert_eq!(
+        manager.forward_status(&key, local, &spec_a),
+        tunnels::Status::Stopped
+    );
+    wait_loopback_refused(port_a, "stop forward A");
+    assert_eq!(manager.forward_status(&key, local, &spec_b), b);
+    assert_forward_echo(port_b, b"FORWARD_B_AFTER_A_STOP");
+
+    // Restart A on the same port while B runs.
+    let a = manager
+        .start_forward(loaded, local, &spec_a, Some(&config))
+        .unwrap();
+    assert!(a.is_running(), "restart A: {a:?}");
+    assert_ne!(a, b);
+    assert_eq!(manager.running_count(), 2);
+    assert_forward_echo(port_a, b"FORWARD_A_AFTER_RESTART");
+    assert_forward_echo(port_b, b"FORWARD_B_AFTER_A_RESTART");
+
+    // Stop B: B refuses, A keeps echoing.
+    assert_eq!(
+        manager.stop_forward(&key, local, &spec_b).unwrap(),
+        tunnels::Status::Stopped
+    );
+    assert_eq!(
+        manager.forward_status(&key, local, &spec_b),
+        tunnels::Status::Stopped
+    );
+    wait_loopback_refused(port_b, "stop forward B");
+    assert_eq!(manager.forward_status(&key, local, &spec_a), a);
+    assert_forward_echo(port_a, b"FORWARD_A_AFTER_B_STOP");
+
+    // Stop A: nothing is left listening.
+    assert_eq!(
+        manager.stop_forward(&key, local, &spec_a).unwrap(),
+        tunnels::Status::Stopped
+    );
+    assert_eq!(
+        manager.forward_status(&key, local, &spec_a),
+        tunnels::Status::Stopped
+    );
+    wait_loopback_refused(port_a, "final stop forward A");
+    wait_loopback_refused(port_b, "B after final stop of A");
+    assert_eq!(manager.running_count(), 0);
+    println!(
+        "PASS saved-profile individual forwards: independent start/stop, refusal, same-port restart, aggregate rejection and namesake isolation"
+    );
+}
+
 #[test]
 #[ignore = "requires disposable AsyncSSH fixture: scripts/test-native-ssh-smoke.py"]
 fn native_local_remote_and_dynamic_ssh_forwarding() {

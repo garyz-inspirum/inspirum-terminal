@@ -214,6 +214,9 @@ pub(super) struct State {
     pub confirm: Option<Confirm>,
     pub busy: bool,
     pub generation: u64,
+    /// Generation of the in-flight async job that writes the profile store,
+    /// if any. Tunnel starts and other profile writers wait for it.
+    pub profile_write: Option<u64>,
     pub output: String,
     pub known_hosts: String,
     pub host_target: Option<terminal::HostKeyTarget>,
@@ -291,6 +294,7 @@ impl State {
             confirm: None,
             busy: false,
             generation: 0,
+            profile_write: None,
             output: String::new(),
             known_hosts: String::new(),
             host_target: None,
@@ -354,6 +358,20 @@ impl App {
         Task::perform(run_blocking_result(job), move |r| {
             msg(Action::JobDone(generation, r))
         })
+    }
+    /// `tool_job` for work that writes the profile store. The pending flag is
+    /// set before the job is spawned and cleared by its `JobDone`, which
+    /// always arrives (errors and worker panics included).
+    pub(super) fn profile_store_job<F>(&mut self, job: F) -> Task<Message>
+    where
+        F: FnOnce() -> Result<Data, String> + Send + 'static,
+    {
+        if self.tools.busy {
+            return Task::none();
+        }
+        let task = self.tool_job(job);
+        self.tools.profile_write = Some(self.tools.generation);
+        task
     }
     pub(super) fn focused_profile(&self) -> Option<Session> {
         self.tabs
@@ -543,8 +561,13 @@ impl App {
                         .map(|profiles| (profiles, s))
                 }) {
                     Ok((profiles, session)) => {
+                        // Check live tunnels before the async store write.
+                        if let Some(reason) = self.profile_store_tunnel_conflict(&profiles) {
+                            self.form.error = Some(reason.into());
+                            return Task::none();
+                        }
                         let path = self.profiles_path.clone();
-                        return self.tool_job(move || {
+                        return self.profile_store_job(move || {
                             save_sessions(&path, &profiles)
                                 .map(|_| Data::DraftSaved(profiles, Box::new(session)))
                                 .map_err(|e| format!("{e:#}"))
@@ -563,8 +586,14 @@ impl App {
                         Confirm::DeleteProfile(key) => {
                             match crate::delete_session(&self.profiles, &key) {
                                 Ok(profiles) => {
+                                    if let Some(reason) =
+                                        self.profile_store_tunnel_conflict(&profiles)
+                                    {
+                                        self.status = reason.into();
+                                        return Task::none();
+                                    }
                                     let path = self.profiles_path.clone();
-                                    return self.tool_job(move || {
+                                    return self.profile_store_job(move || {
                                         save_sessions(&path, &profiles)
                                             .map(|_| Data::Profiles(profiles))
                                             .map_err(|e| format!("{e:#}"))
@@ -575,10 +604,16 @@ impl App {
                         }
                         Confirm::ReplaceProfiles(source) => {
                             let path = self.profiles_path.clone();
-                            return self.tool_job(move || {
+                            // Snapshot live owners now; the import file is
+                            // only read inside the job, before its write.
+                            let owners = self.live_tunnel_owners();
+                            return self.profile_store_job(move || {
                                 let profiles =
                                     import_sessions(&source, &[], SessionImportMode::Replace)
                                         .map_err(|e| format!("{e:#}"))?;
+                                if let Some(reason) = owners.conflict(&profiles) {
+                                    return Err(reason.into());
+                                }
                                 save_sessions(&path, &profiles).map_err(|e| format!("{e:#}"))?;
                                 Ok(Data::Profiles(profiles))
                             });
@@ -1044,6 +1079,9 @@ impl App {
                 });
             }
             Action::JobDone(generation, result) => {
+                if self.tools.profile_write == Some(generation) {
+                    self.tools.profile_write = None;
+                }
                 if generation != self.tools.generation {
                     return Task::none();
                 }
