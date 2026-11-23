@@ -150,6 +150,90 @@ pub(super) const DARK: Palette = Palette {
 
 pub(super) const WARNING: Color = hex(0xF6A623);
 
+/// Light-theme tint behind the focused split pane header: a flat pale blue
+/// that keeps dark text >= 4.5:1 and the blue focus rule >= 3:1.
+const LIGHT_FOCUS_HEADER: Color = hex(0xD9E8F5);
+
+/// Flat chrome state cue: a fill plus an optional accent rule (top rule for
+/// tabs/panes, underline for menu titles). `rule_height` is the reserved
+/// strip in logical px; layout keeps it constant so terminal rows never move.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct StateCue {
+    pub fill: Color,
+    pub rule: Option<Color>,
+    pub rule_height: f32,
+}
+
+pub(super) fn palette_for(theme: ChromeTheme) -> &'static Palette {
+    match theme {
+        ChromeTheme::Light => &LIGHT,
+        ChromeTheme::Dark => &DARK,
+    }
+}
+
+/// Menu-bar title. Light marks the open menu with a darker fill and a blue
+/// underline (hover alone is only the pale `hover` fill); Dark is unchanged.
+pub(super) fn menu_title_cue(theme: ChromeTheme, open: bool) -> StateCue {
+    let p = palette_for(theme);
+    let (fill, rule) = match (theme, open) {
+        (_, false) => (p.chrome, None),
+        (ChromeTheme::Light, true) => (p.selected_row, Some(p.selection_indicator)),
+        (ChromeTheme::Dark, true) => (p.hover, None),
+    };
+    StateCue {
+        fill,
+        rule,
+        rule_height: 2.0,
+    }
+}
+
+/// Hovered drop-down entry fill.
+pub(super) fn menu_item_hover_fill(theme: ChromeTheme) -> Color {
+    let p = palette_for(theme);
+    match theme {
+        ChromeTheme::Light => p.selected_row,
+        ChromeTheme::Dark => p.hover,
+    }
+}
+
+/// Workspace session tab. Inactive tabs keep normal text (not disabled look).
+pub(super) fn session_tab_cue(theme: ChromeTheme, active: bool) -> StateCue {
+    let p = palette_for(theme);
+    match (theme, active) {
+        (_, false) => StateCue {
+            fill: p.tab_inactive,
+            rule: None,
+            rule_height: 0.0,
+        },
+        (ChromeTheme::Light, true) => StateCue {
+            fill: p.list,
+            rule: Some(p.selection_indicator),
+            rule_height: 3.0,
+        },
+        (ChromeTheme::Dark, true) => StateCue {
+            fill: p.tab_active,
+            rule: Some(p.accent),
+            rule_height: 2.0,
+        },
+    }
+}
+
+/// Split-pane header. The rule strip is always 2px so focus changes never
+/// alter the terminal grid height.
+pub(super) fn pane_header_cue(theme: ChromeTheme, focused: bool) -> StateCue {
+    let p = palette_for(theme);
+    let (fill, rule) = match (theme, focused) {
+        (_, false) => (p.header, None),
+        (ChromeTheme::Light, true) => (LIGHT_FOCUS_HEADER, Some(p.selection_indicator)),
+        (ChromeTheme::Dark, true) => (p.header, Some(p.accent)),
+    };
+    StateCue {
+        fill,
+        rule,
+        rule_height: 2.0,
+    }
+}
+
 // Panel marker colours (both themes).
 #[allow(dead_code)] // consumed by the dock stage
 pub(super) mod marker {
@@ -195,10 +279,7 @@ pub(super) fn set(theme: ChromeTheme) {
 }
 
 pub(super) fn palette() -> &'static Palette {
-    match current() {
-        ChromeTheme::Light => &LIGHT,
-        ChromeTheme::Dark => &DARK,
-    }
+    palette_for(current())
 }
 
 pub(super) fn init_from_env() {
@@ -350,6 +431,111 @@ mod tests {
             assert!(contrast(p.warning_text, p.dock) >= 4.5, "preflight warning");
             assert!(contrast(Color::BLACK, p.accent) >= 4.5, "primary action");
             assert!(contrast(p.selection_indicator, p.selected_row) >= 3.0);
+        }
+    }
+
+    /// Smallest per-channel difference, in 8-bit steps, between two fills.
+    fn channel_delta(a: Color, b: Color) -> f32 {
+        [(a.r - b.r), (a.g - b.g), (a.b - b.b)]
+            .iter()
+            .map(|d| d.abs() * 255.0)
+            .fold(f32::MAX, f32::min)
+    }
+
+    #[test]
+    fn light_open_menu_title_has_readable_fill_and_underline() {
+        let open = menu_title_cue(ChromeTheme::Light, true);
+        let closed = menu_title_cue(ChromeTheme::Light, false);
+        assert_ne!(open.fill, LIGHT.hover, "open must not look like hover");
+        assert!(channel_delta(open.fill, LIGHT.chrome) >= 15.0, "open fill");
+        let rule = open.rule.expect("open title needs an underline");
+        assert!(contrast(rule, open.fill) >= 3.0, "underline on open fill");
+        assert!(contrast(rule, LIGHT.chrome) >= 3.0, "underline on menu bar");
+        assert_eq!(closed.rule, None);
+        for cue in [open, closed] {
+            assert!(contrast(LIGHT.text, cue.fill) >= 4.5, "title text");
+        }
+    }
+
+    #[test]
+    fn light_menu_item_hover_is_visible_on_popup() {
+        let fill = menu_item_hover_fill(ChromeTheme::Light);
+        assert!(channel_delta(fill, LIGHT.list) >= 35.0, "hover vs popup");
+        assert!(contrast(LIGHT.text, fill) >= 4.5);
+        assert!(contrast(LIGHT.muted, fill) >= 4.5, "shortcut text");
+    }
+
+    #[test]
+    fn light_active_session_tab_cue_exceeds_hairline() {
+        let active = session_tab_cue(ChromeTheme::Light, true);
+        let inactive = session_tab_cue(ChromeTheme::Light, false);
+        assert!(
+            channel_delta(active.fill, inactive.fill) >= 25.0,
+            "tab fills"
+        );
+        assert!(active.rule_height >= 3.0, "rule thicker than hairline");
+        let rule = active.rule.expect("active tab rule");
+        for surface in [active.fill, inactive.fill, LIGHT.chrome] {
+            assert!(contrast(rule, surface) >= 3.0, "rule on {surface:?}");
+        }
+        assert_eq!(inactive.rule, None);
+        for cue in [active, inactive] {
+            // Inactive labels stay full-strength text, never disabled grey.
+            assert!(contrast(LIGHT.text, cue.fill) >= 4.5, "tab label");
+            assert!(contrast(LIGHT.muted, cue.fill) >= 4.5, "close glyph");
+        }
+    }
+
+    #[test]
+    fn light_focused_pane_header_is_tinted_without_height_change() {
+        let focused = pane_header_cue(ChromeTheme::Light, true);
+        let unfocused = pane_header_cue(ChromeTheme::Light, false);
+        assert_eq!(focused.rule_height, unfocused.rule_height);
+        assert_eq!(focused.rule_height, 2.0);
+        assert_ne!(focused.fill, unfocused.fill, "focused header tint");
+        assert!(
+            (focused.fill.r - unfocused.fill.r).abs() * 255.0 >= 20.0,
+            "tint is perceptible"
+        );
+        let rule = focused.rule.expect("focus rule");
+        assert_eq!(rule, LIGHT.selection_indicator);
+        for surface in [focused.fill, unfocused.fill] {
+            assert!(contrast(rule, surface) >= 3.0, "focus rule on {surface:?}");
+        }
+        for cue in [focused, unfocused] {
+            assert!(contrast(LIGHT.text, cue.fill) >= 4.5, "pane title");
+        }
+        assert_eq!(unfocused.rule, None);
+    }
+
+    #[test]
+    fn dark_state_cues_are_unchanged_and_readable() {
+        let d = ChromeTheme::Dark;
+        assert_eq!(menu_title_cue(d, true).fill, DARK.hover);
+        assert_eq!(menu_title_cue(d, true).rule, None);
+        assert_eq!(menu_item_hover_fill(d), DARK.hover);
+        assert_eq!(session_tab_cue(d, true).rule, Some(DARK.accent));
+        assert_eq!(session_tab_cue(d, true).rule_height, 2.0);
+        assert_eq!(session_tab_cue(d, true).fill, DARK.tab_active);
+        assert_eq!(pane_header_cue(d, true).fill, DARK.header);
+        assert_eq!(pane_header_cue(d, true).rule, Some(DARK.accent));
+        for open in [true, false] {
+            for cue in [
+                menu_title_cue(d, open),
+                session_tab_cue(d, open),
+                pane_header_cue(d, open),
+            ] {
+                assert!(contrast(DARK.text, cue.fill) >= 4.5, "{cue:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn status_bar_stays_white_on_windterm_blue() {
+        for p in [LIGHT, DARK] {
+            assert_eq!(p.status_bg, hex(0x007ACC));
+            assert_eq!(p.status_text, hex(0xFFFFFF));
+            assert!(contrast(p.status_text, p.status_bg) >= 4.5);
         }
     }
 }

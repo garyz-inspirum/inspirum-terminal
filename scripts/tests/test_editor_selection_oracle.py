@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+import subprocess
 import sys
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 try:
@@ -63,6 +65,24 @@ class EditorSelectionOracleTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             module.require_editor_selection(
                 Path("x.png"), 41002, 41001, FORM, locate=loc,
+            )
+
+    def test_sibling_read_timed_out_is_not_absence(self):
+        # A tesseract timeout returns no words; that must not certify the
+        # sibling port absent (seen on a loaded host: 41 s per crop against
+        # the 15 s per-call limit, sibling 40369 "missing" from a frame
+        # that renders it).
+        shown = fake_locator({"41001": (700, 200, 760, 215)})
+
+        def starved(path, label, *, region=None, budget=None):
+            if label == "41002":
+                setattr(module, "OCR_TIMEOUTS", getattr(module, "OCR_TIMEOUTS", 0) + 1)
+                raise RuntimeError("visible label not found in screenshot: 41002")
+            return shown(path, label, region=region, budget=budget)
+
+        with self.assertRaisesRegex(RuntimeError, "cannot prove sibling port 41002 absent"):
+            module.require_editor_selection(
+                Path("x.png"), 41001, 41002, FORM, locate=starved,
             )
 
     def test_port_only_in_left_list_fails(self):
@@ -130,10 +150,85 @@ class EditorSelectionOnRealFrameTest(unittest.TestCase):
             )
 
     def test_visible_sibling_in_card_fails(self):
-        with self.assertRaises(RuntimeError):
+        # Must fail BECAUSE 40369 was read in the card. An OCR timeout on a
+        # slow host raises the inconclusive error instead, which does not
+        # count here (set INSPIRUM_GUI_TIME_SCALE as the GUI container does).
+        with self.assertRaisesRegex(RuntimeError, "still shows sibling port 40369"):
             module.require_editor_selection(
                 FIXTURE, 43231, 40369, self.form, row_region=self.row,
             )
+
+    def test_sibling_read_tesseract_exit_failure_is_not_absence(self):
+        # 40369 IS rendered in this card. Tesseract exiting nonzero during
+        # the sibling search reads no words; that must be inconclusive,
+        # never "sibling absent".
+        #
+        # _PIXEL_CACHE is keyed on the fixture path, so in a full module run
+        # earlier tests leave real words for this frame there and the
+        # sibling search finds 40369 without starting tesseract at all. Every
+        # phase therefore runs on an empty cache.
+        real_run = module.subprocess.run
+
+        # 1. Positive control: a real read finds 40369 inside the form.
+        with mock.patch.dict(module._PIXEL_CACHE, clear=True):
+            shown = module.locate_visible_label(FIXTURE, "40369", region=self.form)
+        self.assertIsNotNone(module._bounds_inside(shown, self.form), shown)
+
+        # 2. The sibling search runs real tesseract processes that really
+        # exit nonzero: each call is pointed at a file that does not exist.
+        missing = Path(__file__).resolve().parent / "fixtures" / "no-such-ocr-input.png"
+        self.assertFalse(missing.exists())
+        calls = []
+
+        def failing_run(argv, *args, **kwargs):
+            argv = [argv[0], str(missing), *argv[2:]]
+            result = real_run(argv, *args, **kwargs)
+            calls.append((argv, result.returncode, result.stdout))
+            return result
+
+        def locate(path, label, *, region=None, budget=None):
+            if label != "40369":
+                return module.locate_visible_label(path, label, region=region)
+            with mock.patch.object(module.subprocess, "run", failing_run):
+                return module.locate_visible_label(path, label, region=region)
+
+        # getattr: OCR_FAILURES does not exist before the fix, and the RED run
+        # must fail on the oracle assertion below, not on an AttributeError.
+        timeouts, failures = module.OCR_TIMEOUTS, getattr(module, "OCR_FAILURES", 0)
+        with mock.patch.dict(module._PIXEL_CACHE, clear=True):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"cannot prove sibling port 40369 absent .*tesseract call\(s\) exited nonzero",
+            ):
+                module.require_editor_selection(
+                    FIXTURE, 43231, 40369, self.form, row_region=self.row, locate=locate,
+                )
+            # A starved read must not be cached for a later absence check.
+            poisoned = [key for key in module._PIXEL_CACHE if key[0] == str(FIXTURE)]
+        self.assertEqual(poisoned, [])
+        self.assertIs(module.subprocess.run, real_run)
+        self.assertTrue(calls, "injection never reached subprocess.run")
+        for argv, returncode, stdout in calls:
+            self.assertIn("tesseract", Path(argv[0]).name, argv)
+            self.assertNotEqual(returncode, 0, argv)
+            self.assertEqual(stdout, "", argv)
+        self.assertEqual(getattr(module, "OCR_FAILURES", 0) - failures, len(calls))
+        self.assertEqual(module.OCR_TIMEOUTS, timeouts)
+
+    def test_starved_whole_frame_read_is_not_cached(self):
+        # A failed stage cached as "no words" would later let an absence
+        # check pass without starting tesseract, so no counter would move.
+        def failing_run(argv, *args, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="injected")
+
+        tesseract = shutil.which("tesseract")
+        with mock.patch.dict(module._PIXEL_CACHE, clear=True):
+            with mock.patch.object(module.subprocess, "run", failing_run):
+                module.visible_pixel_rows(FIXTURE, tesseract, clusters=False)
+                module.visible_segment_rows(FIXTURE, tesseract)
+            self.assertEqual(dict(module._PIXEL_CACHE), {})
+            module.visible_pixel_rows(FIXTURE, tesseract, clusters=False)
+            self.assertEqual(len(module._PIXEL_CACHE), 1)
 
 
 if __name__ == "__main__":

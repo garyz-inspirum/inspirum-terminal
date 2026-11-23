@@ -681,15 +681,29 @@ def _text_threshold(width, height, channels, rows) -> int:
     return max(90, min(160, (p90 + p99) // 2))
 
 
+# Tesseract calls killed by the per-call timeout. A timed-out read returns no
+# words, which a presence check retries but an ABSENCE check would take as
+# "not rendered"; require_editor_selection compares this count around its
+# sibling read so a starved OCR cannot certify the sibling port absent.
+OCR_TIMEOUTS = 0
+# Tesseract calls that exited nonzero. Same hazard as a timeout (no words,
+# not a real read), counted separately so a genuine OCR miss -- exit 0 with
+# no matching word -- stays the only way to prove a port absent.
+OCR_FAILURES = 0
+
+
 def _ocr_tsv(tesseract: str, image: Path, psm: str) -> str:
+    global OCR_TIMEOUTS, OCR_FAILURES
     try:
         result = subprocess.run(
             [tesseract, str(image), "stdout", "--psm", psm, "tsv"],
             capture_output=True, text=True, timeout=15 * TIME_SCALE,
         )
     except subprocess.TimeoutExpired:
+        OCR_TIMEOUTS += 1
         return ""
     if result.returncode != 0:
+        OCR_FAILURES += 1
         return ""
     return result.stdout
 
@@ -780,7 +794,16 @@ def _band_clusters(width, rows, channels, thresh, y1, y2, gap: int):
     return clusters
 
 
+# Only a read whose every tesseract call completed is cached. A starved stage
+# holds missing words; cached, a later ABSENCE check would hit it without any
+# OCR call, the timeout/failure counters around that check would stay still,
+# and the missing words would pass as "not rendered".
 _PIXEL_CACHE: dict[tuple, list] = {}
+
+
+def _ocr_starved_count() -> int:
+    """Tesseract calls so far that produced no real read (timeout or exit != 0)."""
+    return OCR_TIMEOUTS + OCR_FAILURES
 
 
 def _band_segments(width, rows, channels, thresh, y1, y2, gap: int):
@@ -829,6 +852,7 @@ def visible_segment_rows(path: Path, tesseract: str, *, invert: bool = False):
     width, height, channels, rows = _read_png(path)
     thresh = _text_threshold(width, height, channels, rows)
     segments = []
+    starved = _ocr_starved_count()
     temporary = Path(tempfile.mkstemp(suffix=".png")[1])
     try:
         for y1, y2 in _visible_bands(width, height, channels, rows, thresh):
@@ -849,7 +873,8 @@ def visible_segment_rows(path: Path, tesseract: str, *, invert: bool = False):
                 ))
     finally:
         temporary.unlink(missing_ok=True)
-    _PIXEL_CACHE[key] = segments
+    if _ocr_starved_count() == starved:
+        _PIXEL_CACHE[key] = segments
     return segments
 
 
@@ -869,6 +894,7 @@ def visible_pixel_rows(path: Path, tesseract: str, *, clusters: bool = False):
     width, height, channels, rows = _read_png(path)
     thresh = _text_threshold(width, height, channels, rows)
     words = []
+    starved = _ocr_starved_count()
     temporary = Path(tempfile.mkstemp(suffix=".png")[1])
     try:
         for y1, y2 in _visible_bands(width, height, channels, rows, thresh):
@@ -900,7 +926,8 @@ def visible_pixel_rows(path: Path, tesseract: str, *, clusters: bool = False):
                 ))
     finally:
         temporary.unlink(missing_ok=True)
-    _PIXEL_CACHE[key] = words
+    if _ocr_starved_count() == starved:
+        _PIXEL_CACHE[key] = words
     return words
 
 
@@ -1289,9 +1316,22 @@ def require_editor_selection(path, port: int, sibling_port: int, form_region, *,
         ) from exc
     if _bounds_inside(box, where) is None:
         raise RuntimeError(f"listen port {port} box {box} outside editor row {where}")
+    timeouts, failures = OCR_TIMEOUTS, OCR_FAILURES
     try:
         stale = locate(path, str(sibling_port), region=form_region)
     except RuntimeError:
+        if OCR_TIMEOUTS != timeouts:
+            raise RuntimeError(
+                f"cannot prove sibling port {sibling_port} absent from editor "
+                f"form {form_region}: {OCR_TIMEOUTS - timeouts} OCR call(s) "
+                f"timed out (raise INSPIRUM_GUI_TIME_SCALE on a slow host)"
+            ) from None
+        if OCR_FAILURES != failures:
+            raise RuntimeError(
+                f"cannot prove sibling port {sibling_port} absent from editor "
+                f"form {form_region}: {OCR_FAILURES - failures} tesseract "
+                f"call(s) exited nonzero"
+            ) from None
         return box
     raise RuntimeError(
         f"editor form still shows sibling port {sibling_port} at {stale}; "
@@ -1408,17 +1448,122 @@ def _region_band_label(path: Path, tesseract: str, label: str, region):
             )
             if band[2] - band[0] < 24 or band[3] - band[1] < 8:
                 continue
-            words = region_upscaled_rows(
-                path, tesseract, band, psm="7", scale=4, invert=True,
-            )
-            words = [word for word in words if _word_inside(word, region)]
-            bounds = match_visible_label(words, label)
-            if bounds is None:
-                bounds = match_visible_segment([words], label)
-            bounds = _bounds_inside(bounds, region)
-            if bounds is not None:
-                return bounds
+            crops = [band]
+            interior = _outline_interior(rows, channels, thresh, band[0], band[2], by1, by2)
+            if interior is not None:
+                crops.append((band[0], interior[0], band[2], interior[1] + 1))
+                crops.extend(_outline_button_interiors(
+                    rows, channels, thresh, band[0], band[2], *interior,
+                ))
+            for crop in crops:
+                words = region_upscaled_rows(
+                    path, tesseract, crop, psm="7", scale=4, invert=True,
+                )
+                words = [word for word in words if _word_inside(word, region)]
+                bounds = match_visible_label(words, label)
+                if bounds is None:
+                    bounds = match_visible_segment([words], label)
+                bounds = _bounds_inside(bounds, region)
+                if bounds is not None:
+                    return bounds
     return None
+
+
+# A band row counts as an outline rule when this share of its span is lit.
+# Measured on the Edit SSH connection button row (CI frames connected-
+# profile-rename-{before-submit,cancel}.png, span x 624-911): border rows
+# y=724/746 are 92-93% lit; every glyph row is 39-45%, most of it the
+# primary "Save changes" fill.
+OUTLINE_RULE_FRACTION = 0.6
+
+
+def _outline_interior(rows, channels, thresh, x1, x2, y1, y2):
+    """Rows ``(top, bottom)`` of band ``y1..y2`` inside its outline rules.
+
+    A row of outlined buttons is one light band whose first and last rows
+    are the buttons' top and bottom borders. Cropped with them, tesseract
+    reads the box as one glyph and returns nothing (the Edit SSH connection
+    footer once the outlines are drawn brighter after a refused Submit).
+    Returns ``None`` when neither edge is a rule, so plain text bands cost
+    no extra OCR.
+    """
+    span = x2 - x1
+    if span <= 0:
+        return None
+
+    def rule(y):
+        row = rows[y]
+        lit = 0
+        for x in range(x1, x2):
+            base = x * channels
+            if (row[base] + row[base + 1] + row[base + 2]) // 3 >= thresh:
+                lit += 1
+        return lit >= span * OUTLINE_RULE_FRACTION
+
+    top, bottom = y1, y2
+    while top < bottom and rule(top):
+        top += 1
+    while bottom > top and rule(bottom):
+        bottom -= 1
+    if (top, bottom) == (y1, y2) or bottom - top < 6:
+        return None
+    return top, bottom
+
+
+# Vertical border runs at most this wide separate outlined buttons; a wider
+# lit run is a filled (primary) button, whose dark label the light-text OCR
+# cannot read anyway.
+OUTLINE_BORDER_MAX_W = 3
+# At most this many per-button crops per outlined band (bounds the OCR cost
+# of an outlined row on a miss).
+OUTLINE_BUTTONS_MAX = 6
+
+
+def _outline_button_interiors(rows, channels, thresh, x1, x2, top, bottom):
+    """Crops inside each outlined button of an outlined band.
+
+    ``top..bottom`` are the rows inside the band's rules (``_outline_interior``).
+    A column lit on at least ``OUTLINE_RULE_FRACTION`` of those rows is a
+    border; glyph stems cover about half. Each span between two consecutive
+    thin border runs, at least 24 px wide, is one button: its crop starts
+    two columns inside the left border (the 1 px antialiased inner edge) and
+    ends one column before the right border, and drops the first interior
+    row. Measured on the Edit SSH connection footer (CI frames connected-
+    profile-{rename,spec}-{cancel,before-submit}.png): borders at x 624, 690,
+    699, 788, the Save changes fill 797..910. With the whole row or the
+    Save changes fill in the crop, tesseract 5.5.0 (ubuntu-latest, run
+    45177442798) reads nothing on connected-profile-spec-cancel.png; the
+    Save only interior alone reads ``Save only``. Every crop lies inside
+    ``x1..x2`` and the band's rules.
+    """
+    height = bottom - top + 1
+    if height < 6 or x2 - x1 < 24:
+        return []
+    need = height * OUTLINE_RULE_FRACTION
+    runs = []
+    for x in range(x1, x2):
+        base = x * channels
+        lit = 0
+        for y in range(top, bottom + 1):
+            row = rows[y]
+            if (row[base] + row[base + 1] + row[base + 2]) // 3 >= thresh:
+                lit += 1
+        if lit >= need:
+            if runs and runs[-1][1] == x - 1:
+                runs[-1][1] = x
+            else:
+                runs.append([x, x])
+    crops = []
+    for (_l1, l2), (r1, r2) in zip(runs, runs[1:]):
+        if l2 - _l1 + 1 > OUTLINE_BORDER_MAX_W or r2 - r1 + 1 > OUTLINE_BORDER_MAX_W:
+            continue
+        left, right = l2 + 2, r1 - 1
+        if right - left < 24:
+            continue
+        crops.append((left, top + 1, right, bottom + 1))
+        if len(crops) >= OUTLINE_BUTTONS_MAX:
+            break
+    return crops
 
 
 def locate_visible_label(
@@ -1948,6 +2093,228 @@ def band_changed_pixels(first: Path, second: Path, box) -> int:
             ):
                 changed += 1
     return changed
+
+
+# Selected-Filer oracle (tour-08 vs tour-08b). The Filer action strip holds
+# five buttons in this order: Download, New remote folder, Rename, Edit,
+# Delete. New remote folder needs no selection, so it is the in-frame
+# reference for "enabled"; the other four must match it only once a row is
+# selected. Real Light 1280x800 frames: button rules y750/y772, enabled border
+# 118 on face 255, disabled border 191 on dock 240; the selected row has a
+# 1 px selection_indicator outline (0,102,179) on y623/y645 and x0/x1279 with
+# fill 216, while hover is fill-only (no border) per file_row_style.
+FILER_ACTION_COUNT = 5
+FILER_REFERENCE_ACTION = 1
+FILER_SELECTION_ACTIONS = {0: "Download", 2: "Rename", 3: "Edit", 4: "Delete"}
+
+
+def _frame(source):
+    """Accept a PNG path or an already-decoded ``_read_png`` tuple."""
+    return source if isinstance(source, tuple) else _read_png(Path(source))
+
+
+def _px(frame, x: int, y: int) -> tuple[int, int, int]:
+    channels, rows = frame[2], frame[3]
+    i = x * channels
+    row = rows[y]
+    return (row[i], row[i + 1], row[i + 2])
+
+
+def _far(first, second, tolerance: int = 24) -> bool:
+    return max(abs(a - b) for a, b in zip(first, second)) > tolerance
+
+
+def _mode(pixels) -> tuple[int, int, int]:
+    counts: dict[tuple[int, int, int], int] = {}
+    for pixel in pixels:
+        counts[pixel] = counts.get(pixel, 0) + 1
+    return max(counts, key=counts.get)
+
+
+def _is_indicator(pixel) -> bool:
+    """Saturated accent (selection_indicator); the Light UI is otherwise grey."""
+    return max(pixel) - min(pixel) >= 100
+
+
+def horizontal_rules(frame, band, *, min_len: int = 40) -> list[tuple[int, int, int, tuple]]:
+    """Constant-colour runs >= min_len that differ from the rows above AND below.
+
+    Button top/bottom borders qualify in both enabled (118 vs 255 face) and
+    disabled (191 vs 240 dock) states; faces, text and dock fill do not.
+    """
+    width, height = frame[0], frame[1]
+    left, top, right, bottom = (int(edge) for edge in band)
+    if left < 0 or top < 1 or right > width or bottom > height - 1 or right <= left:
+        raise RuntimeError(f"rule band {band} is outside {width}x{height}")
+    rules = []
+    for y in range(top, bottom):
+        x = left
+        while x < right:
+            colour = _px(frame, x, y)
+            end = x
+            while end + 1 < right and _px(frame, end + 1, y) == colour:
+                end += 1
+            if end - x + 1 >= min_len and all(
+                _far(colour, _px(frame, i, y - 1)) and _far(colour, _px(frame, i, y + 1))
+                for i in range(x, end + 1)
+            ):
+                rules.append((y, x, end, colour))
+            x = end + 1
+    return rules
+
+
+def filer_action_buttons(frame, band) -> list[dict]:
+    """Return the five action buttons as {box, border, face}, left to right."""
+    frame = _frame(frame)
+    by_extent: dict[tuple[int, int], list] = {}
+    for y, x0, x1, colour in horizontal_rules(frame, band):
+        by_extent.setdefault((x0, x1), []).append((y, colour))
+    buttons = []
+    for (x0, x1), edges in sorted(by_extent.items()):
+        if len(edges) != 2 or edges[1][0] - edges[0][0] < 10 or edges[0][1] != edges[1][1]:
+            continue
+        top, bottom = edges[0][0], edges[1][0]
+        face = _mode(
+            _px(frame, x, y) for y in range(top + 1, bottom) for x in range(x0, x1 + 1)
+        )
+        buttons.append({"box": (x0, top, x1, bottom), "border": edges[0][1], "face": face})
+    if len(buttons) != FILER_ACTION_COUNT:
+        raise RuntimeError(
+            f"expected {FILER_ACTION_COUNT} Filer action buttons in {band}, found "
+            f"{[button['box'] for button in buttons]}"
+        )
+    return buttons
+
+
+def _same_look(a: dict, b: dict) -> bool:
+    """Same button appearance: border within 24, face within 8."""
+    return not _far(a["border"], b["border"], 24) and not _far(a["face"], b["face"], 8)
+
+
+def filer_action_enabled(buttons: list[dict], anchor: dict | None = None) -> list[bool]:
+    """Enabled == same border and face as ``anchor``.
+
+    ``anchor`` defaults to this frame's New remote folder; selected_filer_verdict
+    passes the BEFORE frame's New remote folder so an after frame whose
+    reference also went disabled cannot redefine "enabled".
+    """
+    reference = anchor if anchor is not None else buttons[FILER_REFERENCE_ACTION]
+    return [_same_look(button, reference) for button in buttons]
+
+
+def filer_row_outline(frame, label_box, *, reach: int = 12, coverage: float = .95) -> dict:
+    """Prove a selection outline encloses the row holding ``label_box``.
+
+    Requires indicator-coloured top and bottom rules across >= coverage of the
+    frame width within ``reach`` px of the label, indicator left/right columns
+    outside the label, and an interior fill distinct from the list below.
+    Hover (fill-only) and an unselected row both fail.
+    """
+    frame = _frame(frame)
+    width, height = frame[0], frame[1]
+    label_left, label_top, label_right, label_bottom = (int(edge) for edge in label_box)
+
+    def rule(y: int) -> bool:
+        hits = sum(1 for x in range(width) if _is_indicator(_px(frame, x, y)))
+        return hits >= coverage * width
+
+    top = next((y for y in range(label_top - 1, max(0, label_top - reach) - 1, -1) if rule(y)), None)
+    bottom = next(
+        (y for y in range(label_bottom + 1, min(height, label_bottom + reach + 1)) if rule(y)),
+        None,
+    )
+    if top is None or bottom is None:
+        raise RuntimeError(
+            f"no selection outline rule around label {label_box}: top {top} bottom {bottom}"
+        )
+
+    def column(x: int) -> bool:
+        span = range(top + 1, bottom)
+        return sum(1 for y in span if _is_indicator(_px(frame, x, y))) >= coverage * len(span)
+
+    left = next((x for x in range(0, label_left) if column(x)), None)
+    right = next((x for x in range(width - 1, label_right, -1) if column(x)), None)
+    if left is None or right is None:
+        raise RuntimeError(
+            f"selection outline rows {top}/{bottom} lack side columns: left {left} right {right}"
+        )
+    fill = _mode(
+        _px(frame, x, y) for y in range(top + 1, bottom) for x in range(left + 1, right)
+    )
+    below = _mode(
+        _px(frame, x, y)
+        for y in range(bottom + 1, min(height, bottom + 4)) for x in range(width)
+    )
+    if not _far(fill, below, 8):
+        raise RuntimeError(f"selected row fill {fill} matches the list background {below}")
+    return {"box": (left, top, right, bottom), "fill": fill, "below": below}
+
+
+def selected_filer_verdict(unselected, selected, label_box, action_band) -> str:
+    """Single oracle for tour-08b; raise RuntimeError unless the frame proves selection.
+
+    unselected must show no outline and Download/Rename/Edit/Delete disabled;
+    selected must show the outline and those four enabled, with the same five
+    button geometries in both frames. "Enabled" is the unselected frame's New
+    remote folder look, which must be unchanged in the selected frame; every
+    target must differ from it before, match it after, and visibly change.
+    """
+    unselected, selected = _frame(unselected), _frame(selected)
+    if unselected[:2] != selected[:2]:
+        raise RuntimeError(f"frame size mismatch {unselected[:2]} vs {selected[:2]}")
+    try:
+        filer_row_outline(unselected, label_box)
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("unselected frame already shows a row selection outline")
+    outline = filer_row_outline(selected, label_box)
+    before = filer_action_buttons(unselected, action_band)
+    after = filer_action_buttons(selected, action_band)
+    if [b["box"] for b in before] != [b["box"] for b in after]:
+        raise RuntimeError(
+            f"action button geometry moved: {[b['box'] for b in before]} -> "
+            f"{[b['box'] for b in after]}"
+        )
+    # Anchor "enabled" to New remote folder in the BEFORE frame (it needs no
+    # selection), and require it unchanged after, so a frame where every
+    # button went disabled cannot pass by matching a reference that moved.
+    anchor = before[FILER_REFERENCE_ACTION]
+    reference_after = after[FILER_REFERENCE_ACTION]
+    if not _same_look(reference_after, anchor):
+        raise RuntimeError(
+            f"reference New remote folder changed: border {anchor['border']}->"
+            f"{reference_after['border']} face {anchor['face']}->{reference_after['face']}"
+        )
+    before_on = filer_action_enabled(before, anchor)
+    after_on = filer_action_enabled(after, anchor)
+    still_on = [name for i, name in FILER_SELECTION_ACTIONS.items() if before_on[i]]
+    if still_on:
+        raise RuntimeError(f"unselected frame shows {still_on} enabled")
+    still_off = [name for i, name in FILER_SELECTION_ACTIONS.items() if not after_on[i]]
+    if still_off:
+        raise RuntimeError(
+            f"selected frame shows {still_off} disabled: "
+            + ", ".join(
+                f"{FILER_SELECTION_ACTIONS[i]} border {after[i]['border']} face {after[i]['face']}"
+                for i in FILER_SELECTION_ACTIONS
+            )
+            + f"; anchor (before New remote folder) border {anchor['border']} "
+            f"face {anchor['face']}"
+        )
+    unchanged = [
+        name for i, name in FILER_SELECTION_ACTIONS.items() if _same_look(before[i], after[i])
+    ]
+    if unchanged:
+        raise RuntimeError(f"selection did not change {unchanged} appearance")
+    return (
+        f"outline {outline['box']} fill {outline['fill']}; "
+        + ", ".join(
+            f"{name} {after[i]['box']} border {before[i]['border']}->{after[i]['border']} "
+            f"face {before[i]['face']}->{after[i]['face']}"
+            for i, name in FILER_SELECTION_ACTIONS.items()
+        )
+    )
 
 
 async def wait_find_strip_closed(
@@ -2739,12 +3106,88 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
             await asyncio.sleep(.5)
     await step("find", s07b)
 
+    async def park_filer_pointer() -> None:
+        # Empty Filer list space right of the columns, above the action strip:
+        # neither a row nor a button can show hover there, so tour-08/08b
+        # carry no pointer-driven cue.
+        command(
+            "xdotool", "mousemove", "--window", window,
+            str(width - 160), str(height - 80), env=env,
+        )
+        await asyncio.sleep(.5)
+
     async def s08():
         key("ctrl+shift+o")
         await wait_for(lambda: "SFTP_LIST_READY" in log_text(), "remote SFTP listing")
         await asyncio.sleep(1.5)
+        await park_filer_pointer()
         shot("tour-08-filer.png")
     await step("filer", s08)
+
+    # Required, outside step(): the selected-row Filer frame must sit beside
+    # the unselected tour-08 frame at the same 1280x800 scale. Geometry is
+    # measured from a real tour-08-filer.png: header y598-622, the fixture row
+    # y623-644 with its name OCR box (31,628,239,639), Name column x0-290,
+    # action buttons y750-772 (Download/Rename/Edit/Delete disabled). The
+    # pointer is parked off the row before both shots, and the verdict is
+    # selected_filer_verdict: selection outline around the row plus all four
+    # selection actions styled like the always-enabled New remote folder.
+    filer_row_label = "444_GUI_DOWNLOAD_FIXTURE.bin"
+    unselected = tour_dir / "tour-08-filer.png"
+    selected = tour_dir / "tour-08b-filer-selected.png"
+    try:
+        actual = window_size(window, env)
+        if actual != (1280, 800):
+            raise RuntimeError(f"selected Filer evidence requires actual 1280x800 window: {actual}")
+        if unselected not in written or not unselected.is_file():
+            raise RuntimeError("unselected tour-08-filer.png was not written by this run")
+        action_top = height - 56
+        name_column = (0, strip_y + 46, 300, action_top)
+        row = await asyncio.to_thread(
+            locate_visible_label, unselected, filer_row_label, region=name_column,
+        )
+        if row is None:
+            raise RuntimeError(f"{filer_row_label} OCR box missing in Name column {name_column}")
+        row_x, row_y = centre(row)
+        if not (name_column[1] < row_y < action_top and row[3] < action_top):
+            raise RuntimeError(f"{filer_row_label} box {row} overlaps the action row ({action_top})")
+        action_band = (0, action_top, width, height - 22)
+        if selected.exists():
+            selected.unlink()
+        click(row_x, row_y)
+        await park_filer_pointer()
+        verdict_error = None
+        deadline = time.monotonic() + 10
+        while True:
+            await asyncio.sleep(.5)
+            await asyncio.to_thread(screenshot, window, selected, env)
+            try:
+                verdict = await asyncio.to_thread(
+                    selected_filer_verdict, unselected, selected, row, action_band,
+                )
+                verdict_error = None
+                break
+            except RuntimeError as error:
+                verdict_error = error
+            if time.monotonic() > deadline:
+                break
+        written.append(selected)
+        print(f"tour: wrote {selected}", flush=True)
+        if window_size(window, env) != (1280, 800):
+            raise RuntimeError("window left 1280x800 during the selected Filer shot")
+        if verdict_error is not None:
+            raise RuntimeError(
+                f"after clicking {filer_row_label} at ({row_x},{row_y}) and parking the "
+                f"pointer: {verdict_error}"
+            )
+        print(
+            f"tour: PASS selected Filer row {filer_row_label} box {row} clicked "
+            f"({row_x},{row_y}), pointer parked ({width - 160},{height - 80}); {verdict}",
+            flush=True,
+        )
+    except Exception as error:
+        print(f"tour: FAILED selected Filer row evidence: {error}", flush=True)
+        return 1
 
     # Bottom dock tab centres (Sender 6-88, Session 92-182, Transfer 186-283,
     # Filer ~287-361, Explorer ~365-463).

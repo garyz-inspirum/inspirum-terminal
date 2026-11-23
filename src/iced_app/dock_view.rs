@@ -63,8 +63,20 @@ fn splitter<'a>(area: Area) -> Element<'a, Message> {
         .into()
 }
 
+/// Dock tab label colour: primary `text` when active, dock text otherwise.
+/// Neither is `muted`, which marks disabled controls.
+fn dock_tab_text(p: &theme::Palette, active: bool) -> Color {
+    if active { p.text } else { p.text_dock }
+}
+
+/// Active dock tab top line. `accent` is under 3:1 on the light chrome;
+/// `selection_indicator` is the palette's high-visibility selection blue.
+fn dock_tab_line(_: &Theme) -> container::Style {
+    fill_style(theme::palette().selection_indicator)
+}
+
 fn strip_icon(icon: icons::Icon, message: Message) -> Element<'static, Message> {
-    button(icons::icon(icon, 12.0, theme::palette().text_dock))
+    button(icons::icon(icon, 12.0, theme::palette().text))
         .padding(4)
         .style(icon_button)
         .on_press(message)
@@ -159,7 +171,7 @@ impl App {
                         icons::marker(panel.marker(), 11.0),
                         text(panel.title())
                             .size(theme::metrics::UI_TEXT)
-                            .color(p.text_dock)
+                            .color(dock_tab_text(p, is_active))
                             .wrapping(iced::widget::text::Wrapping::None),
                     ]
                     .spacing(6)
@@ -171,15 +183,17 @@ impl App {
                 } else {
                     tab_inactive_fill
                 });
-                // Active dock tab: lighter fill, 2px accent top line (as the
-                // session tabs) and no bottom border so it merges with the body.
+                // Active dock tab: lighter fill, darker label, 2px
+                // `selection_indicator` top line and no bottom border so it
+                // merges with the body. Inactive tabs stay enabled buttons
+                // (gray fill, body-text label); only the active one is marked.
                 let label: Element<'_, Message> = if is_active {
                     stack![
                         label,
                         container(space::horizontal())
                             .width(Fill)
                             .height(2)
-                            .style(accent_fill)
+                            .style(dock_tab_line)
                     ]
                     .into()
                 } else {
@@ -383,4 +397,38 @@ fn gear_row(label: &'static str, message: Message) -> Element<'static, Message> 
     .style(menu_item)
     .on_press(message)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_dock_tab_is_marked_unlike_inactive_or_disabled() {
+        for p in [theme::LIGHT, theme::DARK] {
+            let active = dock_tab_text(&p, true);
+            let inactive = dock_tab_text(&p, false);
+            assert_eq!(active, p.text);
+            assert_eq!(inactive, p.text_dock);
+            // Inactive tabs are available, so never use the disabled colour.
+            assert_ne!(inactive, p.muted);
+            assert_ne!(active, p.muted);
+            assert_ne!(p.tab_active, p.tab_inactive);
+            assert_ne!(p.selection_indicator, p.tab_active);
+            assert_ne!(p.selection_indicator, p.tab_inactive);
+        }
+        // LIGHT is the #140 case: the active label is darker than inactive.
+        assert_ne!(
+            dock_tab_text(&theme::LIGHT, true),
+            dock_tab_text(&theme::LIGHT, false)
+        );
+        // The theme is process-global; accept either palette's indicator.
+        let line = dock_tab_line(&Theme::Light).background;
+        assert!(
+            [theme::LIGHT, theme::DARK]
+                .iter()
+                .any(|p| line == Some(p.selection_indicator.into())),
+            "active tab line uses selection_indicator, not accent"
+        );
+    }
 }

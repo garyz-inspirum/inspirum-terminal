@@ -1426,10 +1426,11 @@ fn file_header_cell<'a>(
     ascending: bool,
     message: Message,
 ) -> Element<'a, Message> {
+    // Header captions use primary `text`, a step darker than row cells.
     let label = text(label)
         .size(theme::metrics::UI_TEXT)
         .font(Font::MONOSPACE)
-        .color(theme::palette().text_dock)
+        .color(theme::palette().text)
         .wrapping(text::Wrapping::None);
     let label = container(label)
         .width(Fill)
@@ -1444,11 +1445,7 @@ fn file_header_cell<'a>(
         } else {
             icons::Icon::TriangleDown
         };
-        content = content.push(icons::icon(
-            glyph,
-            FILE_SORT_MARK,
-            theme::palette().text_dock,
-        ));
+        content = content.push(icons::icon(glyph, FILE_SORT_MARK, theme::palette().text));
     }
     button(content)
         .on_press(message)
@@ -2576,11 +2573,17 @@ fn file_listing_footer<'a>(count: usize, total: u64) -> Element<'a, Message> {
         text(file_listing_summary(count, total))
             .size(theme::metrics::UI_TEXT)
             .font(Font::MONOSPACE)
-            .color(theme::palette().muted),
+            .color(file_summary_color(theme::palette())),
     )
     .height(16)
     .padding([0, FILE_CELL_PAD])
     .into()
+}
+
+/// Footer summary (`1 item 2.0 KB`) uses dock body text; `muted` is
+/// reserved for placeholders and disabled controls.
+fn file_summary_color(p: &theme::Palette) -> Color {
+    p.text_dock
 }
 
 /// Footer summary under a file table: `1 item 2.0 KB`, `3 items 6.0 KB`.
@@ -4879,6 +4882,15 @@ impl App {
             self.status = "Select a local file to upload.".into();
             return Task::none();
         };
+        if self
+            .files
+            .local_entries
+            .iter()
+            .any(|entry| entry.path == local && entry.is_dir)
+        {
+            self.status = "Select a local file to upload.".into();
+            return Task::none();
+        }
         let Some(profile) = self.tabs.get(self.active).map(|tab| tab.profile.clone()) else {
             return Task::none();
         };
@@ -6861,11 +6873,19 @@ impl App {
                     self.files.local_loading = false;
                     match result {
                         Ok(entries) => {
+                            let selected_listed =
+                                self.files.selected_local.as_ref().is_some_and(|selected| {
+                                    entries.iter().any(|entry| &entry.path == selected)
+                                });
+                            if !selected_listed {
+                                self.files.selected_local = None;
+                            }
                             self.files.local_entries = entries;
                             self.files.local_error = None;
                         }
                         Err(error) => {
                             self.files.local_entries.clear();
+                            self.files.selected_local = None;
                             self.files.local_error = Some(error);
                         }
                     }
@@ -6879,11 +6899,22 @@ impl App {
                         Ok(entries) => {
                             // Capture once per stored listing, before the sort.
                             self.files.remote_sort_reference = chrono::Local::now().date_naive();
+                            // Rows match the selection by name (as the view
+                            // highlights); keep the fresh entry so type/size
+                            // eligibility follows the new listing.
+                            self.files.selected_remote =
+                                self.files.selected_remote.take().and_then(|selected| {
+                                    entries
+                                        .iter()
+                                        .find(|entry| entry.name == selected.name)
+                                        .cloned()
+                                });
                             self.files.remote_entries = entries;
                             self.files.remote_error = None;
                         }
                         Err(error) => {
                             self.files.remote_entries.clear();
+                            self.files.selected_remote = None;
                             self.files.remote_error = Some(error);
                         }
                     }
@@ -8153,11 +8184,12 @@ impl App {
     }
 
     fn menu_bar(&self) -> Element<'_, Message> {
+        let chrome = theme::current();
         let mut titles = row![].align_y(iced::Center);
         for menu in menu::Menu::ALL {
             let open = self.open_menu == Some(menu);
             titles = titles.push(
-                mouse_area(
+                mouse_area(with_state_rule(
                     button(
                         text(menu.title())
                             .size(theme::metrics::UI_TEXT)
@@ -8168,11 +8200,14 @@ impl App {
                     .width(menu.title_width())
                     .style(move |theme, status| menu_title(theme, status, open))
                     .on_press(Message::MenuOpen(menu)),
-                )
+                    theme::menu_title_cue(chrome, open),
+                    iced::alignment::Vertical::Bottom,
+                ))
                 .on_enter(Message::MenuHover(menu)),
             );
         }
-        titles = titles.push(space::horizontal()).push(
+        let tunnel_open = self.tunnel_menu;
+        titles = titles.push(space::horizontal()).push(with_state_rule(
             button(
                 text("Tunnels")
                     .size(theme::metrics::UI_TEXT)
@@ -8180,12 +8215,11 @@ impl App {
                     .wrapping(iced::widget::text::Wrapping::None),
             )
             .padding([4, 8])
-            .style({
-                let open = self.tunnel_menu;
-                move |theme, status| menu_title(theme, status, open)
-            })
+            .style(move |theme, status| menu_title(theme, status, tunnel_open))
             .on_press(Message::TunnelMenuToggle),
-        );
+            theme::menu_title_cue(chrome, tunnel_open),
+            iced::alignment::Vertical::Bottom,
+        ));
         container(titles)
             .height(theme::metrics::MENU_BAR_HEIGHT)
             .width(Fill)
@@ -8226,9 +8260,7 @@ impl App {
                                 .size(theme::metrics::UI_TEXT)
                                 .color(theme::palette().text),
                             space::horizontal(),
-                            text(shortcut)
-                                .size(theme::metrics::UI_TEXT)
-                                .color(theme::palette().muted),
+                            menu_item_trailing(command, shortcut),
                         ]
                         .align_y(iced::Center),
                     )
@@ -8408,12 +8440,13 @@ impl App {
         // Selected fill is `selected_row`. `text_dock` on that fill is 8.9:1
         // (light) and 8.2:1 (dark); `muted` on the same fill is under 4.5:1.
         let suffix_color = if selected { p.text_dock } else { p.muted };
+        let name_color = if selected { p.text } else { p.text_dock };
         let label = row![
             icons::dot(p.magenta, 7.0),
             text(profile.name.clone())
                 .size(theme::metrics::UI_TEXT)
                 .font(iced::Font::MONOSPACE)
-                .color(p.text_dock),
+                .color(name_color),
             text(suffix)
                 .size(theme::metrics::UI_TEXT)
                 .font(iced::Font::MONOSPACE)
@@ -8453,7 +8486,20 @@ impl App {
             .on_press(Message::EditProfile(index));
         // Right presses are not captured by the row buttons, so a wrapping
         // mouse_area receives them (same pattern as file rows).
-        mouse_area(row![item, edit].width(Fill).spacing(0))
+        let body: Element<'a, Message> = if selected {
+            // Overlay, not a sibling: the row keeps its width and indent.
+            stack![
+                row![item, edit].width(Fill).spacing(0),
+                container(space::vertical())
+                    .width(2)
+                    .height(theme::metrics::ROW_HEIGHT)
+                    .style(selection_marker),
+            ]
+            .into()
+        } else {
+            row![item, edit].width(Fill).spacing(0).into()
+        };
+        mouse_area(body)
             .on_right_press(Message::OpenSessionContext { index })
             .into()
     }
@@ -8527,27 +8573,13 @@ impl App {
                     .style(icon_button)
                     .on_press(Message::AskClose(index)),
                 );
+            let cue = theme::session_tab_cue(theme::current(), active);
             let body = container(body)
                 .padding(iced::Padding::new(0.0).left(10.0).right(4.0).top(2.0))
                 .height(theme::metrics::STRIP_HEIGHT - 1.0)
                 .align_y(iced::Center)
-                .style(if active {
-                    tab_active_fill
-                } else {
-                    tab_inactive_fill
-                });
-            tabs = tabs.push(if active {
-                stack![
-                    body,
-                    container(space::horizontal())
-                        .width(Fill)
-                        .height(2)
-                        .style(accent_fill)
-                ]
-                .into()
-            } else {
-                Element::from(body)
-            });
+                .style(move |_| fill_style(cue.fill));
+            tabs = tabs.push(with_state_rule(body, cue, iced::alignment::Vertical::Top));
         }
         let tab_strip = column![
             row![
@@ -8668,14 +8700,16 @@ impl App {
                     .align_y(iced::Center)
                     .into()
             });
+            let cue = theme::pane_header_cue(theme::current(), focused);
+            let rule = cue.rule.unwrap_or(cue.fill);
             let title = pane_grid::TitleBar::new(column![
                 container(space::horizontal())
                     .width(Fill)
-                    .height(2)
-                    .style(if focused { accent_fill } else { pane_header_fill }),
+                    .height(cue.rule_height)
+                    .style(move |_| fill_style(rule)),
                 container(header).padding([0, 8]).height(20).align_y(iced::Center),
             ])
-            .style(pane_header_fill);
+            .style(move |_| fill_style(cue.fill));
 
             let terminal_body: Element<'_, Message> = if let Some(error) = &pane.error {
                 column![
@@ -9108,12 +9142,33 @@ impl App {
             return self.files_unavailable();
         }
         let (_, remote_panel) = self.file_listing_panels();
+        let eligible = remote_file_actions(self.files.selected_remote.as_ref());
         let actions = files_action_row(vec![
-            action("<- Download", Message::FilesRequestDownload).into(),
+            action_when(
+                "<- Download",
+                eligible.transfer,
+                Message::FilesRequestDownload,
+            )
+            .into(),
             action("New remote folder", Message::FilesRequestMkdirRemote).into(),
-            action("Rename remote", Message::FilesRequestRenameRemote).into(),
-            action("Edit remote", Message::FilesRequestEditRemote).into(),
-            action("Delete remote", Message::FilesRequestDeleteRemote).into(),
+            action_when(
+                "Rename remote",
+                eligible.rename,
+                Message::FilesRequestRenameRemote,
+            )
+            .into(),
+            action_when(
+                "Edit remote",
+                eligible.edit,
+                Message::FilesRequestEditRemote,
+            )
+            .into(),
+            action_when(
+                "Delete remote",
+                eligible.delete,
+                Message::FilesRequestDeleteRemote,
+            )
+            .into(),
         ]);
         column![remote_panel, actions, self.remote_editor_section()]
             .height(Fill)
@@ -9127,11 +9182,25 @@ impl App {
             return self.files_unavailable();
         }
         let (local_panel, _) = self.file_listing_panels();
+        let eligible = local_file_actions(
+            self.files.selected_local.as_deref(),
+            &self.files.local_entries,
+        );
         let actions = files_action_row(vec![
-            action("Upload ->", Message::FilesRequestUpload).into(),
+            action_when("Upload ->", eligible.transfer, Message::FilesRequestUpload).into(),
             action("New local folder", Message::FilesRequestMkdirLocal).into(),
-            action("Rename local", Message::FilesRequestRenameLocal).into(),
-            action("Delete local", Message::FilesRequestDeleteLocal).into(),
+            action_when(
+                "Rename local",
+                eligible.rename,
+                Message::FilesRequestRenameLocal,
+            )
+            .into(),
+            action_when(
+                "Delete local",
+                eligible.delete,
+                Message::FilesRequestDeleteLocal,
+            )
+            .into(),
         ]);
         column![local_panel, actions]
             .height(Fill)
@@ -10935,10 +11004,59 @@ fn policy_field<'a>(
 }
 
 fn action<'a>(label: impl Into<String>, message: Message) -> button::Button<'a, Message> {
+    action_when(label, true, message)
+}
+
+/// Same control as [`action`]; without `enabled` it has no `on_press`, so
+/// Iced reports `Status::Disabled` and `quiet` draws the unavailable look.
+fn action_when<'a>(
+    label: impl Into<String>,
+    enabled: bool,
+    message: Message,
+) -> button::Button<'a, Message> {
     button(text(label.into()).size(13))
         .padding([3, 10])
         .style(quiet)
-        .on_press(message)
+        .on_press_maybe(enabled.then_some(message))
+}
+
+/// Which selection-dependent file actions apply to the current selection.
+/// Mirrors the request handlers: they reject a missing selection, and
+/// Download/Edit also reject a directory. The handlers keep those status
+/// messages for the context menu, keyboard and drop paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileActionEligibility {
+    /// Download (remote) or Upload (local).
+    transfer: bool,
+    edit: bool,
+    rename: bool,
+    delete: bool,
+}
+
+fn remote_file_actions(selected: Option<&sftp::RemoteEntry>) -> FileActionEligibility {
+    let file = selected.is_some_and(|entry| !entry.is_dir);
+    FileActionEligibility {
+        transfer: file,
+        edit: file,
+        rename: selected.is_some(),
+        delete: selected.is_some(),
+    }
+}
+
+/// Local selection is a path; eligibility comes from the listed row with that
+/// path, so a selected directory cannot offer Upload (`request_upload`
+/// rejects non-files) and a selection without a row offers nothing.
+fn local_file_actions(
+    selected: Option<&std::path::Path>,
+    entries: &[LocalFileEntry],
+) -> FileActionEligibility {
+    let entry = selected.and_then(|path| entries.iter().find(|entry| entry.path == path));
+    FileActionEligibility {
+        transfer: entry.is_some_and(|entry| !entry.is_dir),
+        edit: false,
+        rename: entry.is_some(),
+        delete: entry.is_some(),
+    }
 }
 
 fn surface(_: &Theme) -> container::Style {
@@ -10978,10 +11096,13 @@ fn active_card(theme: &Theme) -> container::Style {
 /// Flat WindTerm text button: `list` fill with a 1px `border` outline at rest,
 /// so a control still reads as clickable before the pointer reaches it.
 fn menu_title(_: &Theme, status: button::Status, open: bool) -> button::Style {
-    let p = theme::palette();
+    let chrome = theme::current();
+    let p = theme::palette_for(chrome);
+    // The open state wins over hover so the open menu never fades to the
+    // pale hover fill while the pointer rests on it.
     let background = match status {
+        _ if open => Some(theme::menu_title_cue(chrome, true).fill.into()),
         button::Status::Hovered | button::Status::Pressed => Some(p.hover.into()),
-        _ if open => Some(p.hover.into()),
         _ => None,
     };
     button::Style {
@@ -10992,22 +11113,69 @@ fn menu_title(_: &Theme, status: button::Status, open: bool) -> button::Style {
 }
 
 fn menu_item(_: &Theme, status: button::Status) -> button::Style {
-    let p = theme::palette();
+    let chrome = theme::current();
+    let p = theme::palette_for(chrome);
     button::Style {
         background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-            .then(|| p.hover.into()),
+            .then(|| theme::menu_item_hover_fill(chrome).into()),
         text_color: p.text,
         ..Default::default()
     }
 }
 
-fn quiet(_: &Theme, status: button::Status) -> button::Style {
+/// The chrome theme a View-menu entry selects, if it is a theme choice.
+fn theme_menu_choice(command: menu::Command) -> Option<theme::ChromeTheme> {
+    match command {
+        menu::Command::ThemeLight => Some(theme::ChromeTheme::Light),
+        menu::Command::ThemeDark => Some(theme::ChromeTheme::Dark),
+        _ => None,
+    }
+}
+
+/// Right-hand drop-down cell: the shortcut, or for theme choices a canvas
+/// radio marker (filled = current theme, hollow = available choice).
+fn menu_item_trailing<'a>(command: menu::Command, shortcut: &'a str) -> Element<'a, Message> {
     let p = theme::palette();
+    match theme_menu_choice(command) {
+        Some(choice) if choice == theme::current() => icons::dot(p.selection_indicator, 16.0),
+        Some(_) => icons::icon(icons::Icon::CircleHollow, 16.0, p.control_outline),
+        None => text(shortcut)
+            .size(theme::metrics::UI_TEXT)
+            .color(p.muted)
+            .into(),
+    }
+}
+
+/// Overlay a cue's accent rule on `base` (top for tabs, bottom for menu
+/// titles) without changing `base`'s size; no rule leaves `base` untouched.
+fn with_state_rule<'a>(
+    base: impl Into<Element<'a, Message>>,
+    cue: theme::StateCue,
+    edge: iced::alignment::Vertical,
+) -> Element<'a, Message> {
+    let base = base.into();
+    let Some(color) = cue.rule else {
+        return base;
+    };
+    let rule = container(space::horizontal())
+        .width(Fill)
+        .height(cue.rule_height)
+        .style(move |_| fill_style(color));
+    stack![base, container(rule).width(Fill).height(Fill).align_y(edge)].into()
+}
+
+fn quiet(_: &Theme, status: button::Status) -> button::Style {
+    quiet_style(theme::palette(), status)
+}
+
+fn quiet_style(p: &theme::Palette, status: button::Status) -> button::Style {
     let (background, border_color, text_color) = match status {
         button::Status::Hovered => (p.hover, p.accent, p.text),
         button::Status::Pressed => (p.selected_row, p.accent, p.text),
+        // Disabled sinks into the dock fill with the faint divider; an
+        // available control is a raised field with the 3:1 control outline.
         button::Status::Disabled => (p.dock, p.border, p.muted),
-        button::Status::Active => (p.list, p.border, p.text),
+        button::Status::Active => (p.list, p.control_outline, p.text),
     };
     button::Style {
         background: Some(background.into()),
@@ -11100,20 +11268,12 @@ fn border_fill(_: &Theme) -> container::Style {
     fill_style(theme::palette().border)
 }
 
-fn accent_fill(_: &Theme) -> container::Style {
-    fill_style(theme::palette().accent)
-}
-
 fn tab_active_fill(_: &Theme) -> container::Style {
     fill_style(theme::palette().tab_active)
 }
 
 fn tab_inactive_fill(_: &Theme) -> container::Style {
     fill_style(theme::palette().tab_inactive)
-}
-
-fn pane_header_fill(_: &Theme) -> container::Style {
-    fill_style(theme::palette().header)
 }
 
 fn pane_body(_: &Theme) -> container::Style {
@@ -11158,7 +11318,10 @@ fn tab_button(theme: &Theme, status: button::Status) -> button::Style {
 }
 
 fn file_row(_theme: &Theme, status: button::Status) -> button::Style {
-    let palette = theme::palette();
+    file_row_style(theme::palette(), status)
+}
+
+fn file_row_style(palette: &theme::Palette, status: button::Status) -> button::Style {
     let background = match status {
         button::Status::Hovered | button::Status::Pressed => palette.hover,
         _ => palette.list,
@@ -11171,12 +11334,22 @@ fn file_row(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// Selected row: neutral `selected_row` fill plus a square 1px
+/// `selection_indicator` outline (drawn inside the bounds, so the row keeps
+/// its 23px height and column widths). Hover alone never draws the outline.
 fn file_row_selected(_theme: &Theme, _status: button::Status) -> button::Style {
-    let palette = theme::palette();
+    file_row_selected_style(theme::palette())
+}
+
+fn file_row_selected_style(palette: &theme::Palette) -> button::Style {
     button::Style {
         background: Some(palette.selected_row.into()),
         text_color: palette.text_dock,
-        border: Border::default(),
+        border: Border {
+            color: palette.selection_indicator,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
         ..button::Style::default()
     }
 }
@@ -11447,7 +11620,8 @@ fn transfer_progress(_: &Theme) -> progress_bar::Style {
     }
 }
 
-/// Selected session row: palette `selected_row` fill, full width, no border.
+/// Selected session row: palette `selected_row` fill; the row also draws a
+/// [`selection_marker`] bar that open (connected) rows do not.
 fn session_row_selected(_theme: &Theme, _status: button::Status) -> button::Style {
     let p = theme::palette();
     button::Style {
@@ -11456,6 +11630,11 @@ fn session_row_selected(_theme: &Theme, _status: button::Status) -> button::Styl
         border: Border::default(),
         ..button::Style::default()
     }
+}
+
+/// 2px square `selection_indicator` bar on the left edge of a selected row.
+fn selection_marker(_theme: &Theme) -> container::Style {
+    fill_style(theme::palette().selection_indicator)
 }
 
 const SESSION_DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -11473,6 +11652,53 @@ fn session_group_hides_rows(collapsed: bool, query: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn theme_menu_entries_map_to_their_chrome_theme_only() {
+        use super::menu::Command;
+        use super::theme::ChromeTheme;
+        assert_eq!(
+            super::theme_menu_choice(Command::ThemeLight),
+            Some(ChromeTheme::Light)
+        );
+        assert_eq!(
+            super::theme_menu_choice(Command::ThemeDark),
+            Some(ChromeTheme::Dark)
+        );
+        for other in [Command::NewSession, Command::ZoomIn, Command::Find] {
+            assert_eq!(super::theme_menu_choice(other), None);
+        }
+        // Every View-menu theme entry gets exactly one choice marker.
+        let choices: Vec<_> = super::menu::Menu::View
+            .entries()
+            .into_iter()
+            .filter_map(|entry| match entry {
+                super::menu::Entry::Item { command, .. } => super::theme_menu_choice(command),
+                super::menu::Entry::Separator => None,
+            })
+            .collect();
+        assert_eq!(choices, vec![ChromeTheme::Light, ChromeTheme::Dark]);
+    }
+
+    #[test]
+    fn open_menu_title_is_filled_and_closed_title_keeps_enabled_text() {
+        use iced::widget::button::Status;
+        let theme = iced::Theme::Light;
+        for status in [Status::Active, Status::Hovered, Status::Pressed] {
+            let open = super::menu_title(&theme, status, true);
+            assert!(open.background.is_some(), "{status:?}: open title fill");
+        }
+        let closed = super::menu_title(&theme, Status::Active, false);
+        let open = super::menu_title(&theme, Status::Active, true);
+        assert_eq!(closed.background, None);
+        // Closed titles are enabled: same full-strength text as the open one.
+        assert_eq!(closed.text_color, open.text_color);
+        let hovered = super::menu_item(&theme, Status::Hovered);
+        let rest = super::menu_item(&theme, Status::Active);
+        assert!(hovered.background.is_some());
+        assert_eq!(rest.background, None);
+        assert_eq!(hovered.text_color, rest.text_color);
+    }
+
     #[test]
     fn clickable_controls_are_distinct_from_labels_at_rest() {
         use iced::widget::button::Status;
@@ -11545,6 +11771,306 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn selected_file_row_is_outlined_unlike_hover_rest_or_disabled() {
+        use iced::widget::button::Status;
+        for p in [theme::LIGHT, theme::DARK] {
+            let selected = file_row_selected_style(&p);
+            assert_eq!(selected.background, Some(p.selected_row.into()));
+            assert_eq!(selected.border.color, p.selection_indicator);
+            assert!(selected.border.width >= 1.0, "selection needs an outline");
+            let radius = selected.border.radius;
+            assert!(
+                [
+                    radius.top_left,
+                    radius.top_right,
+                    radius.bottom_right,
+                    radius.bottom_left
+                ]
+                .iter()
+                .all(|corner| *corner == 0.0),
+                "WindTerm rows are square"
+            );
+            for status in [Status::Active, Status::Hovered, Status::Pressed] {
+                let row = file_row_style(&p, status);
+                assert_eq!(
+                    row.border.width, 0.0,
+                    "{status:?} row must not look selected"
+                );
+                assert_ne!(row.background, selected.background, "{status:?} fill");
+            }
+            // A disabled action (unavailable) shares neither cue.
+            let disabled = quiet_style(&p, Status::Disabled);
+            assert_ne!(disabled.background, selected.background);
+            assert_ne!(disabled.border.color, selected.border.color);
+        }
+    }
+
+    #[test]
+    fn disabled_file_action_is_visibly_unavailable_against_enabled() {
+        use iced::widget::button::Status;
+        for p in [theme::LIGHT, theme::DARK] {
+            let enabled = quiet_style(&p, Status::Active);
+            let disabled = quiet_style(&p, Status::Disabled);
+            assert_eq!(enabled.text_color, p.text);
+            assert_eq!(disabled.text_color, p.muted);
+            assert_eq!(enabled.border.color, p.control_outline);
+            assert_eq!(disabled.border.color, p.border);
+            assert_ne!(enabled.background, disabled.background);
+            assert_eq!(disabled.background, Some(p.dock.into()));
+            // Enabled stays legible and outlined on the dock surface.
+            assert!(contrast_ratio(enabled.text_color, p.list) >= 7.0);
+            assert!(contrast_ratio(enabled.border.color, p.dock) >= 3.0);
+            // Disabled is quieter than enabled but still readable for OCR.
+            assert!(contrast_ratio(disabled.text_color, p.dock) >= 4.5);
+            assert!(
+                contrast_ratio(disabled.text_color, p.dock)
+                    < contrast_ratio(enabled.text_color, p.list)
+            );
+        }
+        assert_eq!(file_summary_color(&theme::LIGHT), theme::LIGHT.text_dock);
+        assert!(contrast_ratio(file_summary_color(&theme::LIGHT), theme::LIGHT.list) >= 7.0);
+    }
+
+    fn contrast_ratio(a: iced::Color, b: iced::Color) -> f32 {
+        let luminance = |color: iced::Color| {
+            let linear = |channel: f32| {
+                if channel <= 0.04045 {
+                    channel / 12.92
+                } else {
+                    ((channel + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+        };
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn file_actions_follow_the_actual_selection_model() {
+        let mut app = app_with_one_pane_and_auxiliary_shell("filer-action-eligibility");
+        let none = FileActionEligibility {
+            transfer: false,
+            edit: false,
+            rename: false,
+            delete: false,
+        };
+        assert_eq!(
+            remote_file_actions(app.files.selected_remote.as_ref()),
+            none
+        );
+        assert_eq!(
+            local_file_actions(
+                app.files.selected_local.as_deref(),
+                &app.files.local_entries
+            ),
+            none
+        );
+
+        // Handlers keep their no-selection feedback (context menu / keys).
+        let _ = app.update(Message::FilesRequestDownload);
+        assert_eq!(app.status, "Select a remote file to download.");
+        let _ = app.update(Message::FilesRequestDeleteLocal);
+        assert_eq!(app.status, "Select a local file to delete.");
+
+        let file = sftp::RemoteEntry::new("notes.txt", false, Some(12));
+        app.files.remote_entries = vec![file.clone()];
+        let _ = app.update(Message::FilesSelectRemote(file));
+        assert_eq!(
+            remote_file_actions(app.files.selected_remote.as_ref()),
+            FileActionEligibility {
+                transfer: true,
+                edit: true,
+                rename: true,
+                delete: true,
+            }
+        );
+
+        // Right-click selects a directory: Download/Edit would only report
+        // "not a directory", so they are unavailable; Rename/Delete apply.
+        let dir = sftp::RemoteEntry::new("src", true, None);
+        let _ = app.update(Message::OpenRemoteFileContext {
+            entry: dir,
+            open_path: "/srv/src".into(),
+        });
+        assert_eq!(
+            remote_file_actions(app.files.selected_remote.as_ref()),
+            FileActionEligibility {
+                transfer: false,
+                edit: false,
+                rename: true,
+                delete: true,
+            }
+        );
+
+        let mut upload = listing_entry("upload.bin", false, Some(3), None);
+        upload.path = PathBuf::from("/tmp/upload.bin");
+        let mut local_dir = listing_entry("build", true, None, None);
+        local_dir.path = PathBuf::from("/tmp/build");
+        app.files.local_entries = vec![upload, local_dir];
+        let _ = app.update(Message::FilesSelectLocal(PathBuf::from("/tmp/upload.bin")));
+        assert_eq!(
+            local_file_actions(
+                app.files.selected_local.as_deref(),
+                &app.files.local_entries
+            ),
+            FileActionEligibility {
+                transfer: true,
+                edit: false,
+                rename: true,
+                delete: true,
+            }
+        );
+
+        // A selected local directory cannot be uploaded (`request_upload`
+        // rejects non-files) but can still be renamed or deleted.
+        let _ = app.update(Message::FilesSelectLocal(PathBuf::from("/tmp/build")));
+        assert_eq!(
+            local_file_actions(
+                app.files.selected_local.as_deref(),
+                &app.files.local_entries
+            ),
+            FileActionEligibility {
+                transfer: false,
+                edit: false,
+                rename: true,
+                delete: true,
+            }
+        );
+        let _ = app.update(Message::FilesRequestUpload);
+        assert_eq!(app.status, "Select a local file to upload.");
+        assert!(app.files.transfers.is_empty());
+        let _ = app.view();
+    }
+
+    #[test]
+    fn local_listing_refresh_keeps_present_selection_and_clears_missing() {
+        let (_dir, mut app) = boot_sort_app("selection-local-refresh");
+        let _ = app.update(Message::FilesLocalLoaded(
+            0,
+            Ok(vec![
+                listing_entry("a.txt", false, Some(1), None),
+                listing_entry("b.txt", false, Some(2), None),
+            ]),
+        ));
+        let _ = app.update(Message::FilesSelectLocal(PathBuf::from("b.txt")));
+
+        // Reordered listing that still contains the selection keeps it.
+        let _ = app.update(Message::FilesLocalLoaded(
+            0,
+            Ok(vec![
+                listing_entry("c.txt", false, Some(3), None),
+                listing_entry("b.txt", false, Some(2), None),
+                listing_entry("a.txt", false, Some(1), None),
+            ]),
+        ));
+        assert_eq!(
+            app.files.selected_local.as_deref(),
+            Some(std::path::Path::new("b.txt"))
+        );
+        assert!(
+            local_file_actions(
+                app.files.selected_local.as_deref(),
+                &app.files.local_entries
+            )
+            .transfer
+        );
+
+        // A stale generation neither replaces the listing nor clears it.
+        let stale = app.files.local_generation.wrapping_add(1);
+        let _ = app.update(Message::FilesLocalLoaded(stale, Err("late".into())));
+        let _ = app.update(Message::FilesLocalLoaded(
+            stale,
+            Ok(vec![listing_entry("z.txt", false, Some(9), None)]),
+        ));
+        assert_eq!(
+            app.files.selected_local.as_deref(),
+            Some(std::path::Path::new("b.txt"))
+        );
+        assert_eq!(app.files.local_entries.len(), 3);
+
+        // Refreshed listing without the selected row clears it.
+        let _ = app.update(Message::FilesLocalLoaded(
+            0,
+            Ok(vec![listing_entry("a.txt", false, Some(1), None)]),
+        ));
+        assert!(app.files.selected_local.is_none());
+        assert!(
+            !local_file_actions(
+                app.files.selected_local.as_deref(),
+                &app.files.local_entries
+            )
+            .rename
+        );
+
+        // A load error always clears the selection.
+        let _ = app.update(Message::FilesSelectLocal(PathBuf::from("a.txt")));
+        let _ = app.update(Message::FilesLocalLoaded(0, Err("gone".into())));
+        assert!(app.files.selected_local.is_none());
+    }
+
+    #[test]
+    fn remote_listing_refresh_keeps_present_selection_and_clears_missing() {
+        let (_dir, mut app) = boot_sort_app("selection-remote-refresh");
+        let _ = app.update(Message::FilesRemoteLoaded(
+            0,
+            Ok(vec![
+                sftp::RemoteEntry::new("a.log", false, Some(1)),
+                sftp::RemoteEntry::new("b.log", false, Some(2)),
+            ]),
+        ));
+        let _ = app.update(Message::FilesSelectRemote(sftp::RemoteEntry::new(
+            "b.log",
+            false,
+            Some(2),
+        )));
+
+        // Reordered listing keeps the selection, refreshed to the new entry.
+        let _ = app.update(Message::FilesRemoteLoaded(
+            0,
+            Ok(vec![
+                sftp::RemoteEntry::new("b.log", false, Some(20)),
+                sftp::RemoteEntry::new("a.log", false, Some(1)),
+            ]),
+        ));
+        assert_eq!(
+            app.files.selected_remote,
+            Some(sftp::RemoteEntry::new("b.log", false, Some(20)))
+        );
+        assert!(remote_file_actions(app.files.selected_remote.as_ref()).transfer);
+
+        // A stale generation leaves listing and selection alone.
+        let stale = app.files.remote_generation.wrapping_add(1);
+        let _ = app.update(Message::FilesRemoteLoaded(stale, Err("late".into())));
+        let _ = app.update(Message::FilesRemoteLoaded(stale, Ok(Vec::new())));
+        assert_eq!(
+            app.files
+                .selected_remote
+                .as_ref()
+                .map(|entry| entry.name.as_str()),
+            Some("b.log")
+        );
+        assert_eq!(app.files.remote_entries.len(), 2);
+
+        // Refreshed listing without the selected row clears it.
+        let _ = app.update(Message::FilesRemoteLoaded(
+            0,
+            Ok(vec![sftp::RemoteEntry::new("a.log", false, Some(1))]),
+        ));
+        assert!(app.files.selected_remote.is_none());
+        assert!(!remote_file_actions(app.files.selected_remote.as_ref()).delete);
+
+        // A load error always clears the selection.
+        let _ = app.update(Message::FilesSelectRemote(sftp::RemoteEntry::new(
+            "a.log",
+            false,
+            Some(1),
+        )));
+        let _ = app.update(Message::FilesRemoteLoaded(0, Err("gone".into())));
+        assert!(app.files.selected_remote.is_none());
+    }
 
     #[test]
     fn flat_input_uses_control_outline_not_divider_in_both_themes() {
