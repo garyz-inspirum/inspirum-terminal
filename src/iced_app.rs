@@ -9075,7 +9075,7 @@ impl App {
                     } else {
                         "Saved through the existing validated, non-secret profile store."
                     })
-                    .color(if editing { fg() } else { muted() }),
+                    .color(theme::palette().field_help()),
                     field(
                         "Session name",
                         "Optional; defaults to host",
@@ -9294,7 +9294,7 @@ impl App {
                                         row![
                                             text("Proxy authentication")
                                                 .size(12)
-                                                .color(muted()),
+                                                .color(theme::palette().field_label()),
                                             action(
                                                 "None",
                                                 Message::ProxyAuth(ProxyAuth::None)
@@ -9932,7 +9932,7 @@ fn forward_editor<'a>(
     message: fn(String) -> Message,
 ) -> Element<'a, Message> {
     column![
-        text(label).size(13).color(muted()),
+        text(label).size(13).color(theme::palette().field_label()),
         text_input(hint, value)
             .style(flat_input)
             .on_input(message)
@@ -9968,7 +9968,7 @@ fn field<'a>(
         _ => "connection-name",
     };
     column![
-        text(label).size(13).color(theme::palette().text),
+        text(label).size(13).color(theme::palette().field_label()),
         text_input(hint, value)
             .style(flat_input)
             .id(id)
@@ -9987,7 +9987,7 @@ fn policy_field<'a>(
     message: fn(Option<bool>) -> Message,
 ) -> Element<'a, Message> {
     column![
-        text(label).size(12).color(theme::palette().text),
+        text(label).size(12).color(theme::palette().field_label()),
         row![
             action("Inherit", message(None)).style(if value.is_none() {
                 flat_selected
@@ -10320,9 +10320,9 @@ fn flat_input(_: &Theme, status: text_input::Status) -> text_input::Style {
             width: 1.0,
             radius: 0.0.into(),
         },
-        icon: p.muted,
-        placeholder: p.muted,
-        value: p.text,
+        icon: p.field_help(),
+        placeholder: p.input_placeholder(),
+        value: p.input_value(),
         selection: p.selected_row,
     }
 }
