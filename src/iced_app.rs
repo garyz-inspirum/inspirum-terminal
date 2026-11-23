@@ -327,7 +327,7 @@ fn local_navigation_scroll(key: &keyboard::Key, modifiers: keyboard::Modifiers) 
 pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result {
     theme::init_from_env();
     iced::application(
-        move || App::boot(profiles_path.clone(), ssh_config.clone()),
+        move || App::startup(profiles_path.clone(), ssh_config.clone()),
         App::update,
         App::view,
     )
@@ -2449,6 +2449,100 @@ fn quick_forward_only(session: &Session, kind: tunnels::ForwardKind, spec: &str)
     selected
 }
 
+/// One saved forward queued by the start-up auto-start pass.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AutoStartCandidate {
+    profile_key: String,
+    kind: tunnels::ForwardKind,
+    spec: String,
+}
+
+/// Start-up auto-start pass. Drained one forward per
+/// `Message::TunnelAutoStartNext`, so each launch is a separate update and
+/// the UI is never held by a loop of launches.
+#[derive(Debug, Default)]
+struct AutoStartPass {
+    queue: std::collections::VecDeque<AutoStartCandidate>,
+    started: usize,
+    already_running: usize,
+    failed: Vec<String>,
+    skipped_risk: Vec<String>,
+}
+
+/// Opted-in forwards of every saved profile, in library order, each once.
+fn auto_start_candidates(profiles: &[Session]) -> std::collections::VecDeque<AutoStartCandidate> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    for profile in profiles {
+        let profile_key = session_profile_key(profile);
+        for (kind, spec) in tunnels::auto_start_forwards(profile) {
+            if seen.insert((profile_key.clone(), kind, spec.clone())) {
+                queue.push_back(AutoStartCandidate {
+                    profile_key: profile_key.clone(),
+                    kind,
+                    spec,
+                });
+            }
+        }
+    }
+    queue
+}
+
+fn tunnel_count(count: usize) -> String {
+    if count == 1 {
+        "1 tunnel".into()
+    } else {
+        format!("{count} tunnels")
+    }
+}
+
+/// Status-bar summary of a start-up pass; `remaining` were never attempted.
+fn auto_start_summary(pass: &AutoStartPass, remaining: usize) -> String {
+    let mut parts = Vec::new();
+    if pass.started > 0 {
+        parts.push(format!("{} started", tunnel_count(pass.started)));
+    }
+    if pass.already_running > 0 {
+        parts.push(format!(
+            "{} already running",
+            tunnel_count(pass.already_running)
+        ));
+    }
+    if !pass.failed.is_empty() {
+        parts.push(format!(
+            "{} failed ({})",
+            tunnel_count(pass.failed.len()),
+            pass.failed.join("; ")
+        ));
+    }
+    if !pass.skipped_risk.is_empty() {
+        parts.push(format!(
+            "{} skipped, not loopback-only: start manually after acknowledging the risk ({})",
+            tunnel_count(pass.skipped_risk.len()),
+            pass.skipped_risk.join(", ")
+        ));
+    }
+    if remaining > 0 {
+        parts.push(format!(
+            "{} not started while a profile save was in progress",
+            tunnel_count(remaining)
+        ));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("Auto-start: {}.", parts.join("; "))
+    }
+}
+
+/// Test double for the auto-start launcher: records calls, never spawns ssh.
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct AutoStartFake {
+    calls: Vec<(String, tunnels::ForwardKind, String)>,
+    fail_specs: Vec<String>,
+}
+
 fn tunnel_menu_separator<'a>() -> Element<'a, Message> {
     container(space::horizontal())
         .width(Fill)
@@ -2932,6 +3026,8 @@ enum Message {
     FindClose,
     FindFocusProbe,
     FindFocusSynced(bool),
+    /// Start the next queued opted-in forward of the start-up pass.
+    TunnelAutoStartNext,
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -4116,6 +4212,11 @@ struct App {
     /// True while the Find input owns keyboard input. Cleared when the strip
     /// closes, on Escape, and when a terminal pane is focused.
     find_focused: bool,
+    /// Pending start-up auto-start pass; `None` once finished or when the
+    /// profile file failed to load.
+    auto_start: Option<AutoStartPass>,
+    #[cfg(test)]
+    auto_start_fake: Option<AutoStartFake>,
 }
 
 const FILES_PANELS: [dock::Panel; 3] = [
@@ -4151,6 +4252,11 @@ impl App {
         // Save matching indices once so every terminal redraw does not rescan
         // and lowercase the full session library.
         let profile_matches = (0..profiles.len()).collect();
+        // A failed load leaves an empty library; never auto-start from it.
+        let auto_start = profiles_writable.then(|| AutoStartPass {
+            queue: auto_start_candidates(&profiles),
+            ..Default::default()
+        });
         let snippets_path = command_palette::snippets_path(&profiles_path);
         let snippets = match command_palette::load_library(&snippets_path) {
             Ok(library) => library,
@@ -4267,7 +4373,154 @@ impl App {
             context_menu: None,
             find_open: false,
             find_focused: false,
+            auto_start,
+            #[cfg(test)]
+            auto_start_fake: None,
         }
+    }
+
+    /// `boot` plus the one start-up auto-start pass, scheduled as a task so
+    /// it runs after the app exists instead of inside `boot`.
+    fn startup(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> (Self, Task<Message>) {
+        let app = Self::boot(profiles_path, ssh_config);
+        let task = app.auto_start_task();
+        (app, task)
+    }
+
+    fn auto_start_task(&self) -> Task<Message> {
+        if self
+            .auto_start
+            .as_ref()
+            .is_some_and(|pass| !pass.queue.is_empty())
+        {
+            Task::done(Message::TunnelAutoStartNext)
+        } else {
+            Task::none()
+        }
+    }
+
+    fn auto_start_next(&mut self) -> Task<Message> {
+        #[cfg(test)]
+        if let Some(mut fake) = self.auto_start_fake.take() {
+            let task = self.auto_start_step(&mut |_, session, kind, spec, _| {
+                fake.calls
+                    .push((session_profile_key(session), kind, spec.to_owned()));
+                Ok(if fake.fail_specs.iter().any(|fail| fail == spec) {
+                    tunnels::Status::Failed("listener busy".into())
+                } else {
+                    tunnels::Status::Running { pid: 4242 }
+                })
+            });
+            self.auto_start_fake = Some(fake);
+            return task;
+        }
+        self.auto_start_step(&mut |manager, session, kind, spec, config| {
+            manager.start_forward(session, kind, spec, config)
+        })
+    }
+
+    /// Launch at most one queued forward, then schedule the next one.
+    /// Each candidate is re-read from the current library and re-checked:
+    /// saved JSON can be hand-edited, so an opted-in forward that binds
+    /// beyond loopback is skipped and never silently acknowledged.
+    fn auto_start_step(
+        &mut self,
+        launch: &mut dyn FnMut(
+            &mut tunnels::Manager,
+            &Session,
+            tunnels::ForwardKind,
+            &str,
+            Option<&std::path::Path>,
+        ) -> anyhow::Result<tunnels::Status>,
+    ) -> Task<Message> {
+        let Some(pass) = self.auto_start.as_mut() else {
+            return Task::none();
+        };
+        if self.tools.profile_write.is_some() {
+            return self.finish_auto_start();
+        }
+        let Some(candidate) = pass.queue.pop_front() else {
+            return self.finish_auto_start();
+        };
+        let AutoStartCandidate {
+            profile_key,
+            kind,
+            spec,
+        } = candidate;
+        let session = self
+            .profiles
+            .iter()
+            .find(|profile| session_profile_key(profile) == profile_key)
+            .filter(|profile| tunnels::auto_start_for(profile, kind, &spec))
+            .cloned();
+        // Profile deleted or row opted out since boot: nothing to start.
+        if let Some(session) = session {
+            self.refresh_tunnel_status();
+            let name = self
+                .tunnel_quick
+                .iter()
+                .find(|quick| quick.matches(&profile_key, kind, &spec))
+                .map(QuickForward::title)
+                .unwrap_or_else(|| spec.clone());
+            if session_requires_forward_risk_ack(&quick_forward_only(&session, kind, &spec)) {
+                if let Some(pass) = self.auto_start.as_mut() {
+                    pass.skipped_risk.push(name);
+                }
+            } else if self
+                .tunnels
+                .forward_status(&profile_key, kind, &spec)
+                .is_running()
+            {
+                if let Some(pass) = self.auto_start.as_mut() {
+                    pass.already_running += 1;
+                }
+            } else {
+                let result = launch(
+                    &mut self.tunnels,
+                    &session,
+                    kind,
+                    &spec,
+                    self.ssh_config.as_deref(),
+                );
+                if let Some(pass) = self.auto_start.as_mut() {
+                    match result {
+                        Ok(tunnels::Status::Running { .. }) => pass.started += 1,
+                        Ok(tunnels::Status::Failed(error)) => {
+                            pass.failed.push(format!("{name}: {error}"))
+                        }
+                        Ok(tunnels::Status::Stopped) => {
+                            pass.failed.push(format!("{name}: did not start"))
+                        }
+                        Err(error) => pass.failed.push(format!("{name}: {error:#}")),
+                    }
+                }
+            }
+            self.refresh_tunnel_status();
+        }
+        if self
+            .auto_start
+            .as_ref()
+            .is_some_and(|pass| !pass.queue.is_empty())
+        {
+            Task::done(Message::TunnelAutoStartNext)
+        } else {
+            self.finish_auto_start()
+        }
+    }
+
+    /// End the pass once and report it; later `TunnelAutoStartNext`
+    /// messages find no pass and start nothing.
+    fn finish_auto_start(&mut self) -> Task<Message> {
+        let Some(pass) = self.auto_start.take() else {
+            return Task::none();
+        };
+        let summary = auto_start_summary(&pass, pass.queue.len());
+        if !summary.is_empty() {
+            self.status = summary.clone();
+            self.tunnel_notice = summary;
+        }
+        self.refresh_tunnel_status();
+        Task::none()
     }
 
     fn refresh_profile_matches(&mut self) {
@@ -6152,6 +6405,7 @@ impl App {
                 }
                 self.refresh_tunnel_status();
             }
+            Message::TunnelAutoStartNext => return self.auto_start_next(),
             Message::CloseDialog => {
                 self.free_type_confirm = None;
                 self.dialog = None;
@@ -15959,5 +16213,159 @@ mod tunnel_layout_tests {
                 .contains(&"0.0.0.0:9091:api:443".to_owned())
         );
         assert!(tunnels::auto_start_forwards(&loaded[0]).is_empty());
+    }
+
+    const AUTO_START_DB: &str = "127.0.0.1:5432:db:5432";
+    const AUTO_START_EXPOSED: &str = "0.0.0.0:9091:api:443";
+
+    /// Saved library with three opted-in forwards (one forged to a
+    /// non-loopback bind, as a hand edit could) and one opted-out row.
+    fn auto_start_boot_library() -> (tempfile::TempDir, PathBuf, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+        let mut profile = Session {
+            name: "auto start".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        profile.ssh.local_forwards = vec![
+            AUTO_START_WEB.into(),
+            AUTO_START_DB.into(),
+            AUTO_START_EXPOSED.into(),
+            "127.0.0.1:7000:off:7000".into(),
+        ];
+        for spec in [AUTO_START_WEB, AUTO_START_DB, AUTO_START_EXPOSED] {
+            tunnels::set_auto_start(&mut profile, tunnels::ForwardKind::Local, spec, true).unwrap();
+        }
+        save_sessions(&path, &[profile]).unwrap();
+        let key = session_profile_key(&load_sessions(&path).unwrap()[0]);
+        (dir, path, key)
+    }
+
+    fn drain_auto_start(app: &mut App) {
+        for _ in 0..32 {
+            if app.auto_start.is_none() {
+                return;
+            }
+            let _ = app.update(Message::TunnelAutoStartNext);
+        }
+        panic!("auto-start pass did not finish");
+    }
+
+    fn auto_start_calls(app: &App) -> Vec<String> {
+        app.auto_start_fake
+            .as_ref()
+            .unwrap()
+            .calls
+            .iter()
+            .map(|(_, _, spec)| spec.clone())
+            .collect()
+    }
+
+    #[test]
+    fn startup_queues_only_opted_in_forwards_once() {
+        let (_dir, path, key) = auto_start_boot_library();
+        let (mut app, _task) = App::startup(path, None);
+        let queue: Vec<_> = app
+            .auto_start
+            .as_ref()
+            .unwrap()
+            .queue
+            .iter()
+            .cloned()
+            .collect();
+        let expected: Vec<_> = [AUTO_START_WEB, AUTO_START_DB, AUTO_START_EXPOSED]
+            .into_iter()
+            .map(|spec| AutoStartCandidate {
+                profile_key: key.clone(),
+                kind: tunnels::ForwardKind::Local,
+                spec: spec.into(),
+            })
+            .collect();
+        assert_eq!(queue, expected);
+        // Booting alone starts nothing; the pass runs from the task.
+        assert_eq!(app.tunnels.running_count(), 0);
+    }
+
+    #[test]
+    fn duplicate_saved_forward_is_queued_once() {
+        let mut profile = Session {
+            name: "dup".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        profile.ssh.local_forwards = vec![AUTO_START_WEB.into(), AUTO_START_WEB.into()];
+        tunnels::set_auto_start(
+            &mut profile,
+            tunnels::ForwardKind::Local,
+            AUTO_START_WEB,
+            true,
+        )
+        .unwrap();
+        assert_eq!(auto_start_candidates(&[profile]).len(), 1);
+    }
+
+    #[test]
+    fn startup_pass_skips_forged_non_loopback_and_continues_after_failure() {
+        let (_dir, path, key) = auto_start_boot_library();
+        let (mut app, _task) = App::startup(path, None);
+        app.auto_start_fake = Some(AutoStartFake {
+            fail_specs: vec![AUTO_START_WEB.into()],
+            ..Default::default()
+        });
+        drain_auto_start(&mut app);
+
+        // The first failure does not stop the second launch; the forged
+        // 0.0.0.0 bind and the opted-out row are never launched.
+        assert_eq!(auto_start_calls(&app), vec![AUTO_START_WEB, AUTO_START_DB]);
+        assert!(!app.tunnels.acknowledged(&key));
+        assert!(
+            app.status
+                .starts_with("Auto-start: 1 tunnel started; 1 tunnel failed (")
+        );
+        assert!(app.status.contains(": listener busy"));
+        assert!(app.status.contains("1 tunnel skipped, not loopback-only"));
+        assert_eq!(app.tunnel_notice, app.status);
+
+        // The pass ran once: a stray later message launches nothing more.
+        let _ = app.update(Message::TunnelAutoStartNext);
+        assert_eq!(auto_start_calls(&app).len(), 2);
+    }
+
+    #[test]
+    fn startup_pass_rechecks_risk_at_launch_time() {
+        let (_dir, path, key) = auto_start_boot_library();
+        let (mut app, _task) = App::startup(path, None);
+        // Even a risk acknowledgement made before the pass reaches the row
+        // does not let auto-start launch an exposed bind.
+        app.tunnels.set_acknowledged(&key, true);
+        app.auto_start_fake = Some(AutoStartFake::default());
+        drain_auto_start(&mut app);
+        assert_eq!(auto_start_calls(&app), vec![AUTO_START_WEB, AUTO_START_DB]);
+        assert!(app.status.contains("1 tunnel skipped"));
+    }
+
+    #[test]
+    fn startup_pass_ignores_rows_opted_out_after_boot() {
+        let (_dir, path, _key) = auto_start_boot_library();
+        let (mut app, _task) = App::startup(path, None);
+        let profile = &mut app.profiles[0];
+        tunnels::set_auto_start(profile, tunnels::ForwardKind::Local, AUTO_START_DB, false)
+            .unwrap();
+        app.auto_start_fake = Some(AutoStartFake::default());
+        drain_auto_start(&mut app);
+        assert_eq!(auto_start_calls(&app), vec![AUTO_START_WEB]);
+    }
+
+    #[test]
+    fn failed_profile_load_schedules_no_auto_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+        std::fs::write(&path, b"{ not json").unwrap();
+        let (mut app, _task) = App::startup(path, None);
+        assert!(app.auto_start.is_none());
+        app.auto_start_fake = Some(AutoStartFake::default());
+        let _ = app.update(Message::TunnelAutoStartNext);
+        assert!(auto_start_calls(&app).is_empty());
     }
 }
