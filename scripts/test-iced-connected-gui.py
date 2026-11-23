@@ -4773,18 +4773,36 @@ async def main() -> int:
                     )
                     command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
                     await asyncio.sleep(.6)
+                    # The split layout has its vertical divider at width/2
+                    # (x=640 at 1280 wide), so refocus inside the right
+                    # terminal pane, well clear of the divider.
+                    toggle_width, toggle_height = window_size(window, env)
+                    term_x, term_y = (toggle_width * 3) // 4, 280
+                    if not (0 <= term_x < toggle_width and 0 <= term_y < toggle_height
+                            and abs(term_x - toggle_width // 2) >= 100):
+                        raise RuntimeError(
+                            f"terminal refocus click ({term_x}, {term_y}) invalid for "
+                            f"window {toggle_width}x{toggle_height}"
+                        )
                     command(
                         "xdotool", "windowfocus", window, "mousemove", "--window", window,
-                        "640", "280", "click", "1", env=env,
+                        str(term_x), str(term_y), "click", "1", env=env,
                     )
                     await asyncio.sleep(.3)
                     command("xdotool", "type", "--clearmodifiers", "--delay", "25",
                             "echo:AFTER_TUNNEL_TOGGLES", env=env)
                     command("xdotool", "key", "--clearmodifiers", "Return", env=env)
-                    await wait_for(
-                        lambda: "NATIVE_ECHO:AFTER_TUNNEL_TOGGLES" in events.path.read_text(encoding="utf-8").splitlines(),
-                        "shell echo after per-forward tunnel toggles",
-                    )
+                    try:
+                        await wait_for(
+                            lambda: "NATIVE_ECHO:AFTER_TUNNEL_TOGGLES" in events.path.read_text(encoding="utf-8").splitlines(),
+                            "shell echo after per-forward tunnel toggles",
+                        )
+                    except RuntimeError:
+                        await asyncio.to_thread(
+                            screenshot, window,
+                            destination / "connected-tunnels-toggles-echo-timeout.png", env,
+                        )
+                        raise
                     print("PASS populated tunnels: independent per-forward start/stop "
                           "(echo + refusal through fixture SSH)", flush=True)
 
