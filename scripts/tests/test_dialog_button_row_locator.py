@@ -133,5 +133,121 @@ class SaveOnlyLocatorTest(unittest.TestCase):
             module.locate_visible_label(TOP, "Save only", region=DIALOG)
 
 
+# connected-profile-spec-cancel.png: CI frame from run 45177442798 (4cba4b6),
+# 1280x800 dark. The refused Local forward edit: one danger line above the
+# same button row, outlines drawn brighter. CI (ubuntu-latest, tesseract
+# 5.5.0) raised "visible label not found: Save only" here
+# (scripts/test-iced-connected-gui.py:5908, cancel()): the whole band and its
+# rule-free interior both OCR as nothing. tesseract 5.3.4 (the local GUI
+# image) still reads the interior, so the locate tests below are red on
+# 4cba4b6 only under tesseract 5.5.0.
+SPEC_CANCEL = FIXTURES / "connected-profile-spec-cancel.png"
+CANCEL_INTERIOR = (626, 689)
+SAVE_ONLY_INTERIOR = (701, 787)
+
+
+def erased_save_only_glyphs(source: Path) -> Path:
+    """``source`` with the Save only label painted out, borders kept."""
+    width, height, channels, rows = module._read_png(source)
+    out = bytearray()
+    x1, y1, x2, y2 = SAVE_ONLY_BUTTON
+    for y in range(height):
+        row = rows[y]
+        for x in range(width):
+            base = x * channels
+            if x1 + 2 <= x < x2 - 2 and y1 + 2 <= y < y2 - 2:
+                out += bytes(BACKGROUND)
+            else:
+                out += bytes(row[base:base + 3])
+    fd, name = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    module._write_png(Path(name), width, height, bytes(out))
+    return Path(name)
+
+
+class OutlineButtonInteriorsTest(unittest.TestCase):
+    """Per-button crops of an outlined row; pure pixel geometry, no OCR."""
+
+    def buttons(self, path, span=BUTTON_ROW_SPAN, band=(724, 746)):
+        width, height, channels, rows = module._read_png(path)
+        thresh = module._text_threshold(width, height, channels, rows)
+        interior = module._outline_interior(rows, channels, thresh, *span, *band)
+        self.assertIsNotNone(interior)
+        return module._outline_button_interiors(rows, channels, thresh, *span, *interior)
+
+    def test_spec_cancel_frame_splits_cancel_and_save_only(self):
+        self.assertEqual(self.buttons(SPEC_CANCEL), [
+            (CANCEL_INTERIOR[0], 726, CANCEL_INTERIOR[1], 746),
+            (SAVE_ONLY_INTERIOR[0], 726, SAVE_ONLY_INTERIOR[1], 746),
+        ])
+
+    def test_rename_frames_split_the_same_buttons(self):
+        self.assertEqual(self.buttons(CANCEL), [(626, 726, 689, 746), (701, 726, 787, 746)])
+        self.assertEqual(self.buttons(BEFORE), [(626, 725, 689, 746), (701, 725, 787, 746)])
+
+    def test_crops_stay_inside_the_button_borders(self):
+        x1, y1, x2, y2 = SAVE_ONLY_BUTTON
+        crop = self.buttons(SPEC_CANCEL)[1]
+        self.assertTrue(x1 < crop[0] < crop[2] < x2 - 1 and y1 < crop[1] < crop[3] < y2)
+
+    def test_filled_primary_button_yields_no_crop(self):
+        # Save changes fill 797..910 alone: one wide lit run, no border pair.
+        width, height, channels, rows = module._read_png(SPEC_CANCEL)
+        thresh = module._text_threshold(width, height, channels, rows)
+        self.assertEqual(
+            module._outline_button_interiors(rows, channels, thresh, 792, 911, 725, 745), [],
+        )
+        # Cut before Cancel's right border (x 690): one border, no crop.
+        self.assertEqual(
+            module._outline_button_interiors(rows, channels, thresh, 624, 690, 725, 745), [],
+        )
+        # Save only's border pair, then the fill: only Save only is a crop.
+        self.assertEqual(
+            module._outline_button_interiors(rows, channels, thresh, 693, 911, 725, 745),
+            [(SAVE_ONLY_INTERIOR[0], 726, SAVE_ONLY_INTERIOR[1], 746)],
+        )
+
+    def test_plain_text_band_yields_no_crop(self):
+        width, height, channels, rows = module._read_png(SPEC_CANCEL)
+        thresh = module._text_threshold(width, height, channels, rows)
+        # Danger line "... changing it." (y 705..711) has no vertical rules.
+        self.assertEqual(
+            module._outline_button_interiors(rows, channels, thresh, 354, 771, 705, 711), [],
+        )
+
+
+@unittest.skipUnless(HAS_TESSERACT, "tesseract is not installed")
+class SpecCancelSaveOnlyLocatorTest(unittest.TestCase):
+    """Default budget and every stage, exactly as cancel() calls it."""
+
+    def assertInsideButton(self, box):
+        x1, y1, x2, y2 = SAVE_ONLY_BUTTON
+        self.assertTrue(x1 <= box[0] < box[2] <= x2 and y1 <= box[1] < box[3] <= y2,
+                        f"{box} not inside Save only button {SAVE_ONLY_BUTTON}")
+
+    def test_after_refused_spec_edit_frame(self):
+        self.assertInsideButton(
+            module.locate_visible_label(SPEC_CANCEL, "Save only", region=DIALOG))
+
+    def test_spec_frame_erased_button_is_a_miss(self):
+        path = erased_save_only(SPEC_CANCEL)
+        self.addCleanup(path.unlink)
+        with self.assertRaises(RuntimeError):
+            module.locate_visible_label(path, "Save only", region=DIALOG)
+
+    def test_spec_frame_outline_without_label_is_a_miss(self):
+        # Borders intact, label gone: the per-button crop must not invent it.
+        path = erased_save_only_glyphs(SPEC_CANCEL)
+        self.addCleanup(path.unlink)
+        with self.assertRaises(RuntimeError):
+            module.locate_visible_label(path, "Save only", region=DIALOG)
+
+    def test_spec_frame_save_only_outside_region_is_a_miss(self):
+        # Region ends above the button row: no box from the row may escape it.
+        with self.assertRaises(RuntimeError):
+            module.locate_visible_label(
+                SPEC_CANCEL, "Save only", region=(DIALOG[0], DIALOG[1], DIALOG[2], 720))
+
+
 if __name__ == "__main__":
     unittest.main()
