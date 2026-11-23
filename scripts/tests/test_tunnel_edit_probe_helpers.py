@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import sys
 import tempfile
 import types
@@ -73,6 +74,39 @@ class TunnelFrameHelpersTest(unittest.TestCase):
         self.assertLess(region[2], 909, "notice region must not reach Cancel")
         self.assertLessEqual(region[1], 661)
         self.assertGreaterEqual(region[3], 684)
+
+
+LIGHT_EMPTY = FIXTURES / "tour-tunnel-manager-light-empty.png"
+
+
+@unittest.skipUnless(shutil.which("tesseract"), "tesseract is not installed")
+@unittest.skipUnless(LIGHT_EMPTY.is_file(), "light tour fixture missing")
+class LightLocateTest(unittest.TestCase):
+    """Real LIGHT 1280x800 Tunnel Manager (unpopulated tour capture); the
+    dark pipeline missed its heading in that run (OCR miss after 22 s)."""
+
+    def test_heading_found_inside_region(self):
+        region = (0, 42, 1280, 400)
+        box = module.light_locate(LIGHT_EMPTY, "Tunnel Manager", region=region)
+        self.assertIsNotNone(module._bounds_inside(box, region))
+        left, dialog = module.tunnel_dialog_left(1280)
+        self.assertTrue(left <= box[0] < left + 60, box)
+
+    def test_absent_forward_label_fails(self):
+        # Negative control: the unpopulated manager has no saved forward.
+        for label in ("Alpha forward", "Bravo forward"):
+            with self.assertRaises(RuntimeError):
+                module.light_locate(LIGHT_EMPTY, label, region=(0, 42, 1280, 800))
+
+    def test_region_is_a_hard_box(self):
+        with self.assertRaises(RuntimeError):
+            module.light_locate(LIGHT_EMPTY, "Tunnel Manager", region=(640, 42, 1280, 800))
+
+    def test_minimum_window_geometry(self):
+        left, dialog = module.tunnel_dialog_left(960)
+        self.assertEqual((left, dialog), (60, 840))
+        row = module.listen_port_row_region((89, 40, 207, 48), 960)
+        self.assertTrue(row[0] > left + 325 and row[2] <= 960, row)
 
 
 class SavedForwardsTest(unittest.TestCase):

@@ -1047,6 +1047,29 @@ def saved_local_forwards(profiles_path: Path, profile_name: str) -> list[str]:
     raise RuntimeError(f"profile {profile_name!r} missing from {profiles_path}")
 
 
+def light_locate(path: Path, label: str, *, region, budget=None, tesseract=None):
+    """Dark-text-on-light locator for the LIGHT tour chrome.
+
+    The default locator's band/segment stages assume light text on a dark
+    background (the connected run forces the dark theme), and on the light
+    Tunnel Manager they miss even the heading. Tesseract reads dark-on-light
+    natively, so this OCRs a non-inverted grey x3 crop of ``region`` (psm 6,
+    then 11) and keeps only boxes wholly inside it. ``budget`` is accepted
+    for ``require_editor_selection`` compatibility.
+    """
+    tesseract = tesseract or shutil.which("tesseract")
+    if tesseract is None:
+        raise RuntimeError("tesseract unavailable")
+    words = []
+    for psm in ("6", "11"):
+        rows = region_upscaled_rows(path, tesseract, region, psm=psm)
+        box = _bounds_inside(match_visible_label(rows, label), region)
+        if box:
+            return box
+        words.extend(row[0] for row in rows[:30])
+    raise RuntimeError(f"light label {label!r} not in {region} of {path}; words: {words[:40]}")
+
+
 def require_editor_selection(path, port: int, sibling_port: int, form_region, *,
                              row_region=None, locate=None):
     """Prove the editor form shows ``port`` and NOT ``sibling_port``.
@@ -2134,7 +2157,8 @@ def sync_badge_labels_visible(path: Path, tesseract: str, expected: str) -> bool
     return False
 
 
-async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app_log: Path) -> int:
+async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app_log: Path,
+                   *, forward_ports: tuple[int, ...] = ()) -> int:
     """LIGHT-theme screenshot tour (INSPIRUM_GUI_TOUR=1).
 
     The window, a real SSH session, and the terminal echo probe are required.
@@ -2375,6 +2399,81 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
             # Escape closes the manager; focus remains with the connected
             # terminal. The mandatory echo below proves input routing.
     await step("tunnels-manager", s05_tunnels)
+
+    async def s05_tunnels_min() -> None:
+        """Populated LIGHT Tunnel Manager at the minimum window size.
+
+        Real saved forwards (INSPIRUM_GUI_POPULATED=1): the popup and the
+        manager list must show both labels, and selecting Alpha must put its
+        own listen port in the Listen Port row with Bravo's absent. All OCR
+        is dark-on-light (light_locate), never the dark-theme pipeline.
+        """
+        min_w, min_h = await resize_tour(640, 480)
+        tag = f"{min_w}x{min_h}"
+        try:
+            await asyncio.sleep(.8)
+            base = tour_dir / f"tour-05c-terminal-{tag}.png"
+            shot(base.name)
+            box = await asyncio.to_thread(
+                light_locate, base, "Tunnels", region=(max(0, min_w - 220), 0, min_w, 42),
+            )
+            click(*centre(box))
+            await asyncio.sleep(1)
+            popup_shot = tour_dir / f"tour-05d-tunnels-popup-{tag}.png"
+            shot(popup_shot.name)
+            popup = (max(0, min_w - 440), 32, min_w, min_h)
+            settings = await asyncio.to_thread(
+                light_locate, popup_shot, "Tunnel Settings...", region=popup,
+            )
+            for label in POPULATED_LABELS:
+                row = await asyncio.to_thread(light_locate, popup_shot, label, region=popup)
+                if row[3] > settings[1]:
+                    raise RuntimeError(f"{label} {row} below the popup footer {settings}")
+            click(*centre(settings))
+            await asyncio.sleep(1.2)
+            manager = tour_dir / f"tour-05e-tunnel-manager-{tag}.png"
+            shot(manager.name)
+            heading = await asyncio.to_thread(
+                light_locate, manager, "Tunnel Manager", region=(0, 42, min_w, min_h // 2),
+            )
+            left, _dialog = tunnel_dialog_left(min_w)
+            list_card = (left, heading[3], left + TUNNEL_EDITOR_CARD_DX - 6, min_h)
+            rows = []
+            for label in POPULATED_LABELS:
+                rows.append(await asyncio.to_thread(
+                    light_locate, manager, label, region=list_card,
+                ))
+            print(f"tour: {tag} Tunnel Manager heading {heading} rows {rows}", flush=True)
+            if len(forward_ports) == 2:
+                click(*centre(rows[0]))
+                await asyncio.sleep(1)
+                selected = tour_dir / f"tour-05f-tunnel-manager-alpha-{tag}.png"
+                shot(selected.name)
+                port_box = await asyncio.to_thread(
+                    require_editor_selection, selected, forward_ports[0], forward_ports[1],
+                    editor_form_region(min_w, min_h),
+                    row_region=listen_port_row_region(heading, min_w),
+                    locate=light_locate,
+                )
+                print(f"tour: {tag} Alpha listen port {forward_ports[0]} at {port_box}",
+                      flush=True)
+        finally:
+            # One Escape closes the popup or the manager. A second would
+            # reach the shell and corrupt the mandatory echo probe line.
+            key("Escape")
+            await asyncio.sleep(.5)
+            restored = await resize_tour(1280, 800)
+            if restored != (1280, 800):
+                raise RuntimeError(f"tour baseline not restored: {restored}")
+
+    if POPULATED:
+        # Required in a populated tour: it exists for this evidence.
+        try:
+            await s05_tunnels_min()
+        except Exception as error:
+            print(f"tour: FAILED populated minimum Tunnel Manager: {error}", flush=True)
+            return 1
+        print("tour: PASS populated LIGHT Tunnel Manager at minimum size", flush=True)
 
     # Required: a missed echo fails the tour. INSPIRUM_GUI_TOUR_WITHHOLD_ECHO=1
     # makes the fixture stay silent so this path can be proven.
@@ -2702,6 +2801,7 @@ async def main() -> int:
                     # surrounding finally block performs the usual teardown.
                     return await run_tour(
                         window, destination.parent / "tour", env, events, app_log,
+                        forward_ports=forward_ports,
                     )
                 # The native graphics stack may still be initializing after
                 # the X11 window first appears, especially on shared runners.
