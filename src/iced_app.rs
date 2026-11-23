@@ -2041,6 +2041,128 @@ fn session_context_entries() -> Vec<(&'static str, SessionContextAction)> {
     ]
 }
 
+const TUNNEL_MENU_WIDTH: f32 = 300.0;
+const TUNNEL_MENU_ROW_HEIGHT: f32 = 36.0;
+const TUNNEL_MENU_HEADER_HEIGHT: f32 = 44.0;
+const TUNNEL_MENU_NOTICE_HEIGHT: f32 = 16.0;
+const TUNNEL_MENU_FOOTER_HEIGHT: f32 = 28.0;
+
+/// One saved forward as shown in the quick menu. Snapshot taken on open and
+/// after each action; `view` cannot poll the manager.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QuickForward {
+    row: tunnels::ForwardRow,
+    running: bool,
+    /// The legacy whole-profile process owns this forward; per-forward stop
+    /// would be refused, so the row routes to settings instead.
+    aggregate: bool,
+    failed: Option<String>,
+    /// This forward alone binds beyond loopback.
+    needs_ack: bool,
+}
+
+impl QuickForward {
+    fn matches(&self, key: &str, kind: tunnels::ForwardKind, spec: &str) -> bool {
+        self.row.profile_key == key && self.row.kind == kind && self.row.spec == spec
+    }
+
+    fn title(&self) -> String {
+        if self.row.label.trim().is_empty() {
+            format!("{} {}", self.row.profile_name, self.row.listen)
+        } else {
+            self.row.label.clone()
+        }
+    }
+
+    fn subtitle(&self) -> String {
+        let route = if self.row.target.is_empty() {
+            format!("{} SOCKS", self.row.listen)
+        } else {
+            format!("{} → {}", self.row.listen, self.row.target)
+        };
+        format!("{} · {route}", self.row.profile_name)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QuickForwardAction {
+    Start,
+    Stop,
+    /// Whole-profile process running: stop it from Tunnel Settings.
+    ProfileOwned,
+    /// Non-loopback bind without acknowledgement: acknowledge in settings.
+    NeedsAck,
+}
+
+fn quick_forward_action(quick: &QuickForward, acknowledged: bool) -> QuickForwardAction {
+    if quick.aggregate {
+        QuickForwardAction::ProfileOwned
+    } else if quick.running {
+        QuickForwardAction::Stop
+    } else if quick.needs_ack && !acknowledged {
+        QuickForwardAction::NeedsAck
+    } else {
+        QuickForwardAction::Start
+    }
+}
+
+fn quick_forward_blocked_reason(quick: &QuickForward) -> String {
+    if quick.aggregate {
+        format!(
+            "{} runs as part of the whole {} profile; stop the profile here first.",
+            quick.title(),
+            quick.row.profile_name
+        )
+    } else {
+        format!(
+            "{} binds beyond loopback; tick \"Allow non-loopback bind\" to start it.",
+            quick.title()
+        )
+    }
+}
+
+/// Copy of `session` carrying only the one forward, so risk assessment
+/// matches what `Manager::start_forward` checks.
+fn quick_forward_only(session: &Session, kind: tunnels::ForwardKind, spec: &str) -> Session {
+    let mut selected = session.clone();
+    selected.ssh.local_forwards.clear();
+    selected.ssh.remote_forwards.clear();
+    selected.ssh.dynamic_forwards.clear();
+    match kind {
+        tunnels::ForwardKind::Local => &mut selected.ssh.local_forwards,
+        tunnels::ForwardKind::Remote => &mut selected.ssh.remote_forwards,
+        tunnels::ForwardKind::Dynamic => &mut selected.ssh.dynamic_forwards,
+    }
+    .push(spec.to_owned());
+    selected
+}
+
+fn tunnel_menu_separator<'a>() -> Element<'a, Message> {
+    container(space::horizontal())
+        .width(Fill)
+        .height(1)
+        .style(|_| container::Style {
+            background: Some(theme::palette().border.into()),
+            ..Default::default()
+        })
+        .into()
+}
+
+/// Scroll-list height that keeps header and footer inside the window.
+fn tunnel_menu_list_height(rows: usize, window_height: f32, notice: bool) -> f32 {
+    let chrome = theme::metrics::MENU_BAR_HEIGHT
+        + TUNNEL_MENU_HEADER_HEIGHT
+        + if notice {
+            TUNNEL_MENU_NOTICE_HEIGHT
+        } else {
+            0.0
+        }
+        + TUNNEL_MENU_FOOTER_HEIGHT
+        + 12.0;
+    let available = (window_height - chrome).max(TUNNEL_MENU_ROW_HEIGHT);
+    (rows as f32 * TUNNEL_MENU_ROW_HEIGHT).min(available)
+}
+
 /// Surface shared with the menu-bar drop-downs. `palette.border` is only
 /// 1.61:1 against the light list fill and 1.71:1 against the dark list fill, so
 /// the outline disappears on the dark panel. `text_dock` is at least 9:1
@@ -2367,6 +2489,11 @@ enum Message {
     RemoteForwards(String),
     DynamicForwards(String),
     Tunnels,
+    TunnelMenuToggle,
+    TunnelMenuClose,
+    TunnelForwardToggle(String, tunnels::ForwardKind, String),
+    TunnelStopAll,
+    TunnelSettings,
     TunnelStart(String),
     TunnelStop(String),
     TunnelAcknowledge(String, bool),
@@ -3585,6 +3712,9 @@ struct App {
     editing_profile: Option<String>,
     dialog: Option<Dialog>,
     tunnels: tunnels::Manager,
+    /// Top-right quick popup; owns keyboard input like the other menus.
+    tunnel_menu: bool,
+    tunnel_quick: Vec<QuickForward>,
     tunnel_status: std::collections::BTreeMap<String, tunnels::Status>,
     tunnel_notice: String,
     tunnel_edit: Option<TunnelEditState>,
@@ -3755,6 +3885,8 @@ impl App {
             editing_profile: None,
             dialog: None,
             tunnels: tunnels::Manager::default(),
+            tunnel_menu: false,
+            tunnel_quick: Vec::new(),
             tunnel_status: Default::default(),
             tunnel_notice: String::new(),
             tunnel_edit: None,
@@ -4704,6 +4836,7 @@ impl App {
                 if self.open_menu.is_some()
                     || self.dock_menu.is_some()
                     || self.context_menu.is_some()
+                    || self.tunnel_menu
                 {
                     return Task::none();
                 }
@@ -4792,7 +4925,10 @@ impl App {
         }
         // An open menu owns keyboard input, including queued IME and paste
         // messages from before the overlay appeared.
-        if (self.open_menu.is_some() || self.dock_menu.is_some() || self.context_menu.is_some())
+        if (self.open_menu.is_some()
+            || self.dock_menu.is_some()
+            || self.context_menu.is_some()
+            || self.tunnel_menu)
             && matches!(
                 &message,
                 Message::TerminalImeCursor(..)
@@ -5331,6 +5467,83 @@ impl App {
                 self.dialog = Some(Dialog::Tunnels);
             }
             Message::TunnelRefresh => self.refresh_tunnel_status(),
+            Message::TunnelMenuToggle => {
+                self.tunnel_menu = !self.tunnel_menu;
+                if self.tunnel_menu {
+                    self.open_menu = None;
+                    self.dock_menu = None;
+                    self.context_menu = None;
+                    self.tunnel_notice.clear();
+                    self.refresh_tunnel_status();
+                }
+            }
+            Message::TunnelMenuClose => self.tunnel_menu = false,
+            Message::TunnelSettings => {
+                self.tunnel_menu = false;
+                return self.update(Message::Tunnels);
+            }
+            Message::TunnelStopAll => {
+                let running = self.tunnels.running_count();
+                self.tunnels.stop_all();
+                self.tunnel_notice = format!("Stopped {running} tunnel process(es).");
+                self.refresh_tunnel_status();
+            }
+            Message::TunnelForwardToggle(key, kind, spec) => {
+                self.refresh_tunnel_status();
+                let Some(quick) = self
+                    .tunnel_quick
+                    .iter()
+                    .find(|quick| quick.matches(&key, kind, &spec))
+                    .cloned()
+                else {
+                    self.tunnel_notice = "Tunnel entry no longer exists.".into();
+                    return Task::none();
+                };
+                let name = quick.title();
+                match quick_forward_action(&quick, self.tunnels.acknowledged(&key)) {
+                    QuickForwardAction::Stop => {
+                        self.tunnel_notice = match self.tunnels.stop_forward(&key, kind, &spec) {
+                            Ok(_) => format!("{name} stopped."),
+                            Err(error) => format!("{error:#}"),
+                        };
+                    }
+                    QuickForwardAction::Start => {
+                        let Some(session) = self
+                            .profiles
+                            .iter()
+                            .find(|profile| session_profile_key(profile) == key)
+                            .cloned()
+                        else {
+                            self.tunnel_notice = "Profile no longer exists.".into();
+                            return Task::none();
+                        };
+                        self.tunnel_notice = match self.tunnels.start_forward(
+                            &session,
+                            kind,
+                            &spec,
+                            self.ssh_config.as_deref(),
+                        ) {
+                            Ok(tunnels::Status::Running { pid }) => {
+                                format!("{name} running in ssh {pid}.")
+                            }
+                            Ok(tunnels::Status::Failed(error)) => format!("{name}: {error}"),
+                            Ok(tunnels::Status::Stopped) => String::new(),
+                            Err(error) => format!("{error:#}"),
+                        };
+                    }
+                    QuickForwardAction::ProfileOwned | QuickForwardAction::NeedsAck => {
+                        let notice = quick_forward_blocked_reason(&quick);
+                        self.tunnel_menu = false;
+                        let _ = self.update(Message::Tunnels);
+                        if !self.tunnels.status(&key).is_running() {
+                            let _ = self.update(Message::TunnelEdit(key, kind, spec));
+                        }
+                        self.tunnel_notice = notice;
+                        return Task::none();
+                    }
+                }
+                self.refresh_tunnel_status();
+            }
             Message::TunnelAdd(key) => {
                 if !self
                     .profiles
@@ -5533,7 +5746,9 @@ impl App {
             }
             Message::DismissModalKey => {
                 let closed_context = self.context_menu.take().is_some();
-                if self.open_menu.take().is_some()
+                let closed_tunnels = std::mem::take(&mut self.tunnel_menu);
+                if closed_tunnels
+                    || self.open_menu.take().is_some()
                     || self.dock_menu.take().is_some()
                     || closed_context
                 {
@@ -6850,11 +7065,13 @@ impl App {
                 if self.open_menu.is_some()
                     || self.dock_menu.is_some()
                     || self.context_menu.is_some()
+                    || self.tunnel_menu
                 {
                     if key.as_ref() == keyboard::Key::Named(Named::Escape) {
                         self.open_menu = None;
                         self.dock_menu = None;
                         self.context_menu = None;
+                        self.tunnel_menu = false;
                     }
                     return Task::none();
                 }
@@ -7319,6 +7536,7 @@ impl App {
             && self.open_menu.is_none()
             && self.dock_menu.is_none()
             && self.context_menu.is_none()
+            && !self.tunnel_menu
         {
             self.focused_terminal_id().filter(|id| {
                 !self.local_navigation.contains(id)
@@ -7529,6 +7747,11 @@ impl App {
             Some(menu) => file_context_overlay(body, menu, self.window_size),
             None => body,
         };
+        let body: Element<'_, Message> = if self.tunnel_menu {
+            self.tunnel_menu_overlay(body)
+        } else {
+            body
+        };
 
         if let Some(dialog) = &self.dialog {
             let content = self.dialog_view(dialog);
@@ -7576,8 +7799,11 @@ impl App {
                     .wrapping(iced::widget::text::Wrapping::None),
             )
             .padding([4, 8])
-            .style(|theme, status| menu_title(theme, status, false))
-            .on_press(Message::Tunnels),
+            .style({
+                let open = self.tunnel_menu;
+                move |theme, status| menu_title(theme, status, open)
+            })
+            .on_press(Message::TunnelMenuToggle),
         );
         container(titles)
             .height(theme::metrics::MENU_BAR_HEIGHT)
@@ -8742,6 +8968,203 @@ impl App {
             let status = self.tunnels.status(&key);
             self.tunnel_status.insert(key, status);
         }
+        let mut quick = Vec::new();
+        for profile in &self.profiles {
+            let key = session_profile_key(profile);
+            let aggregate = self.tunnels.status(&key).is_running();
+            for row in tunnels::rows_for(profile) {
+                let status = self.tunnels.forward_status(&key, row.kind, &row.spec);
+                let needs_ack = session_requires_forward_risk_ack(&quick_forward_only(
+                    profile, row.kind, &row.spec,
+                ));
+                quick.push(QuickForward {
+                    running: status.is_running(),
+                    failed: match status {
+                        tunnels::Status::Failed(error) => Some(error),
+                        _ => None,
+                    },
+                    aggregate,
+                    needs_ack,
+                    row,
+                });
+            }
+        }
+        self.tunnel_quick = quick;
+    }
+
+    /// Compact WindTerm-style quick menu under the top-right `Tunnels` title:
+    /// header + master control, one row per saved forward, fixed footer.
+    fn tunnel_menu_overlay<'a>(&'a self, body: Element<'a, Message>) -> Element<'a, Message> {
+        let ink = theme::palette().text;
+        let running = self.tunnel_quick.iter().filter(|q| q.running).count();
+        let total = self.tunnel_quick.len();
+        // Start-all is deliberately absent: launches are independent ssh
+        // processes with per-profile risk acknowledgement, so a batch start
+        // cannot be atomic. Only the safe aggregate (Stop all) is offered.
+        let master: Element<'_, Message> = if running > 0 {
+            button(
+                text("Stop all")
+                    .size(theme::metrics::UI_TEXT)
+                    .color(danger()),
+            )
+            .padding([2, 8])
+            .style(quiet)
+            .on_press(Message::TunnelStopAll)
+            .into()
+        } else {
+            text("Start each forward below")
+                .size(11)
+                .color(muted())
+                .into()
+        };
+        let mut header = column![
+            row![
+                column![
+                    text("Tunnels").size(theme::metrics::UI_TEXT).color(ink),
+                    text(format!("{running} of {total} running"))
+                        .size(11)
+                        .color(muted()),
+                ]
+                .spacing(1)
+                .width(Fill),
+                master,
+            ]
+            .align_y(iced::Center)
+            .spacing(8),
+        ]
+        .spacing(4)
+        .padding([6, 10]);
+        if !self.tunnel_notice.is_empty() {
+            header = header.push(
+                text(self.tunnel_notice.as_str())
+                    .size(11)
+                    .color(muted())
+                    .wrapping(iced::widget::text::Wrapping::None),
+            );
+        }
+        let mut rows = column![].width(Fill);
+        if self.tunnel_quick.is_empty() {
+            rows = rows.push(
+                container(
+                    text("No saved forwards. Add one in Tunnel Settings.")
+                        .size(11)
+                        .color(muted()),
+                )
+                .padding([8, 10]),
+            );
+        }
+        for quick in &self.tunnel_quick {
+            rows = rows.push(self.tunnel_quick_row(quick));
+        }
+        let list_height = tunnel_menu_list_height(
+            self.tunnel_quick.len().max(1),
+            self.window_size.height,
+            !self.tunnel_notice.is_empty(),
+        );
+        let footer = button(
+            text("Tunnel Settings...")
+                .size(theme::metrics::UI_TEXT)
+                .color(ink),
+        )
+        .width(Fill)
+        .height(TUNNEL_MENU_FOOTER_HEIGHT)
+        .padding([4, 10])
+        .style(menu_item)
+        .on_press(Message::TunnelSettings);
+        let popup = container(
+            column![
+                header,
+                tunnel_menu_separator(),
+                scrollable(rows).height(list_height),
+                tunnel_menu_separator(),
+                footer,
+            ]
+            .width(TUNNEL_MENU_WIDTH),
+        )
+        .padding(1)
+        .style(menu_popup_style);
+        stack![
+            body,
+            mouse_area(container(space::horizontal()).width(Fill).height(Fill))
+                .on_press(Message::TunnelMenuClose)
+                .on_right_press(Message::TunnelMenuClose),
+            container(opaque(popup))
+                .padding(iced::Padding {
+                    top: theme::metrics::MENU_BAR_HEIGHT,
+                    right: 4.0,
+                    ..iced::Padding::ZERO
+                })
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::alignment::Horizontal::Right),
+        ]
+        .into()
+    }
+
+    fn tunnel_quick_row<'a>(&self, quick: &'a QuickForward) -> Element<'a, Message> {
+        let ink = theme::palette().text;
+        let row_data = &quick.row;
+        let message = Message::TunnelForwardToggle(
+            row_data.profile_key.clone(),
+            row_data.kind,
+            row_data.spec.clone(),
+        );
+        let action: Element<'_, Message> =
+            match quick_forward_action(quick, self.tunnels.acknowledged(&row_data.profile_key)) {
+                QuickForwardAction::Start | QuickForwardAction::Stop => {
+                    let message = message.clone();
+                    iced::widget::toggler(quick.running)
+                        .size(14)
+                        .on_toggle(move |_| message.clone())
+                        .into()
+                }
+                QuickForwardAction::NeedsAck | QuickForwardAction::ProfileOwned => {
+                    button(text("Settings").size(11).color(ink))
+                        .padding([1, 6])
+                        .style(quiet)
+                        .on_press(message)
+                        .into()
+                }
+            };
+        let detail = if quick.aggregate {
+            "Runs with whole profile".to_owned()
+        } else if let Some(error) = &quick.failed {
+            format!("Failed · {error}")
+        } else if quick.needs_ack && !quick.running {
+            format!("{} · non-loopback bind", quick.subtitle())
+        } else {
+            quick.subtitle()
+        };
+        container(
+            row![
+                container(
+                    text(row_data.kind.short())
+                        .size(11)
+                        .font(Font::MONOSPACE)
+                        .color(ink)
+                )
+                .width(16)
+                .align_x(iced::Center),
+                column![
+                    text(quick.title())
+                        .size(theme::metrics::UI_TEXT)
+                        .color(ink)
+                        .wrapping(iced::widget::text::Wrapping::None),
+                    text(detail)
+                        .size(11)
+                        .color(muted())
+                        .wrapping(iced::widget::text::Wrapping::None),
+                ]
+                .width(Fill),
+                action,
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        )
+        .height(TUNNEL_MENU_ROW_HEIGHT)
+        .padding([2, 10])
+        .align_y(iced::Center)
+        .into()
     }
 
     fn tunnels_view(&self) -> Element<'_, Message> {
@@ -10643,6 +11066,121 @@ mod tests {
     }
 
     use super::*;
+
+    fn quick_session(name: &str, local: &[&str]) -> Session {
+        let mut session = Session {
+            name: name.into(),
+            host: format!("{name}.invalid"),
+            ..Session::default()
+        };
+        session.ssh.local_forwards = local.iter().map(|spec| (*spec).to_owned()).collect();
+        session
+    }
+
+    fn quick_row(session: &Session, spec: &str) -> QuickForward {
+        let row = tunnels::rows_for(session)
+            .into_iter()
+            .find(|row| row.spec == spec)
+            .expect("forward row");
+        QuickForward {
+            needs_ack: session_requires_forward_risk_ack(&quick_forward_only(
+                session, row.kind, &row.spec,
+            )),
+            row,
+            running: false,
+            aggregate: false,
+            failed: None,
+        }
+    }
+
+    #[test]
+    fn quick_forward_action_routes_each_state() {
+        let session = quick_session("alpha", &["8080:127.0.0.1:80", "0.0.0.0:9090:db:5432"]);
+        let mut loopback = quick_row(&session, "8080:127.0.0.1:80");
+        assert_eq!(
+            quick_forward_action(&loopback, false),
+            QuickForwardAction::Start
+        );
+        loopback.running = true;
+        assert_eq!(
+            quick_forward_action(&loopback, false),
+            QuickForwardAction::Stop
+        );
+        loopback.aggregate = true;
+        assert_eq!(
+            quick_forward_action(&loopback, true),
+            QuickForwardAction::ProfileOwned
+        );
+
+        let exposed = quick_row(&session, "0.0.0.0:9090:db:5432");
+        assert!(exposed.needs_ack);
+        assert_eq!(
+            quick_forward_action(&exposed, false),
+            QuickForwardAction::NeedsAck
+        );
+        assert_eq!(
+            quick_forward_action(&exposed, true),
+            QuickForwardAction::Start
+        );
+        assert!(quick_forward_blocked_reason(&exposed).contains("non-loopback"));
+    }
+
+    #[test]
+    fn quick_forward_risk_is_isolated_per_forward_and_profile() {
+        let alpha = quick_session("alpha", &["8080:127.0.0.1:80", "0.0.0.0:9090:db:5432"]);
+        let beta = quick_session("beta", &["8080:127.0.0.1:80"]);
+        let only = quick_forward_only(&alpha, tunnels::ForwardKind::Local, "8080:127.0.0.1:80");
+        assert_eq!(
+            only.ssh.local_forwards,
+            vec!["8080:127.0.0.1:80".to_owned()]
+        );
+        assert!(only.ssh.remote_forwards.is_empty() && only.ssh.dynamic_forwards.is_empty());
+        assert!(!quick_row(&alpha, "8080:127.0.0.1:80").needs_ack);
+
+        let a = quick_row(&alpha, "8080:127.0.0.1:80");
+        let b = quick_row(&beta, "8080:127.0.0.1:80");
+        assert_ne!(a.row.profile_key, b.row.profile_key);
+        assert!(a.matches(&a.row.profile_key, a.row.kind, &a.row.spec));
+        assert!(!a.matches(&b.row.profile_key, b.row.kind, &b.row.spec));
+    }
+
+    #[test]
+    fn quick_menu_list_height_keeps_footer_in_window() {
+        let tall = tunnel_menu_list_height(200, 600.0, true);
+        assert!(tall < 200.0 * TUNNEL_MENU_ROW_HEIGHT);
+        assert!(
+            theme::metrics::MENU_BAR_HEIGHT
+                + TUNNEL_MENU_HEADER_HEIGHT
+                + TUNNEL_MENU_NOTICE_HEIGHT
+                + tall
+                + TUNNEL_MENU_FOOTER_HEIGHT
+                <= 600.0
+        );
+        assert_eq!(
+            tunnel_menu_list_height(2, 800.0, false),
+            2.0 * TUNNEL_MENU_ROW_HEIGHT
+        );
+    }
+
+    #[test]
+    fn quick_menu_owns_input_and_closes_on_escape_or_settings() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-tunnel-menu-{}-missing.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.profiles = vec![quick_session("alpha", &["8080:127.0.0.1:80"])];
+        let _ = app.update(Message::TunnelMenuToggle);
+        assert!(app.tunnel_menu);
+        assert_eq!(app.tunnel_quick.len(), 1);
+        let _ = app.update(Message::DismissModalKey);
+        assert!(!app.tunnel_menu && app.dialog.is_none());
+
+        let _ = app.update(Message::TunnelMenuToggle);
+        let _ = app.update(Message::TunnelSettings);
+        assert!(!app.tunnel_menu);
+        assert!(matches!(app.dialog, Some(Dialog::Tunnels)));
+    }
 
     #[test]
     fn file_listing_summary_uses_singular_for_one_item() {
