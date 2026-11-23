@@ -917,30 +917,178 @@ INVERTED_MIN_S = 10.0 * TIME_SCALE
 TOOLBAR_BOTTOM_Y = 90
 
 
+# Tunnel Settings dialog geometry (src/iced_app.rs): width is
+# clamp(window - 2*24, 600, 840), centred; 12 px padding; the 300 px list
+# card, a 12 px gap, then the editor card. Measured on the 1280x800 populated
+# dark frame (connected-tunnels-editor-selected.png): dialog x 220..1060,
+# list card 245..545, editor card 557..1035, "Listen Port" label x 569..650,
+# its input 719..1023 x 287..310 with digits at y 295..304, Destination Port
+# input y 357..380; OCR puts the "Tunnel Manager" heading top at y 151.
+TUNNEL_DIALOG_MAX_W = 840
+TUNNEL_DIALOG_MIN_W = 600
+TUNNEL_DIALOG_MARGIN = 24
+# Editor card left edge relative to the dialog's left edge (557 - 220).
+TUNNEL_EDITOR_CARD_DX = 337
+# Listen Port input left edge (719 - 220) at the widest label column; the
+# label column can shrink to 128 px (22 px less) on narrow dialogs.
+TUNNEL_LISTEN_INPUT_DX = 499 - 22 - 6
+# Listen Port row relative to the heading's OCR top: digits at +144..+153.
+# The band stops above the Destination Host input (+171) and far above the
+# Destination Port digits (+216), so a form showing the port in another row
+# cannot satisfy it.
+TUNNEL_LISTEN_ROW_DY = (124, 170)
+
+
+def tunnel_dialog_left(width: int) -> tuple[int, int]:
+    """``(left, dialog_width)`` of the centred Tunnel Settings dialog."""
+    dialog = max(TUNNEL_DIALOG_MIN_W, min(TUNNEL_DIALOG_MAX_W, width - 2 * TUNNEL_DIALOG_MARGIN))
+    return max(0, (width - dialog) // 2), dialog
+
+
 def editor_form_region(width: int, height: int):
-    """Right-hand Tunnel Manager form: right half of the window below the
-    toolbar. The list sits on the left, so a list-row label can never prove
-    which forward the form is editing."""
-    return (width // 2, 42, width, height)
+    """Tunnel Manager editor card: right of the 300 px list card, inside the
+    dialog. The list sits on the left, so a list-row label can never prove
+    which forward the form is editing. Used for "sibling port absent"."""
+    left, dialog = tunnel_dialog_left(width)
+    return (left + TUNNEL_EDITOR_CARD_DX - 6, 42, min(width, left + dialog), height)
+
+
+def listen_port_row_region(heading_bounds, width: int):
+    """Tight box around the Listen Port input, anchored to the located
+    "Tunnel Manager" heading. Only digits here prove the selected forward:
+    the editor card also shows the destination port (the shared echo
+    service), so the whole card would accept a port from the wrong row."""
+    left, dialog = tunnel_dialog_left(width)
+    top = heading_bounds[1]
+    return (
+        left + TUNNEL_LISTEN_INPUT_DX,
+        top + TUNNEL_LISTEN_ROW_DY[0],
+        min(width, left + dialog - 20),
+        top + TUNNEL_LISTEN_ROW_DY[1],
+    )
+
+
+# Remove ("−") button under the 350 px list: x 285..313, y 544..567 on the
+# 1280x800 frame, i.e. centre (dialog left + 79, heading top + 405).
+TUNNEL_REMOVE_BUTTON_D = (79, 405)
+# Footer Save (primary fill, right-aligned): y 661..684 = heading top +510..
+# +533. Scanned for, not assumed: the band searched is +300..+620.
+TUNNEL_SAVE_SCAN_DY = (300, 620)
+
+
+def listen_input_centre(heading_bounds, width: int) -> tuple[int, int]:
+    """Click target inside the Listen Port text input."""
+    x1, y1, x2, y2 = listen_port_row_region(heading_bounds, width)
+    return ((x1 + x2) // 2, (y1 + y2) // 2)
+
+
+def tunnel_remove_centre(heading_bounds, width: int) -> tuple[int, int]:
+    left, _dialog = tunnel_dialog_left(width)
+    return (left + TUNNEL_REMOVE_BUTTON_D[0], heading_bounds[1] + TUNNEL_REMOVE_BUTTON_D[1])
+
+
+def primary_fill_run(path: Path, y: int, x1: int, x2: int, *, min_width: int = 30,
+                     image=None):
+    """Like ``danger_fill_run`` for the blue primary fill (dark theme
+    (33,150,243)). Returns ``(left, right)`` or ``None``. ``image`` is an
+    already decoded ``_read_png`` result."""
+    width, height, channels, rows = image or _read_png(path)
+    if not 0 <= y < height:
+        return None
+    row = rows[y]
+    blue = [
+        x for x in range(max(0, x1), min(width, x2))
+        if row[x * channels + 2] >= 200
+        and row[x * channels + 2] - row[x * channels] >= 120
+    ]
+    if len(blue) < min_width:
+        return None
+    return (blue[0], blue[-1] + 1)
+
+
+def tunnel_save_button(path: Path, heading_bounds, width: int):
+    """Centre and span of the footer Save fill, or ``None``.
+
+    Only the right half of the dialog below the editor fields is scanned,
+    so the primary "Local" kind toggle (heading +74..+97) cannot match; the
+    run must end near the dialog's right edge (Save is right-aligned).
+    """
+    left, dialog = tunnel_dialog_left(width)
+    right = left + dialog
+    top = heading_bounds[1]
+    image = _read_png(path)
+    hits = []
+    for y in range(top + TUNNEL_SAVE_SCAN_DY[0], top + TUNNEL_SAVE_SCAN_DY[1]):
+        run = primary_fill_run(path, y, left + dialog // 2, right, image=image)
+        if run and run[1] >= right - 60 and run[1] - run[0] <= 120:
+            hits.append((y, run))
+    if len(hits) < 8:
+        return None
+    ys = [y for y, _run in hits]
+    lefts = [run[0] for _y, run in hits]
+    rights = [run[1] for _y, run in hits]
+    box = (min(lefts), min(ys), max(rights), max(ys) + 1)
+    return ((box[0] + box[2]) // 2, (box[1] + box[3]) // 2), box
+
+
+def tunnel_notice_region(save_box, width: int):
+    """Footer notice text, left of Cancel/Save on the Save row."""
+    left, _dialog = tunnel_dialog_left(width)
+    return (left + 6, save_box[1] - 12, max(left + 7, save_box[0] - 80), save_box[3] + 12)
+
+
+def saved_local_forwards(profiles_path: Path, profile_name: str) -> list[str]:
+    """``ssh.local_forwards`` of ``profile_name`` as persisted on disk."""
+    data = json.loads(profiles_path.read_text(encoding="utf-8"))
+    sessions = data.get("sessions", data) if isinstance(data, dict) else data
+    for session in sessions:
+        if session.get("name") == profile_name:
+            return list((session.get("ssh") or {}).get("local_forwards") or [])
+    raise RuntimeError(f"profile {profile_name!r} missing from {profiles_path}")
+
+
+def light_locate(path: Path, label: str, *, region, budget=None, tesseract=None):
+    """Dark-text-on-light locator for the LIGHT tour chrome.
+
+    The default locator's band/segment stages assume light text on a dark
+    background (the connected run forces the dark theme), and on the light
+    Tunnel Manager they miss even the heading. Tesseract reads dark-on-light
+    natively, so this OCRs a non-inverted grey x3 crop of ``region`` (psm 6,
+    then 11) and keeps only boxes wholly inside it. ``budget`` is accepted
+    for ``require_editor_selection`` compatibility.
+    """
+    tesseract = tesseract or shutil.which("tesseract")
+    if tesseract is None:
+        raise RuntimeError("tesseract unavailable")
+    words = []
+    for psm in ("6", "11"):
+        rows = region_upscaled_rows(path, tesseract, region, psm=psm)
+        box = _bounds_inside(match_visible_label(rows, label), region)
+        if box:
+            return box
+        words.extend(row[0] for row in rows[:30])
+    raise RuntimeError(f"light label {label!r} not in {region} of {path}; words: {words[:40]}")
 
 
 def require_editor_selection(path, port: int, sibling_port: int, form_region, *,
-                             locate=None):
+                             row_region=None, locate=None):
     """Prove the editor form shows ``port`` and NOT ``sibling_port``.
 
     A no-op click leaves the previous selection's port in the form, so the
-    sibling must be absent; the port must be inside ``form_region``, not just
-    anywhere (e.g. a list subtitle). Returns the port's bounds.
+    sibling must be absent anywhere in ``form_region``. The selected port
+    must be inside ``row_region`` (the Listen Port input) when given, else
+    inside ``form_region`` -- never a list subtitle. Returns its bounds.
     """
     locate = locate or locate_visible_label
+    where = row_region or form_region
     try:
-        box = locate(path, str(port), region=form_region)
+        box = locate(path, str(port), region=where)
     except RuntimeError as exc:
         raise RuntimeError(
-            f"editor form {form_region} does not show selected listen port {port}"
+            f"editor form {where} does not show selected listen port {port}"
         ) from exc
-    if _bounds_inside(box, form_region) is None:
-        raise RuntimeError(f"listen port {port} box {box} outside editor form {form_region}")
+    if _bounds_inside(box, where) is None:
+        raise RuntimeError(f"listen port {port} box {box} outside editor row {where}")
     try:
         stale = locate(path, str(sibling_port), region=form_region)
     except RuntimeError:
@@ -2009,7 +2157,8 @@ def sync_badge_labels_visible(path: Path, tesseract: str, expected: str) -> bool
     return False
 
 
-async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app_log: Path) -> int:
+async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app_log: Path,
+                   *, forward_ports: tuple[int, ...] = ()) -> int:
     """LIGHT-theme screenshot tour (INSPIRUM_GUI_TOUR=1).
 
     The window, a real SSH session, and the terminal echo probe are required.
@@ -2250,6 +2399,81 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
             # Escape closes the manager; focus remains with the connected
             # terminal. The mandatory echo below proves input routing.
     await step("tunnels-manager", s05_tunnels)
+
+    async def s05_tunnels_min() -> None:
+        """Populated LIGHT Tunnel Manager at the minimum window size.
+
+        Real saved forwards (INSPIRUM_GUI_POPULATED=1): the popup and the
+        manager list must show both labels, and selecting Alpha must put its
+        own listen port in the Listen Port row with Bravo's absent. All OCR
+        is dark-on-light (light_locate), never the dark-theme pipeline.
+        """
+        min_w, min_h = await resize_tour(640, 480)
+        tag = f"{min_w}x{min_h}"
+        try:
+            await asyncio.sleep(.8)
+            base = tour_dir / f"tour-05c-terminal-{tag}.png"
+            shot(base.name)
+            box = await asyncio.to_thread(
+                light_locate, base, "Tunnels", region=(max(0, min_w - 220), 0, min_w, 42),
+            )
+            click(*centre(box))
+            await asyncio.sleep(1)
+            popup_shot = tour_dir / f"tour-05d-tunnels-popup-{tag}.png"
+            shot(popup_shot.name)
+            popup = (max(0, min_w - 440), 32, min_w, min_h)
+            settings = await asyncio.to_thread(
+                light_locate, popup_shot, "Tunnel Settings...", region=popup,
+            )
+            for label in POPULATED_LABELS:
+                row = await asyncio.to_thread(light_locate, popup_shot, label, region=popup)
+                if row[3] > settings[1]:
+                    raise RuntimeError(f"{label} {row} below the popup footer {settings}")
+            click(*centre(settings))
+            await asyncio.sleep(1.2)
+            manager = tour_dir / f"tour-05e-tunnel-manager-{tag}.png"
+            shot(manager.name)
+            heading = await asyncio.to_thread(
+                light_locate, manager, "Tunnel Manager", region=(0, 42, min_w, min_h // 2),
+            )
+            left, _dialog = tunnel_dialog_left(min_w)
+            list_card = (left, heading[3], left + TUNNEL_EDITOR_CARD_DX - 6, min_h)
+            rows = []
+            for label in POPULATED_LABELS:
+                rows.append(await asyncio.to_thread(
+                    light_locate, manager, label, region=list_card,
+                ))
+            print(f"tour: {tag} Tunnel Manager heading {heading} rows {rows}", flush=True)
+            if len(forward_ports) == 2:
+                click(*centre(rows[0]))
+                await asyncio.sleep(1)
+                selected = tour_dir / f"tour-05f-tunnel-manager-alpha-{tag}.png"
+                shot(selected.name)
+                port_box = await asyncio.to_thread(
+                    require_editor_selection, selected, forward_ports[0], forward_ports[1],
+                    editor_form_region(min_w, min_h),
+                    row_region=listen_port_row_region(heading, min_w),
+                    locate=light_locate,
+                )
+                print(f"tour: {tag} Alpha listen port {forward_ports[0]} at {port_box}",
+                      flush=True)
+        finally:
+            # One Escape closes the popup or the manager. A second would
+            # reach the shell and corrupt the mandatory echo probe line.
+            key("Escape")
+            await asyncio.sleep(.5)
+            restored = await resize_tour(1280, 800)
+            if restored != (1280, 800):
+                raise RuntimeError(f"tour baseline not restored: {restored}")
+
+    if POPULATED:
+        # Required in a populated tour: it exists for this evidence.
+        try:
+            await s05_tunnels_min()
+        except Exception as error:
+            print(f"tour: FAILED populated minimum Tunnel Manager: {error}", flush=True)
+            return 1
+        print("tour: PASS populated LIGHT Tunnel Manager at minimum size", flush=True)
 
     # Required: a missed echo fails the tour. INSPIRUM_GUI_TOUR_WITHHOLD_ECHO=1
     # makes the fixture stay silent so this path can be proven.
@@ -2577,6 +2801,7 @@ async def main() -> int:
                     # surrounding finally block performs the usual teardown.
                     return await run_tour(
                         window, destination.parent / "tour", env, events, app_log,
+                        forward_ports=forward_ports,
                     )
                 # The native graphics stack may still be initializing after
                 # the X11 window first appears, especially on shared runners.
@@ -4714,7 +4939,7 @@ async def main() -> int:
                     *map(str, center(settings_bounds)), "click", "1", env=env,
                 )
                 await asyncio.sleep(.6)
-                await locate_rendered_label(
+                heading_bounds = await locate_rendered_label(
                     window, destination / "connected-tunnels-settings.png",
                     "Tunnel Manager", env=env, timeout=15,
                 )
@@ -4725,6 +4950,7 @@ async def main() -> int:
                     # form with the sibling's port absent (no-op click fails).
                     ed_w, ed_h = window_size(window, env)
                     form_region = editor_form_region(ed_w, ed_h)
+                    listen_row = listen_port_row_region(heading_bounds, ed_w)
                     list_region = (0, 42, ed_w // 2, ed_h)
                     for idx, (label, name) in enumerate(
                         zip(POPULATED_LABELS, ("alpha", "bravo"))
@@ -4741,6 +4967,7 @@ async def main() -> int:
                                 await asyncio.to_thread(
                                     require_editor_selection, shot,
                                     forward_ports[idx], forward_ports[1 - idx], form_region,
+                                    row_region=listen_row,
                                 )
                                 break
                             except RuntimeError:
@@ -4802,6 +5029,201 @@ async def main() -> int:
                                 str(x), str(y), "click", "1", env=env)
                         await asyncio.sleep(1)
 
+                    async def open_manager(tag: str):
+                        """Tunnels -> Tunnel Settings...; return the heading box."""
+                        await click_label(
+                            window, destination / f"connected-tunnels-{tag}-button.png",
+                            "Tunnels", env, region=(max(0, tun_width - 220), 0, tun_width, 42),
+                            timeout=15,
+                        )
+                        footer = await locate_rendered_label(
+                            window, destination / f"connected-tunnels-{tag}-popup.png",
+                            "Tunnel Settings...", env=env, region=popup_region, timeout=15,
+                        )
+                        command("xdotool", "mousemove", "--window", window,
+                                *map(str, center(footer)), "click", "1", env=env)
+                        await asyncio.sleep(.6)
+                        return await locate_rendered_label(
+                            window, destination / f"connected-tunnels-{tag}-manager.png",
+                            "Tunnel Manager", env=env, timeout=15,
+                        )
+
+                    async def require_form(port, sibling, heading, tag):
+                        w, h = window_size(window, env)
+                        shot = destination / f"connected-tunnels-{tag}.png"
+                        deadline = time.monotonic() + 15 * TIME_SCALE
+                        while True:
+                            await asyncio.to_thread(screenshot, window, shot, env)
+                            try:
+                                return await asyncio.to_thread(
+                                    require_editor_selection, shot, port, sibling,
+                                    editor_form_region(w, h),
+                                    row_region=listen_port_row_region(heading, w),
+                                )
+                            except RuntimeError:
+                                if time.monotonic() >= deadline:
+                                    raise
+                                await asyncio.sleep(.5)
+
+                    async def select_row(label, port, sibling, heading, tag):
+                        """Click a list row; prove it by the Listen Port row."""
+                        w, h = window_size(window, env)
+                        await click_label(
+                            window, destination / f"connected-tunnels-{tag}-pre.png",
+                            label, env, region=(0, 42, w // 2, h), timeout=15, settle=.8,
+                        )
+                        return await require_form(port, sibling, heading, tag)
+
+                    async def type_listen_port(heading, value: int) -> None:
+                        w, _h = window_size(window, env)
+                        x, y = listen_input_centre(heading, w)
+                        command("xdotool", "mousemove", "--window", window,
+                                str(x), str(y), "click", "1", env=env)
+                        await asyncio.sleep(.3)
+                        command("xdotool", "key", "--clearmodifiers", "ctrl+a", env=env)
+                        command("xdotool", "type", "--clearmodifiers", "--delay", "40",
+                                str(value), env=env)
+                        await asyncio.sleep(.5)
+
+                    async def press_save(heading, tag: str):
+                        """Click the primary Save fill; return its box."""
+                        w, _h = window_size(window, env)
+                        shot = destination / f"connected-tunnels-{tag}-save.png"
+                        await asyncio.to_thread(screenshot, window, shot, env)
+                        found = await asyncio.to_thread(tunnel_save_button, shot, heading, w)
+                        if found is None:
+                            raise RuntimeError(f"Tunnel Manager Save fill not found in {shot}")
+                        (x, y), box = found
+                        print(f"tunnel {tag}: Save fill {box} -> ({x},{y})", flush=True)
+                        command("xdotool", "mousemove", "--window", window,
+                                str(x), str(y), "click", "1", env=env)
+                        await asyncio.sleep(.8)
+                        return box
+
+                    async def press_remove(heading, tag: str) -> None:
+                        w, _h = window_size(window, env)
+                        x, y = tunnel_remove_centre(heading, w)
+                        print(f"tunnel {tag}: remove button -> ({x},{y})", flush=True)
+                        command("xdotool", "mousemove", "--window", window,
+                                str(x), str(y), "click", "1", env=env)
+                        await asyncio.sleep(.8)
+
+                    async def require_notice(word: str, save_box, tag: str) -> None:
+                        """Positive signal the click landed: the footer notice.
+                        Each expected word is unique to its outcome."""
+                        w, _h = window_size(window, env)
+                        await locate_rendered_label(
+                            window, destination / f"connected-tunnels-{tag}-notice.png",
+                            word, env=env, region=tunnel_notice_region(save_box, w),
+                            timeout=12,
+                        )
+
+                    def disk_forwards() -> list[str]:
+                        return saved_local_forwards(profiles, "CI tunnel fixture")
+
+                    def spec(port: int) -> str:
+                        return f"127.0.0.1:{port}:127.0.0.1:{echo_port}"
+
+                    async def running_edit_delete_probe() -> None:
+                        """Edit/delete of RUNNING Alpha is refused and its real
+                        listener keeps echoing; idle Bravo stays editable:
+                        edit + save + reopen + remove. Truth is the loopback
+                        listener and the profile file the GUI persists."""
+                        original = [spec(port_a), spec(port_b)]
+                        if sorted(disk_forwards()) != sorted(original):
+                            raise RuntimeError(f"unexpected saved forwards {disk_forwards()}")
+                        await click_label(
+                            window, destination / "connected-tunnels-edit-start-button.png",
+                            "Tunnels", env, region=(max(0, tun_width - 220), 0, tun_width, 42),
+                            timeout=15,
+                        )
+                        await toggle(label_a, "edit-start-a")
+                        await forward_echo(port_a, b"GUI_FORWARD_ALPHA_EDIT_0")
+                        await forward_refused(port_b, "bravo idle before edit probe")
+                        command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                        await asyncio.sleep(.6)
+                        heading = await open_manager("edit")
+
+                        # 1. Running Alpha: change its listen port -> refused.
+                        new_a = free_loopback_port({echo_port, port_a, port_b})
+                        await select_row(label_a, port_a, port_b, heading, "edit-alpha-selected")
+                        await type_listen_port(heading, new_a)
+                        # The draft really changed (typing reached the input).
+                        await require_form(new_a, port_a, heading, "edit-alpha-draft")
+                        save_box = await press_save(heading, "edit-alpha")
+                        await require_notice("changing", save_box, "edit-alpha")
+                        if sorted(disk_forwards()) != sorted(original):
+                            raise RuntimeError(f"refused Alpha edit persisted: {disk_forwards()}")
+                        await forward_echo(port_a, b"GUI_FORWARD_ALPHA_EDIT_1")
+                        await forward_refused(new_a, "rejected Alpha listen port")
+                        await forward_refused(port_b, "bravo during Alpha edit refusal")
+
+                        # 2. Running Alpha: delete -> refused. Reselecting
+                        # reverts the draft and clears the notice, so the
+                        # "deleting" word below is fresh evidence.
+                        await select_row(label_a, port_a, new_a, heading, "delete-alpha-selected")
+                        await press_remove(heading, "delete-alpha")
+                        await require_notice("deleting", save_box, "delete-alpha")
+                        if sorted(disk_forwards()) != sorted(original):
+                            raise RuntimeError(f"refused Alpha delete persisted: {disk_forwards()}")
+                        await forward_echo(port_a, b"GUI_FORWARD_ALPHA_DELETE")
+                        await forward_refused(port_b, "bravo during Alpha delete refusal")
+                        await require_form(port_a, port_b, heading, "delete-alpha-kept")
+
+                        # 3. Idle Bravo: edit + save allowed, Alpha keeps running.
+                        new_b = free_loopback_port({echo_port, port_a, port_b, new_a})
+                        await select_row(label_b, port_b, port_a, heading, "edit-bravo-selected")
+                        await type_listen_port(heading, new_b)
+                        await require_form(new_b, port_b, heading, "edit-bravo-draft")
+                        save_box = await press_save(heading, "edit-bravo")
+                        await require_notice("saved", save_box, "edit-bravo")
+                        saved = disk_forwards()
+                        if sorted(saved) != sorted([spec(port_a), spec(new_b)]):
+                            raise RuntimeError(f"Bravo edit not persisted exactly: {saved}")
+                        await forward_echo(port_a, b"GUI_FORWARD_ALPHA_AFTER_BRAVO_EDIT")
+                        await forward_refused(new_b, "edited Bravo must stay idle")
+                        await forward_refused(port_b, "old Bravo port after edit")
+
+                        # 4. Reopen: the manager shows the persisted edit.
+                        command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                        await asyncio.sleep(.6)
+                        heading = await open_manager("reopen")
+                        await select_row(label_b, new_b, port_b, heading, "reopen-bravo-selected")
+                        await require_form(new_b, port_a, heading, "reopen-bravo-not-alpha")
+
+                        # 5. Remove idle Bravo; Alpha survives and still echoes.
+                        w, _h = window_size(window, env)
+                        found = await asyncio.to_thread(
+                            tunnel_save_button,
+                            destination / "connected-tunnels-reopen-bravo-not-alpha.png",
+                            heading, w,
+                        )
+                        if found is None:
+                            raise RuntimeError("Save fill not found for the remove notice row")
+                        await press_remove(heading, "remove-bravo")
+                        await require_notice("deleted", found[1], "remove-bravo")
+                        if disk_forwards() != [spec(port_a)]:
+                            raise RuntimeError(f"Bravo remove not persisted exactly: {disk_forwards()}")
+                        await forward_echo(port_a, b"GUI_FORWARD_ALPHA_AFTER_BRAVO_REMOVE")
+                        await forward_refused(new_b, "removed Bravo")
+
+                        # Leave nothing running: stop Alpha from the popup.
+                        command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                        await asyncio.sleep(.6)
+                        await click_label(
+                            window, destination / "connected-tunnels-edit-stop-button.png",
+                            "Tunnels", env, region=(max(0, tun_width - 220), 0, tun_width, 42),
+                            timeout=15,
+                        )
+                        await toggle(label_a, "edit-stop-a")
+                        await forward_refused(port_a, "alpha after edit probe stop")
+                        command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                        await asyncio.sleep(.6)
+                        print("PASS populated tunnels: running Alpha edit+delete refused "
+                              "(listener kept echoing, file unchanged, Bravo idle); idle "
+                              "Bravo edit/save/reopen/remove persisted while Alpha ran",
+                              flush=True)
+
                     allow_before = events.path.read_text(encoding="utf-8").count("LOCAL_FORWARD_ALLOW")
                     await click_label(
                         window, destination / "connected-tunnels-button-2.png", "Tunnels", env,
@@ -4858,6 +5280,7 @@ async def main() -> int:
                         raise
                     print("PASS populated tunnels: independent per-forward start/stop "
                           "(echo + refusal through fixture SSH)", flush=True)
+                    await running_edit_delete_probe()
 
                 event_log = events.path.read_text(encoding="utf-8")
                 if "SHELL_PTY_RESIZE" not in event_log:
