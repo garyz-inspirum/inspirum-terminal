@@ -11243,6 +11243,18 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn flat_input_uses_control_outline_not_divider_in_both_themes() {
+        for p in [theme::LIGHT, theme::DARK] {
+            let rest = flat_input_style(&p, text_input::Status::Active);
+            assert_eq!(rest.border.color, p.input_border());
+            assert_ne!(rest.border.color, p.border);
+            assert!(rest.border.width >= 1.0);
+            let focused = flat_input_style(&p, text_input::Status::Focused { is_hovered: false });
+            assert_eq!(focused.border.color, p.input_focus_border());
+        }
+    }
+
     fn quick_session(name: &str, local: &[&str]) -> Session {
         let mut session = Session {
             name: name.into(),

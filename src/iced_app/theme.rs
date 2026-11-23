@@ -291,6 +291,27 @@ mod tests {
     }
 
     #[test]
+    fn input_outlines_meet_non_text_contrast_on_neighbouring_fills() {
+        // WCAG 1.4.11: a text field's boundary must reach 3:1 against both
+        // its own fill and every surface it sits on, in both themes.
+        for p in [LIGHT, DARK] {
+            for surface in [p.chrome, p.dock, p.list, p.raised, p.hover, p.selected_row] {
+                assert!(
+                    contrast(p.input_border(), surface) >= 3.0,
+                    "input outline on {surface:?}"
+                );
+                assert!(
+                    contrast(p.input_focus_border(), surface) >= 3.0,
+                    "focused input outline on {surface:?}"
+                );
+            }
+            assert_ne!(p.input_border(), p.input_focus_border());
+        }
+        // Regression: the shared divider token is too faint for inputs.
+        assert!(contrast(LIGHT.border, LIGHT.dock) < 3.0);
+    }
+
+    #[test]
     fn small_chrome_text_meets_wcag_aa_on_all_relevant_surfaces() {
         // Direct constants avoid changing the process-global runtime theme in parallel tests.
         for p in [LIGHT, DARK] {
