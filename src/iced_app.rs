@@ -2052,16 +2052,29 @@ const TUNNEL_MENU_SWITCH_WIDTH: f32 = 28.0;
 /// "Settings" at 11 px with `[1, 6]` padding, rounded up.
 const TUNNEL_MENU_SETTINGS_BUTTON_WIDTH: f32 = 60.0;
 const DIALOG_DEFAULT_WIDTH: f32 = 600.0;
-const TUNNEL_SETTINGS_WIDTH: f32 = 760.0;
+const TUNNEL_SETTINGS_WIDTH: f32 = 840.0;
 const TUNNEL_SETTINGS_WINDOW_MARGIN: f32 = 24.0;
 const TUNNEL_LIST_PANEL_WIDTH: f32 = 300.0;
 /// Card padding around the editor column.
 const TUNNEL_EDITOR_PADDING: f32 = 12.0;
-/// Fits "Destination Host" / "Destination Port" at 12 px.
-const TUNNEL_EDITOR_LABEL_MAX: f32 = 112.0;
-const TUNNEL_EDITOR_LABEL_MIN: f32 = 96.0;
-/// Room for "127.0.0.1" and a typical tunnel name at 13 px plus padding.
-const TUNNEL_EDITOR_MIN_FIELD: f32 = 180.0;
+/// Static editor field labels, rendered single-line at 12 px.
+const TUNNEL_EDITOR_LABELS: [&str; 8] = [
+    "Name",
+    "Type",
+    "Session / profile",
+    "Listen Port",
+    "Destination Host",
+    "Destination Port",
+    "Status (session)",
+    "Bind address",
+];
+/// Roomy label column at the regular dialog width.
+const TUNNEL_EDITOR_LABEL_MAX: f32 = 150.0;
+/// Longest label ("Session / profile", 17 chars) at 12 px under the
+/// generous `UI_CHAR_ADVANCE` estimate (122.4 px), rounded up.
+const TUNNEL_EDITOR_LABEL_MIN: f32 = 128.0;
+/// Room for "127.0.0.1", tunnel names and hosts at 13 px plus padding.
+const TUNNEL_EDITOR_MIN_FIELD: f32 = 250.0;
 const TUNNEL_MENU_EMPTY: &str = "No saved tunnels.";
 const TUNNEL_MENU_FOOTER_HEIGHT: f32 = 28.0;
 /// Quick-menu footer entry; the dialog it opens carries the same name.
@@ -2176,6 +2189,16 @@ fn tunnel_editor_panel_width(dialog_width: f32) -> f32 {
 /// field column keeps at least `TUNNEL_EDITOR_MIN_FIELD` px when possible.
 fn tunnel_editor_label_width(panel_width: f32) -> f32 {
     (panel_width - TUNNEL_EDITOR_MIN_FIELD).clamp(TUNNEL_EDITOR_LABEL_MIN, TUNNEL_EDITOR_LABEL_MAX)
+}
+
+/// Single-line editor label of the fixed label-column width.
+fn tunnel_editor_label<'a>(label: &'a str, width: f32, ink: Color) -> Element<'a, Message> {
+    text(label)
+        .size(12)
+        .color(ink)
+        .width(width)
+        .wrapping(iced::widget::text::Wrapping::None)
+        .into()
 }
 
 /// Secondary popup line, bounded to `max_chars`.
@@ -9493,7 +9516,7 @@ impl App {
             );
             let grid = column![
                 row![
-                    text("Name").size(12).color(ink).width(label_width),
+                    tunnel_editor_label("Name", label_width, ink),
                     text_input("Tunnel name", &edit.draft.label)
                         .style(flat_input)
                         .on_input(Message::TunnelDraftLabel)
@@ -9501,22 +9524,16 @@ impl App {
                         .padding([3, 6])
                         .width(Fill),
                 ],
+                row![tunnel_editor_label("Type", label_width, ink), kind_row],
                 row![
-                    text("Type").size(12).color(ink).width(label_width),
-                    kind_row
-                ],
-                row![
-                    text("Session / profile")
-                        .size(12)
-                        .color(ink)
-                        .width(label_width),
+                    tunnel_editor_label("Session / profile", label_width, ink),
                     text(truncate(profile_name, field_chars))
                         .size(12)
                         .color(ink)
                         .wrapping(iced::widget::text::Wrapping::None),
                 ],
                 row![
-                    text("Listen Port").size(12).color(ink).width(label_width),
+                    tunnel_editor_label("Listen Port", label_width, ink),
                     text_input("Port", &edit.draft.listen_port)
                         .style(flat_input)
                         .on_input(Message::TunnelDraftListenPort)
@@ -9525,29 +9542,23 @@ impl App {
                         .width(Fill),
                 ],
                 row![
-                    text("Destination Host")
-                        .size(12)
-                        .color(ink)
-                        .width(label_width),
+                    tunnel_editor_label("Destination Host", label_width, ink),
                     destination_host,
                 ],
                 row![
-                    text("Destination Port")
-                        .size(12)
-                        .color(ink)
-                        .width(label_width),
+                    tunnel_editor_label("Destination Port", label_width, ink),
                     destination_port,
                 ],
                 row![
-                    text("Status (session)")
+                    tunnel_editor_label("Status (session)", label_width, ink),
+                    text(status.label())
                         .size(12)
-                        .color(ink)
-                        .width(label_width),
-                    text(status.label()).size(12).color(if status.is_running() {
-                        green()
-                    } else {
-                        muted()
-                    }),
+                        .color(if status.is_running() {
+                            green()
+                        } else {
+                            muted()
+                        })
+                        .wrapping(iced::widget::text::Wrapping::None),
                 ],
             ]
             .spacing(12);
@@ -9569,7 +9580,7 @@ impl App {
             let mut controls = column![
                 grid,
                 row![
-                    text("Bind address").size(12).color(ink).width(label_width),
+                    tunnel_editor_label("Bind address", label_width, ink),
                     text_input("127.0.0.1", &edit.draft.bind_address)
                         .style(flat_input)
                         .on_input(Message::TunnelDraftBind)
@@ -15276,10 +15287,33 @@ mod tunnel_layout_tests {
         let narrow = tunnel_editor_label_width(tunnel_editor_panel_width(DIALOG_DEFAULT_WIDTH));
         assert!(narrow < wide);
         assert!(narrow >= TUNNEL_EDITOR_LABEL_MIN);
-        // Longest label still fits the narrowest column at 12 px.
-        assert!(
-            "Destination Host".chars().count() <= chars_fitting(TUNNEL_EDITOR_LABEL_MIN, 12.0) + 3
-        );
+        // Every label fits the narrowest column on one line at 12 px.
+        for label in TUNNEL_EDITOR_LABELS {
+            assert!(
+                label.chars().count() <= chars_fitting(TUNNEL_EDITOR_LABEL_MIN, 12.0),
+                "{label} wraps in {TUNNEL_EDITOR_LABEL_MIN}px"
+            );
+        }
+    }
+
+    #[test]
+    fn regular_editor_keeps_labels_single_line_and_values_roomy() {
+        // Minimum supported window (960) gets the full dialog with margin.
+        let dialog = tunnel_settings_dialog_width(960.0);
+        assert!(dialog + 2.0 * TUNNEL_SETTINGS_WINDOW_MARGIN <= 960.0);
+        let panel = tunnel_editor_panel_width(dialog);
+        let label = tunnel_editor_label_width(panel);
+        let longest = TUNNEL_EDITOR_LABELS
+            .iter()
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap();
+        assert!(longest <= chars_fitting(label, 12.0), "label col {label}px");
+        let field = panel - label;
+        assert!(field > 250.0, "value col {field}px");
+        for value in ["CI tunnel fixture", "Alpha forward", "127.0.0.1", "Running"] {
+            assert!(value.chars().count() <= chars_fitting(field - 12.0, 13.0));
+        }
     }
 
     #[test]
