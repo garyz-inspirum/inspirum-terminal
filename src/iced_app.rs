@@ -2463,10 +2463,14 @@ struct AutoStartCandidate {
 #[derive(Debug, Default)]
 struct AutoStartPass {
     queue: std::collections::VecDeque<AutoStartCandidate>,
-    started: usize,
+    /// ssh was spawned and survived the launcher's brief early-exit check.
+    /// That does not prove the listener is accepting connections, so the
+    /// summary reports these as requested, not started.
+    requested: usize,
     already_running: usize,
     failed: Vec<String>,
-    skipped_risk: Vec<String>,
+    /// Opted in but not `tunnels::auto_start_eligible` (hand-edited JSON).
+    skipped_ineligible: Vec<String>,
 }
 
 /// Opted-in forwards of every saved profile, in library order, each once.
@@ -2499,8 +2503,11 @@ fn tunnel_count(count: usize) -> String {
 /// Status-bar summary of a start-up pass; `remaining` were never attempted.
 fn auto_start_summary(pass: &AutoStartPass, remaining: usize) -> String {
     let mut parts = Vec::new();
-    if pass.started > 0 {
-        parts.push(format!("{} started", tunnel_count(pass.started)));
+    if pass.requested > 0 {
+        parts.push(format!(
+            "launch requested for {} (see Tunnels for live status)",
+            tunnel_count(pass.requested)
+        ));
     }
     if pass.already_running > 0 {
         parts.push(format!(
@@ -2515,11 +2522,12 @@ fn auto_start_summary(pass: &AutoStartPass, remaining: usize) -> String {
             pass.failed.join("; ")
         ));
     }
-    if !pass.skipped_risk.is_empty() {
+    if !pass.skipped_ineligible.is_empty() {
         parts.push(format!(
-            "{} skipped, not loopback-only: start manually after acknowledging the risk ({})",
-            tunnel_count(pass.skipped_risk.len()),
-            pass.skipped_risk.join(", ")
+            "{} skipped, only Local or Dynamic tunnels bound to 127.0.0.1 or [::1] can \
+auto-start: start manually ({})",
+            tunnel_count(pass.skipped_ineligible.len()),
+            pass.skipped_ineligible.join(", ")
         ));
     }
     if remaining > 0 {
@@ -4102,15 +4110,26 @@ struct TunnelEditState {
 }
 
 const TUNNEL_AUTO_START_LABEL: &str = "Automatically start when app opens";
-const TUNNEL_AUTO_START_HELP: &str = "Starts this saved tunnel the next time Inspirum opens. \
-Only local-only (127.0.0.1) tunnels can auto-start; it never starts at OS login.";
-const TUNNEL_AUTO_START_UNSAFE: &str = "Cannot auto-start a tunnel that accepts non-local \
-connections. Use a loopback bind address such as 127.0.0.1, or turn off automatic start.";
+const TUNNEL_AUTO_START_HELP: &str = "Requests this saved tunnel the next time Inspirum \
+opens; it never starts at OS login. Only Local or Dynamic tunnels with bind address 127.0.0.1 \
+or [::1] can auto-start. Remote tunnels are started manually.";
+const TUNNEL_AUTO_START_UNSAFE: &str = "Cannot auto-start this tunnel. Set the bind address \
+to 127.0.0.1 or [::1] (an empty bind or a host name such as localhost is not accepted), or turn \
+off automatic start.";
+const TUNNEL_AUTO_START_REMOTE: &str = "Remote tunnels cannot auto-start: the SSH server can \
+override their bind address. Start remote tunnels manually, or turn off automatic start.";
 
-/// True when this forward would listen beyond loopback, which makes it
-/// ineligible for unattended start.
-fn tunnel_auto_start_unsafe(profile: &Session, kind: tunnels::ForwardKind, spec: &str) -> bool {
-    session_requires_forward_risk_ack(&quick_forward_only(profile, kind, spec))
+/// Why this forward may not auto-start, or `None` when it may. The same
+/// check gates the editor's save and the start-up pass, so a hand-edited
+/// profile cannot launch what the editor would refuse.
+fn tunnel_auto_start_rejection(kind: tunnels::ForwardKind, spec: &str) -> Option<&'static str> {
+    if kind == tunnels::ForwardKind::Remote {
+        Some(TUNNEL_AUTO_START_REMOTE)
+    } else if tunnels::auto_start_eligible(kind, spec) {
+        None
+    } else {
+        Some(TUNNEL_AUTO_START_UNSAFE)
+    }
 }
 
 struct App {
@@ -4462,9 +4481,9 @@ impl App {
                 .find(|quick| quick.matches(&profile_key, kind, &spec))
                 .map(QuickForward::title)
                 .unwrap_or_else(|| spec.clone());
-            if session_requires_forward_risk_ack(&quick_forward_only(&session, kind, &spec)) {
+            if tunnel_auto_start_rejection(kind, &spec).is_some() {
                 if let Some(pass) = self.auto_start.as_mut() {
-                    pass.skipped_risk.push(name);
+                    pass.skipped_ineligible.push(name);
                 }
             } else if self
                 .tunnels
@@ -4484,7 +4503,7 @@ impl App {
                 );
                 if let Some(pass) = self.auto_start.as_mut() {
                     match result {
-                        Ok(tunnels::Status::Running { .. }) => pass.started += 1,
+                        Ok(tunnels::Status::Running { .. }) => pass.requested += 1,
                         Ok(tunnels::Status::Failed(error)) => {
                             pass.failed.push(format!("{name}: {error}"))
                         }
@@ -6240,7 +6259,13 @@ impl App {
             }
             Message::TunnelDraftAutoStart(value) => {
                 if let Some(edit) = self.tunnel_edit.as_mut() {
-                    edit.auto_start = value;
+                    // Turning on is refused for Remote; turning off (e.g. a
+                    // hand-edited opt-in) is always allowed.
+                    if value && edit.draft.kind == tunnels::ForwardKind::Remote {
+                        self.tunnel_notice = TUNNEL_AUTO_START_REMOTE.into();
+                    } else {
+                        edit.auto_start = value;
+                    }
                 }
             }
             Message::TunnelSaveEdit => {
@@ -6287,8 +6312,10 @@ impl App {
                 };
                 // Re-check against the spec being saved now, so a bind edited
                 // after ticking the box cannot slip through as auto-start.
-                if edit.auto_start && tunnel_auto_start_unsafe(profile, edit.draft.kind, &spec) {
-                    self.tunnel_notice = TUNNEL_AUTO_START_UNSAFE.into();
+                if edit.auto_start
+                    && let Some(reason) = tunnel_auto_start_rejection(edit.draft.kind, &spec)
+                {
+                    self.tunnel_notice = reason.into();
                     return Task::none();
                 }
                 let result = if let Some((old_kind, old_spec)) = &edit.original {
@@ -10178,9 +10205,13 @@ impl App {
                 text("Use 127.0.0.1 to accept local connections only.")
                     .size(11)
                     .color(muted()),
+                // Disabled for Remote unless a saved opt-in must be cleared.
                 iced::widget::checkbox(edit.auto_start)
                     .label(TUNNEL_AUTO_START_LABEL)
-                    .on_toggle(Message::TunnelDraftAutoStart),
+                    .on_toggle_maybe(
+                        (edit.draft.kind != tunnels::ForwardKind::Remote || edit.auto_start)
+                            .then_some(Message::TunnelDraftAutoStart),
+                    ),
                 text(TUNNEL_AUTO_START_HELP).size(11).color(muted()),
                 operation.style(quiet),
                 operation_reason,
@@ -16234,12 +16265,24 @@ mod tunnel_layout_tests {
             AUTO_START_EXPOSED.into(),
             "127.0.0.1:7000:off:7000".into(),
         ];
-        for spec in [AUTO_START_WEB, AUTO_START_DB, AUTO_START_EXPOSED] {
+        for spec in [AUTO_START_WEB, AUTO_START_DB] {
             tunnels::set_auto_start(&mut profile, tunnels::ForwardKind::Local, spec, true).unwrap();
         }
+        forge_auto_start(&mut profile, crate::TunnelKind::Local, AUTO_START_EXPOSED);
         save_sessions(&path, &[profile]).unwrap();
         let key = session_profile_key(&load_sessions(&path).unwrap()[0]);
         (dir, path, key)
+    }
+
+    /// Opt-in written straight into the metadata, as a hand edit of the
+    /// profile JSON could; `set_auto_start` itself refuses these specs.
+    fn forge_auto_start(profile: &mut Session, kind: crate::TunnelKind, spec: &str) {
+        profile.ssh.tunnel_labels.push(crate::TunnelLabel {
+            kind,
+            spec: spec.into(),
+            label: String::new(),
+            auto_start: true,
+        });
     }
 
     fn drain_auto_start(app: &mut App) {
@@ -16319,12 +16362,18 @@ mod tunnel_layout_tests {
         // 0.0.0.0 bind and the opted-out row are never launched.
         assert_eq!(auto_start_calls(&app), vec![AUTO_START_WEB, AUTO_START_DB]);
         assert!(!app.tunnels.acknowledged(&key));
+        // A surviving ssh process is only a launch request, not a proven
+        // listener, so the summary never claims "started".
+        assert!(app.status.starts_with(
+            "Auto-start: launch requested for 1 tunnel (see Tunnels for live status); \
+1 tunnel failed ("
+        ));
+        assert!(!app.status.contains("started"), "{}", app.status);
+        assert!(app.status.contains(": listener busy"));
         assert!(
             app.status
-                .starts_with("Auto-start: 1 tunnel started; 1 tunnel failed (")
+                .contains("1 tunnel skipped, only Local or Dynamic tunnels bound to 127.0.0.1")
         );
-        assert!(app.status.contains(": listener busy"));
-        assert!(app.status.contains("1 tunnel skipped, not loopback-only"));
         assert_eq!(app.tunnel_notice, app.status);
 
         // The pass ran once: a stray later message launches nothing more.
@@ -16355,6 +16404,154 @@ mod tunnel_layout_tests {
         app.auto_start_fake = Some(AutoStartFake::default());
         drain_auto_start(&mut app);
         assert_eq!(auto_start_calls(&app), vec![AUTO_START_WEB]);
+    }
+
+    #[test]
+    fn startup_pass_skips_forged_omitted_localhost_and_remote_binds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+        let mut profile = Session {
+            name: "forged".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let explicit_v6 = "[::1]:8081:web:80";
+        let omitted = "9092:api:443";
+        let localhost = "localhost:9093:api:443";
+        let remote = "127.0.0.1:9000:127.0.0.1:3000";
+        let socks = "127.0.0.1:1080";
+        let socks_omitted = "1081";
+        profile.ssh.local_forwards = vec![
+            AUTO_START_WEB.into(),
+            explicit_v6.into(),
+            omitted.into(),
+            localhost.into(),
+        ];
+        profile.ssh.remote_forwards = vec![remote.into()];
+        profile.ssh.dynamic_forwards = vec![socks.into(), socks_omitted.into()];
+        for (kind, spec) in [
+            (tunnels::ForwardKind::Local, AUTO_START_WEB),
+            (tunnels::ForwardKind::Local, explicit_v6),
+            (tunnels::ForwardKind::Dynamic, socks),
+        ] {
+            tunnels::set_auto_start(&mut profile, kind, spec, true).unwrap();
+        }
+        forge_auto_start(&mut profile, crate::TunnelKind::Local, omitted);
+        forge_auto_start(&mut profile, crate::TunnelKind::Local, localhost);
+        forge_auto_start(&mut profile, crate::TunnelKind::Remote, remote);
+        forge_auto_start(&mut profile, crate::TunnelKind::Dynamic, socks_omitted);
+        save_sessions(&path, &[profile]).unwrap();
+
+        let (mut app, _task) = App::startup(path, None);
+        assert_eq!(app.auto_start.as_ref().unwrap().queue.len(), 7);
+        app.auto_start_fake = Some(AutoStartFake::default());
+        drain_auto_start(&mut app);
+        let mut calls = auto_start_calls(&app);
+        calls.sort();
+        let mut expected = vec![AUTO_START_WEB, explicit_v6, socks];
+        expected.sort();
+        assert_eq!(calls, expected);
+        assert!(
+            app.status.contains("launch requested for 3 tunnels"),
+            "{}",
+            app.status
+        );
+        assert!(app.status.contains("4 tunnels skipped"), "{}", app.status);
+        assert_eq!(app.tunnel_notice, app.status);
+    }
+
+    #[test]
+    fn auto_start_save_gate_requires_explicit_numeric_loopback() {
+        let (_dir, path, mut app, key) = auto_start_app();
+        let before_file = std::fs::read(&path).unwrap();
+        // Omitted bind follows client GatewayPorts; localhost follows
+        // /etc/hosts. Both are refused for auto-start.
+        for bind in ["", "localhost", " ", "127.0.0.2"] {
+            edit_auto_start_web(&mut app, &key);
+            let _ = app.update(Message::TunnelDraftAutoStart(true));
+            let _ = app.update(Message::TunnelDraftBind(bind.into()));
+            let _ = app.update(Message::TunnelSaveEdit);
+            assert_eq!(app.tunnel_notice, TUNNEL_AUTO_START_UNSAFE, "bind {bind:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), before_file);
+            let _ = app.update(Message::CloseDialog);
+        }
+
+        // Explicit numeric loopback is accepted for Local and Dynamic.
+        edit_auto_start_web(&mut app, &key);
+        let _ = app.update(Message::TunnelDraftBind("[::1]".into()));
+        let _ = app.update(Message::TunnelDraftAutoStart(true));
+        let _ = app.update(Message::TunnelSaveEdit);
+        assert_eq!(app.tunnel_notice, "Tunnel saved.");
+        let _ = app.update(Message::TunnelAdd(key.clone()));
+        let _ = app.update(Message::TunnelDraftKind(tunnels::ForwardKind::Dynamic));
+        let _ = app.update(Message::TunnelDraftListenPort("1080".into()));
+        let _ = app.update(Message::TunnelDraftAutoStart(true));
+        let _ = app.update(Message::TunnelSaveEdit);
+        assert_eq!(app.tunnel_notice, "Tunnel saved.");
+        let loaded = load_sessions(&path).unwrap();
+        assert_eq!(
+            tunnels::auto_start_forwards(&loaded[0]),
+            vec![
+                (tunnels::ForwardKind::Local, "[::1]:8080:web:80".to_owned()),
+                (tunnels::ForwardKind::Dynamic, "127.0.0.1:1080".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_forwards_cannot_opt_in_to_auto_start() {
+        let (_dir, path, mut app, key) = auto_start_app();
+        let before_file = std::fs::read(&path).unwrap();
+        let _ = app.update(Message::TunnelAdd(key.clone()));
+        let _ = app.update(Message::TunnelDraftKind(tunnels::ForwardKind::Remote));
+        let _ = app.update(Message::TunnelDraftListenPort("9000".into()));
+        let _ = app.update(Message::TunnelDraftDestinationHost("127.0.0.1".into()));
+        let _ = app.update(Message::TunnelDraftDestinationPort("3000".into()));
+        // The checkbox refuses to turn on for Remote.
+        let _ = app.update(Message::TunnelDraftAutoStart(true));
+        assert!(!app.tunnel_edit.as_ref().unwrap().auto_start);
+        assert_eq!(app.tunnel_notice, TUNNEL_AUTO_START_REMOTE);
+
+        // Ticked as Local, then switched to Remote: the save re-checks.
+        let _ = app.update(Message::TunnelDraftKind(tunnels::ForwardKind::Local));
+        let _ = app.update(Message::TunnelDraftAutoStart(true));
+        let _ = app.update(Message::TunnelDraftKind(tunnels::ForwardKind::Remote));
+        let _ = app.update(Message::TunnelSaveEdit);
+        assert_eq!(app.tunnel_notice, TUNNEL_AUTO_START_REMOTE);
+        assert_eq!(std::fs::read(&path).unwrap(), before_file);
+
+        // Manual remote forwards still save with auto-start off.
+        let _ = app.update(Message::TunnelDraftAutoStart(false));
+        let _ = app.update(Message::TunnelSaveEdit);
+        assert_eq!(app.tunnel_notice, "Tunnel saved.");
+        let loaded = load_sessions(&path).unwrap();
+        assert_eq!(
+            loaded[0].ssh.remote_forwards,
+            vec!["127.0.0.1:9000:127.0.0.1:3000".to_owned()]
+        );
+        assert!(tunnels::auto_start_forwards(&loaded[0]).is_empty());
+    }
+
+    #[test]
+    fn forged_remote_opt_in_can_be_cleared_in_the_editor() {
+        let (_dir, path, app, key) = auto_start_app();
+        let remote = "127.0.0.1:9000:127.0.0.1:3000";
+        let mut profiles = app.profiles.clone();
+        profiles[0].ssh.remote_forwards.push(remote.into());
+        forge_auto_start(&mut profiles[0], crate::TunnelKind::Remote, remote);
+        save_sessions(&path, &profiles).unwrap();
+        let mut app = App::boot(path.clone(), None);
+        let _ = app.update(Message::TunnelEdit(
+            key.clone(),
+            tunnels::ForwardKind::Remote,
+            remote.into(),
+        ));
+        assert!(app.tunnel_edit.as_ref().unwrap().auto_start);
+        let _ = app.update(Message::TunnelDraftAutoStart(false));
+        assert!(!app.tunnel_edit.as_ref().unwrap().auto_start);
+        let _ = app.update(Message::TunnelSaveEdit);
+        assert_eq!(app.tunnel_notice, "Tunnel saved.");
+        assert!(tunnels::auto_start_forwards(&load_sessions(&path).unwrap()[0]).is_empty());
     }
 
     #[test]

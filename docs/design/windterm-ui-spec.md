@@ -296,6 +296,20 @@ The supplied WindTerm screenshots distinguish **daily operation** from **editing
   rather than a required input. Selecting a tunnel reveals its actual owner
   profile; save/delete retain current validation and persistence. The settings
   dialog should remain usable with a long list and at minimum window size.
+- **Auto-start (opt-in, per saved forward):** `Automatically start when app
+  opens` requests the forward once when Inspirum opens (never at OS login),
+  without a risk prompt, so it is limited to forwards whose listener the
+  client can pin to loopback: **Local or Dynamic with an explicit numeric
+  `127.0.0.1:` or `[::1]:` bind** and a decimal port. An omitted bind
+  (client `GatewayPorts` may widen it), `localhost` (resolved via
+  `/etc/hosts`), and every **Remote** forward (the server's `GatewayPorts`
+  can override the requested bind) are refused at save and skipped at start
+  if forged in profile JSON; these stay manual, with unchanged manual
+  acknowledgement rules. The checkbox is disabled for Remote except to clear
+  an existing opt-in. The start-up summary says *launch requested*, not
+  *started*: a surviving ssh process after the launcher's early-exit check
+  does not prove a listening socket; failures and skips are still listed in
+  the status bar and tunnel popup notice.
 - Do not hard-code names from the supplied screenshots; these are the user's
   personal saved entries, not fixtures or app defaults. Do not copy WindTerm
   icons or source. Match the two-surface workflow, row alignment, density,

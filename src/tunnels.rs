@@ -211,8 +211,47 @@ pub fn auto_start_forwards(session: &Session) -> Vec<(ForwardKind, String)> {
         .collect()
 }
 
+/// Whether a forward may be launched unattended at app start.
+///
+/// Stricter than [`session_requires_forward_risk_ack`] on purpose: auto-start
+/// never shows the risk prompt, so the listener must be loopback whatever the
+/// SSH configuration says.
+/// - Only Local and Dynamic qualify. A Remote listener is bound by the SSH
+///   server, whose `GatewayPorts yes` overrides the requested bind address,
+///   so the client cannot guarantee loopback; remote forwards start manually.
+/// - The bind must be an explicit numeric loopback (`127.0.0.1:` or
+///   `[::1]:`). An omitted bind follows client `GatewayPorts` (ssh_config can
+///   widen it to the wildcard address) and `localhost` follows name
+///   resolution (`/etc/hosts`), so neither counts as loopback-only here.
+/// - The listen port is a decimal 1-65535, so the listener is TCP on that
+///   address (not a socket path or another bind smuggled after the prefix).
+pub fn auto_start_eligible(kind: ForwardKind, spec: &str) -> bool {
+    if kind == ForwardKind::Remote {
+        return false;
+    }
+    let Some(rest) = spec
+        .strip_prefix("127.0.0.1:")
+        .or_else(|| spec.strip_prefix("[::1]:"))
+    else {
+        return false;
+    };
+    let (port, target) = match kind {
+        ForwardKind::Dynamic => (rest, None),
+        _ => match rest.split_once(':') {
+            Some((port, target)) => (port, Some(target)),
+            None => return false,
+        },
+    };
+    let port_ok = !port.is_empty()
+        && port.len() <= 5
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok_and(|port| port != 0);
+    port_ok && target.is_none_or(|target| !target.is_empty())
+}
+
 /// Opt a saved forward in or out of auto-start, keeping its label.
-/// Rejects a forward that is not saved so no dangling metadata is created.
+/// Rejects a forward that is not saved so no dangling metadata is created,
+/// and refuses to opt in a forward that is not [`auto_start_eligible`].
 pub fn set_auto_start(
     session: &mut Session,
     kind: ForwardKind,
@@ -222,6 +261,10 @@ pub fn set_auto_start(
     ensure!(
         forward_exists(session, kind, spec),
         "tunnel entry no longer exists"
+    );
+    ensure!(
+        !enabled || auto_start_eligible(kind, spec),
+        "only local or dynamic tunnels bound to 127.0.0.1 or [::1] can auto-start"
     );
     let mut candidate = session.clone();
     let label = meta_for(&candidate, kind, spec)
@@ -1130,6 +1173,83 @@ mod tests {
             "127.0.0.1:9:x:9"
         ));
         assert!(auto_start_forwards(&session).is_empty());
+    }
+
+    #[test]
+    fn auto_start_eligibility_requires_explicit_numeric_loopback_local_or_dynamic() {
+        use ForwardKind::{Dynamic, Local, Remote};
+        for (kind, spec) in [
+            (Local, "127.0.0.1:8080:web:80"),
+            (Local, "[::1]:8080:web:80"),
+            (Local, "127.0.0.1:8080:/run/app.sock"),
+            (Dynamic, "127.0.0.1:1080"),
+            (Dynamic, "[::1]:1080"),
+        ] {
+            assert!(auto_start_eligible(kind, spec), "{kind:?} {spec}");
+        }
+        for (kind, spec) in [
+            // Omitted bind: client GatewayPorts can widen it.
+            (Local, "8080:web:80"),
+            (Dynamic, "1080"),
+            // Name-resolved bind: /etc/hosts can remap it.
+            (Local, "localhost:8080:web:80"),
+            (Dynamic, "localhost:1080"),
+            // Non-loopback or wildcard binds.
+            (Local, "0.0.0.0:8080:web:80"),
+            (Local, "*:8080:web:80"),
+            (Local, ":8080:web:80"),
+            (Local, "127.0.0.2:8080:web:80"),
+            (Local, "[::]:8080:web:80"),
+            (Dynamic, "0.0.0.0:1080"),
+            // Prefix-only tricks and non-TCP listeners.
+            (Local, "127.0.0.1.evil:8080:web:80"),
+            (Local, "127.0.0.1:0.0.0.0:8080:web:80"),
+            (Local, "127.0.0.1:/tmp/listen.sock:web:80"),
+            (Local, "127.0.0.1:8080"),
+            (Local, "127.0.0.1:8080:"),
+            (Local, "127.0.0.1:0:web:80"),
+            (Local, "127.0.0.1:65536:web:80"),
+            (Dynamic, "127.0.0.1:"),
+            (Dynamic, "127.0.0.1:1080:x"),
+            (Dynamic, "127.0.0.1:+1080"),
+            // Remote: the server's GatewayPorts can override any bind.
+            (Remote, "127.0.0.1:9000:127.0.0.1:3000"),
+            (Remote, "[::1]:9000:[::1]:3000"),
+            (Remote, "9000:127.0.0.1:3000"),
+        ] {
+            assert!(!auto_start_eligible(kind, spec), "{kind:?} {spec}");
+        }
+    }
+
+    #[test]
+    fn set_auto_start_refuses_ineligible_forwards_but_allows_opting_out() {
+        let mut session = web_session();
+        session.ssh.local_forwards.push("8080:web:80".into());
+        session
+            .ssh
+            .local_forwards
+            .push("localhost:8081:web:80".into());
+        session
+            .ssh
+            .remote_forwards
+            .push("127.0.0.1:9000:127.0.0.1:3000".into());
+        session.ssh.dynamic_forwards.push("1080".into());
+        let before = session.clone();
+        for (kind, spec) in [
+            (ForwardKind::Local, "8080:web:80"),
+            (ForwardKind::Local, "localhost:8081:web:80"),
+            (ForwardKind::Remote, "127.0.0.1:9000:127.0.0.1:3000"),
+            (ForwardKind::Dynamic, "1080"),
+        ] {
+            assert!(
+                set_auto_start(&mut session, kind, spec, true).is_err(),
+                "{spec}"
+            );
+            assert_eq!(session, before);
+            // Turning a (forged) opt-in off is always allowed.
+            set_auto_start(&mut session, kind, spec, false).unwrap();
+            assert_eq!(session, before);
+        }
     }
 
     #[test]
