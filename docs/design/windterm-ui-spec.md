@@ -129,8 +129,8 @@ the open state wins over hover. Drop-down row hover uses `selected_row`.
 of shortcut text: filled dot = current theme, hollow circle = available.
 Labels and commands are unchanged. Dark keeps its previous open/hover fill
 (`hover`, no underline); the theme marker is drawn in both themes. Menu items
-have no general disabled styling; unavailable commands still report through
-the status bar.
+have no disabled gating; unavailable commands still report through the status
+bar.
 
 Mapping of existing actions (every current button must appear here or in a
 toolbar/context menu):
@@ -255,9 +255,11 @@ directory); Filer Rename/Delete and Explorer Upload/Rename/Delete need any
 selected item. New folder is always enabled. Disabled buttons use the `dock`
 fill, `border` outline and `muted` text; enabled buttons use `list` fill,
 `control_outline` and `text`. Request handlers still report "Select a ..."
-in the status bar for keyboard/context paths. This applies to these file
-action rows only; other buttons and menu items have no comparable
-disabled-state treatment.
+in the status bar for keyboard/context paths. The disabled look itself is not
+new: `quiet` (shared by these and other text buttons, including dialogs)
+already styles any button without `on_press` as `Status::Disabled`. What #140
+adds is conditional `on_press_maybe` gating for these selection-dependent
+file actions. Menu items have no disabled gating.
 
 ### 5.3 Transfer panel
 
@@ -296,7 +298,9 @@ Current build (Light, #140): the active session tab uses the `list` fill
 `selection_indicator` (`#0066B3`) top rule, replacing the 2 px `accent`
 line, which measured about 3.0:1 and read as a hairline. This is a deliberate
 readability deviation from the 2 px WindTerm line. Dark is unchanged:
-`tab_active` fill, 2 px `accent` line. Per-session tab colours are not built.
+`tab_active` fill, 2 px `accent` line. WindTerm-style per-session tab
+colours are not built; a Window → Workspace tab label adds only a coloured
+marker glyph before the tab title.
 
 ### 6.2 Session toolbar
 
@@ -401,6 +405,9 @@ script (updated to the new labels and layout, not weakened).
 Terminal gutter (timestamps, line numbers, folding), per-split-group tab
 strips, quick bar, Find strip, drag-and-drop docking, session tab colours.
 
+Later: the Find strip was implemented in PR #144; the other items remain
+unbuilt (see 11.1).
+
 ## 11. Implementation status
 
 The table records the issue #140 / PR #141 implementation snapshot; it is not
@@ -430,7 +437,7 @@ sections above are the fuller description.
 | 7. Status bar | Implemented | Mode, `<cols>x<rows>`, `ssh`, counts, date-time. |
 | 8. Dialogs | Partly | Restyling not reviewed dialog by dialog. |
 | 9. Things that must keep working | Not yet verified | GUI acceptance on the new layout is pending; a local container harness is in `scripts/local-gui/`. |
-| 10. Not in this pass | Not yet | Gutter, per-split-group tab strips, quick bar, Find strip, drag-and-drop docking, session tab colours. |
+| 10. Not in this pass | Not yet | Gutter, per-split-group tab strips, quick bar, Find strip, drag-and-drop docking, session tab colours. [Later, PR #144: Find strip implemented. Window → Workspace tab labels add a coloured marker, not WindTerm tab colours.] |
 
 ### 11.1 #140 Light readability pass (open)
 
@@ -448,6 +455,6 @@ Still not built (target remains): Shell and Outline dock panels (Shell is a
 split pane; Outline absent); Tunnels as a dock panel (dialog/menu only);
 Enter to open a session row; double-click-to-open and three-dot/history
 menus in Filer/Explorer; session toolbar and breadcrumb (removed by PR #145);
-per-session tab colours; terminal gutter, per-split-group tab strips, quick
-bar, Find strip and drag-and-drop docking; general disabled styling for menu
-items and buttons outside the file action rows.
+WindTerm-style per-session tab colours (only a coloured label marker exists);
+terminal gutter, per-split-group tab strips, quick bar and drag-and-drop
+docking; disabled gating for menu items. The Find strip is built (PR #144).
