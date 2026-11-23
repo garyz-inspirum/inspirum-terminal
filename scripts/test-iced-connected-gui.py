@@ -2746,6 +2746,65 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
         shot("tour-08-filer.png")
     await step("filer", s08)
 
+    # Required, outside step(): the selected-row Filer frame must sit beside
+    # the unselected tour-08 frame at the same 1280x800 scale. Geometry is
+    # measured from a real tour-08-filer.png: header y598-622, the fixture row
+    # y623-644 with its name OCR box (31,628,239,639), Name column x0-290,
+    # action buttons y748-777 (Download/Rename/Edit/Delete disabled).
+    filer_row_label = "444_GUI_DOWNLOAD_FIXTURE.bin"
+    unselected = tour_dir / "tour-08-filer.png"
+    selected = tour_dir / "tour-08b-filer-selected.png"
+    try:
+        actual = window_size(window, env)
+        if actual != (1280, 800):
+            raise RuntimeError(f"selected Filer evidence requires actual 1280x800 window: {actual}")
+        if unselected not in written or not unselected.is_file():
+            raise RuntimeError("unselected tour-08-filer.png was not written by this run")
+        action_top = height - 56
+        name_column = (0, strip_y + 46, 300, action_top)
+        row = await asyncio.to_thread(
+            locate_visible_label, unselected, filer_row_label, region=name_column,
+        )
+        if row is None:
+            raise RuntimeError(f"{filer_row_label} OCR box missing in Name column {name_column}")
+        row_x, row_y = centre(row)
+        if not (name_column[1] < row_y < action_top and row[3] < action_top):
+            raise RuntimeError(f"{filer_row_label} box {row} overlaps the action row ({action_top})")
+        row_band = (0, max(0, row[1] - 6), width, min(action_top, row[3] + 6))
+        action_band = (0, action_top, width // 2, height - 22)
+        if selected.exists():
+            selected.unlink()
+        click(row_x, row_y)
+        row_changed = 0
+        deadline = time.monotonic() + 10
+        while True:
+            await asyncio.sleep(.5)
+            await asyncio.to_thread(screenshot, window, selected, env)
+            row_changed = band_changed_pixels(unselected, selected, row_band)
+            if row_changed >= 200 or time.monotonic() > deadline:
+                break
+        written.append(selected)
+        print(f"tour: wrote {selected}", flush=True)
+        if window_size(window, env) != (1280, 800):
+            raise RuntimeError("window left 1280x800 during the selected Filer shot")
+        if diff(unselected, selected, env) == 0:
+            raise RuntimeError("selected Filer frame is identical to tour-08-filer.png")
+        if row_changed < 200:
+            raise RuntimeError(
+                f"row band {row_band} unchanged after clicking {filer_row_label} at "
+                f"({row_x},{row_y}): {row_changed} px"
+            )
+        action_changed = band_changed_pixels(unselected, selected, action_band)
+        print(
+            f"tour: PASS selected Filer row {filer_row_label} box {row} clicked "
+            f"({row_x},{row_y}); row band {row_band} changed {row_changed} px; "
+            f"action strip {action_band} changed {action_changed} px",
+            flush=True,
+        )
+    except Exception as error:
+        print(f"tour: FAILED selected Filer row evidence: {error}", flush=True)
+        return 1
+
     # Bottom dock tab centres (Sender 6-88, Session 92-182, Transfer 186-283,
     # Filer ~287-361, Explorer ~365-463).
     for x, name in ((414, "tour-09-explorer.png"), (234, "tour-10-transfer.png"),
