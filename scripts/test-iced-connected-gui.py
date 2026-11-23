@@ -1412,6 +1412,9 @@ def _region_band_label(path: Path, tesseract: str, label: str, region):
             interior = _outline_interior(rows, channels, thresh, band[0], band[2], by1, by2)
             if interior is not None:
                 crops.append((band[0], interior[0], band[2], interior[1] + 1))
+                crops.extend(_outline_button_interiors(
+                    rows, channels, thresh, band[0], band[2], *interior,
+                ))
             for crop in crops:
                 words = region_upscaled_rows(
                     path, tesseract, crop, psm="7", scale=4, invert=True,
@@ -1465,6 +1468,62 @@ def _outline_interior(rows, channels, thresh, x1, x2, y1, y2):
     if (top, bottom) == (y1, y2) or bottom - top < 6:
         return None
     return top, bottom
+
+
+# Vertical border runs at most this wide separate outlined buttons; a wider
+# lit run is a filled (primary) button, whose dark label the light-text OCR
+# cannot read anyway.
+OUTLINE_BORDER_MAX_W = 3
+# At most this many per-button crops per outlined band (bounds the OCR cost
+# of an outlined row on a miss).
+OUTLINE_BUTTONS_MAX = 6
+
+
+def _outline_button_interiors(rows, channels, thresh, x1, x2, top, bottom):
+    """Crops inside each outlined button of an outlined band.
+
+    ``top..bottom`` are the rows inside the band's rules (``_outline_interior``).
+    A column lit on at least ``OUTLINE_RULE_FRACTION`` of those rows is a
+    border; glyph stems cover about half. Each span between two consecutive
+    thin border runs, at least 24 px wide, is one button: its crop starts
+    two columns inside the left border (the 1 px antialiased inner edge) and
+    ends one column before the right border, and drops the first interior
+    row. Measured on the Edit SSH connection footer (CI frames connected-
+    profile-{rename,spec}-{cancel,before-submit}.png): borders at x 624, 690,
+    699, 788, the Save changes fill 797..910. With the whole row or the
+    Save changes fill in the crop, tesseract 5.5.0 (ubuntu-latest, run
+    45177442798) reads nothing on connected-profile-spec-cancel.png; the
+    Save only interior alone reads ``Save only``. Every crop lies inside
+    ``x1..x2`` and the band's rules.
+    """
+    height = bottom - top + 1
+    if height < 6 or x2 - x1 < 24:
+        return []
+    need = height * OUTLINE_RULE_FRACTION
+    runs = []
+    for x in range(x1, x2):
+        base = x * channels
+        lit = 0
+        for y in range(top, bottom + 1):
+            row = rows[y]
+            if (row[base] + row[base + 1] + row[base + 2]) // 3 >= thresh:
+                lit += 1
+        if lit >= need:
+            if runs and runs[-1][1] == x - 1:
+                runs[-1][1] = x
+            else:
+                runs.append([x, x])
+    crops = []
+    for (_l1, l2), (r1, r2) in zip(runs, runs[1:]):
+        if l2 - _l1 + 1 > OUTLINE_BORDER_MAX_W or r2 - r1 + 1 > OUTLINE_BORDER_MAX_W:
+            continue
+        left, right = l2 + 2, r1 - 1
+        if right - left < 24:
+            continue
+        crops.append((left, top + 1, right, bottom + 1))
+        if len(crops) >= OUTLINE_BUTTONS_MAX:
+            break
+    return crops
 
 
 def locate_visible_label(
