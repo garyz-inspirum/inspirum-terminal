@@ -65,6 +65,24 @@ class EditorSelectionOracleTest(unittest.TestCase):
                 Path("x.png"), 41002, 41001, FORM, locate=loc,
             )
 
+    def test_sibling_read_timed_out_is_not_absence(self):
+        # A tesseract timeout returns no words; that must not certify the
+        # sibling port absent (seen on a loaded host: 41 s per crop against
+        # the 15 s per-call limit, sibling 40369 "missing" from a frame
+        # that renders it).
+        shown = fake_locator({"41001": (700, 200, 760, 215)})
+
+        def starved(path, label, *, region=None, budget=None):
+            if label == "41002":
+                setattr(module, "OCR_TIMEOUTS", getattr(module, "OCR_TIMEOUTS", 0) + 1)
+                raise RuntimeError("visible label not found in screenshot: 41002")
+            return shown(path, label, region=region, budget=budget)
+
+        with self.assertRaisesRegex(RuntimeError, "cannot prove sibling port 41002 absent"):
+            module.require_editor_selection(
+                Path("x.png"), 41001, 41002, FORM, locate=starved,
+            )
+
     def test_port_only_in_left_list_fails(self):
         # Port rendered outside the right-hand form (e.g. list subtitle).
         loc = fake_locator({"41002": (100, 200, 160, 215)})
@@ -130,7 +148,10 @@ class EditorSelectionOnRealFrameTest(unittest.TestCase):
             )
 
     def test_visible_sibling_in_card_fails(self):
-        with self.assertRaises(RuntimeError):
+        # Must fail BECAUSE 40369 was read in the card. An OCR timeout on a
+        # slow host raises the inconclusive error instead, which does not
+        # count here (set INSPIRUM_GUI_TIME_SCALE as the GUI container does).
+        with self.assertRaisesRegex(RuntimeError, "still shows sibling port 40369"):
             module.require_editor_selection(
                 FIXTURE, 43231, 40369, self.form, row_region=self.row,
             )

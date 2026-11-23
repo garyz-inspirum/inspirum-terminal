@@ -681,13 +681,22 @@ def _text_threshold(width, height, channels, rows) -> int:
     return max(90, min(160, (p90 + p99) // 2))
 
 
+# Tesseract calls killed by the per-call timeout. A timed-out read returns no
+# words, which a presence check retries but an ABSENCE check would take as
+# "not rendered"; require_editor_selection compares this count around its
+# sibling read so a starved OCR cannot certify the sibling port absent.
+OCR_TIMEOUTS = 0
+
+
 def _ocr_tsv(tesseract: str, image: Path, psm: str) -> str:
+    global OCR_TIMEOUTS
     try:
         result = subprocess.run(
             [tesseract, str(image), "stdout", "--psm", psm, "tsv"],
             capture_output=True, text=True, timeout=15 * TIME_SCALE,
         )
     except subprocess.TimeoutExpired:
+        OCR_TIMEOUTS += 1
         return ""
     if result.returncode != 0:
         return ""
@@ -1289,9 +1298,16 @@ def require_editor_selection(path, port: int, sibling_port: int, form_region, *,
         ) from exc
     if _bounds_inside(box, where) is None:
         raise RuntimeError(f"listen port {port} box {box} outside editor row {where}")
+    timeouts = OCR_TIMEOUTS
     try:
         stale = locate(path, str(sibling_port), region=form_region)
     except RuntimeError:
+        if OCR_TIMEOUTS != timeouts:
+            raise RuntimeError(
+                f"cannot prove sibling port {sibling_port} absent from editor "
+                f"form {form_region}: {OCR_TIMEOUTS - timeouts} OCR call(s) "
+                f"timed out (raise INSPIRUM_GUI_TIME_SCALE on a slow host)"
+            ) from None
         return box
     raise RuntimeError(
         f"editor form still shows sibling port {sibling_port} at {stale}; "
