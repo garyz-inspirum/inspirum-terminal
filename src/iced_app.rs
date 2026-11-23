@@ -2043,8 +2043,11 @@ fn session_context_entries() -> Vec<(&'static str, SessionContextAction)> {
 
 const TUNNEL_MENU_WIDTH: f32 = 300.0;
 const TUNNEL_MENU_ROW_HEIGHT: f32 = 36.0;
-const TUNNEL_MENU_HEADER_HEIGHT: f32 = 44.0;
-const TUNNEL_MENU_NOTICE_HEIGHT: f32 = 16.0;
+const TUNNEL_MENU_HEADER_HEIGHT: f32 = 46.0;
+const TUNNEL_MENU_NOTICE_HEIGHT: f32 = 18.0;
+/// Secondary (gray) popup text; `muted` on `list` is >= 4.5:1 in both themes.
+const TUNNEL_MENU_SECONDARY_TEXT: f32 = 12.0;
+const TUNNEL_MENU_EMPTY: &str = "No saved tunnels.";
 const TUNNEL_MENU_FOOTER_HEIGHT: f32 = 28.0;
 
 /// One saved forward as shown in the quick menu. Snapshot taken on open and
@@ -2146,6 +2149,28 @@ fn tunnel_menu_separator<'a>() -> Element<'a, Message> {
             ..Default::default()
         })
         .into()
+}
+
+/// Header copy for the quick popup. Nothing instructional is shown when no
+/// forwards exist (the footer is the only action), and the idle hint never
+/// implies a batch start that does not exist.
+#[derive(Debug, PartialEq, Eq)]
+struct TunnelMenuCopy {
+    summary: Option<String>,
+    hint: Option<&'static str>,
+}
+
+fn tunnel_menu_copy(running: usize, total: usize) -> TunnelMenuCopy {
+    if total == 0 {
+        return TunnelMenuCopy {
+            summary: None,
+            hint: None,
+        };
+    }
+    TunnelMenuCopy {
+        summary: Some(format!("{running} of {total} running")),
+        hint: (running == 0).then_some("Start individually"),
+    }
 }
 
 /// Scroll-list height that keeps header and footer inside the window.
@@ -8998,69 +9023,87 @@ impl App {
         let ink = theme::palette().text;
         let running = self.tunnel_quick.iter().filter(|q| q.running).count();
         let total = self.tunnel_quick.len();
+        let copy = tunnel_menu_copy(running, total);
         // Start-all is deliberately absent: launches are independent ssh
         // processes with per-profile risk acknowledgement, so a batch start
         // cannot be atomic. Only the safe aggregate (Stop all) is offered.
-        let master: Element<'_, Message> = if running > 0 {
-            button(
-                text("Stop all")
-                    .size(theme::metrics::UI_TEXT)
-                    .color(danger()),
+        let master: Option<Element<'_, Message>> = if running > 0 {
+            Some(
+                button(
+                    text("Stop all")
+                        .size(theme::metrics::UI_TEXT)
+                        .color(danger()),
+                )
+                .padding([2, 8])
+                .style(quiet)
+                .on_press(Message::TunnelStopAll)
+                .into(),
             )
-            .padding([2, 8])
-            .style(quiet)
-            .on_press(Message::TunnelStopAll)
-            .into()
         } else {
-            text("Start each forward below")
-                .size(11)
-                .color(muted())
-                .into()
+            copy.hint.map(|hint| {
+                text(hint)
+                    .size(TUNNEL_MENU_SECONDARY_TEXT)
+                    .color(muted())
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .into()
+            })
         };
-        let mut header = column![
-            row![
-                column![
-                    text("Tunnels").size(theme::metrics::UI_TEXT).color(ink),
-                    text(format!("{running} of {total} running"))
-                        .size(11)
-                        .color(muted()),
-                ]
-                .spacing(1)
-                .width(Fill),
-                master,
-            ]
-            .align_y(iced::Center)
-            .spacing(8),
+        let mut title = column![
+            text("Tunnels")
+                .size(theme::metrics::UI_TEXT)
+                .color(ink)
+                .font(iced::Font {
+                    weight: iced::font::Weight::Bold,
+                    ..Font::MONOSPACE
+                })
         ]
-        .spacing(4)
-        .padding([6, 10]);
-        if !self.tunnel_notice.is_empty() {
-            header = header.push(
-                text(self.tunnel_notice.as_str())
-                    .size(11)
+        .spacing(1)
+        .width(Fill);
+        if let Some(summary) = copy.summary {
+            title = title.push(
+                text(summary)
+                    .size(TUNNEL_MENU_SECONDARY_TEXT)
                     .color(muted())
                     .wrapping(iced::widget::text::Wrapping::None),
             );
         }
-        let mut rows = column![].width(Fill);
-        if self.tunnel_quick.is_empty() {
-            rows = rows.push(
-                container(
-                    text("No saved forwards. Add one in Tunnel Settings.")
-                        .size(11)
-                        .color(muted()),
-                )
-                .padding([8, 10]),
+        let mut header_row = row![title].align_y(iced::Center).spacing(8);
+        if let Some(master) = master {
+            header_row = header_row.push(master);
+        }
+        let mut header = column![header_row].spacing(4).padding([6, 10]);
+        if !self.tunnel_notice.is_empty() {
+            header = header.push(
+                text(self.tunnel_notice.as_str())
+                    .size(TUNNEL_MENU_SECONDARY_TEXT)
+                    .color(muted())
+                    .wrapping(iced::widget::text::Wrapping::None),
             );
         }
-        for quick in &self.tunnel_quick {
-            rows = rows.push(self.tunnel_quick_row(quick));
-        }
-        let list_height = tunnel_menu_list_height(
-            self.tunnel_quick.len().max(1),
-            self.window_size.height,
-            !self.tunnel_notice.is_empty(),
-        );
+        // Empty state is a single static line: no scrollable, so no idle
+        // scrollbar track is drawn when there is nothing to scroll.
+        let body_list: Element<'_, Message> = if self.tunnel_quick.is_empty() {
+            container(
+                text(TUNNEL_MENU_EMPTY)
+                    .size(TUNNEL_MENU_SECONDARY_TEXT)
+                    .color(muted())
+                    .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .width(Fill)
+            .padding([8, 10])
+            .into()
+        } else {
+            let mut rows = column![].width(Fill);
+            for quick in &self.tunnel_quick {
+                rows = rows.push(self.tunnel_quick_row(quick));
+            }
+            let list_height = tunnel_menu_list_height(
+                self.tunnel_quick.len(),
+                self.window_size.height,
+                !self.tunnel_notice.is_empty(),
+            );
+            scrollable(rows).height(list_height).into()
+        };
         let footer = button(
             text("Tunnel Settings...")
                 .size(theme::metrics::UI_TEXT)
@@ -9075,7 +9118,7 @@ impl App {
             column![
                 header,
                 tunnel_menu_separator(),
-                scrollable(rows).height(list_height),
+                body_list,
                 tunnel_menu_separator(),
                 footer,
             ]
@@ -11142,6 +11185,40 @@ mod tests {
         assert_ne!(a.row.profile_key, b.row.profile_key);
         assert!(a.matches(&a.row.profile_key, a.row.kind, &a.row.spec));
         assert!(!a.matches(&b.row.profile_key, b.row.kind, &b.row.spec));
+    }
+
+    #[test]
+    fn quick_menu_copy_is_truthful_for_empty_idle_and_running() {
+        assert_eq!(
+            tunnel_menu_copy(0, 0),
+            TunnelMenuCopy {
+                summary: None,
+                hint: None
+            }
+        );
+        let idle = tunnel_menu_copy(0, 2);
+        assert_eq!(idle.summary.as_deref(), Some("0 of 2 running"));
+        let hint = idle.hint.expect("idle list explains per-forward start");
+        assert!(!hint.to_lowercase().contains("start all") && !hint.contains("below"));
+        // Summary + hint share one header row at monospace advance.
+        let wide = tunnel_menu_copy(0, 120);
+        let chars = wide.summary.unwrap().chars().count() + wide.hint.unwrap().chars().count();
+        assert!(chars as f32 * TUNNEL_MENU_SECONDARY_TEXT * 0.62 + 8.0 < TUNNEL_MENU_WIDTH - 22.0);
+        assert_eq!(
+            tunnel_menu_copy(1, 2),
+            TunnelMenuCopy {
+                summary: Some("1 of 2 running".to_owned()),
+                hint: None
+            }
+        );
+        // Empty copy is one line at monospace advance (~0.6 em) inside the
+        // padded popup, so it cannot wrap to a lonely trailing word.
+        assert!(
+            TUNNEL_MENU_EMPTY.chars().count() as f32 * TUNNEL_MENU_SECONDARY_TEXT * 0.62
+                < TUNNEL_MENU_WIDTH - 22.0
+        );
+        assert!(!TUNNEL_MENU_EMPTY.contains("Settings"));
+        assert!(TUNNEL_MENU_SECONDARY_TEXT >= 12.0);
     }
 
     #[test]
