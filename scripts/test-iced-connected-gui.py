@@ -162,6 +162,31 @@ def populated_profile_ssh(ports, echo_port: int) -> dict:
     }
 
 
+def fixture_profiles(forward_ports, echo_port) -> list[dict]:
+    """Saved profiles for the connected run.
+
+    The first profile is always the plain terminal target ('CI connected
+    fixture', no forwards): the UI test opens it and then extra panes /
+    auxiliary shells, each its own SSH process, which would collide on any
+    ``-L`` listener. Populated mode therefore puts the labelled forwards on a
+    SECOND profile with the same SSH target; the Tunnels quick menu lists
+    saved forwards from every profile.
+    """
+    base = {
+        "host": "native-smoke",
+        "user": "native-smoke",
+        "port": None,
+        "strict": True,
+    }
+    out = [{"name": "CI connected fixture", **base}]
+    if POPULATED:
+        out.append({
+            "name": "CI tunnel fixture", **base,
+            "ssh": populated_profile_ssh(forward_ports, echo_port),
+        })
+    return out
+
+
 async def forward_echo(port: int, message: bytes, *, timeout: float = 15) -> None:
     """Connect to a GUI-started -L listener and require the fixture echo."""
     deadline = time.monotonic() + timeout
@@ -2460,14 +2485,7 @@ async def main() -> int:
         )
         profiles = root / "profiles.json"
         profiles.write_text(
-            json.dumps([{
-                "name": "CI connected fixture",
-                "host": "native-smoke",
-                "user": "native-smoke",
-                "port": None,
-                "strict": True,
-                **({"ssh": populated_profile_ssh(forward_ports, echo_port)} if POPULATED else {}),
-            }]), encoding="utf-8",
+            json.dumps(fixture_profiles(forward_ports, echo_port)), encoding="utf-8",
         )
 
         runtime = root / "xdg-runtime"
