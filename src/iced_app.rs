@@ -2840,6 +2840,7 @@ enum Message {
     TunnelDraftListenPort(String),
     TunnelDraftDestinationHost(String),
     TunnelDraftDestinationPort(String),
+    TunnelDraftAutoStart(bool),
     TunnelSaveEdit,
     TunnelDeleteEdit,
     Advanced,
@@ -3999,6 +4000,21 @@ struct TunnelEditState {
     profile_key: String,
     original: Option<(tunnels::ForwardKind, String)>,
     draft: tunnels::ForwardDraft,
+    /// Draft of the saved forward's opt-in auto-start flag; persisted only
+    /// by `TunnelSaveEdit`, never by toggling or cancelling.
+    auto_start: bool,
+}
+
+const TUNNEL_AUTO_START_LABEL: &str = "Automatically start when app opens";
+const TUNNEL_AUTO_START_HELP: &str = "Starts this saved tunnel the next time Inspirum opens. \
+Only local-only (127.0.0.1) tunnels can auto-start; it never starts at OS login.";
+const TUNNEL_AUTO_START_UNSAFE: &str = "Cannot auto-start a tunnel that accepts non-local \
+connections. Use a loopback bind address such as 127.0.0.1, or turn off automatic start.";
+
+/// True when this forward would listen beyond loopback, which makes it
+/// ineligible for unattended start.
+fn tunnel_auto_start_unsafe(profile: &Session, kind: tunnels::ForwardKind, spec: &str) -> bool {
+    session_requires_forward_risk_ack(&quick_forward_only(profile, kind, spec))
 }
 
 struct App {
@@ -5906,6 +5922,7 @@ impl App {
                     profile_key: key,
                     original: None,
                     draft: tunnels::ForwardDraft::default(),
+                    auto_start: false,
                 });
                 self.tunnel_notice.clear();
             }
@@ -5925,10 +5942,12 @@ impl App {
                     self.tunnel_notice = "Tunnel entry no longer exists.".into();
                     return Task::none();
                 };
+                let auto_start = tunnels::auto_start_for(profile, kind, &spec);
                 self.tunnel_edit = Some(TunnelEditState {
                     profile_key: key,
                     original: Some((kind, spec)),
                     draft: tunnels::ForwardDraft::from_row(&row),
+                    auto_start,
                 });
                 self.tunnel_notice.clear();
             }
@@ -5964,6 +5983,11 @@ impl App {
             Message::TunnelDraftDestinationPort(value) => {
                 if let Some(edit) = self.tunnel_edit.as_mut() {
                     edit.draft.destination_port = value;
+                }
+            }
+            Message::TunnelDraftAutoStart(value) => {
+                if let Some(edit) = self.tunnel_edit.as_mut() {
+                    edit.auto_start = value;
                 }
             }
             Message::TunnelSaveEdit => {
@@ -6008,20 +6032,31 @@ impl App {
                     self.tunnel_notice = "Profile no longer exists.".into();
                     return Task::none();
                 };
+                // Re-check against the spec being saved now, so a bind edited
+                // after ticking the box cannot slip through as auto-start.
+                if edit.auto_start && tunnel_auto_start_unsafe(profile, edit.draft.kind, &spec) {
+                    self.tunnel_notice = TUNNEL_AUTO_START_UNSAFE.into();
+                    return Task::none();
+                }
                 let result = if let Some((old_kind, old_spec)) = &edit.original {
                     tunnels::replace_forward(
                         profile,
                         *old_kind,
                         old_spec,
                         edit.draft.kind,
-                        spec,
+                        spec.clone(),
                         &edit.draft.label,
                     )
                 } else {
-                    tunnels::add_forward(profile, edit.draft.kind, spec, &edit.draft.label)
+                    tunnels::add_forward(profile, edit.draft.kind, spec.clone(), &edit.draft.label)
                 };
-                if let Err(error) =
-                    result.and_then(|_| save_sessions(&self.profiles_path, &profiles))
+                // Auto-start is applied to the same candidate before the one
+                // write; it takes effect at the next app launch, not now.
+                if let Err(error) = result
+                    .and_then(|_| {
+                        tunnels::set_auto_start(profile, edit.draft.kind, &spec, edit.auto_start)
+                    })
+                    .and_then(|_| save_sessions(&self.profiles_path, &profiles))
                 {
                     self.tunnel_notice = format!("Cannot save tunnel: {error:#}");
                     return Task::none();
@@ -9889,6 +9924,10 @@ impl App {
                 text("Use 127.0.0.1 to accept local connections only.")
                     .size(11)
                     .color(muted()),
+                iced::widget::checkbox(edit.auto_start)
+                    .label(TUNNEL_AUTO_START_LABEL)
+                    .on_toggle(Message::TunnelDraftAutoStart),
+                text(TUNNEL_AUTO_START_HELP).size(11).color(muted()),
                 operation.style(quiet),
                 operation_reason,
             ]
@@ -15770,5 +15809,155 @@ mod tunnel_layout_tests {
         assert_eq!(compact_detail("abc", " · port 1", 4).chars().count(), 4);
         assert_eq!(chars_fitting(0.0, 11.0), 0);
         assert!(chars_fitting(200.0, 11.0) > chars_fitting(200.0, 13.0));
+    }
+
+    const AUTO_START_WEB: &str = "127.0.0.1:8080:web:80";
+
+    fn auto_start_app() -> (tempfile::TempDir, PathBuf, App, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+        let mut profile = Session {
+            name: "auto start".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        profile.ssh.local_forwards.push(AUTO_START_WEB.into());
+        save_sessions(&path, &[profile]).unwrap();
+        let app = App::boot(path.clone(), None);
+        let key = session_profile_key(&app.profiles[0]);
+        (dir, path, app, key)
+    }
+
+    fn edit_auto_start_web(app: &mut App, key: &str) {
+        let _ = app.update(Message::TunnelEdit(
+            key.to_owned(),
+            tunnels::ForwardKind::Local,
+            AUTO_START_WEB.into(),
+        ));
+    }
+
+    #[test]
+    fn existing_forward_auto_start_defaults_off_and_saves_in_one_reloadable_write() {
+        let (_dir, path, mut app, key) = auto_start_app();
+        edit_auto_start_web(&mut app, &key);
+        assert!(!app.tunnel_edit.as_ref().unwrap().auto_start);
+
+        let _ = app.update(Message::TunnelDraftAutoStart(true));
+        assert!(!tunnels::auto_start_for(
+            &load_sessions(&path).unwrap()[0],
+            tunnels::ForwardKind::Local,
+            AUTO_START_WEB
+        ));
+        let _ = app.update(Message::TunnelSaveEdit);
+        assert_eq!(app.tunnel_notice, "Tunnel saved.");
+        assert!(app.tunnel_edit.is_none());
+        // Saving opts in for the next launch only; nothing is started now.
+        assert!(!app.tunnels.status(&key).is_running());
+        assert!(
+            !app.tunnels
+                .forward_status(&key, tunnels::ForwardKind::Local, AUTO_START_WEB)
+                .is_running()
+        );
+
+        let loaded = load_sessions(&path).unwrap();
+        assert_eq!(
+            tunnels::auto_start_forwards(&loaded[0]),
+            vec![(tunnels::ForwardKind::Local, AUTO_START_WEB.to_owned())]
+        );
+        let mut reopened = App::boot(path.clone(), None);
+        edit_auto_start_web(&mut reopened, &key);
+        assert!(reopened.tunnel_edit.as_ref().unwrap().auto_start);
+
+        let _ = reopened.update(Message::TunnelDraftAutoStart(false));
+        let _ = reopened.update(Message::TunnelSaveEdit);
+        assert_eq!(reopened.tunnel_notice, "Tunnel saved.");
+        assert!(tunnels::auto_start_forwards(&load_sessions(&path).unwrap()[0]).is_empty());
+    }
+
+    #[test]
+    fn new_forward_auto_start_defaults_off_and_persists_when_enabled() {
+        let (_dir, path, mut app, key) = auto_start_app();
+        let _ = app.update(Message::TunnelAdd(key.clone()));
+        assert!(!app.tunnel_edit.as_ref().unwrap().auto_start);
+        let _ = app.update(Message::TunnelDraftListenPort("9090".into()));
+        let _ = app.update(Message::TunnelDraftDestinationHost("api".into()));
+        let _ = app.update(Message::TunnelDraftDestinationPort("443".into()));
+        let _ = app.update(Message::TunnelDraftAutoStart(true));
+        let _ = app.update(Message::TunnelSaveEdit);
+        assert_eq!(app.tunnel_notice, "Tunnel saved.");
+
+        let loaded = load_sessions(&path).unwrap();
+        assert_eq!(
+            tunnels::auto_start_forwards(&loaded[0]),
+            vec![(
+                tunnels::ForwardKind::Local,
+                "127.0.0.1:9090:api:443".to_owned()
+            )]
+        );
+        assert!(!tunnels::auto_start_for(
+            &loaded[0],
+            tunnels::ForwardKind::Local,
+            AUTO_START_WEB
+        ));
+    }
+
+    #[test]
+    fn cancelling_an_auto_start_toggle_persists_nothing() {
+        let (_dir, path, mut app, key) = auto_start_app();
+        let before = std::fs::read(&path).unwrap();
+        edit_auto_start_web(&mut app, &key);
+        let _ = app.update(Message::TunnelDraftAutoStart(true));
+        let _ = app.update(Message::CloseDialog);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!tunnels::auto_start_for(
+            &app.profiles[0],
+            tunnels::ForwardKind::Local,
+            AUTO_START_WEB
+        ));
+        // Reopening the row reloads saved state, discarding the draft.
+        edit_auto_start_web(&mut app, &key);
+        assert!(!app.tunnel_edit.as_ref().unwrap().auto_start);
+    }
+
+    #[test]
+    fn auto_start_rejects_non_loopback_bind_without_mutation() {
+        let (_dir, path, mut app, key) = auto_start_app();
+        let before_file = std::fs::read(&path).unwrap();
+        let before_profiles = app.profiles.clone();
+
+        // Ticked while safe, then the bind is widened: the save re-checks.
+        edit_auto_start_web(&mut app, &key);
+        let _ = app.update(Message::TunnelDraftAutoStart(true));
+        let _ = app.update(Message::TunnelDraftBind("0.0.0.0".into()));
+        let _ = app.update(Message::TunnelSaveEdit);
+        assert_eq!(app.tunnel_notice, TUNNEL_AUTO_START_UNSAFE);
+        assert!(app.tunnel_edit.is_some());
+        assert_eq!(std::fs::read(&path).unwrap(), before_file);
+        assert_eq!(app.profiles, before_profiles);
+
+        // A new forward on a non-loopback bind is rejected the same way.
+        let _ = app.update(Message::TunnelAdd(key.clone()));
+        let _ = app.update(Message::TunnelDraftBind("0.0.0.0".into()));
+        let _ = app.update(Message::TunnelDraftListenPort("9091".into()));
+        let _ = app.update(Message::TunnelDraftDestinationHost("api".into()));
+        let _ = app.update(Message::TunnelDraftDestinationPort("443".into()));
+        let _ = app.update(Message::TunnelDraftAutoStart(true));
+        let _ = app.update(Message::TunnelSaveEdit);
+        assert_eq!(app.tunnel_notice, TUNNEL_AUTO_START_UNSAFE);
+        assert_eq!(std::fs::read(&path).unwrap(), before_file);
+        assert_eq!(app.profiles, before_profiles);
+
+        // The gate is specific to auto-start: the same bind saves when off.
+        let _ = app.update(Message::TunnelDraftAutoStart(false));
+        let _ = app.update(Message::TunnelSaveEdit);
+        assert_eq!(app.tunnel_notice, "Tunnel saved.");
+        let loaded = load_sessions(&path).unwrap();
+        assert!(
+            loaded[0]
+                .ssh
+                .local_forwards
+                .contains(&"0.0.0.0:9091:api:443".to_owned())
+        );
+        assert!(tunnels::auto_start_forwards(&loaded[0]).is_empty());
     }
 }
