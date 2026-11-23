@@ -1408,17 +1408,63 @@ def _region_band_label(path: Path, tesseract: str, label: str, region):
             )
             if band[2] - band[0] < 24 or band[3] - band[1] < 8:
                 continue
-            words = region_upscaled_rows(
-                path, tesseract, band, psm="7", scale=4, invert=True,
-            )
-            words = [word for word in words if _word_inside(word, region)]
-            bounds = match_visible_label(words, label)
-            if bounds is None:
-                bounds = match_visible_segment([words], label)
-            bounds = _bounds_inside(bounds, region)
-            if bounds is not None:
-                return bounds
+            crops = [band]
+            interior = _outline_interior(rows, channels, thresh, band[0], band[2], by1, by2)
+            if interior is not None:
+                crops.append((band[0], interior[0], band[2], interior[1] + 1))
+            for crop in crops:
+                words = region_upscaled_rows(
+                    path, tesseract, crop, psm="7", scale=4, invert=True,
+                )
+                words = [word for word in words if _word_inside(word, region)]
+                bounds = match_visible_label(words, label)
+                if bounds is None:
+                    bounds = match_visible_segment([words], label)
+                bounds = _bounds_inside(bounds, region)
+                if bounds is not None:
+                    return bounds
     return None
+
+
+# A band row counts as an outline rule when this share of its span is lit.
+# Measured on the Edit SSH connection button row (CI frames connected-
+# profile-rename-{before-submit,cancel}.png, span x 624-911): border rows
+# y=724/746 are 92-93% lit; every glyph row is 39-45%, most of it the
+# primary "Save changes" fill.
+OUTLINE_RULE_FRACTION = 0.6
+
+
+def _outline_interior(rows, channels, thresh, x1, x2, y1, y2):
+    """Rows ``(top, bottom)`` of band ``y1..y2`` inside its outline rules.
+
+    A row of outlined buttons is one light band whose first and last rows
+    are the buttons' top and bottom borders. Cropped with them, tesseract
+    reads the box as one glyph and returns nothing (the Edit SSH connection
+    footer once the outlines are drawn brighter after a refused Submit).
+    Returns ``None`` when neither edge is a rule, so plain text bands cost
+    no extra OCR.
+    """
+    span = x2 - x1
+    if span <= 0:
+        return None
+
+    def rule(y):
+        row = rows[y]
+        lit = 0
+        for x in range(x1, x2):
+            base = x * channels
+            if (row[base] + row[base + 1] + row[base + 2]) // 3 >= thresh:
+                lit += 1
+        return lit >= span * OUTLINE_RULE_FRACTION
+
+    top, bottom = y1, y2
+    while top < bottom and rule(top):
+        top += 1
+    while bottom > top and rule(bottom):
+        bottom -= 1
+    if (top, bottom) == (y1, y2) or bottom - top < 6:
+        return None
+    return top, bottom
 
 
 def locate_visible_label(
