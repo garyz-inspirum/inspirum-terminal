@@ -215,6 +215,12 @@ impl App {
                     let key = session_profile_key(&session);
                     match save_session_edit(&self.profiles, Some(&key), session.clone()) {
                         Ok(profiles) => {
+                            // The tool target may be a stale copy of the saved
+                            // profile; never let it drop a live forward.
+                            if let Some(reason) = self.profile_store_tunnel_conflict(&profiles) {
+                                self.status = reason.into();
+                                return Task::none();
+                            }
                             let path = self.profiles_path.clone();
                             self.tools.target = Some(session);
                             return self.tool_job(move || {

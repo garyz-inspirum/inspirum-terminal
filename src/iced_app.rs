@@ -2371,6 +2371,65 @@ fn quick_forward_blocked_reason(quick: &QuickForward) -> String {
     }
 }
 
+/// A running managed tunnel process (aggregate or per-forward) and the saved
+/// profile it is filed under, captured before a profile-store write.
+struct LiveTunnelOwner {
+    key: String,
+    profile: Session,
+    aggregate: bool,
+    live: Vec<tunnels::ForwardRow>,
+}
+
+impl LiveTunnelOwner {
+    /// `next` is the candidate profile saved under the same key.
+    fn conflict(&self, next: &Session) -> Option<&'static str> {
+        let original = &self.profile;
+        let same_target = original.host.trim().eq_ignore_ascii_case(next.host.trim())
+            && original.user.trim() == next.user.trim()
+            && original.port == next.port;
+        if !same_target {
+            return Some("Stop this profile's running tunnels before changing its SSH target.");
+        }
+        let same_forwards = original.ssh.local_forwards == next.ssh.local_forwards
+            && original.ssh.remote_forwards == next.ssh.remote_forwards
+            && original.ssh.dynamic_forwards == next.ssh.dynamic_forwards;
+        if self.aggregate && !same_forwards {
+            return Some("Stop this profile's tunnel process before changing its forwards.");
+        }
+        let next_rows = tunnels::rows_for(next);
+        if self.live.iter().any(|row| {
+            !next_rows
+                .iter()
+                .any(|kept| kept.kind == row.kind && kept.spec == row.spec)
+        }) {
+            return Some("Stop a running forward before removing or changing it.");
+        }
+        None
+    }
+}
+
+/// Snapshot of every live tunnel owner. Live processes are filed under the
+/// profile key, spec and SSH target, so a candidate library that drops the
+/// key (delete, rename, folder move, replace) or changes a live target/spec
+/// is refused; idle siblings and display-only changes stay writable.
+struct LiveTunnelOwners(Vec<LiveTunnelOwner>);
+
+impl LiveTunnelOwners {
+    fn conflict(&self, candidate: &[Session]) -> Option<&'static str> {
+        self.0.iter().find_map(|owner| {
+            match candidate
+                .iter()
+                .find(|profile| session_profile_key(profile) == owner.key)
+            {
+                Some(next) => owner.conflict(next),
+                None => Some(
+                    "Stop this profile's running tunnels before renaming, moving, deleting or replacing it.",
+                ),
+            }
+        })
+    }
+}
+
 /// Copy of `session` carrying only the one forward, so risk assessment
 /// matches what `Manager::start_forward` checks.
 fn quick_forward_only(session: &Session, kind: tunnels::ForwardKind, spec: &str) -> Session {
@@ -5488,21 +5547,27 @@ impl App {
                     &self.profiles,
                     SessionImportMode::Merge,
                 ) {
-                    Ok(imported) => match save_sessions(&self.profiles_path, &imported) {
-                        Ok(()) => {
-                            let added = imported.len().saturating_sub(self.profiles.len());
-                            self.profiles = imported;
-                            self.refresh_profile_matches();
-                            self.dialog = None;
-                            self.import_path.clear();
-                            self.status =
-                                format!("Imported {added} validated non-secret SSH profile(s).");
-                            return self.restore_find_focus();
+                    Ok(imported) => {
+                        match self.profile_store_tunnel_conflict(&imported).map_or_else(
+                            || save_sessions(&self.profiles_path, &imported),
+                            |reason| Err(anyhow::anyhow!(reason)),
+                        ) {
+                            Ok(()) => {
+                                let added = imported.len().saturating_sub(self.profiles.len());
+                                self.profiles = imported;
+                                self.refresh_profile_matches();
+                                self.dialog = None;
+                                self.import_path.clear();
+                                self.status = format!(
+                                    "Imported {added} validated non-secret SSH profile(s)."
+                                );
+                                return self.restore_find_focus();
+                            }
+                            Err(error) => {
+                                self.status = format!("Cannot save imported profiles: {error:#}");
+                            }
                         }
-                        Err(error) => {
-                            self.status = format!("Cannot save imported profiles: {error:#}");
-                        }
-                    },
+                    }
                     Err(error) => {
                         self.status = format!("Profile import rejected: {error:#}");
                     }
@@ -7222,17 +7287,15 @@ impl App {
                 let selected_profile = self.editing_profile.clone();
                 let was_editing = selected_profile.is_some();
                 match self.form.session().and_then(|session| {
-                    // Check live tunnels before touching the profile store.
-                    if let Some(original) = selected_profile.as_deref()
-                        && let Some(reason) = self.profile_edit_tunnel_conflict(original, &session)
-                    {
-                        anyhow::bail!(reason);
-                    }
                     let profiles = save_session_edit(
                         &self.profiles,
                         selected_profile.as_deref(),
                         session.clone(),
                     )?;
+                    // Check live tunnels before touching the profile store.
+                    if let Some(reason) = self.profile_store_tunnel_conflict(&profiles) {
+                        anyhow::bail!(reason);
+                    }
                     save_sessions(&self.profiles_path, &profiles)?;
                     Ok((profiles, session))
                 }) {
@@ -9264,55 +9327,40 @@ impl App {
         section.into()
     }
 
-    /// Live tunnel processes are filed under the original profile key, spec
-    /// and SSH target. A profile edit that changes any of those for a running
-    /// listener would orphan or misattribute it, so it is refused; idle
-    /// siblings and display-only changes stay editable.
-    fn profile_edit_tunnel_conflict(
-        &mut self,
-        original_key: &str,
-        next: &Session,
-    ) -> Option<&'static str> {
-        let original = self
-            .profiles
-            .iter()
-            .find(|profile| session_profile_key(profile) == original_key)?
-            .clone();
-        let aggregate = self.tunnels.status(original_key).is_running();
-        let live: Vec<_> = tunnels::rows_for(&original)
-            .into_iter()
-            .filter(|row| {
-                self.tunnels
-                    .forward_status(original_key, row.kind, &row.spec)
-                    .is_running()
-            })
-            .collect();
-        if live.is_empty() && !aggregate {
-            return None;
-        }
-        let same_target = original.host.trim().eq_ignore_ascii_case(next.host.trim())
-            && original.user.trim() == next.user.trim()
-            && original.port == next.port;
-        if session_profile_key(next) != original_key || !same_target {
-            return Some(
-                "Stop this profile's running tunnels before renaming it or changing its SSH target.",
-            );
-        }
-        let same_forwards = original.ssh.local_forwards == next.ssh.local_forwards
-            && original.ssh.remote_forwards == next.ssh.remote_forwards
-            && original.ssh.dynamic_forwards == next.ssh.dynamic_forwards;
-        if aggregate && !same_forwards {
-            return Some("Stop this profile's tunnel process before changing its forwards.");
-        }
-        let next_rows = tunnels::rows_for(next);
-        if live.iter().any(|row| {
-            !next_rows
-                .iter()
-                .any(|kept| kept.kind == row.kind && kept.spec == row.spec)
-        }) {
-            return Some("Stop a running forward before removing or changing it.");
-        }
-        None
+    /// Running managed tunnels and the saved profile each is filed under.
+    /// Taken synchronously before any profile-store write (including async
+    /// tool jobs) so the candidate library is judged against live owners.
+    fn live_tunnel_owners(&mut self) -> LiveTunnelOwners {
+        let profiles = self.profiles.clone();
+        LiveTunnelOwners(
+            profiles
+                .into_iter()
+                .filter_map(|profile| {
+                    let key = session_profile_key(&profile);
+                    let aggregate = self.tunnels.status(&key).is_running();
+                    let live: Vec<_> = tunnels::rows_for(&profile)
+                        .into_iter()
+                        .filter(|row| {
+                            self.tunnels
+                                .forward_status(&key, row.kind, &row.spec)
+                                .is_running()
+                        })
+                        .collect();
+                    (aggregate || !live.is_empty()).then_some(LiveTunnelOwner {
+                        key,
+                        profile,
+                        aggregate,
+                        live,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// Why writing `candidate` as the whole profile library would orphan or
+    /// misattribute a running tunnel, if it would.
+    fn profile_store_tunnel_conflict(&mut self, candidate: &[Session]) -> Option<&'static str> {
+        self.live_tunnel_owners().conflict(candidate)
     }
 
     fn refresh_tunnel_status(&mut self) {

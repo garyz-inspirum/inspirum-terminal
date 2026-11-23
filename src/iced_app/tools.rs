@@ -543,6 +543,11 @@ impl App {
                         .map(|profiles| (profiles, s))
                 }) {
                     Ok((profiles, session)) => {
+                        // Check live tunnels before the async store write.
+                        if let Some(reason) = self.profile_store_tunnel_conflict(&profiles) {
+                            self.form.error = Some(reason.into());
+                            return Task::none();
+                        }
                         let path = self.profiles_path.clone();
                         return self.tool_job(move || {
                             save_sessions(&path, &profiles)
@@ -563,6 +568,12 @@ impl App {
                         Confirm::DeleteProfile(key) => {
                             match crate::delete_session(&self.profiles, &key) {
                                 Ok(profiles) => {
+                                    if let Some(reason) =
+                                        self.profile_store_tunnel_conflict(&profiles)
+                                    {
+                                        self.status = reason.into();
+                                        return Task::none();
+                                    }
                                     let path = self.profiles_path.clone();
                                     return self.tool_job(move || {
                                         save_sessions(&path, &profiles)
@@ -575,10 +586,16 @@ impl App {
                         }
                         Confirm::ReplaceProfiles(source) => {
                             let path = self.profiles_path.clone();
+                            // Snapshot live owners now; the import file is
+                            // only read inside the job, before its write.
+                            let owners = self.live_tunnel_owners();
                             return self.tool_job(move || {
                                 let profiles =
                                     import_sessions(&source, &[], SessionImportMode::Replace)
                                         .map_err(|e| format!("{e:#}"))?;
+                                if let Some(reason) = owners.conflict(&profiles) {
+                                    return Err(reason.into());
+                                }
                                 save_sessions(&path, &profiles).map_err(|e| format!("{e:#}"))?;
                                 Ok(Data::Profiles(profiles))
                             });

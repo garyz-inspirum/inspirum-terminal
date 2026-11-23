@@ -254,3 +254,162 @@ fn profile_editor_refuses_forward_edits_while_the_whole_profile_runs() {
     assert_eq!(app.tunnels.status(&key), whole);
     app.tunnels.stop_all();
 }
+
+/// Add an idle sibling profile after the running `srv` profile.
+fn add_idle_profile(app: &mut App) -> String {
+    let idle = Session {
+        name: "zz-idle".into(),
+        host: "idle.invalid".into(),
+        ..Session::default()
+    };
+    let key = session_profile_key(&idle);
+    let mut profiles = app.profiles.clone();
+    profiles.push(idle);
+    save_sessions(&app.profiles_path, &profiles).unwrap();
+    app.profiles = profiles;
+    app.refresh_tunnel_status();
+    key
+}
+
+/// Open the real profile editor on `srv`, apply `edit`, then press
+/// "Save only" (the async tools writer, not `Message::Submit`).
+fn save_draft_profile_edit(app: &mut App, edit: impl FnOnce(&mut ConnectionForm)) {
+    let _ = app.update(Message::EditProfile(0));
+    assert!(app.editing_profile.is_some(), "the profile editor is open");
+    edit(&mut app.form);
+    let _ = app.update(Message::Tool(tools::Action::SaveDraft));
+}
+
+fn assert_save_draft_refused(app: &mut App, key: &str, alpha: &tunnels::Status) {
+    let error = app.form.error.clone().unwrap_or_default();
+    assert!(error.contains("Stop"), "{error:?}");
+    assert!(!app.tools.busy, "no async profile write was started");
+    assert!(matches!(app.dialog, Some(Dialog::Connection)));
+    assert_eq!(load_sessions(&app.profiles_path).unwrap()[0].name, "srv");
+    assert_eq!(
+        load_sessions(&app.profiles_path).unwrap()[0].host,
+        "srv.invalid"
+    );
+    assert_eq!(session_profile_key(&app.profiles[0]), key);
+    app.refresh_tunnel_status();
+    assert_alpha_untouched(app, key, alpha);
+    let _ = app.update(Message::CloseDialog);
+}
+
+#[test]
+fn save_only_refuses_drafts_that_would_orphan_a_running_forward() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, key, alpha) = app_with_alpha_running(dir.path());
+
+    save_draft_profile_edit(&mut app, |form| form.name = "renamed".into());
+    assert_save_draft_refused(&mut app, &key, &alpha);
+    save_draft_profile_edit(&mut app, |form| form.folder = "prod".into());
+    assert_save_draft_refused(&mut app, &key, &alpha);
+    save_draft_profile_edit(&mut app, |form| form.local_forwards = BRAVO.into());
+    assert_save_draft_refused(&mut app, &key, &alpha);
+    save_draft_profile_edit(&mut app, |form| form.host = "other.invalid".into());
+    assert_save_draft_refused(&mut app, &key, &alpha);
+
+    // An idle sibling edit beside the live forward still reaches the store
+    // writer (the job is queued, not refused).
+    save_draft_profile_edit(&mut app, |form| {
+        form.local_forwards = format!("{ALPHA}; 127.0.0.1:18084:web:81");
+    });
+    assert_eq!(app.form.error, None);
+    assert!(app.tools.busy, "the idle sibling save was queued");
+    assert_eq!(app.tunnels.forward_status(&key, LOCAL, ALPHA), alpha);
+    app.tunnels.stop_all();
+}
+
+#[test]
+fn deleting_a_profile_with_a_running_forward_is_refused_but_idle_profiles_delete() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, key, alpha) = app_with_alpha_running(dir.path());
+    let idle = add_idle_profile(&mut app);
+
+    let _ = app.update(Message::Tool(tools::Action::Delete(key.clone())));
+    let _ = app.update(Message::Tool(tools::Action::Confirm));
+    assert!(app.status.contains("Stop"), "{}", app.status);
+    assert!(!app.tools.busy, "no async profile write was started");
+    assert_eq!(load_sessions(&app.profiles_path).unwrap().len(), 2);
+    assert_eq!(app.profiles.len(), 2);
+    assert_alpha_untouched(&mut app, &key, &alpha);
+
+    // The idle sibling may still be deleted while Alpha runs.
+    let _ = app.update(Message::Tool(tools::Action::Delete(idle)));
+    let _ = app.update(Message::Tool(tools::Action::Confirm));
+    assert!(!app.status.contains("Stop"), "{}", app.status);
+    assert!(app.tools.busy, "the idle delete was queued");
+    assert_eq!(app.tunnels.forward_status(&key, LOCAL, ALPHA), alpha);
+    app.tunnels.stop_all();
+}
+
+#[test]
+fn deleting_a_profile_with_nothing_running_is_still_queued() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, key, _) = app_with_alpha_running(dir.path());
+    app.tunnels.stop_forward(&key, LOCAL, ALPHA).unwrap();
+    let _ = app.update(Message::Tool(tools::Action::Delete(key)));
+    let _ = app.update(Message::Tool(tools::Action::Confirm));
+    assert!(!app.status.contains("Stop"), "{}", app.status);
+    assert!(app.tools.busy, "the delete was queued");
+}
+
+#[test]
+fn deleting_a_profile_whose_aggregate_tunnel_runs_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ssh_config");
+    let (mut app, key, _) = app_with_alpha_running(dir.path());
+    app.tunnels.stop_forward(&key, LOCAL, ALPHA).unwrap();
+    let session = app.profiles[0].clone();
+    let whole = app.tunnels.start(&session, Some(&config)).unwrap();
+    assert!(whole.is_running(), "{whole:?}");
+    let _ = app.update(Message::Tool(tools::Action::Delete(key.clone())));
+    let _ = app.update(Message::Tool(tools::Action::Confirm));
+    assert!(app.status.contains("Stop"), "{}", app.status);
+    assert!(!app.tools.busy);
+    assert_eq!(load_sessions(&app.profiles_path).unwrap().len(), 1);
+    assert_eq!(app.tunnels.status(&key), whole);
+    app.tunnels.stop_all();
+}
+
+#[test]
+fn replacement_snapshot_refuses_libraries_that_drop_or_change_a_live_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, key, alpha) = app_with_alpha_running(dir.path());
+    let idle_key = add_idle_profile(&mut app);
+    let owners = app.live_tunnel_owners();
+    let srv = app.profiles[0].clone();
+    let idle = app.profiles[1].clone();
+
+    // Unchanged live owner with idle siblings dropped or added: allowed.
+    assert_eq!(owners.conflict(&app.profiles), None);
+    assert_eq!(owners.conflict(std::slice::from_ref(&srv)), None);
+    // Library without the live owner, or with it pointed elsewhere: refused.
+    assert!(owners.conflict(std::slice::from_ref(&idle)).is_some());
+    let mut moved = srv.clone();
+    moved.host = "other.invalid".into();
+    assert!(owners.conflict(&[moved, idle]).is_some());
+    let mut dropped = srv;
+    dropped.ssh.local_forwards = vec![BRAVO.into()];
+    assert!(owners.conflict(&[dropped]).is_some());
+    assert_ne!(idle_key, key);
+    assert_eq!(app.tunnels.forward_status(&key, LOCAL, ALPHA), alpha);
+    app.tunnels.stop_all();
+}
+
+#[test]
+fn ssh_policy_save_from_a_stale_target_cannot_drop_a_running_forward() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, key, alpha) = app_with_alpha_running(dir.path());
+    // The tools target is a copy taken earlier; here it predates Alpha.
+    let mut stale = app.profiles[0].clone();
+    stale.ssh.local_forwards = vec![BRAVO.into()];
+    app.tools.target = Some(stale);
+    app.tools.control_persist = "60".into();
+    let _ = app.update(Message::Tool(tools::Action::SaveSshPolicy));
+    assert!(app.status.contains("Stop"), "{}", app.status);
+    assert!(!app.tools.busy);
+    assert_alpha_untouched(&mut app, &key, &alpha);
+    app.tunnels.stop_all();
+}
