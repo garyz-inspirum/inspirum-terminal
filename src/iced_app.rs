@@ -2381,7 +2381,6 @@ enum Message {
     TunnelDraftDestinationPort(String),
     TunnelSaveEdit,
     TunnelDeleteEdit,
-    TunnelCancelEdit,
     Advanced,
     Submit,
     Scale(f64),
@@ -5404,10 +5403,6 @@ impl App {
                 if let Some(edit) = self.tunnel_edit.as_mut() {
                     edit.draft.destination_port = value;
                 }
-            }
-            Message::TunnelCancelEdit => {
-                self.tunnel_edit = None;
-                self.tunnel_notice.clear();
             }
             Message::TunnelSaveEdit => {
                 let Some(edit) = self.tunnel_edit.clone() else {
@@ -9001,15 +8996,16 @@ impl App {
                 operation.style(quiet),
             ]
             .spacing(10);
-            if let Some(profile) = owner {
-                if session_requires_forward_risk_ack(profile) && !status.is_running() {
-                    let key = edit.profile_key.clone();
-                    controls = controls.push(
-                        iced::widget::checkbox(self.tunnels.acknowledged(&key))
-                            .label("Allow non-loopback bind")
-                            .on_toggle(move |value| Message::TunnelAcknowledge(key.clone(), value)),
-                    );
-                }
+            if let Some(profile) = owner
+                && session_requires_forward_risk_ack(profile)
+                && !status.is_running()
+            {
+                let key = edit.profile_key.clone();
+                controls = controls.push(
+                    iced::widget::checkbox(self.tunnels.acknowledged(&key))
+                        .label("Allow non-loopback bind")
+                        .on_toggle(move |value| Message::TunnelAcknowledge(key.clone(), value)),
+                );
             }
             container(controls)
                 .padding(12)
