@@ -335,7 +335,11 @@ fn deleting_a_profile_with_a_running_forward_is_refused_but_idle_profiles_delete
     assert_eq!(app.profiles.len(), 2);
     assert_alpha_untouched(&mut app, &key, &alpha);
 
-    // The idle sibling may still be deleted while Alpha runs.
+    // The idle sibling may still be deleted while Alpha runs. The refusal
+    // above stays in the status line until something replaces it (a queued
+    // async delete only rewrites it on completion), so clear it first: any
+    // "Stop" seen afterwards is a NEW guard refusal of the idle delete.
+    app.status.clear();
     let _ = app.update(Message::Tool(tools::Action::Delete(idle)));
     let _ = app.update(Message::Tool(tools::Action::Confirm));
     assert!(!app.status.contains("Stop"), "{}", app.status);
