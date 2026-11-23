@@ -7222,6 +7222,12 @@ impl App {
                 let selected_profile = self.editing_profile.clone();
                 let was_editing = selected_profile.is_some();
                 match self.form.session().and_then(|session| {
+                    // Check live tunnels before touching the profile store.
+                    if let Some(original) = selected_profile.as_deref()
+                        && let Some(reason) = self.profile_edit_tunnel_conflict(original, &session)
+                    {
+                        anyhow::bail!(reason);
+                    }
                     let profiles = save_session_edit(
                         &self.profiles,
                         selected_profile.as_deref(),
@@ -9256,6 +9262,57 @@ impl App {
             container(column![]).height(0).padding(0)
         };
         section.into()
+    }
+
+    /// Live tunnel processes are filed under the original profile key, spec
+    /// and SSH target. A profile edit that changes any of those for a running
+    /// listener would orphan or misattribute it, so it is refused; idle
+    /// siblings and display-only changes stay editable.
+    fn profile_edit_tunnel_conflict(
+        &mut self,
+        original_key: &str,
+        next: &Session,
+    ) -> Option<&'static str> {
+        let original = self
+            .profiles
+            .iter()
+            .find(|profile| session_profile_key(profile) == original_key)?
+            .clone();
+        let aggregate = self.tunnels.status(original_key).is_running();
+        let live: Vec<_> = tunnels::rows_for(&original)
+            .into_iter()
+            .filter(|row| {
+                self.tunnels
+                    .forward_status(original_key, row.kind, &row.spec)
+                    .is_running()
+            })
+            .collect();
+        if live.is_empty() && !aggregate {
+            return None;
+        }
+        let same_target = original.host.trim().eq_ignore_ascii_case(next.host.trim())
+            && original.user.trim() == next.user.trim()
+            && original.port == next.port;
+        if session_profile_key(next) != original_key || !same_target {
+            return Some(
+                "Stop this profile's running tunnels before renaming it or changing its SSH target.",
+            );
+        }
+        let same_forwards = original.ssh.local_forwards == next.ssh.local_forwards
+            && original.ssh.remote_forwards == next.ssh.remote_forwards
+            && original.ssh.dynamic_forwards == next.ssh.dynamic_forwards;
+        if aggregate && !same_forwards {
+            return Some("Stop this profile's tunnel process before changing its forwards.");
+        }
+        let next_rows = tunnels::rows_for(next);
+        if live.iter().any(|row| {
+            !next_rows
+                .iter()
+                .any(|kept| kept.kind == row.kind && kept.spec == row.spec)
+        }) {
+            return Some("Stop a running forward before removing or changing it.");
+        }
+        None
     }
 
     fn refresh_tunnel_status(&mut self) {

@@ -124,3 +124,133 @@ fn deleting_a_running_forward_is_refused_and_keeps_its_listener() {
     assert_eq!(app.tunnel_notice, "Tunnel deleted.");
     assert!(saved_forwards(&app).is_empty());
 }
+
+/// Open the real profile editor on the saved profile, apply `edit` to the
+/// form, then press Save.
+fn submit_profile_edit(app: &mut App, edit: impl FnOnce(&mut ConnectionForm)) {
+    let _ = app.update(Message::EditProfile(0));
+    assert!(app.editing_profile.is_some(), "the profile editor is open");
+    edit(&mut app.form);
+    let _ = app.update(Message::Submit);
+}
+
+fn assert_profile_edit_refused(app: &mut App, key: &str, alpha: &tunnels::Status) {
+    let error = app.form.error.clone().unwrap_or_default();
+    assert!(error.contains("Stop"), "{error:?}");
+    assert!(
+        matches!(app.dialog, Some(Dialog::Connection)),
+        "draft stays open"
+    );
+    assert_eq!(app.editing_profile.as_deref(), Some(key));
+    assert_eq!(load_sessions(&app.profiles_path).unwrap()[0].name, "srv");
+    assert_eq!(
+        load_sessions(&app.profiles_path).unwrap()[0].host,
+        "srv.invalid"
+    );
+    assert_eq!(session_profile_key(&app.profiles[0]), key);
+    app.refresh_tunnel_status();
+    assert_alpha_untouched(app, key, alpha);
+    let _ = app.update(Message::CloseDialog);
+}
+
+#[test]
+fn profile_editor_refuses_saves_that_would_orphan_a_running_forward() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, key, alpha) = app_with_alpha_running(dir.path());
+
+    // Renaming changes the profile key the live listener is filed under.
+    submit_profile_edit(&mut app, |form| form.name = "renamed".into());
+    assert_profile_edit_refused(&mut app, &key, &alpha);
+    // Moving folders changes the key just the same.
+    submit_profile_edit(&mut app, |form| form.folder = "prod".into());
+    assert_profile_edit_refused(&mut app, &key, &alpha);
+    // Removing the active spec leaves its listener without a row.
+    submit_profile_edit(&mut app, |form| form.local_forwards = BRAVO.into());
+    assert_profile_edit_refused(&mut app, &key, &alpha);
+    // Changing the active spec misattributes the old listener.
+    submit_profile_edit(&mut app, |form| {
+        form.local_forwards = format!("127.0.0.1:18083:web:80; {BRAVO}");
+    });
+    assert_profile_edit_refused(&mut app, &key, &alpha);
+    // A new SSH target would report the old server's listener as its own.
+    submit_profile_edit(&mut app, |form| form.host = "other.invalid".into());
+    assert_profile_edit_refused(&mut app, &key, &alpha);
+    submit_profile_edit(&mut app, |form| form.user = "root".into());
+    assert_profile_edit_refused(&mut app, &key, &alpha);
+    submit_profile_edit(&mut app, |form| form.port = "2222".into());
+    assert_profile_edit_refused(&mut app, &key, &alpha);
+
+    // The quick switch can still stop the original listener.
+    let _ = app.update(Message::TunnelForwardToggle(
+        key.clone(),
+        LOCAL,
+        ALPHA.into(),
+    ));
+    assert_eq!(
+        app.tunnels.forward_status(&key, LOCAL, ALPHA),
+        tunnels::Status::Stopped,
+        "{}",
+        app.tunnel_notice
+    );
+    app.tunnels.stop_all();
+}
+
+#[test]
+fn profile_editor_saves_idle_sibling_and_display_edits_beside_a_running_forward() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, key, alpha) = app_with_alpha_running(dir.path());
+    let edited = "127.0.0.1:18084:web:81";
+    submit_profile_edit(&mut app, |form| {
+        form.local_forwards = format!("{ALPHA}; {edited}");
+        form.favorite = true;
+        form.tags = vec!["web".into()];
+    });
+    assert_eq!(app.form.error, None);
+    assert!(app.dialog.is_none(), "{:?}", app.form.error);
+    let saved = &load_sessions(&app.profiles_path).unwrap()[0];
+    assert_eq!(
+        saved.ssh.local_forwards,
+        vec![ALPHA.to_owned(), edited.to_owned()]
+    );
+    assert!(saved.favorite);
+    assert_eq!(saved.tags, vec!["web".to_owned()]);
+    app.refresh_tunnel_status();
+    assert_eq!(app.tunnels.forward_status(&key, LOCAL, ALPHA), alpha);
+    assert!(
+        app.tunnel_quick
+            .iter()
+            .any(|quick| quick.row.spec == ALPHA && quick.running)
+    );
+    app.tunnels.stop_all();
+}
+
+#[test]
+fn profile_editor_refuses_forward_edits_while_the_whole_profile_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ssh_config");
+    let (mut app, key, _) = app_with_alpha_running(dir.path());
+    app.tunnels.stop_forward(&key, LOCAL, ALPHA).unwrap();
+    let session = app.profiles[0].clone();
+    let whole = app.tunnels.start(&session, Some(&config)).unwrap();
+    assert!(whole.is_running(), "{whole:?}");
+
+    // The aggregate ssh owns every saved forward, even idle-looking Bravo.
+    submit_profile_edit(&mut app, |form| {
+        form.local_forwards = format!("{ALPHA}; 127.0.0.1:18084:web:81");
+    });
+    let error = app.form.error.clone().unwrap_or_default();
+    assert!(error.contains("Stop"), "{error:?}");
+    assert_eq!(
+        saved_forwards(&app),
+        vec![ALPHA.to_owned(), BRAVO.to_owned()]
+    );
+    assert_eq!(app.tunnels.status(&key), whole);
+    let _ = app.update(Message::CloseDialog);
+
+    // Display-only edits stay allowed.
+    submit_profile_edit(&mut app, |form| form.favorite = true);
+    assert_eq!(app.form.error, None);
+    assert!(load_sessions(&app.profiles_path).unwrap()[0].favorite);
+    assert_eq!(app.tunnels.status(&key), whole);
+    app.tunnels.stop_all();
+}
