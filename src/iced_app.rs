@@ -2057,7 +2057,9 @@ const TUNNEL_SETTINGS_WINDOW_MARGIN: f32 = 24.0;
 const TUNNEL_LIST_PANEL_WIDTH: f32 = 300.0;
 /// Card padding around the editor column.
 const TUNNEL_EDITOR_PADDING: f32 = 12.0;
-/// Static editor field labels, rendered single-line at 12 px.
+/// Static editor field labels, rendered single-line at 12 px. Test-only:
+/// the editor renders these literals inline; tests pin label-column widths.
+#[cfg(test)]
 const TUNNEL_EDITOR_LABELS: [&str; 8] = [
     "Name",
     "Type",
