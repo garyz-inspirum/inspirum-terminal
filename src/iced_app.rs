@@ -2047,6 +2047,21 @@ const TUNNEL_MENU_HEADER_HEIGHT: f32 = 46.0;
 const TUNNEL_MENU_NOTICE_HEIGHT: f32 = 18.0;
 /// Secondary (gray) popup text; `muted` on `list` is >= 4.5:1 in both themes.
 const TUNNEL_MENU_SECONDARY_TEXT: f32 = 12.0;
+/// `toggler(..).size(14)` is two sizes wide.
+const TUNNEL_MENU_SWITCH_WIDTH: f32 = 28.0;
+/// "Settings" at 11 px with `[1, 6]` padding, rounded up.
+const TUNNEL_MENU_SETTINGS_BUTTON_WIDTH: f32 = 60.0;
+const DIALOG_DEFAULT_WIDTH: f32 = 600.0;
+const TUNNEL_SETTINGS_WIDTH: f32 = 760.0;
+const TUNNEL_SETTINGS_WINDOW_MARGIN: f32 = 24.0;
+const TUNNEL_LIST_PANEL_WIDTH: f32 = 300.0;
+/// Card padding around the editor column.
+const TUNNEL_EDITOR_PADDING: f32 = 12.0;
+/// Fits "Destination Host" / "Destination Port" at 12 px.
+const TUNNEL_EDITOR_LABEL_MAX: f32 = 112.0;
+const TUNNEL_EDITOR_LABEL_MIN: f32 = 96.0;
+/// Room for "127.0.0.1" and a typical tunnel name at 13 px plus padding.
+const TUNNEL_EDITOR_MIN_FIELD: f32 = 180.0;
 const TUNNEL_MENU_EMPTY: &str = "No saved tunnels.";
 const TUNNEL_MENU_FOOTER_HEIGHT: f32 = 28.0;
 /// Quick-menu footer entry; the dialog it opens carries the same name.
@@ -2091,13 +2106,95 @@ impl QuickForward {
         }
     }
 
-    fn subtitle(&self) -> String {
-        let route = if self.row.target.is_empty() {
-            format!("{} SOCKS", self.row.listen)
+    /// Compact popup detail: profile + listen port. The full route lives in
+    /// Tunnel Settings; the fixed-width popup cannot hold it beside a switch.
+    fn subtitle(&self, max_chars: usize) -> String {
+        let port = listen_port(&self.row.listen);
+        let suffix = if self.row.kind == tunnels::ForwardKind::Dynamic {
+            format!(" · port {port} SOCKS")
         } else {
-            format!("{} → {}", self.row.listen, self.row.target)
+            format!(" · port {port}")
         };
-        format!("{} · {route}", self.row.profile_name)
+        compact_detail(&self.row.profile_name, &suffix, max_chars)
+    }
+}
+
+/// Port half of a `bind:port` / `port` listener.
+fn listen_port(listen: &str) -> &str {
+    listen.rsplit(':').next().unwrap_or(listen).trim()
+}
+
+/// `head + suffix` within `max_chars`, shortening `head` first so the
+/// identifying suffix (port) survives; whole string truncated as last resort.
+fn compact_detail(head: &str, suffix: &str, max_chars: usize) -> String {
+    let suffix_len = suffix.chars().count();
+    if head.chars().count() + suffix_len <= max_chars {
+        return format!("{head}{suffix}");
+    }
+    if max_chars > suffix_len + 1 {
+        return format!("{}{suffix}", truncate(head, max_chars - suffix_len));
+    }
+    truncate(&format!("{head}{suffix}"), max_chars)
+}
+
+/// Approximate average advance of proportional UI text, px per char per px
+/// of font size. Deliberately generous so estimates err toward truncation.
+const UI_CHAR_ADVANCE: f32 = 0.6;
+
+/// How many characters of `size`-px text fit in `width` px.
+fn chars_fitting(width: f32, size: f32) -> usize {
+    if width <= 0.0 || size <= 0.0 {
+        return 0;
+    }
+    (width / (size * UI_CHAR_ADVANCE)).floor() as usize
+}
+
+/// Popup row text-column width: menu minus border, row padding, kind badge,
+/// two spacings and the trailing control (switch or "Settings" button).
+fn tunnel_quick_text_width(switch: bool) -> f32 {
+    let control = if switch {
+        TUNNEL_MENU_SWITCH_WIDTH
+    } else {
+        TUNNEL_MENU_SETTINGS_BUTTON_WIDTH
+    };
+    TUNNEL_MENU_WIDTH - 2.0 - 2.0 * 10.0 - 16.0 - 2.0 * 8.0 - control
+}
+
+/// Tunnel Settings dialog width: roomy at regular window sizes, never wider
+/// than the window allows, never narrower than the generic dialog.
+fn tunnel_settings_dialog_width(window_width: f32) -> f32 {
+    (window_width - 2.0 * TUNNEL_SETTINGS_WINDOW_MARGIN)
+        .clamp(DIALOG_DEFAULT_WIDTH, TUNNEL_SETTINGS_WIDTH)
+}
+
+/// Editor panel width inside the Tunnel Settings dialog.
+fn tunnel_editor_panel_width(dialog_width: f32) -> f32 {
+    dialog_width - 2.0 * 12.0 - TUNNEL_LIST_PANEL_WIDTH - 12.0 - 2.0 * TUNNEL_EDITOR_PADDING
+}
+
+/// Label column: as wide as the longest label wants, but shrunk so the
+/// field column keeps at least `TUNNEL_EDITOR_MIN_FIELD` px when possible.
+fn tunnel_editor_label_width(panel_width: f32) -> f32 {
+    (panel_width - TUNNEL_EDITOR_MIN_FIELD).clamp(TUNNEL_EDITOR_LABEL_MIN, TUNNEL_EDITOR_LABEL_MAX)
+}
+
+/// Secondary popup line, bounded to `max_chars`.
+fn quick_detail(quick: &QuickForward, max_chars: usize) -> String {
+    if quick.aggregate {
+        truncate("Runs with whole profile", max_chars)
+    } else if let Some(error) = &quick.failed {
+        truncate(&format!("Failed · {error}"), max_chars)
+    } else if quick.needs_ack && !quick.running {
+        let port = listen_port(&quick.row.listen);
+        let suffix = format!(" · port {port} · non-loopback");
+        // Keep a recognisable profile prefix, else drop it for the warning.
+        if max_chars >= suffix.chars().count() + 5 {
+            compact_detail(&quick.row.profile_name, &suffix, max_chars)
+        } else {
+            truncate(&format!("port {port} · non-loopback"), max_chars)
+        }
+    } else {
+        quick.subtitle(max_chars)
     }
 }
 
@@ -9183,15 +9280,14 @@ impl App {
                         .into()
                 }
             };
-        let detail = if quick.aggregate {
-            "Runs with whole profile".to_owned()
-        } else if let Some(error) = &quick.failed {
-            format!("Failed · {error}")
-        } else if quick.needs_ack && !quick.running {
-            format!("{} · non-loopback bind", quick.subtitle())
-        } else {
-            quick.subtitle()
-        };
+        let switch = matches!(
+            quick_forward_action(quick, self.tunnels.acknowledged(&row_data.profile_key)),
+            QuickForwardAction::Start | QuickForwardAction::Stop
+        );
+        let text_width = tunnel_quick_text_width(switch);
+        let detail_chars = chars_fitting(text_width, 11.0);
+        let title_chars = chars_fitting(text_width, theme::metrics::UI_TEXT);
+        let detail = quick_detail(quick, detail_chars);
         container(
             row![
                 container(
@@ -9202,8 +9298,8 @@ impl App {
                 )
                 .width(16)
                 .align_x(iced::Center),
-                column![
-                    text(quick.title())
+                container(column![
+                    text(truncate(&quick.title(), title_chars))
                         .size(theme::metrics::UI_TEXT)
                         .color(ink)
                         .wrapping(iced::widget::text::Wrapping::None),
@@ -9211,8 +9307,9 @@ impl App {
                         .size(11)
                         .color(muted())
                         .wrapping(iced::widget::text::Wrapping::None),
-                ]
-                .width(Fill),
+                ])
+                .width(Fill)
+                .clip(true),
                 action,
             ]
             .spacing(8)
@@ -9324,7 +9421,7 @@ impl App {
             .spacing(8),
         )
         .padding(8)
-        .width(300)
+        .width(TUNNEL_LIST_PANEL_WIDTH)
         .style(card);
 
         let editor: Element<'_, Message> = if let Some(edit) = &self.tunnel_edit {
@@ -9386,7 +9483,14 @@ impl App {
                         .padding([3, 6])
                         .into()
                 };
-            let label_width = 150;
+            let label_width = tunnel_editor_label_width(tunnel_editor_panel_width(
+                tunnel_settings_dialog_width(self.window_size.width),
+            ));
+            let field_chars = chars_fitting(
+                tunnel_editor_panel_width(tunnel_settings_dialog_width(self.window_size.width))
+                    - label_width,
+                12.0,
+            );
             let grid = column![
                 row![
                     text("Name").size(12).color(ink).width(label_width),
@@ -9406,7 +9510,10 @@ impl App {
                         .size(12)
                         .color(ink)
                         .width(label_width),
-                    text(profile_name).size(12).color(ink),
+                    text(truncate(profile_name, field_chars))
+                        .size(12)
+                        .color(ink)
+                        .wrapping(iced::widget::text::Wrapping::None),
                 ],
                 row![
                     text("Listen Port").size(12).color(ink).width(label_width),
@@ -10257,10 +10364,10 @@ impl App {
             scrollable(body)
         };
         dialog_frame(title, container(body).padding(12))
-            .width(if matches!(dialog, Dialog::Tools) {
-                880
-            } else {
-                600
+            .width(match dialog {
+                Dialog::Tools => 880.0,
+                Dialog::Tunnels => tunnel_settings_dialog_width(self.window_size.width),
+                _ => DIALOG_DEFAULT_WIDTH,
             })
             .max_height(720)
             .into()
@@ -15098,5 +15205,130 @@ mod tests {
         assert_eq!(label, "1/3");
         assert!(!danger);
         assert_eq!(super::FIND_COUNTER_MIN.chars().count(), 7);
+    }
+}
+
+#[cfg(test)]
+mod tunnel_layout_tests {
+    use super::*;
+
+    fn quick(
+        profile: &str,
+        listen: &str,
+        target: &str,
+        kind: tunnels::ForwardKind,
+    ) -> QuickForward {
+        QuickForward {
+            row: tunnels::ForwardRow {
+                profile_key: "k".into(),
+                profile_name: profile.into(),
+                kind,
+                listen: listen.into(),
+                target: target.into(),
+                spec: format!("{listen}:{target}"),
+                label: "Alpha forward".into(),
+            },
+            running: true,
+            aggregate: false,
+            failed: None,
+            needs_ack: false,
+        }
+    }
+
+    #[test]
+    fn settings_dialog_widens_at_regular_sizes_and_respects_window() {
+        let regular = tunnel_settings_dialog_width(1280.0);
+        assert!(regular > DIALOG_DEFAULT_WIDTH);
+        assert!(regular <= 1280.0);
+        // Minimum window (960) still gets the wide dialog with margin left.
+        let min_window = tunnel_settings_dialog_width(960.0);
+        assert!(min_window + 2.0 * TUNNEL_SETTINGS_WINDOW_MARGIN <= 960.0);
+        assert_eq!(min_window, regular);
+        // Narrow windows fall back to, but never below, the generic width.
+        let narrow = tunnel_settings_dialog_width(700.0);
+        assert!(narrow < regular);
+        assert!(narrow >= DIALOG_DEFAULT_WIDTH);
+    }
+
+    #[test]
+    fn editor_fields_hold_loopback_and_fixture_names_at_regular_width() {
+        let panel = tunnel_editor_panel_width(tunnel_settings_dialog_width(1280.0));
+        let label = tunnel_editor_label_width(panel);
+        let field = panel - label;
+        // Text inputs add 6 px padding each side at 13 px.
+        let input_chars = chars_fitting(field - 12.0, 13.0);
+        for value in ["127.0.0.1", "Alpha forward", "Bravo forward"] {
+            assert!(
+                value.chars().count() <= input_chars,
+                "{value} hidden in {field}px"
+            );
+        }
+        let name = "CI tunnel fixture";
+        assert_eq!(truncate(name, chars_fitting(field, 12.0)), name);
+        // The old fixed 150 px label left far less room.
+        let old_field = tunnel_editor_panel_width(DIALOG_DEFAULT_WIDTH) - 150.0;
+        assert!(field > 2.0 * old_field);
+    }
+
+    #[test]
+    fn label_column_shrinks_before_fields_on_narrow_dialogs() {
+        let wide = tunnel_editor_label_width(tunnel_editor_panel_width(TUNNEL_SETTINGS_WIDTH));
+        let narrow = tunnel_editor_label_width(tunnel_editor_panel_width(DIALOG_DEFAULT_WIDTH));
+        assert!(narrow < wide);
+        assert!(narrow >= TUNNEL_EDITOR_LABEL_MIN);
+        // Longest label still fits the narrowest column at 12 px.
+        assert!(
+            "Destination Host".chars().count() <= chars_fitting(TUNNEL_EDITOR_LABEL_MIN, 12.0) + 3
+        );
+    }
+
+    #[test]
+    fn quick_subtitle_is_compact_and_fits_beside_switch() {
+        let q = quick(
+            "CI tunnel fixture",
+            "127.0.0.1:9000",
+            "127.0.0.1:3000",
+            tunnels::ForwardKind::Local,
+        );
+        let max = chars_fitting(tunnel_quick_text_width(true), 11.0);
+        let detail = quick_detail(&q, max);
+        assert_eq!(detail, "CI tunnel fixture · port 9000");
+        assert!(detail.chars().count() <= max);
+        assert!(!detail.contains("3000"), "full route belongs in the editor");
+        let dynamic = quick("p", "1080", "", tunnels::ForwardKind::Dynamic);
+        assert_eq!(dynamic.subtitle(max), "p · port 1080 SOCKS");
+    }
+
+    #[test]
+    fn long_profile_names_truncate_but_keep_port() {
+        let q = quick(
+            "An exceedingly long production bastion profile name",
+            "0.0.0.0:15432",
+            "db:5432",
+            tunnels::ForwardKind::Remote,
+        );
+        for switch in [true, false] {
+            let max = chars_fitting(tunnel_quick_text_width(switch), 11.0);
+            let detail = quick_detail(&q, max);
+            assert_eq!(detail.chars().count(), max);
+            assert!(detail.ends_with(" · port 15432"), "{detail}");
+            assert!(detail.contains('…'));
+        }
+        // Settings button is wider than the switch, so less text fits.
+        assert!(tunnel_quick_text_width(false) < tunnel_quick_text_width(true));
+        let mut ack = q.clone();
+        ack.needs_ack = true;
+        ack.running = false;
+        let max = chars_fitting(tunnel_quick_text_width(false), 11.0);
+        let detail = quick_detail(&ack, max);
+        assert!(detail.chars().count() <= max);
+        assert!(detail.ends_with("non-loopback"), "{detail}");
+    }
+
+    #[test]
+    fn compact_detail_degrades_when_suffix_alone_overflows() {
+        assert_eq!(compact_detail("abc", " · port 1", 4).chars().count(), 4);
+        assert_eq!(chars_fitting(0.0, 11.0), 0);
+        assert!(chars_fitting(200.0, 11.0) > chars_fitting(200.0, 13.0));
     }
 }
