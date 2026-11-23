@@ -1950,6 +1950,204 @@ def band_changed_pixels(first: Path, second: Path, box) -> int:
     return changed
 
 
+# Selected-Filer oracle (tour-08 vs tour-08b). The Filer action strip holds
+# five buttons in this order: Download, New remote folder, Rename, Edit,
+# Delete. New remote folder needs no selection, so it is the in-frame
+# reference for "enabled"; the other four must match it only once a row is
+# selected. Real Light 1280x800 frames: button rules y750/y772, enabled border
+# 118 on face 255, disabled border 191 on dock 240; the selected row has a
+# 1 px selection_indicator outline (0,102,179) on y623/y645 and x0/x1279 with
+# fill 216, while hover is fill-only (no border) per file_row_style.
+FILER_ACTION_COUNT = 5
+FILER_REFERENCE_ACTION = 1
+FILER_SELECTION_ACTIONS = {0: "Download", 2: "Rename", 3: "Edit", 4: "Delete"}
+
+
+def _frame(source):
+    """Accept a PNG path or an already-decoded ``_read_png`` tuple."""
+    return source if isinstance(source, tuple) else _read_png(Path(source))
+
+
+def _px(frame, x: int, y: int) -> tuple[int, int, int]:
+    channels, rows = frame[2], frame[3]
+    i = x * channels
+    row = rows[y]
+    return (row[i], row[i + 1], row[i + 2])
+
+
+def _far(first, second, tolerance: int = 24) -> bool:
+    return max(abs(a - b) for a, b in zip(first, second)) > tolerance
+
+
+def _mode(pixels) -> tuple[int, int, int]:
+    counts: dict[tuple[int, int, int], int] = {}
+    for pixel in pixels:
+        counts[pixel] = counts.get(pixel, 0) + 1
+    return max(counts, key=counts.get)
+
+
+def _is_indicator(pixel) -> bool:
+    """Saturated accent (selection_indicator); the Light UI is otherwise grey."""
+    return max(pixel) - min(pixel) >= 100
+
+
+def horizontal_rules(frame, band, *, min_len: int = 40) -> list[tuple[int, int, int, tuple]]:
+    """Constant-colour runs >= min_len that differ from the rows above AND below.
+
+    Button top/bottom borders qualify in both enabled (118 vs 255 face) and
+    disabled (191 vs 240 dock) states; faces, text and dock fill do not.
+    """
+    width, height = frame[0], frame[1]
+    left, top, right, bottom = (int(edge) for edge in band)
+    if left < 0 or top < 1 or right > width or bottom > height - 1 or right <= left:
+        raise RuntimeError(f"rule band {band} is outside {width}x{height}")
+    rules = []
+    for y in range(top, bottom):
+        x = left
+        while x < right:
+            colour = _px(frame, x, y)
+            end = x
+            while end + 1 < right and _px(frame, end + 1, y) == colour:
+                end += 1
+            if end - x + 1 >= min_len and all(
+                _far(colour, _px(frame, i, y - 1)) and _far(colour, _px(frame, i, y + 1))
+                for i in range(x, end + 1)
+            ):
+                rules.append((y, x, end, colour))
+            x = end + 1
+    return rules
+
+
+def filer_action_buttons(frame, band) -> list[dict]:
+    """Return the five action buttons as {box, border, face}, left to right."""
+    frame = _frame(frame)
+    by_extent: dict[tuple[int, int], list] = {}
+    for y, x0, x1, colour in horizontal_rules(frame, band):
+        by_extent.setdefault((x0, x1), []).append((y, colour))
+    buttons = []
+    for (x0, x1), edges in sorted(by_extent.items()):
+        if len(edges) != 2 or edges[1][0] - edges[0][0] < 10 or edges[0][1] != edges[1][1]:
+            continue
+        top, bottom = edges[0][0], edges[1][0]
+        face = _mode(
+            _px(frame, x, y) for y in range(top + 1, bottom) for x in range(x0, x1 + 1)
+        )
+        buttons.append({"box": (x0, top, x1, bottom), "border": edges[0][1], "face": face})
+    if len(buttons) != FILER_ACTION_COUNT:
+        raise RuntimeError(
+            f"expected {FILER_ACTION_COUNT} Filer action buttons in {band}, found "
+            f"{[button['box'] for button in buttons]}"
+        )
+    return buttons
+
+
+def filer_action_enabled(buttons: list[dict]) -> list[bool]:
+    """Enabled == same border and face as the always-enabled reference button."""
+    reference = buttons[FILER_REFERENCE_ACTION]
+    return [
+        not _far(button["border"], reference["border"], 24)
+        and not _far(button["face"], reference["face"], 8)
+        for button in buttons
+    ]
+
+
+def filer_row_outline(frame, label_box, *, reach: int = 12, coverage: float = .95) -> dict:
+    """Prove a selection outline encloses the row holding ``label_box``.
+
+    Requires indicator-coloured top and bottom rules across >= coverage of the
+    frame width within ``reach`` px of the label, indicator left/right columns
+    outside the label, and an interior fill distinct from the list below.
+    Hover (fill-only) and an unselected row both fail.
+    """
+    frame = _frame(frame)
+    width, height = frame[0], frame[1]
+    label_left, label_top, label_right, label_bottom = (int(edge) for edge in label_box)
+
+    def rule(y: int) -> bool:
+        hits = sum(1 for x in range(width) if _is_indicator(_px(frame, x, y)))
+        return hits >= coverage * width
+
+    top = next((y for y in range(label_top - 1, max(0, label_top - reach) - 1, -1) if rule(y)), None)
+    bottom = next(
+        (y for y in range(label_bottom + 1, min(height, label_bottom + reach + 1)) if rule(y)),
+        None,
+    )
+    if top is None or bottom is None:
+        raise RuntimeError(
+            f"no selection outline rule around label {label_box}: top {top} bottom {bottom}"
+        )
+
+    def column(x: int) -> bool:
+        span = range(top + 1, bottom)
+        return sum(1 for y in span if _is_indicator(_px(frame, x, y))) >= coverage * len(span)
+
+    left = next((x for x in range(0, label_left) if column(x)), None)
+    right = next((x for x in range(width - 1, label_right, -1) if column(x)), None)
+    if left is None or right is None:
+        raise RuntimeError(
+            f"selection outline rows {top}/{bottom} lack side columns: left {left} right {right}"
+        )
+    fill = _mode(
+        _px(frame, x, y) for y in range(top + 1, bottom) for x in range(left + 1, right)
+    )
+    below = _mode(
+        _px(frame, x, y)
+        for y in range(bottom + 1, min(height, bottom + 4)) for x in range(width)
+    )
+    if not _far(fill, below, 8):
+        raise RuntimeError(f"selected row fill {fill} matches the list background {below}")
+    return {"box": (left, top, right, bottom), "fill": fill, "below": below}
+
+
+def selected_filer_verdict(unselected, selected, label_box, action_band) -> str:
+    """Single oracle for tour-08b; raise RuntimeError unless the frame proves selection.
+
+    unselected must show no outline and Download/Rename/Edit/Delete disabled;
+    selected must show the outline and those four enabled, with the same five
+    button geometries in both frames.
+    """
+    unselected, selected = _frame(unselected), _frame(selected)
+    if unselected[:2] != selected[:2]:
+        raise RuntimeError(f"frame size mismatch {unselected[:2]} vs {selected[:2]}")
+    try:
+        filer_row_outline(unselected, label_box)
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("unselected frame already shows a row selection outline")
+    outline = filer_row_outline(selected, label_box)
+    before = filer_action_buttons(unselected, action_band)
+    after = filer_action_buttons(selected, action_band)
+    if [b["box"] for b in before] != [b["box"] for b in after]:
+        raise RuntimeError(
+            f"action button geometry moved: {[b['box'] for b in before]} -> "
+            f"{[b['box'] for b in after]}"
+        )
+    before_on, after_on = filer_action_enabled(before), filer_action_enabled(after)
+    still_on = [name for i, name in FILER_SELECTION_ACTIONS.items() if before_on[i]]
+    if still_on:
+        raise RuntimeError(f"unselected frame shows {still_on} enabled")
+    still_off = [name for i, name in FILER_SELECTION_ACTIONS.items() if not after_on[i]]
+    if still_off:
+        raise RuntimeError(
+            f"selected frame shows {still_off} disabled: "
+            + ", ".join(
+                f"{FILER_SELECTION_ACTIONS[i]} border {after[i]['border']} face {after[i]['face']}"
+                for i in FILER_SELECTION_ACTIONS
+            )
+            + f"; reference border {after[FILER_REFERENCE_ACTION]['border']} "
+            f"face {after[FILER_REFERENCE_ACTION]['face']}"
+        )
+    return (
+        f"outline {outline['box']} fill {outline['fill']}; "
+        + ", ".join(
+            f"{name} {after[i]['box']} border {before[i]['border']}->{after[i]['border']} "
+            f"face {before[i]['face']}->{after[i]['face']}"
+            for i, name in FILER_SELECTION_ACTIONS.items()
+        )
+    )
+
+
 async def wait_find_strip_closed(
     app, window, open_frame: Path, closed_shot: Path, find_band, env,
     *, label: str = "Escape",
@@ -2739,10 +2937,21 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
             await asyncio.sleep(.5)
     await step("find", s07b)
 
+    async def park_filer_pointer() -> None:
+        # Empty Filer list space right of the columns, above the action strip:
+        # neither a row nor a button can show hover there, so tour-08/08b
+        # carry no pointer-driven cue.
+        command(
+            "xdotool", "mousemove", "--window", window,
+            str(width - 160), str(height - 80), env=env,
+        )
+        await asyncio.sleep(.5)
+
     async def s08():
         key("ctrl+shift+o")
         await wait_for(lambda: "SFTP_LIST_READY" in log_text(), "remote SFTP listing")
         await asyncio.sleep(1.5)
+        await park_filer_pointer()
         shot("tour-08-filer.png")
     await step("filer", s08)
 
@@ -2750,7 +2959,10 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
     # the unselected tour-08 frame at the same 1280x800 scale. Geometry is
     # measured from a real tour-08-filer.png: header y598-622, the fixture row
     # y623-644 with its name OCR box (31,628,239,639), Name column x0-290,
-    # action buttons y748-777 (Download/Rename/Edit/Delete disabled).
+    # action buttons y750-772 (Download/Rename/Edit/Delete disabled). The
+    # pointer is parked off the row before both shots, and the verdict is
+    # selected_filer_verdict: selection outline around the row plus all four
+    # selection actions styled like the always-enabled New remote folder.
     filer_row_label = "444_GUI_DOWNLOAD_FIXTURE.bin"
     unselected = tour_dir / "tour-08-filer.png"
     selected = tour_dir / "tour-08b-filer-selected.png"
@@ -2770,35 +2982,38 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
         row_x, row_y = centre(row)
         if not (name_column[1] < row_y < action_top and row[3] < action_top):
             raise RuntimeError(f"{filer_row_label} box {row} overlaps the action row ({action_top})")
-        row_band = (0, max(0, row[1] - 6), width, min(action_top, row[3] + 6))
-        action_band = (0, action_top, width // 2, height - 22)
+        action_band = (0, action_top, width, height - 22)
         if selected.exists():
             selected.unlink()
         click(row_x, row_y)
-        row_changed = 0
+        await park_filer_pointer()
+        verdict_error = None
         deadline = time.monotonic() + 10
         while True:
             await asyncio.sleep(.5)
             await asyncio.to_thread(screenshot, window, selected, env)
-            row_changed = band_changed_pixels(unselected, selected, row_band)
-            if row_changed >= 200 or time.monotonic() > deadline:
+            try:
+                verdict = await asyncio.to_thread(
+                    selected_filer_verdict, unselected, selected, row, action_band,
+                )
+                verdict_error = None
+                break
+            except RuntimeError as error:
+                verdict_error = error
+            if time.monotonic() > deadline:
                 break
         written.append(selected)
         print(f"tour: wrote {selected}", flush=True)
         if window_size(window, env) != (1280, 800):
             raise RuntimeError("window left 1280x800 during the selected Filer shot")
-        if diff(unselected, selected, env) == 0:
-            raise RuntimeError("selected Filer frame is identical to tour-08-filer.png")
-        if row_changed < 200:
+        if verdict_error is not None:
             raise RuntimeError(
-                f"row band {row_band} unchanged after clicking {filer_row_label} at "
-                f"({row_x},{row_y}): {row_changed} px"
+                f"after clicking {filer_row_label} at ({row_x},{row_y}) and parking the "
+                f"pointer: {verdict_error}"
             )
-        action_changed = band_changed_pixels(unselected, selected, action_band)
         print(
             f"tour: PASS selected Filer row {filer_row_label} box {row} clicked "
-            f"({row_x},{row_y}); row band {row_band} changed {row_changed} px; "
-            f"action strip {action_band} changed {action_changed} px",
+            f"({row_x},{row_y}), pointer parked ({width - 160},{height - 80}); {verdict}",
             flush=True,
         )
     except Exception as error:
