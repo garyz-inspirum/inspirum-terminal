@@ -96,6 +96,15 @@ FIND_INJECT_PTY_BYTE = os.environ.get("INSPIRUM_GUI_FIND_INJECT_PTY_BYTE") == "1
 # Tunnels quick menu. Default mode keeps the empty-tunnel profile.
 POPULATED = os.environ.get("INSPIRUM_GUI_POPULATED") == "1"
 POPULATED_LABELS = ("Alpha forward", "Bravo forward")
+# Opt-in on top of POPULATED: Alpha's saved metadata carries
+# ``auto_start: true`` (Bravo stays opted out). Before any Tunnels click the
+# run requires Alpha's listener to echo and Bravo's to refuse, then stops
+# Alpha with the real popup toggle so the populated flow below starts from
+# "both stopped" exactly as without this mode.
+AUTOSTART = os.environ.get("INSPIRUM_GUI_AUTOSTART") == "1"
+# Checkbox label in the Tunnel Settings form (src/iced_app.rs
+# TUNNEL_AUTO_START_LABEL).
+AUTOSTART_CHECKBOX_LABEL = "Automatically start when app opens"
 # Product minimum (src/iced_app.rs window min_size). The X window manager in
 # the tour honours any xdotool size, bypassing iced's min_size, so a smaller
 # request yields a clipped frame the app never supports. Minimum-size evidence
@@ -198,21 +207,29 @@ def toggler_target(path: Path, label_box, window_width: int):
     return target, source
 
 
-def populated_profile_ssh(ports, echo_port: int) -> dict:
-    """``ssh`` block for the populated profile (schema: src/lib.rs SshOptions)."""
+def populated_profile_ssh(ports, echo_port: int, *, auto_start=()) -> dict:
+    """``ssh`` block for the populated profile (schema: src/lib.rs SshOptions).
+
+    ``auto_start`` names the POPULATED_LABELS whose metadata row opts in to
+    auto-start; every other row omits the field (the product's default off,
+    which is also how it serialises off).
+    """
     specs = [f"127.0.0.1:{port}:127.0.0.1:{echo_port}" for port in ports]
     if len(set(specs)) != len(specs):
         raise RuntimeError("populated forwards must be distinct")
-    return {
-        "local_forwards": specs,
-        "tunnel_labels": [
-            {"kind": "local", "spec": spec, "label": label}
-            for spec, label in zip(specs, POPULATED_LABELS)
-        ],
-    }
+    unknown = set(auto_start) - set(POPULATED_LABELS)
+    if unknown:
+        raise RuntimeError(f"auto_start names unknown forwards: {sorted(unknown)}")
+    labels = []
+    for spec, label in zip(specs, POPULATED_LABELS):
+        row = {"kind": "local", "spec": spec, "label": label}
+        if label in auto_start:
+            row["auto_start"] = True
+        labels.append(row)
+    return {"local_forwards": specs, "tunnel_labels": labels}
 
 
-def fixture_profiles(forward_ports, echo_port) -> list[dict]:
+def fixture_profiles(forward_ports, echo_port, *, populated=None, autostart=None) -> list[dict]:
     """Saved profiles for the connected run.
 
     The first profile is always the plain terminal target ('CI connected
@@ -220,8 +237,12 @@ def fixture_profiles(forward_ports, echo_port) -> list[dict]:
     auxiliary shells, each its own SSH process, which would collide on any
     ``-L`` listener. Populated mode therefore puts the labelled forwards on a
     SECOND profile with the same SSH target; the Tunnels quick menu lists
-    saved forwards from every profile.
+    saved forwards from every profile. Auto-start mode opts in Alpha only.
     """
+    populated = POPULATED if populated is None else populated
+    autostart = AUTOSTART if autostart is None else autostart
+    if autostart and not populated:
+        raise RuntimeError("INSPIRUM_GUI_AUTOSTART=1 requires INSPIRUM_GUI_POPULATED=1")
     base = {
         "host": "native-smoke",
         "user": "native-smoke",
@@ -229,10 +250,13 @@ def fixture_profiles(forward_ports, echo_port) -> list[dict]:
         "strict": True,
     }
     out = [{"name": "CI connected fixture", **base}]
-    if POPULATED:
+    if populated:
         out.append({
             "name": "CI tunnel fixture", **base,
-            "ssh": populated_profile_ssh(forward_ports, echo_port),
+            "ssh": populated_profile_ssh(
+                forward_ports, echo_port,
+                auto_start=POPULATED_LABELS[:1] if autostart else (),
+            ),
         })
     return out
 
@@ -2892,12 +2916,134 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
     return 0
 
 
+async def autostart_precheck(window: str, destination: Path, env: dict[str, str], events,
+                             forward_ports, profiles: Path) -> None:
+    """INSPIRUM_GUI_AUTOSTART=1: prove app launch started Alpha and only Alpha.
+
+    Runs right after the first frame, before any Tunnels click, toggle or
+    session open. Truth is the loopback listener and the fixture's
+    LOCAL_FORWARD_ALLOW event, never a screenshot. Ends with Alpha stopped by
+    the real popup toggle so the populated flow keeps "both initially
+    stopped". Every step is required; nothing here is best-effort.
+    """
+    port_a, port_b = forward_ports
+    label_a, label_b = POPULATED_LABELS
+    with profiles.open(encoding="utf-8") as handle:
+        saved = {p["name"]: p for p in json.load(handle)}
+    flags = {
+        row["label"]: bool(row.get("auto_start"))
+        for row in saved["CI tunnel fixture"]["ssh"]["tunnel_labels"]
+    }
+    if flags != {label_a: True, label_b: False}:
+        raise RuntimeError(f"auto-start fixture metadata wrong on disk: {flags}")
+    # 1. Launch alone (no click) brings Alpha up through the fixture SSH
+    # server. Startup spawns ssh and authenticates, so allow a generous
+    # TIME_SCALE'd window instead of the per-toggle 15 s.
+    await forward_echo(port_a, b"GUI_AUTOSTART_ALPHA_0", timeout=45 * TIME_SCALE)
+    if "LOCAL_FORWARD_ALLOW" not in events.path.read_text(encoding="utf-8"):
+        raise RuntimeError("auto-started Alpha echoed without a fixture LOCAL_FORWARD_ALLOW")
+    # 2. Opted-out Bravo stays stopped.
+    await forward_refused(port_b, "opted-out Bravo after app launch")
+    if events.path.read_text(encoding="utf-8").splitlines().count("SESSION_STARTED"):
+        raise RuntimeError("auto-start opened a shell session; it must only forward")
+    print(f"PASS auto-start: Alpha {port_a} echoed at launch, Bravo {port_b} refused",
+          flush=True)
+
+    # 3. Evidence: popup with Alpha on / Bravo off (both rows located).
+    tun_width, tun_height = window_size(window, env)
+    button_region = (max(0, tun_width - 220), 0, tun_width, 42)
+    tunnels_bounds = await click_label(
+        window, destination / "connected-autostart-tunnels-button.png", "Tunnels", env,
+        region=button_region, timeout=15,
+    )
+    popup_region = (
+        max(0, tun_width - 440), tunnels_bounds[1],
+        tun_width, min(tun_height, tunnels_bounds[3] + 420),
+    )
+    popup_shot = destination / "connected-autostart-popup-alpha-on.png"
+    footer = await locate_rendered_label(
+        window, popup_shot, "Tunnel Settings...", env=env, region=popup_region, timeout=15,
+    )
+    for label in POPULATED_LABELS:
+        box = await asyncio.to_thread(locate_visible_label, popup_shot, label,
+                                      region=popup_region)
+        if not (_bounds_inside(box, popup_region) and box[3] <= footer[1]):
+            raise RuntimeError(f"{label} row {box} not inside auto-start popup list")
+    # 4. Tunnel Settings editor with the checkbox, Alpha selected.
+    command("xdotool", "mousemove", "--window", window,
+            *map(str, center(footer)), "click", "1", env=env)
+    await asyncio.sleep(.6)
+    heading = await locate_rendered_label(
+        window, destination / "connected-autostart-manager.png", "Tunnel Manager",
+        env=env, timeout=15,
+    )
+    ed_w, ed_h = window_size(window, env)
+    await click_label(
+        window, destination / "connected-autostart-editor-pre-alpha.png", label_a, env,
+        region=(0, 42, ed_w // 2, ed_h), timeout=15, settle=.8,
+    )
+    editor_shot = destination / "connected-autostart-editor-alpha.png"
+    deadline = time.monotonic() + 15 * TIME_SCALE
+    while True:
+        await asyncio.to_thread(screenshot, window, editor_shot, env)
+        try:
+            await asyncio.to_thread(
+                require_editor_selection, editor_shot, port_a, port_b,
+                editor_form_region(ed_w, ed_h),
+                row_region=listen_port_row_region(heading, ed_w),
+            )
+            break
+        except RuntimeError:
+            if time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(.5)
+    # The checkbox label is evidence only: its checked state has no OCR
+    # oracle yet, and the listener checks above are the acceptance.
+    try:
+        box = await asyncio.to_thread(
+            locate_visible_label, editor_shot, AUTOSTART_CHECKBOX_LABEL,
+            region=editor_form_region(ed_w, ed_h),
+        )
+        print(f"auto-start: checkbox label at {box} in {editor_shot.name}", flush=True)
+    except RuntimeError as error:
+        print(f"NOTE auto-start: checkbox label not OCR-located in {editor_shot.name}: "
+              f"{error}", flush=True)
+    command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+    await asyncio.sleep(.6)
+    # Browsing the editor must not have changed the running set.
+    await forward_echo(port_a, b"GUI_AUTOSTART_ALPHA_1")
+    await forward_refused(port_b, "Bravo after viewing Tunnel Settings")
+
+    # 5. Restore the baseline with the real popup toggle on Alpha's row.
+    await click_label(
+        window, destination / "connected-autostart-tunnels-button-2.png", "Tunnels", env,
+        region=button_region, timeout=15,
+    )
+    shot = destination / "connected-autostart-stop-a-before.png"
+    box = await locate_rendered_label(window, shot, label_a, env=env,
+                                      region=popup_region, timeout=15)
+    (x, y), source = await asyncio.to_thread(toggler_target, shot, box, tun_width)
+    print(f"auto-start: stop Alpha row {box} -> ({x},{y}) via {source}", flush=True)
+    command("xdotool", "mousemove", "--window", window, str(x), str(y), "click", "1", env=env)
+    await asyncio.sleep(1)
+    await forward_refused(port_a, "auto-started Alpha after popup stop")
+    await forward_refused(port_b, "Bravo after Alpha popup stop")
+    await asyncio.to_thread(
+        screenshot, window, destination / "connected-autostart-popup-stopped.png", env,
+    )
+    command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+    await asyncio.sleep(.6)
+    print("PASS auto-start: popup toggle stopped Alpha; both forwards stopped", flush=True)
+
+
 async def main() -> int:
     if sys.platform != "linux":
         raise RuntimeError("Linux-only native GUI fixture")
     if len(sys.argv) != 3:
         raise SystemExit("usage: test-iced-connected-gui.py BINARY ARTIFACT_DIRECTORY")
 
+    if AUTOSTART and (TOUR or not POPULATED):
+        raise SystemExit("INSPIRUM_GUI_AUTOSTART=1 needs INSPIRUM_GUI_POPULATED=1 and no tour")
     binary = Path(sys.argv[1]).resolve(strict=True)
     destination = Path(sys.argv[2]).resolve()
     destination.mkdir(parents=True, exist_ok=True)
@@ -3031,6 +3177,11 @@ async def main() -> int:
                         if first_frame_deadline - time.monotonic() < 1:
                             raise
                         await asyncio.sleep(1)
+
+                if AUTOSTART:
+                    await autostart_precheck(
+                        window, destination, env, events, forward_ports, profiles,
+                    )
 
                 # Saved sessions are listed in the bottom Session dock panel
                 # (Filter row, 'Sessions' group row, then one flat 23px row per
