@@ -109,6 +109,45 @@ def free_loopback_port(exclude=()) -> int:
     raise RuntimeError("no distinct free loopback port")
 
 
+def toggler_target(path: Path, label_box, window_width: int):
+    """Click point of the per-forward toggle on the row titled by ``label_box``.
+
+    The quick-menu control is an iced ``toggler`` with no text, at the right
+    end of the row whose title OCR located. Scan that row band, right of the
+    title, for the rightmost run of columns that differ from the row
+    background; fall back to the geometry in src/iced_app.rs (popup inset 4+1,
+    row padding 10, 28 px toggler) when no run is found.
+    """
+    width, height, channels, rows = _read_png(path)
+    y1 = max(0, label_box[1] - 2)
+    y2 = min(height, label_box[3] + 16)
+    x1 = min(width - 1, label_box[2] + 8)
+    x2 = min(width, window_width - 6)
+    cy = (label_box[1] + label_box[3]) // 2 + 7
+    columns = []
+    for x in range(x1, x2):
+        hit = False
+        for y in range(y1, y2):
+            row = rows[y]
+            bg = row[x1 * channels: x1 * channels + 3]
+            px = row[x * channels: x * channels + 3]
+            if sum(abs(a - b) for a, b in zip(px, bg)) > 60:
+                hit = True
+                break
+        if hit:
+            columns.append(x)
+    runs = []
+    for x in columns:
+        if runs and x - runs[-1][1] <= 2:
+            runs[-1][1] = x
+        else:
+            runs.append([x, x])
+    for left, right in reversed(runs):
+        if 10 <= right - left + 1 <= 60:
+            return ((left + right) // 2, cy), "pixels"
+    return (window_width - 29, cy), "geometry"
+
+
 def populated_profile_ssh(ports, echo_port: int) -> dict:
     """``ssh`` block for the populated profile (schema: src/lib.rs SshOptions)."""
     specs = [f"127.0.0.1:{port}:127.0.0.1:{echo_port}" for port in ports]
@@ -4656,6 +4695,80 @@ async def main() -> int:
                     lambda: "NATIVE_ECHO:AFTER_TUNNEL_SETTINGS" in events.path.read_text(encoding="utf-8").splitlines(),
                     "shell echo after closing Tunnel Manager without terminal click",
                 )
+
+                if POPULATED:
+                    # Functional per-forward toggles. Truth is the loopback
+                    # listener (echo through the fixture SSH server, or a
+                    # real refusal), never the screenshot.
+                    port_a, port_b = forward_ports
+                    label_a, label_b = POPULATED_LABELS
+
+                    async def popup_row(label: str, shot: Path):
+                        for attempt in range(2):
+                            try:
+                                return await locate_rendered_label(
+                                    window, shot, label, env=env,
+                                    region=popup_region, timeout=8,
+                                )
+                            except RuntimeError:
+                                if attempt:
+                                    raise
+                                await click_label(
+                                    window, destination / "connected-tunnels-reopen.png",
+                                    "Tunnels", env, timeout=10,
+                                    region=(max(0, tun_width - 220), 0, tun_width, 42),
+                                )
+
+                    async def toggle(label: str, name: str) -> None:
+                        shot = destination / f"connected-tunnels-{name}-before.png"
+                        box = await popup_row(label, shot)
+                        (x, y), source = await asyncio.to_thread(
+                            toggler_target, shot, box, tun_width,
+                        )
+                        print(f"tunnel toggle {name}: {label} row {box} -> ({x},{y}) via {source}",
+                              flush=True)
+                        command("xdotool", "mousemove", "--window", window,
+                                str(x), str(y), "click", "1", env=env)
+                        await asyncio.sleep(1)
+
+                    allow_before = events.path.read_text(encoding="utf-8").count("LOCAL_FORWARD_ALLOW")
+                    await click_label(
+                        window, destination / "connected-tunnels-button-2.png", "Tunnels", env,
+                        region=(max(0, tun_width - 220), 0, tun_width, 42), timeout=15,
+                    )
+                    await toggle(label_a, "start-a")
+                    await forward_echo(port_a, b"GUI_FORWARD_ALPHA_1")
+                    if events.path.read_text(encoding="utf-8").count("LOCAL_FORWARD_ALLOW") <= allow_before:
+                        raise RuntimeError("alpha echo did not traverse the fixture SSH forward")
+                    await forward_refused(port_b, "bravo after starting only alpha")
+                    await popup_row(label_a, destination / "connected-tunnels-popup-one-running.png")
+                    await toggle(label_b, "start-b")
+                    await forward_echo(port_b, b"GUI_FORWARD_BRAVO_1")
+                    await toggle(label_a, "stop-a")
+                    await forward_refused(port_a, "alpha after its own stop")
+                    await forward_echo(port_b, b"GUI_FORWARD_BRAVO_2")
+                    await toggle(label_b, "stop-b")
+                    await forward_refused(port_b, "bravo after its own stop")
+                    await forward_refused(port_a, "alpha still stopped")
+                    await asyncio.to_thread(
+                        screenshot, window, destination / "connected-tunnels-popup-stopped.png", env,
+                    )
+                    command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                    await asyncio.sleep(.6)
+                    command(
+                        "xdotool", "windowfocus", window, "mousemove", "--window", window,
+                        "640", "280", "click", "1", env=env,
+                    )
+                    await asyncio.sleep(.3)
+                    command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                            "echo:AFTER_TUNNEL_TOGGLES", env=env)
+                    command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                    await wait_for(
+                        lambda: "NATIVE_ECHO:AFTER_TUNNEL_TOGGLES" in events.path.read_text(encoding="utf-8").splitlines(),
+                        "shell echo after per-forward tunnel toggles",
+                    )
+                    print("PASS populated tunnels: independent per-forward start/stop "
+                          "(echo + refusal through fixture SSH)", flush=True)
 
                 event_log = events.path.read_text(encoding="utf-8")
                 if "SHELL_PTY_RESIZE" not in event_log:
