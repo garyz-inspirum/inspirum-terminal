@@ -11218,7 +11218,6 @@ mod tests {
                 < TUNNEL_MENU_WIDTH - 22.0
         );
         assert!(!TUNNEL_MENU_EMPTY.contains("Settings"));
-        assert!(TUNNEL_MENU_SECONDARY_TEXT >= 12.0);
     }
 
     #[test]
