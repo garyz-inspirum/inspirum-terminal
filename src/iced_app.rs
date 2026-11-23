@@ -10938,12 +10938,19 @@ fn session_row_open(_theme: &Theme, _status: button::Status) -> button::Style {
 }
 
 fn flat_input(_: &Theme, status: text_input::Status) -> text_input::Style {
-    let p = theme::palette();
+    flat_input_style(theme::palette(), status)
+}
+
+fn flat_input_style(p: &theme::Palette, status: text_input::Status) -> text_input::Style {
     let focused = matches!(status, text_input::Status::Focused { .. });
     text_input::Style {
         background: p.list.into(),
         border: Border {
-            color: if focused { p.accent } else { p.border },
+            color: if focused {
+                p.input_focus_border()
+            } else {
+                p.input_border()
+            },
             width: 1.0,
             radius: 0.0.into(),
         },

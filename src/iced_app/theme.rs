@@ -43,6 +43,8 @@ pub(super) struct Palette {
     pub hover: Color,
     pub selected_row: Color,
     pub border: Color,
+    /// Outline for interactive controls (text fields), >= 3:1 on all fills.
+    pub control_outline: Color,
     pub text: Color,
     pub text_dock: Color,
     pub muted: Color,
@@ -75,6 +77,17 @@ impl Palette {
     pub fn input_placeholder(self) -> Color {
         self.field_help()
     }
+
+    /// Resting text-field outline. The shared `border` divider is too faint
+    /// (1.61:1 on the light dock); controls need 3:1 against every fill.
+    pub fn input_border(self) -> Color {
+        self.control_outline
+    }
+
+    /// Focused text-field outline; `accent` misses 3:1 on the light dock.
+    pub fn input_focus_border(self) -> Color {
+        self.selection_indicator
+    }
 }
 
 const fn hex(value: u32) -> Color {
@@ -96,6 +109,7 @@ pub(super) const LIGHT: Palette = Palette {
     hover: hex(0xE4E4E4),
     selected_row: hex(0xD8D8D8),
     border: hex(0xBFBFBF),
+    control_outline: hex(0x767676),
     text: hex(0x151515),
     text_dock: hex(0x333333),
     muted: hex(0x5C5C5C),
@@ -120,6 +134,7 @@ pub(super) const DARK: Palette = Palette {
     hover: hex(0x2A2A2A),
     selected_row: hex(0x3A3A3A),
     border: hex(0x444444),
+    control_outline: hex(0x8A8A8A),
     text: hex(0xBFBFBF),
     text_dock: hex(0xBFBFBF),
     muted: hex(0xAAAAAA),
