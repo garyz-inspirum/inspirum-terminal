@@ -478,6 +478,14 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
             Subscription::run(pty_bridge),
             Subscription::run(transfer_bridge),
             Subscription::run(frame_bridge),
+            if tunnel_status_poll_active(
+                app.tunnel_menu,
+                matches!(app.dialog, Some(Dialog::Tunnels)),
+            ) {
+                Subscription::run(tunnel_status_poll)
+            } else {
+                Subscription::none()
+            },
         ])
     })
     .run()
@@ -497,6 +505,24 @@ fn frame_timer_worker(
             break;
         }
     }
+}
+
+/// While the tunnel popup or settings are open, re-read process state once a
+/// second so an ssh that exits on its own does not leave a stale switch.
+fn tunnel_status_poll() -> impl Stream<Item = Message> {
+    iced::stream::channel(1, async |mut output| {
+        let (tick_sender, mut ticks) = mpsc::unbounded();
+        thread::spawn(move || {
+            while tick_sender.unbounded_send(()).is_ok() {
+                thread::sleep(Duration::from_secs(1));
+            }
+        });
+        while ticks.next().await.is_some() {
+            if output.send(Message::TunnelRefresh).await.is_err() {
+                break;
+            }
+        }
+    })
 }
 
 fn frame_bridge() -> impl Stream<Item = Message> {
@@ -2060,13 +2086,14 @@ const TUNNEL_EDITOR_PADDING: f32 = 12.0;
 /// Static editor field labels, rendered single-line at 12 px. Test-only:
 /// the editor renders these literals inline; tests pin label-column widths.
 #[cfg(test)]
-const TUNNEL_EDITOR_LABELS: [&str; 8] = [
+const TUNNEL_EDITOR_LABELS: [&str; 9] = [
     "Name",
     "Type",
     "Session / profile",
     "Listen Port",
     "Destination Host",
     "Destination Port",
+    "Status (forward)",
     "Status (session)",
     "Bind address",
 ];
@@ -2243,6 +2270,88 @@ fn quick_forward_action(quick: &QuickForward, acknowledged: bool) -> QuickForwar
     } else {
         QuickForwardAction::Start
     }
+}
+
+/// ssh processes actually running: whole-profile processes plus forwards
+/// started individually. Rows owned by a profile process are not recounted.
+fn running_tunnel_processes(
+    aggregate: &std::collections::BTreeMap<String, tunnels::Status>,
+    quick: &[QuickForward],
+) -> usize {
+    let profiles = aggregate
+        .values()
+        .filter(|status| status.is_running())
+        .count();
+    let individual = quick
+        .iter()
+        .filter(|quick| quick.running && !quick.aggregate)
+        .count();
+    profiles + individual
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionTunnelOp {
+    Stop,
+    Start,
+    /// Shown disabled with the reason; the manager would reject the start.
+    Unavailable(&'static str),
+}
+
+fn session_tunnel_op(
+    aggregate_running: bool,
+    has_rows: bool,
+    individual_running: usize,
+) -> SessionTunnelOp {
+    if aggregate_running {
+        SessionTunnelOp::Stop
+    } else if individual_running > 0 {
+        SessionTunnelOp::Unavailable("Stop individual forwards before starting the whole session.")
+    } else if !has_rows {
+        SessionTunnelOp::Unavailable("Save a forward before starting session tunnels.")
+    } else {
+        SessionTunnelOp::Start
+    }
+}
+
+/// Status of the forward open in the editor, with who owns its process.
+fn selected_forward_status(
+    quick: &[QuickForward],
+    key: &str,
+    original: Option<&(tunnels::ForwardKind, String)>,
+) -> (String, bool) {
+    let Some((kind, spec)) = original else {
+        return ("Not saved".into(), false);
+    };
+    let Some(row) = quick.iter().find(|row| row.matches(key, *kind, spec)) else {
+        return ("Stopped".into(), false);
+    };
+    if row.running && row.aggregate {
+        ("Running · whole session".into(), true)
+    } else if row.running {
+        ("Running · individual".into(), true)
+    } else if let Some(error) = &row.failed {
+        (format!("Failed · {error}"), false)
+    } else {
+        ("Stopped".into(), false)
+    }
+}
+
+/// Tunnel UI open: poll so an unexpected ssh exit reconciles switches.
+fn tunnel_status_poll_active(menu_open: bool, dialog_open: bool) -> bool {
+    menu_open || dialog_open
+}
+
+/// Notice for the first forward that was running and no longer is.
+fn tunnel_exit_notice(before: &[QuickForward], after: &[QuickForward]) -> Option<String> {
+    after.iter().find_map(|now| {
+        let was_running = before.iter().any(|old| {
+            old.running && old.matches(&now.row.profile_key, now.row.kind, &now.row.spec)
+        });
+        (was_running && !now.running).then(|| match &now.failed {
+            Some(error) => format!("{} exited: {error}", now.title()),
+            None => format!("{} stopped.", now.title()),
+        })
+    })
 }
 
 fn quick_forward_blocked_reason(quick: &QuickForward) -> String {
@@ -5627,7 +5736,13 @@ impl App {
                 self.refresh_tunnel_status();
                 self.dialog = Some(Dialog::Tunnels);
             }
-            Message::TunnelRefresh => self.refresh_tunnel_status(),
+            Message::TunnelRefresh => {
+                let before = self.tunnel_quick.clone();
+                self.refresh_tunnel_status();
+                if let Some(notice) = tunnel_exit_notice(&before, &self.tunnel_quick) {
+                    self.tunnel_notice = notice;
+                }
+            }
             Message::TunnelMenuToggle => {
                 self.tunnel_menu = !self.tunnel_menu;
                 if self.tunnel_menu {
@@ -7769,11 +7884,7 @@ impl App {
                 )
             })
             .count();
-        let running_tunnels = self
-            .tunnel_status
-            .values()
-            .filter(|status| status.is_running())
-            .count();
+        let running_tunnels = running_tunnel_processes(&self.tunnel_status, &self.tunnel_quick);
 
         let header = self.menu_bar();
 
@@ -9456,6 +9567,11 @@ impl App {
                 .get(&edit.profile_key)
                 .cloned()
                 .unwrap_or(tunnels::Status::Stopped);
+            let (forward_label, forward_running) = selected_forward_status(
+                &self.tunnel_quick,
+                &edit.profile_key,
+                edit.original.as_ref(),
+            );
             let kind_row = row![
                 action(
                     "Local",
@@ -9552,6 +9668,13 @@ impl App {
                     destination_port,
                 ],
                 row![
+                    tunnel_editor_label("Status (forward)", label_width, ink),
+                    text(forward_label)
+                        .size(12)
+                        .color(if forward_running { green() } else { muted() })
+                        .wrapping(iced::widget::text::Wrapping::None),
+                ],
+                row![
                     tunnel_editor_label("Status (session)", label_width, ink),
                     text(status.label())
                         .size(12)
@@ -9566,18 +9689,29 @@ impl App {
             .spacing(12);
             let has_owner_rows =
                 owner.is_some_and(|profile| !tunnels::rows_for(profile).is_empty());
-            let operation = if status.is_running() {
-                action(
+            let individual_running = self
+                .tunnel_quick
+                .iter()
+                .filter(|quick| {
+                    quick.row.profile_key == edit.profile_key && quick.running && !quick.aggregate
+                })
+                .count();
+            let session_op =
+                session_tunnel_op(status.is_running(), has_owner_rows, individual_running);
+            let operation = match session_op {
+                SessionTunnelOp::Stop => action(
                     "Stop session tunnels",
                     Message::TunnelStop(edit.profile_key.clone()),
-                )
-            } else if has_owner_rows {
-                action(
+                ),
+                SessionTunnelOp::Start => action(
                     "Start session tunnels",
                     Message::TunnelStart(edit.profile_key.clone()),
-                )
-            } else {
-                button(text("Start session tunnels"))
+                ),
+                SessionTunnelOp::Unavailable(_) => button(text("Start session tunnels")),
+            };
+            let operation_reason: Element<'_, Message> = match session_op {
+                SessionTunnelOp::Unavailable(reason) => text(reason).size(11).color(muted()).into(),
+                SessionTunnelOp::Stop | SessionTunnelOp::Start => column![].into(),
             };
             let mut controls = column![
                 grid,
@@ -9595,6 +9729,7 @@ impl App {
                     .size(11)
                     .color(muted()),
                 operation.style(quiet),
+                operation_reason,
             ]
             .spacing(10);
             if let Some(profile) = owner
