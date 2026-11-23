@@ -8153,11 +8153,12 @@ impl App {
     }
 
     fn menu_bar(&self) -> Element<'_, Message> {
+        let chrome = theme::current();
         let mut titles = row![].align_y(iced::Center);
         for menu in menu::Menu::ALL {
             let open = self.open_menu == Some(menu);
             titles = titles.push(
-                mouse_area(
+                mouse_area(with_state_rule(
                     button(
                         text(menu.title())
                             .size(theme::metrics::UI_TEXT)
@@ -8168,11 +8169,14 @@ impl App {
                     .width(menu.title_width())
                     .style(move |theme, status| menu_title(theme, status, open))
                     .on_press(Message::MenuOpen(menu)),
-                )
+                    theme::menu_title_cue(chrome, open),
+                    iced::alignment::Vertical::Bottom,
+                ))
                 .on_enter(Message::MenuHover(menu)),
             );
         }
-        titles = titles.push(space::horizontal()).push(
+        let tunnel_open = self.tunnel_menu;
+        titles = titles.push(space::horizontal()).push(with_state_rule(
             button(
                 text("Tunnels")
                     .size(theme::metrics::UI_TEXT)
@@ -8180,12 +8184,11 @@ impl App {
                     .wrapping(iced::widget::text::Wrapping::None),
             )
             .padding([4, 8])
-            .style({
-                let open = self.tunnel_menu;
-                move |theme, status| menu_title(theme, status, open)
-            })
+            .style(move |theme, status| menu_title(theme, status, tunnel_open))
             .on_press(Message::TunnelMenuToggle),
-        );
+            theme::menu_title_cue(chrome, tunnel_open),
+            iced::alignment::Vertical::Bottom,
+        ));
         container(titles)
             .height(theme::metrics::MENU_BAR_HEIGHT)
             .width(Fill)
@@ -8226,9 +8229,7 @@ impl App {
                                 .size(theme::metrics::UI_TEXT)
                                 .color(theme::palette().text),
                             space::horizontal(),
-                            text(shortcut)
-                                .size(theme::metrics::UI_TEXT)
-                                .color(theme::palette().muted),
+                            menu_item_trailing(command, shortcut),
                         ]
                         .align_y(iced::Center),
                     )
@@ -8527,27 +8528,13 @@ impl App {
                     .style(icon_button)
                     .on_press(Message::AskClose(index)),
                 );
+            let cue = theme::session_tab_cue(theme::current(), active);
             let body = container(body)
                 .padding(iced::Padding::new(0.0).left(10.0).right(4.0).top(2.0))
                 .height(theme::metrics::STRIP_HEIGHT - 1.0)
                 .align_y(iced::Center)
-                .style(if active {
-                    tab_active_fill
-                } else {
-                    tab_inactive_fill
-                });
-            tabs = tabs.push(if active {
-                stack![
-                    body,
-                    container(space::horizontal())
-                        .width(Fill)
-                        .height(2)
-                        .style(accent_fill)
-                ]
-                .into()
-            } else {
-                Element::from(body)
-            });
+                .style(move |_| fill_style(cue.fill));
+            tabs = tabs.push(with_state_rule(body, cue, iced::alignment::Vertical::Top));
         }
         let tab_strip = column![
             row![
@@ -8668,14 +8655,16 @@ impl App {
                     .align_y(iced::Center)
                     .into()
             });
+            let cue = theme::pane_header_cue(theme::current(), focused);
+            let rule = cue.rule.unwrap_or(cue.fill);
             let title = pane_grid::TitleBar::new(column![
                 container(space::horizontal())
                     .width(Fill)
-                    .height(2)
-                    .style(if focused { accent_fill } else { pane_header_fill }),
+                    .height(cue.rule_height)
+                    .style(move |_| fill_style(rule)),
                 container(header).padding([0, 8]).height(20).align_y(iced::Center),
             ])
-            .style(pane_header_fill);
+            .style(move |_| fill_style(cue.fill));
 
             let terminal_body: Element<'_, Message> = if let Some(error) = &pane.error {
                 column![
@@ -10978,10 +10967,13 @@ fn active_card(theme: &Theme) -> container::Style {
 /// Flat WindTerm text button: `list` fill with a 1px `border` outline at rest,
 /// so a control still reads as clickable before the pointer reaches it.
 fn menu_title(_: &Theme, status: button::Status, open: bool) -> button::Style {
-    let p = theme::palette();
+    let chrome = theme::current();
+    let p = theme::palette_for(chrome);
+    // The open state wins over hover so the open menu never fades to the
+    // pale hover fill while the pointer rests on it.
     let background = match status {
+        _ if open => Some(theme::menu_title_cue(chrome, true).fill.into()),
         button::Status::Hovered | button::Status::Pressed => Some(p.hover.into()),
-        _ if open => Some(p.hover.into()),
         _ => None,
     };
     button::Style {
@@ -10992,13 +10984,55 @@ fn menu_title(_: &Theme, status: button::Status, open: bool) -> button::Style {
 }
 
 fn menu_item(_: &Theme, status: button::Status) -> button::Style {
-    let p = theme::palette();
+    let chrome = theme::current();
+    let p = theme::palette_for(chrome);
     button::Style {
         background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-            .then(|| p.hover.into()),
+            .then(|| theme::menu_item_hover_fill(chrome).into()),
         text_color: p.text,
         ..Default::default()
     }
+}
+
+/// The chrome theme a View-menu entry selects, if it is a theme choice.
+fn theme_menu_choice(command: menu::Command) -> Option<theme::ChromeTheme> {
+    match command {
+        menu::Command::ThemeLight => Some(theme::ChromeTheme::Light),
+        menu::Command::ThemeDark => Some(theme::ChromeTheme::Dark),
+        _ => None,
+    }
+}
+
+/// Right-hand drop-down cell: the shortcut, or for theme choices a canvas
+/// radio marker (filled = current theme, hollow = available choice).
+fn menu_item_trailing<'a>(command: menu::Command, shortcut: &'a str) -> Element<'a, Message> {
+    let p = theme::palette();
+    match theme_menu_choice(command) {
+        Some(choice) if choice == theme::current() => icons::dot(p.selection_indicator, 16.0),
+        Some(_) => icons::icon(icons::Icon::CircleHollow, 16.0, p.control_outline),
+        None => text(shortcut)
+            .size(theme::metrics::UI_TEXT)
+            .color(p.muted)
+            .into(),
+    }
+}
+
+/// Overlay a cue's accent rule on `base` (top for tabs, bottom for menu
+/// titles) without changing `base`'s size; no rule leaves `base` untouched.
+fn with_state_rule<'a>(
+    base: impl Into<Element<'a, Message>>,
+    cue: theme::StateCue,
+    edge: iced::alignment::Vertical,
+) -> Element<'a, Message> {
+    let base = base.into();
+    let Some(color) = cue.rule else {
+        return base;
+    };
+    let rule = container(space::horizontal())
+        .width(Fill)
+        .height(cue.rule_height)
+        .style(move |_| fill_style(color));
+    stack![base, container(rule).width(Fill).height(Fill).align_y(edge)].into()
 }
 
 fn quiet(_: &Theme, status: button::Status) -> button::Style {
@@ -11110,10 +11144,6 @@ fn tab_active_fill(_: &Theme) -> container::Style {
 
 fn tab_inactive_fill(_: &Theme) -> container::Style {
     fill_style(theme::palette().tab_inactive)
-}
-
-fn pane_header_fill(_: &Theme) -> container::Style {
-    fill_style(theme::palette().header)
 }
 
 fn pane_body(_: &Theme) -> container::Style {
@@ -11473,6 +11503,53 @@ fn session_group_hides_rows(collapsed: bool, query: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn theme_menu_entries_map_to_their_chrome_theme_only() {
+        use super::menu::Command;
+        use super::theme::ChromeTheme;
+        assert_eq!(
+            super::theme_menu_choice(Command::ThemeLight),
+            Some(ChromeTheme::Light)
+        );
+        assert_eq!(
+            super::theme_menu_choice(Command::ThemeDark),
+            Some(ChromeTheme::Dark)
+        );
+        for other in [Command::NewSession, Command::ZoomIn, Command::Find] {
+            assert_eq!(super::theme_menu_choice(other), None);
+        }
+        // Every View-menu theme entry gets exactly one choice marker.
+        let choices: Vec<_> = super::menu::Menu::View
+            .entries()
+            .into_iter()
+            .filter_map(|entry| match entry {
+                super::menu::Entry::Item { command, .. } => super::theme_menu_choice(command),
+                super::menu::Entry::Separator => None,
+            })
+            .collect();
+        assert_eq!(choices, vec![ChromeTheme::Light, ChromeTheme::Dark]);
+    }
+
+    #[test]
+    fn open_menu_title_is_filled_and_closed_title_keeps_enabled_text() {
+        use iced::widget::button::Status;
+        let theme = iced::Theme::Light;
+        for status in [Status::Active, Status::Hovered, Status::Pressed] {
+            let open = super::menu_title(&theme, status, true);
+            assert!(open.background.is_some(), "{status:?}: open title fill");
+        }
+        let closed = super::menu_title(&theme, Status::Active, false);
+        let open = super::menu_title(&theme, Status::Active, true);
+        assert_eq!(closed.background, None);
+        // Closed titles are enabled: same full-strength text as the open one.
+        assert_eq!(closed.text_color, open.text_color);
+        let hovered = super::menu_item(&theme, Status::Hovered);
+        let rest = super::menu_item(&theme, Status::Active);
+        assert!(hovered.background.is_some());
+        assert_eq!(rest.background, None);
+        assert_eq!(hovered.text_color, rest.text_color);
+    }
+
     #[test]
     fn clickable_controls_are_distinct_from_labels_at_rest() {
         use iced::widget::button::Status;
