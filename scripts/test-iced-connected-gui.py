@@ -1806,6 +1806,26 @@ def request_window_close(window: str, env: dict[str, str]) -> None:
 TOUR = os.environ.get("INSPIRUM_GUI_TOUR") == "1"
 
 
+def sync_badge_labels_visible(path: Path, tesseract: str, expected: str) -> bool:
+    """Require both full labels on one line inside the 640px status badge.
+
+    Full-width OCR treats the 240px badge outline as a glyph. Crop to the
+    badge and reject OCR boxes touching its border or outside the badge.
+    """
+    badge = (60, 455, 300, 480)
+    interior = (62, 461, 298, 477)
+    for psm, invert in (("6", False), ("11", False), ("6", True)):
+        words = region_upscaled_rows(path, tesseract, badge, psm=psm, invert=invert)
+        words = [(w[0].upper(), *w[1:]) for w in words if _word_inside(w, interior)]
+        count = match_visible_label(words, "2 SELECTED")
+        state = match_visible_label(words, expected)
+        if count and state and count[2] < state[0] \
+                and count[1] < state[3] and state[1] < count[3] \
+                and _bounds_inside(count, interior) and _bounds_inside(state, interior):
+            return True
+    return False
+
+
 async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app_log: Path) -> int:
     """LIGHT-theme screenshot tour (INSPIRUM_GUI_TOUR=1).
 
@@ -2201,19 +2221,12 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
                 crop = tour_dir / name.replace(".png", "-status.png")
                 await asyncio.to_thread(_region_crop_upscaled, path, (0, 440, 640, 480), 3, crop)
                 written.append(crop)
-                for psm, invert in (("6", False), ("11", False), ("6", True)):
-                    words = await asyncio.to_thread(
-                        region_upscaled_rows, path, tesseract, (0, 440, 640, 480),
-                        psm=psm, invert=invert,
+                if not await asyncio.to_thread(sync_badge_labels_visible, path, tesseract, expected):
+                    raise RuntimeError(
+                        f"{name}: badge missing full 2 SELECTED / {expected} "
+                        "inside 640px status badge"
                     )
-                    words = [(w[0].upper(), *w[1:]) for w in words]
-                    count = match_visible_label(words, "2 SELECTED")
-                    state = match_visible_label(words, expected)
-                    if count and state and count[1] < state[3] and state[1] < count[3] \
-                            and state[2] < 638:
-                        print(f"tour: {name}: visible 2 SELECTED and {expected}", flush=True)
-                        return
-                raise RuntimeError(f"{name}: badge missing full 2 SELECTED / {expected} in bottom 40px")
+                print(f"tour: {name}: visible 2 SELECTED and {expected}", flush=True)
 
             # Newly split C occupies the right edge; A occupies the left half
             # of the terminal area after the session sidebar. OCR is the gate
