@@ -223,7 +223,7 @@ impl App {
                             }
                             let path = self.profiles_path.clone();
                             self.tools.target = Some(session);
-                            return self.tool_job(move || {
+                            return self.profile_store_job(move || {
                                 save_sessions(&path, &profiles)
                                     .map(|_| Data::Profiles(profiles))
                                     .map_err(|e| format!("{e:#}"))

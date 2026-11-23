@@ -413,3 +413,165 @@ fn ssh_policy_save_from_a_stale_target_cannot_drop_a_running_forward() {
     assert_alpha_untouched(&mut app, &key, &alpha);
     app.tunnels.stop_all();
 }
+
+/// Queue "Save only" renaming the idle `srv` profile, returning the job's
+/// generation and the library it will commit (written to disk here, as the
+/// worker would, so `JobDone` can be delivered by hand).
+fn queue_rename_while_idle(app: &mut App, key: &str) -> (u64, Vec<Session>, Session) {
+    save_draft_profile_edit(app, |form| form.name = "renamed".into());
+    assert_eq!(app.form.error, None);
+    assert!(app.tools.busy, "the rename was queued");
+    let generation = app.tools.generation;
+    assert_eq!(app.tools.profile_write, Some(generation));
+    let draft = app.form.session().unwrap();
+    let profiles = save_session_edit(&app.profiles, Some(key), draft.clone()).unwrap();
+    (generation, profiles, draft)
+}
+
+fn assert_nothing_started(app: &mut App, key: &str) {
+    assert_eq!(app.tunnel_notice, PROFILE_WRITE_PENDING);
+    assert_eq!(
+        app.tunnels.forward_status(key, LOCAL, ALPHA),
+        tunnels::Status::Stopped
+    );
+    assert!(!app.tunnels.status(key).is_running());
+    assert_eq!(app.tunnels.running_count(), 0);
+}
+
+#[test]
+fn tunnel_starts_wait_for_an_in_flight_profile_save_then_retry_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, key, _) = app_with_alpha_running(dir.path());
+    app.tunnels.stop_forward(&key, LOCAL, ALPHA).unwrap();
+    app.refresh_tunnel_status();
+    let (generation, profiles, draft) = queue_rename_while_idle(&mut app, &key);
+
+    // While the rename is in flight, neither start entry may file a live
+    // process under the key the job is about to drop.
+    let _ = app.update(Message::TunnelForwardToggle(
+        key.clone(),
+        LOCAL,
+        ALPHA.into(),
+    ));
+    assert_nothing_started(&mut app, &key);
+    let _ = app.update(Message::TunnelStart(key.clone()));
+    assert_nothing_started(&mut app, &key);
+
+    // A late result from an older job does not release the gate.
+    let _ = app.update(Message::Tool(tools::Action::JobDone(
+        generation.wrapping_sub(1),
+        Ok(tools::Data::Profiles(Vec::new())),
+    )));
+    assert_eq!(app.tools.profile_write, Some(generation));
+    assert_eq!(app.profiles[0].name, "srv");
+    let _ = app.update(Message::TunnelForwardToggle(
+        key.clone(),
+        LOCAL,
+        ALPHA.into(),
+    ));
+    assert_nothing_started(&mut app, &key);
+
+    // Synchronous profile writers wait too, so the job's library cannot
+    // overwrite (or be overwritten by) a concurrent save.
+    let _ = app.update(Message::CloseDialog);
+    submit_profile_edit(&mut app, |form| form.favorite = true);
+    let error = app.form.error.clone().unwrap_or_default();
+    assert_eq!(error, PROFILE_WRITE_PENDING);
+    let _ = app.update(Message::CloseDialog);
+    let _ = app.update(Message::TunnelEdit(key.clone(), LOCAL, BRAVO.into()));
+    app.tunnel_edit.as_mut().unwrap().draft.label = "Bravo".into();
+    let _ = app.update(Message::TunnelSaveEdit);
+    assert_eq!(app.tunnel_notice, PROFILE_WRITE_PENDING);
+    let _ = app.update(Message::TunnelDeleteEdit);
+    assert_eq!(app.tunnel_notice, PROFILE_WRITE_PENDING);
+    app.tunnel_edit = None;
+    let stored = load_sessions(&app.profiles_path).unwrap();
+    assert_eq!(stored[0].name, "srv");
+    assert!(!stored[0].favorite);
+    assert_ne!(tunnels::label_for(&stored[0], LOCAL, BRAVO), "Bravo");
+    assert_ne!(tunnels::label_for(&app.profiles[0], LOCAL, BRAVO), "Bravo");
+
+    // The job commits; the gate opens and the old key is gone.
+    save_sessions(&app.profiles_path, &profiles).unwrap();
+    let _ = app.update(Message::Tool(tools::Action::JobDone(
+        generation,
+        Ok(tools::Data::DraftSaved(profiles, Box::new(draft))),
+    )));
+    assert_eq!(app.tools.profile_write, None);
+    assert!(!app.tools.busy);
+    assert_eq!(app.profiles[0].name, "renamed");
+    let renamed = session_profile_key(&app.profiles[0]);
+    assert_ne!(renamed, key);
+    let _ = app.update(Message::TunnelForwardToggle(
+        key.clone(),
+        LOCAL,
+        ALPHA.into(),
+    ));
+    assert_eq!(app.tunnels.running_count(), 0, "{}", app.tunnel_notice);
+
+    // Retrying on the committed profile starts Alpha under its new key.
+    let _ = app.update(Message::TunnelForwardToggle(
+        renamed.clone(),
+        LOCAL,
+        ALPHA.into(),
+    ));
+    assert!(
+        app.tunnels
+            .forward_status(&renamed, LOCAL, ALPHA)
+            .is_running(),
+        "{}",
+        app.tunnel_notice
+    );
+    assert_eq!(
+        load_sessions(&app.profiles_path).unwrap()[0].name,
+        "renamed"
+    );
+    app.tunnels.stop_all();
+}
+
+#[test]
+fn a_failed_profile_save_releases_tunnel_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, key, _) = app_with_alpha_running(dir.path());
+    app.tunnels.stop_forward(&key, LOCAL, ALPHA).unwrap();
+    app.refresh_tunnel_status();
+    let (generation, _, _) = queue_rename_while_idle(&mut app, &key);
+    let _ = app.update(Message::TunnelStart(key.clone()));
+    assert_nothing_started(&mut app, &key);
+
+    let _ = app.update(Message::Tool(tools::Action::JobDone(
+        generation,
+        Err("disk full".into()),
+    )));
+    assert_eq!(app.tools.profile_write, None);
+    assert_eq!(app.status, "disk full");
+    assert_eq!(session_profile_key(&app.profiles[0]), key);
+    let _ = app.update(Message::TunnelStart(key.clone()));
+    assert!(
+        app.tunnels.status(&key).is_running(),
+        "{}",
+        app.tunnel_notice
+    );
+    app.tunnels.stop_all();
+}
+
+#[test]
+fn unrelated_tool_jobs_do_not_gate_tunnel_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, key, _) = app_with_alpha_running(dir.path());
+    app.tunnels.stop_forward(&key, LOCAL, ALPHA).unwrap();
+    let _ = app.update(Message::Tool(tools::Action::ExportProfiles));
+    assert!(app.tools.busy, "the export was queued");
+    assert_eq!(app.tools.profile_write, None);
+    let _ = app.update(Message::TunnelForwardToggle(
+        key.clone(),
+        LOCAL,
+        ALPHA.into(),
+    ));
+    assert!(
+        app.tunnels.forward_status(&key, LOCAL, ALPHA).is_running(),
+        "{}",
+        app.tunnel_notice
+    );
+    app.tunnels.stop_all();
+}

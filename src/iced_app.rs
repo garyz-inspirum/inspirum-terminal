@@ -2371,6 +2371,9 @@ fn quick_forward_blocked_reason(quick: &QuickForward) -> String {
     }
 }
 
+const PROFILE_WRITE_PENDING: &str =
+    "A profile library save is still in progress; try again when it finishes.";
+
 /// A running managed tunnel process (aggregate or per-forward) and the saved
 /// profile it is filed under, captured before a profile-store write.
 struct LiveTunnelOwner {
@@ -5851,6 +5854,9 @@ impl App {
                         };
                     }
                     QuickForwardAction::Start => {
+                        if self.profile_write_pending() {
+                            return Task::none();
+                        }
                         let Some(session) = self
                             .profiles
                             .iter()
@@ -5964,6 +5970,9 @@ impl App {
                 let Some(edit) = self.tunnel_edit.clone() else {
                     return Task::none();
                 };
+                if self.profile_write_pending() {
+                    return Task::none();
+                }
                 if self.tunnels.status(&edit.profile_key).is_running() {
                     self.tunnel_notice =
                         "Stop this profile's tunnel process before changing its forwards.".into();
@@ -6027,6 +6036,9 @@ impl App {
                 let Some(edit) = self.tunnel_edit.clone() else {
                     return Task::none();
                 };
+                if self.profile_write_pending() {
+                    return Task::none();
+                }
                 let Some((kind, spec)) = edit.original else {
                     self.tunnel_edit = None;
                     return Task::none();
@@ -6068,6 +6080,9 @@ impl App {
             }
             Message::TunnelAcknowledge(key, value) => self.tunnels.set_acknowledged(&key, value),
             Message::TunnelStart(key) => {
+                if self.profile_write_pending() {
+                    return Task::none();
+                }
                 let Some(session) = self
                     .profiles
                     .iter()
@@ -9360,7 +9375,23 @@ impl App {
     /// Why writing `candidate` as the whole profile library would orphan or
     /// misattribute a running tunnel, if it would.
     fn profile_store_tunnel_conflict(&mut self, candidate: &[Session]) -> Option<&'static str> {
+        if self.tools.profile_write.is_some() {
+            return Some(PROFILE_WRITE_PENDING);
+        }
         self.live_tunnel_owners().conflict(candidate)
+    }
+
+    /// An async profile-store job judged its candidate against the live
+    /// tunnels it snapshotted when it was queued. Starting a tunnel (or
+    /// writing the store another way) before it commits could leave a live
+    /// process filed under a profile that job is about to drop or change,
+    /// so both wait; this sets the notice and says whether to refuse.
+    fn profile_write_pending(&mut self) -> bool {
+        let pending = self.tools.profile_write.is_some();
+        if pending {
+            self.tunnel_notice = PROFILE_WRITE_PENDING.into();
+        }
+        pending
     }
 
     fn refresh_tunnel_status(&mut self) {
