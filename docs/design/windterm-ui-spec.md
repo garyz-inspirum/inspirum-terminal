@@ -276,6 +276,45 @@ strip like a dock title, flat inputs with 1 px border, text buttons per
 section 3, primary button = accent fill with white text. Privacy curtain and
 focus mode keep their behaviour.
 
+### 8.1 Tunnel management (WindTerm reference)
+
+The supplied WindTerm screenshots distinguish **daily operation** from **editing**:
+
+- The top-right `Tunnels` control opens a compact, scrollable menu headed
+  `Tunnels`, with a master state at the top, one row per saved forward (name and
+  type marker at left; state switch at right), and a separated `Tunnel
+  Settings...` command at the bottom. A switch must drive that one forward,
+  not silently start or stop every forward belonging to the same SSH profile.
+  An independently switchable process must be backed by the existing validated
+  OpenSSH launcher, acknowledgement for non-loopback binds, and real status.
+  Until that runtime is ready, do not show a decorative switch.
+- `Tunnel Settings...` opens the editor: left scrollable saved-tunnel list with
+  a neutral selected row and compact add/remove actions; right aligned
+  `Name`, `Type`, `Session`, `Listen Port`, `Destination Host`,
+  `Destination Port`, `Status` fields, then safety/startup options only when
+  actually implemented. In Dynamic mode, destination is visibly inapplicable
+  rather than a required input. Selecting a tunnel reveals its actual owner
+  profile; save/delete retain current validation and persistence. The settings
+  dialog should remain usable with a long list and at minimum window size.
+- Do not hard-code names from the supplied screenshots; these are the user's
+  personal saved entries, not fixtures or app defaults. Do not copy WindTerm
+  icons or source. Match the two-surface workflow, row alignment, density,
+  neutral selection, and clear on/off states.
+- **Light theme across the whole interface:** primary labels and entered
+  values are dark (`text` / `text_dock`), supporting explanations and
+  placeholders are a distinct readable gray (`muted`). Text smaller than
+  18 px targets 4.5:1 contrast on its real background; control outlines
+  needed to identify an input target 3:1. Preserve equally readable dark
+  theme. Error/status text is not styled as an ordinary explanation.
+
+Acceptance: from the menu, toggle one of two saved forwards in the same
+profile and prove only its listener opens/closes while the other stays up;
+open settings, select/add/edit/delete a tunnel, save/reopen and verify the
+saved values; confirm a dynamic forward does not ask for a fixed destination;
+inspect light/dark screenshots of the menu and expanded editor, including
+minimum window size. A master toggle must have defined, tested behavior rather
+than merely mirroring a color.
+
 ## 9. Things that must keep working
 
 Keyboard shortcuts, IME wrapper, guarded paste, sync-input safety warnings,
