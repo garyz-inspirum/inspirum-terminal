@@ -379,9 +379,28 @@ impl ProcessKey {
     }
 }
 
+/// Remote (`-R`) listeners bind on the SSH server, so their port namespace
+/// is per server; local and dynamic listeners all share this machine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ServerIdentity {
+    host: String,
+    port: Option<u16>,
+}
+
+impl ServerIdentity {
+    fn of(session: &Session) -> Self {
+        Self {
+            host: session.host.trim().to_ascii_lowercase(),
+            port: session.port,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Manager {
     processes: BTreeMap<ProcessKey, TunnelProcess>,
+    /// Server each managed process connected to, for remote conflicts.
+    servers: BTreeMap<ProcessKey, ServerIdentity>,
     failures: BTreeMap<ProcessKey, String>,
     /// Per-start acknowledgement for non-loopback binds, keyed by profile.
     /// UI state only; never persisted (docs/tunnels.md).
@@ -395,10 +414,12 @@ impl Manager {
                 Ok(true) => return Status::Running { pid: process.id() },
                 Ok(false) => {
                     self.processes.remove(key);
+                    self.servers.remove(key);
                     self.failures.insert(key.clone(), "ssh exited".into());
                 }
                 Err(error) => {
                     self.processes.remove(key);
+                    self.servers.remove(key);
                     self.failures.insert(key.clone(), format!("{error:#}"));
                 }
             }
@@ -511,7 +532,9 @@ impl Manager {
         );
         // Reject conflicting listeners before spawning; OpenSSH also enforces
         // ExitOnForwardFailure for conflicts with external processes.
+        // Remote listeners only conflict on the same SSH server.
         let listener = split_spec(kind, spec).0;
+        let server = ServerIdentity::of(session);
         let active: Vec<_> = self.processes.keys().cloned().collect();
         for other in active {
             if !self.status_for(&other).is_running() {
@@ -523,10 +546,20 @@ impl Manager {
                 ..
             } = &other
             {
-                let same_side =
-                    (kind == ForwardKind::Remote) == (*other_kind == ForwardKind::Remote);
+                let same_namespace = match (
+                    kind == ForwardKind::Remote,
+                    *other_kind == ForwardKind::Remote,
+                ) {
+                    (false, false) => true,
+                    // Unknown server: stay conservative and treat as shared.
+                    (true, true) => self
+                        .servers
+                        .get(&other)
+                        .is_none_or(|other| *other == server),
+                    _ => false,
+                };
                 ensure!(
-                    !same_side || split_spec(*other_kind, other_spec).0 != listener,
+                    !same_namespace || split_spec(*other_kind, other_spec).0 != listener,
                     "tunnel listener is already managed by another forward"
                 );
             }
@@ -543,6 +576,7 @@ impl Manager {
         match crate::terminal::start_tunnels(&selected, config) {
             Ok(process) => {
                 let pid = process.id();
+                self.servers.insert(key.clone(), server);
                 self.processes.insert(key, process);
                 self.acknowledged.remove(&profile);
                 Ok(Status::Running { pid })
@@ -573,6 +607,7 @@ impl Manager {
     }
 
     fn stop_key(&mut self, key: &ProcessKey) -> Result<()> {
+        self.servers.remove(key);
         if let Some(mut process) = self.processes.remove(key) {
             process.stop()?;
         }
@@ -852,5 +887,66 @@ mod tests {
         .unwrap();
         assert!(rows_for(&session).is_empty());
         assert!(session.ssh.tunnel_labels.is_empty());
+    }
+
+    /// Forwarding-only `ssh -N` that stays alive without any server: the
+    /// ProxyCommand never sends a banner, so no listener is ever bound.
+    fn hung_ssh_config(dir: &Path) -> std::path::PathBuf {
+        let config = dir.join("ssh_config");
+        std::fs::write(&config, "Host *\n  ProxyCommand sleep 30\n").unwrap();
+        config
+    }
+
+    #[test]
+    fn remote_listener_conflicts_are_scoped_to_the_ssh_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = hung_ssh_config(dir.path());
+        let config = Some(config.as_path());
+        let remote = "127.0.0.1:9000:127.0.0.1:3000";
+        let local = "127.0.0.1:18080:web:80";
+        let profile = |name: &str, host: &str| Session {
+            name: name.into(),
+            host: host.into(),
+            ssh: crate::SshOptions {
+                local_forwards: vec![local.into()],
+                remote_forwards: vec![remote.into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let one = profile("one", "one.invalid");
+        let two = profile("two", "two.invalid");
+        let one_again = profile("one again", "ONE.invalid");
+        let mut manager = Manager::default();
+        let (r, l) = (ForwardKind::Remote, ForwardKind::Local);
+
+        let first = manager.start_forward(&one, r, remote, config).unwrap();
+        assert!(first.is_running(), "{first:?}");
+        // A distinct server has its own remote port namespace.
+        let second = manager.start_forward(&two, r, remote, config).unwrap();
+        assert!(second.is_running(), "distinct server: {second:?}");
+        // Same server through another profile: that remote port is taken.
+        let error = manager
+            .start_forward(&one_again, r, remote, config)
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("already managed"),
+            "{error:#}"
+        );
+        // Local listeners share this machine whatever the server.
+        assert!(
+            manager
+                .start_forward(&one, l, local, config)
+                .unwrap()
+                .is_running()
+        );
+        let error = manager.start_forward(&two, l, local, config).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("already managed"),
+            "{error:#}"
+        );
+        assert_eq!(manager.running_count(), 3);
+        manager.stop_all();
+        assert_eq!(manager.running_count(), 0);
     }
 }

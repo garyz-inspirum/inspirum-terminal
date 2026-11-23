@@ -11,6 +11,8 @@ mod menu;
 mod terminal_ime;
 mod theme;
 mod tools;
+#[cfg(test)]
+mod tunnel_edit_lifecycle_tests;
 mod ui_state;
 
 use crate::{
@@ -5795,6 +5797,20 @@ impl App {
                         return Task::none();
                     }
                 };
+                // A running forward is keyed by its kind and spec; changing
+                // either would orphan the live listener. Label-only is safe.
+                if let Some((old_kind, old_spec)) = &edit.original
+                    && (*old_kind != edit.draft.kind || *old_spec != spec)
+                    && self
+                        .tunnels
+                        .forward_status(&edit.profile_key, *old_kind, old_spec)
+                        .is_running()
+                {
+                    self.tunnel_notice =
+                        "Stop this forward before changing its listener or destination.".into();
+                    self.refresh_tunnel_status();
+                    return Task::none();
+                }
                 let mut profiles = self.profiles.clone();
                 let Some(profile) = profiles
                     .iter_mut()
@@ -5838,6 +5854,15 @@ impl App {
                 if self.tunnels.status(&edit.profile_key).is_running() {
                     self.tunnel_notice =
                         "Stop this profile's tunnel process before deleting a forward.".into();
+                    self.refresh_tunnel_status();
+                    return Task::none();
+                }
+                if self
+                    .tunnels
+                    .forward_status(&edit.profile_key, kind, &spec)
+                    .is_running()
+                {
+                    self.tunnel_notice = "Stop this forward before deleting it.".into();
                     self.refresh_tunnel_status();
                     return Task::none();
                 }
