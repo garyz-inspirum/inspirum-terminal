@@ -1096,6 +1096,95 @@ def saved_local_forwards(profiles_path: Path, profile_name: str) -> list[str]:
     raise RuntimeError(f"profile {profile_name!r} missing from {profiles_path}")
 
 
+def saved_profile_names(profiles_path: Path) -> list[str]:
+    """Profile names as persisted on disk (same layouts as above)."""
+    data = json.loads(profiles_path.read_text(encoding="utf-8"))
+    sessions = data.get("sessions", data) if isinstance(data, dict) else data
+    return [session.get("name") for session in sessions]
+
+
+# Sessions-pane Edit Profile probe (Edit SSH connection dialog).
+# DIALOG_DEFAULT_WIDTH (src/iced_app.rs) centred on the window; the dialog
+# frame hangs below the 32 px menu bar and stops above the status bar.
+CONNECTION_DIALOG_W = 600
+CONNECTION_DIALOG_TITLE = "Edit SSH connection"
+# Rename target for the running owner; must never reach the profile file.
+PROFILE_RENAME_PROBE = "CI tunnel renamed"
+# A refused Submit keeps the dialog open and pushes `form.error` (palette
+# danger, dark #FF5C5C) above the buttons. Counted as fresh danger-text
+# pixels against the pre-Submit frame so the wording is not assumed.
+PROFILE_REFUSAL_MIN_RED = 40
+
+
+def connection_dialog_region(width: int, height: int):
+    """Box of the centred Edit/New SSH connection dialog."""
+    half = CONNECTION_DIALOG_W // 2 + 4
+    return (max(0, width // 2 - half), 32, min(width, width // 2 + half), max(33, height - 22))
+
+
+def danger_text_pixels(path: Path, region, *, image=None) -> int:
+    """Pixels of saturated danger-red text inside ``region``.
+
+    Dark danger is (255,92,92); the amber preflight warning (246,184,75)
+    and anything dimmed by the modal backdrop (R <= 166) are excluded.
+    """
+    width, height, channels, rows = image or _read_png(path)
+    x1, y1, x2, y2 = region
+    count = 0
+    for y in range(max(0, y1), min(height, y2)):
+        row = rows[y]
+        for x in range(max(0, x1), min(width, x2)):
+            r, g, b = row[x * channels], row[x * channels + 1], row[x * channels + 2]
+            if r >= 200 and g <= 140 and b <= 140 and r - g >= 90:
+                count += 1
+    return count
+
+
+def connection_submit_button(path: Path, save_only_bounds, width: int):
+    """Centre and box of the primary "Save changes" fill right of the
+    OCR-located "Save only" label on the same button row, or ``None``.
+    Only that row is scanned, so a selected toggle elsewhere in the form
+    (flat_selected) cannot match."""
+    image = _read_png(path)
+    a1, a2, a3, a4 = save_only_bounds
+    hits = []
+    for y in range(a2 - 8, a4 + 9):
+        run = primary_fill_run(path, y, a3 + 4, min(width, a3 + 260), min_width=40, image=image)
+        if run and run[1] - run[0] <= 200:
+            hits.append((y, run))
+    if len(hits) < 6:
+        return None
+    ys = [y for y, _run in hits]
+    box = (min(r[0] for _y, r in hits), min(ys), max(r[1] for _y, r in hits), max(ys) + 1)
+    return ((box[0] + box[2]) // 2, (box[1] + box[3]) // 2), box
+
+
+def local_forward_input_centre(label_bounds, width: int) -> tuple[int, int]:
+    """Click target inside the "Local forward (-L)" text input, which sits
+    4 px below its 13 px label (padding 8: ~33 px tall)."""
+    left, _top, right, _bottom = connection_dialog_region(width, 10_000)
+    x = max(label_bounds[0] + 120, left + 160)
+    return (min(x, right - 40), label_bounds[3] + 22)
+
+
+def profile_edit_refused(*, file_before: bytes, file_after: bytes, title_visible: bool,
+                         red_before: int, red_after: int, context: str) -> None:
+    """Verdict for a Submit that must be refused BEFORE any disk write.
+
+    Truth is the profile file (byte-identical); the dialog must still be
+    open, and fresh danger text is the positive signal that the click
+    reached Submit (a missed click also leaves the file unchanged)."""
+    if file_after != file_before:
+        raise RuntimeError(f"{context}: refused profile edit reached the profile file")
+    if not title_visible:
+        raise RuntimeError(f"{context}: Submit closed the {CONNECTION_DIALOG_TITLE!r} dialog")
+    if red_after - red_before < PROFILE_REFUSAL_MIN_RED:
+        raise RuntimeError(
+            f"{context}: no inline refusal after Submit (danger pixels "
+            f"{red_before} -> {red_after}, need +{PROFILE_REFUSAL_MIN_RED})"
+        )
+
+
 def light_locate(path: Path, label: str, *, region, budget=None, tesseract=None):
     """Dark-text-on-light locator for the LIGHT tour chrome.
 
@@ -5346,6 +5435,240 @@ async def main() -> int:
                               "Bravo edit/save/reopen/remove persisted while Alpha ran",
                               flush=True)
 
+                    async def profile_edit_probe() -> None:
+                        """Sessions pane -> right-click 'CI tunnel fixture' ->
+                        Edit -> Edit SSH connection -> Save changes, while
+                        Alpha runs. Renaming the owner or changing Alpha's
+                        active spec is refused before any disk write (file
+                        byte-identical, inline error, Alpha keeps echoing);
+                        adding/editing an idle sibling (Bravo) is allowed;
+                        finally the ORIGINAL popup switch stops Alpha.
+                        Runs after running_edit_delete_probe, which leaves
+                        exactly [Alpha] saved and nothing running."""
+                        owner = "CI tunnel fixture"
+                        if disk_forwards() != [spec(port_a)]:
+                            raise RuntimeError(f"profile probe start state: {disk_forwards()}")
+                        await click_label(
+                            window, destination / "connected-profile-start-button.png",
+                            "Tunnels", env, region=(max(0, tun_width - 220), 0, tun_width, 42),
+                            timeout=15,
+                        )
+                        await toggle(label_a, "profile-start-a")
+                        await forward_echo(port_a, b"GUI_FORWARD_ALPHA_PROFILE_0")
+                        command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                        await asyncio.sleep(.6)
+
+                        async def session_row():
+                            """Bounds of the owner row in the Sessions pane.
+                            View > Session toggles: use it only on a miss."""
+                            w, h = window_size(window, env)
+                            for attempt in range(3):
+                                try:
+                                    return await locate_rendered_label(
+                                        window, destination / f"connected-profile-row-{attempt}.png",
+                                        owner, env=env, region=(0, 32, w, h - 22), timeout=6,
+                                    )
+                                except RuntimeError:
+                                    if attempt == 2:
+                                        raise
+                                await click_label(
+                                    window, destination / f"connected-profile-view-{attempt}.png",
+                                    "View", env, region=(0, 0, 500, 32), timeout=10, settle=.4,
+                                )
+                                await click_label(
+                                    window, destination / f"connected-profile-view-session-{attempt}.png",
+                                    "Session", env, region=(0, 34, 520, 420), timeout=10, settle=.8,
+                                )
+
+                        async def open_edit(tag: str):
+                            """Real Sessions-pane path; returns the dialog region."""
+                            row = await session_row()
+                            x, y = center(row)
+                            command("xdotool", "mousemove", "--window", window,
+                                    str(x), str(y), "click", "3", env=env)
+                            await asyncio.sleep(.6)
+                            w, h = window_size(window, env)
+                            await click_label(
+                                window, destination / f"connected-profile-{tag}-context.png",
+                                "Edit", env, timeout=10, settle=.8,
+                                region=(max(0, x - 260), max(32, y - 160),
+                                        min(w, x + 260), min(h - 22, y + 160)),
+                            )
+                            dialog = connection_dialog_region(w, h)
+                            await locate_rendered_label(
+                                window, destination / f"connected-profile-{tag}-dialog.png",
+                                CONNECTION_DIALOG_TITLE, env=env, timeout=12,
+                                region=(dialog[0], dialog[1], dialog[2], dialog[1] + 80),
+                            )
+                            return dialog
+
+                        def scroll_bottom(dialog) -> None:
+                            command("xdotool", "mousemove", "--window", window,
+                                    str((dialog[0] + dialog[2]) // 2), str((dialog[1] + dialog[3]) // 2),
+                                    "click", "--repeat", "30", "--delay", "15", "5", env=env)
+
+                        async def bottom_shot(dialog, tag: str) -> Path:
+                            scroll_bottom(dialog)
+                            await asyncio.sleep(.8)
+                            shot = destination / f"connected-profile-{tag}.png"
+                            await asyncio.to_thread(screenshot, window, shot, env)
+                            return shot
+
+                        async def title_visible(dialog, tag: str) -> bool:
+                            shot = destination / f"connected-profile-{tag}-title.png"
+                            await asyncio.to_thread(screenshot, window, shot, env)
+                            try:
+                                await asyncio.to_thread(
+                                    locate_visible_label, shot, CONNECTION_DIALOG_TITLE,
+                                    region=(dialog[0], dialog[1], dialog[2], dialog[1] + 80),
+                                )
+                            except RuntimeError:
+                                return False
+                            return True
+
+                        async def submit(dialog, tag: str):
+                            """Scroll to the buttons, click the primary
+                            "Save changes" fill; return the pre-click
+                            danger-pixel count (refusal control)."""
+                            w, _h = window_size(window, env)
+                            before = await bottom_shot(dialog, f"{tag}-before-submit")
+                            save_only = await asyncio.to_thread(
+                                locate_visible_label, before, "Save only", region=dialog,
+                            )
+                            found = await asyncio.to_thread(
+                                connection_submit_button, before, save_only, w,
+                            )
+                            if found is None:
+                                raise RuntimeError(f"Save changes fill not found in {before}")
+                            (x, y), box = found
+                            red = await asyncio.to_thread(danger_text_pixels, before, dialog)
+                            print(f"profile {tag}: Save changes {box} -> ({x},{y}); "
+                                  f"danger pixels before {red}", flush=True)
+                            command("xdotool", "mousemove", "--window", window,
+                                    str(x), str(y), "click", "1", env=env)
+                            await asyncio.sleep(1.2)
+                            return red
+
+                        async def require_refused(dialog, tag, file_before, red_before):
+                            after = await bottom_shot(dialog, f"{tag}-after-submit")
+                            red_after = await asyncio.to_thread(danger_text_pixels, after, dialog)
+                            print(f"profile {tag}: danger pixels after {red_after}", flush=True)
+                            profile_edit_refused(
+                                file_before=file_before, file_after=profiles.read_bytes(),
+                                title_visible=await title_visible(dialog, f"{tag}-after"),
+                                red_before=red_before, red_after=red_after, context=tag,
+                            )
+
+                        async def cancel(dialog, tag: str) -> None:
+                            shot = await bottom_shot(dialog, f"{tag}-cancel")
+                            save_only = await asyncio.to_thread(
+                                locate_visible_label, shot, "Save only", region=dialog,
+                            )
+                            await click_label(
+                                window, destination / f"connected-profile-{tag}-cancel-click.png",
+                                "Cancel", env, timeout=10, settle=.8,
+                                region=(dialog[0], save_only[1] - 12, save_only[0], save_only[3] + 12),
+                            )
+                            if await title_visible(dialog, f"{tag}-cancelled"):
+                                raise RuntimeError(f"{tag}: Cancel left the connection dialog open")
+
+                        async def set_local_forwards(dialog, value: str, tag: str) -> None:
+                            w, _h = window_size(window, env)
+                            shot = await bottom_shot(dialog, f"{tag}-forwards")
+                            label = await asyncio.to_thread(
+                                locate_visible_label, shot, "Local forward", region=dialog,
+                            )
+                            x, y = local_forward_input_centre(label, w)
+                            print(f"profile {tag}: Local forward label {label} -> ({x},{y})", flush=True)
+                            command("xdotool", "mousemove", "--window", window,
+                                    str(x), str(y), "click", "1", env=env)
+                            await asyncio.sleep(.3)
+                            command("xdotool", "key", "--clearmodifiers", "ctrl+a", env=env)
+                            command("xdotool", "type", "--clearmodifiers", "--delay", "20",
+                                    value, env=env)
+                            await asyncio.sleep(.5)
+
+                        async def stop_alpha(tag: str) -> None:
+                            await click_label(
+                                window, destination / f"connected-{tag}-button.png",
+                                "Tunnels", env, region=(max(0, tun_width - 220), 0, tun_width, 42),
+                                timeout=15,
+                            )
+                            await toggle(label_a, tag)
+                            await forward_refused(port_a, f"Alpha after popup stop ({tag})")
+                            command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                            await asyncio.sleep(.6)
+
+                        # 1. Rename the running owner -> refused before disk.
+                        dialog = await open_edit("rename")
+                        file_before = profiles.read_bytes()
+                        # EditProfile focuses the Session name input.
+                        command("xdotool", "key", "--clearmodifiers", "ctrl+a", env=env)
+                        command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                                PROFILE_RENAME_PROBE, env=env)
+                        await asyncio.sleep(.4)
+                        red = await submit(dialog, "rename")
+                        await require_refused(dialog, "rename", file_before, red)
+                        names = saved_profile_names(profiles)
+                        if owner not in names or PROFILE_RENAME_PROBE in names:
+                            raise RuntimeError(f"rename refusal left profiles {names}")
+                        await forward_echo(port_a, b"GUI_FORWARD_ALPHA_PROFILE_RENAME")
+                        await cancel(dialog, "rename")
+                        print("PASS profile edit: rename of running owner refused before disk "
+                              "write; Alpha kept echoing", flush=True)
+
+                        # 2. Change Alpha's ACTIVE spec -> refused before disk.
+                        new_a = free_loopback_port({echo_port, port_a, port_b})
+                        dialog = await open_edit("spec")
+                        file_before = profiles.read_bytes()
+                        await set_local_forwards(dialog, spec(new_a), "spec")
+                        red = await submit(dialog, "spec")
+                        await require_refused(dialog, "spec", file_before, red)
+                        await forward_echo(port_a, b"GUI_FORWARD_ALPHA_PROFILE_SPEC")
+                        await forward_refused(new_a, "refused Alpha spec change")
+                        await cancel(dialog, "spec")
+                        print("PASS profile edit: running Alpha spec change refused before "
+                              "disk write; Alpha kept echoing", flush=True)
+
+                        # 3. The ORIGINAL popup switch still owns Alpha after
+                        # both refusals: it stops the real listener.
+                        await stop_alpha("profile-refused-stop")
+                        print("PASS profile edit: original popup switch stopped Alpha after "
+                              "refused rename/spec edits", flush=True)
+                        await click_label(
+                            window, destination / "connected-profile-restart-button.png",
+                            "Tunnels", env, region=(max(0, tun_width - 220), 0, tun_width, 42),
+                            timeout=15,
+                        )
+                        await toggle(label_a, "profile-restart-a")
+                        await forward_echo(port_a, b"GUI_FORWARD_ALPHA_PROFILE_RESTART")
+                        command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                        await asyncio.sleep(.6)
+
+                        # 4. Idle sibling: add Bravo, then edit it -> allowed.
+                        new_b = free_loopback_port({echo_port, port_a, port_b, new_a})
+                        new_b2 = free_loopback_port({echo_port, port_a, port_b, new_a, new_b})
+                        for tag, sibling in (("bravo-add", new_b), ("bravo-edit", new_b2)):
+                            dialog = await open_edit(tag)
+                            await set_local_forwards(dialog, f"{spec(port_a)}; {spec(sibling)}", tag)
+                            await submit(dialog, tag)
+                            if await title_visible(dialog, f"{tag}-after"):
+                                raise RuntimeError(f"{tag}: idle sibling Save changes was refused")
+                            if disk_forwards() != [spec(port_a), spec(sibling)]:
+                                raise RuntimeError(f"{tag}: not persisted exactly: {disk_forwards()}")
+                            await forward_echo(port_a, f"GUI_FORWARD_ALPHA_{tag}".encode())
+                            await forward_refused(sibling, f"{tag}: sibling must stay idle")
+                        await forward_refused(new_b, "Bravo old port after sibling edit")
+                        print("PASS profile edit: idle sibling Bravo add+edit persisted while "
+                              "Alpha ran", flush=True)
+
+                        # 5. Leave nothing running: the switch stops Alpha
+                        # again after the accepted sibling edits.
+                        await stop_alpha("profile-final-stop")
+                        await forward_refused(new_b2, "edited Bravo after final stop")
+                        print("PASS profile edit: popup switch stopped Alpha after idle "
+                              "sibling edits", flush=True)
+
                     allow_before = events.path.read_text(encoding="utf-8").count("LOCAL_FORWARD_ALLOW")
                     await click_label(
                         window, destination / "connected-tunnels-button-2.png", "Tunnels", env,
@@ -5403,6 +5726,7 @@ async def main() -> int:
                     print("PASS populated tunnels: independent per-forward start/stop "
                           "(echo + refusal through fixture SSH)", flush=True)
                     await running_edit_delete_probe()
+                    await profile_edit_probe()
 
                 event_log = events.path.read_text(encoding="utf-8")
                 if "SHELL_PTY_RESIZE" not in event_log:
