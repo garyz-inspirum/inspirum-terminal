@@ -134,7 +134,7 @@ pub fn label_for(session: &Session, kind: ForwardKind, spec: &str) -> String {
         .ssh
         .tunnel_labels
         .iter()
-        .find(|meta| meta.kind == TunnelKind::from(kind) && meta.spec == spec)
+        .find(|meta| matches_meta(meta, kind, spec))
         .map(|meta| meta.label.trim().to_owned())
         .filter(|label| !label.is_empty())
         .unwrap_or_else(|| default_label(kind, spec))
@@ -149,19 +149,88 @@ fn default_label(kind: ForwardKind, spec: &str) -> String {
     }
 }
 
-pub fn set_label(session: &mut Session, kind: ForwardKind, spec: &str, label: &str) {
+fn matches_meta(meta: &TunnelLabel, kind: ForwardKind, spec: &str) -> bool {
+    meta.kind == TunnelKind::from(kind) && meta.spec == spec
+}
+
+/// First metadata row for a forward, mirroring `label_for`'s first-match rule.
+fn meta_for<'a>(session: &'a Session, kind: ForwardKind, spec: &str) -> Option<&'a TunnelLabel> {
     session
         .ssh
         .tunnel_labels
-        .retain(|meta| !(meta.kind == TunnelKind::from(kind) && meta.spec == spec));
+        .iter()
+        .find(|meta| matches_meta(meta, kind, spec))
+}
+
+fn forward_exists(session: &Session, kind: ForwardKind, spec: &str) -> bool {
+    let specs = match kind {
+        ForwardKind::Local => &session.ssh.local_forwards,
+        ForwardKind::Remote => &session.ssh.remote_forwards,
+        ForwardKind::Dynamic => &session.ssh.dynamic_forwards,
+    };
+    specs.iter().any(|value| value == spec)
+}
+
+/// Replace every metadata row for `kind`/`spec` with one row, or with none
+/// when it would carry nothing (empty label and auto-start off).
+fn write_meta(session: &mut Session, kind: ForwardKind, spec: &str, label: &str, auto_start: bool) {
+    session
+        .ssh
+        .tunnel_labels
+        .retain(|meta| !matches_meta(meta, kind, spec));
     let label = label.trim();
-    if !label.is_empty() {
+    if !label.is_empty() || auto_start {
         session.ssh.tunnel_labels.push(TunnelLabel {
             kind: kind.into(),
             spec: spec.to_owned(),
             label: label.to_owned(),
+            auto_start,
         });
     }
+}
+
+/// Set a forward's label, keeping its auto-start opt-in unchanged.
+pub fn set_label(session: &mut Session, kind: ForwardKind, spec: &str, label: &str) {
+    let auto_start = meta_for(session, kind, spec).is_some_and(|meta| meta.auto_start);
+    write_meta(session, kind, spec, label, auto_start);
+}
+
+/// Whether a saved forward is opted in to start when the app opens.
+/// Metadata whose forward no longer exists is ignored.
+pub fn auto_start_for(session: &Session, kind: ForwardKind, spec: &str) -> bool {
+    forward_exists(session, kind, spec)
+        && meta_for(session, kind, spec).is_some_and(|meta| meta.auto_start)
+}
+
+/// Saved forwards opted in to auto-start, in `rows_for` order.
+pub fn auto_start_forwards(session: &Session) -> Vec<(ForwardKind, String)> {
+    rows_for(session)
+        .into_iter()
+        .filter(|row| auto_start_for(session, row.kind, &row.spec))
+        .map(|row| (row.kind, row.spec))
+        .collect()
+}
+
+/// Opt a saved forward in or out of auto-start, keeping its label.
+/// Rejects a forward that is not saved so no dangling metadata is created.
+pub fn set_auto_start(
+    session: &mut Session,
+    kind: ForwardKind,
+    spec: &str,
+    enabled: bool,
+) -> Result<()> {
+    ensure!(
+        forward_exists(session, kind, spec),
+        "tunnel entry no longer exists"
+    );
+    let mut candidate = session.clone();
+    let label = meta_for(&candidate, kind, spec)
+        .map(|meta| meta.label.clone())
+        .unwrap_or_default();
+    write_meta(&mut candidate, kind, spec, &label, enabled);
+    candidate.ssh_args()?;
+    *session = candidate;
+    Ok(())
 }
 
 fn specs_mut(session: &mut Session, kind: ForwardKind) -> &mut Vec<String> {
@@ -205,12 +274,14 @@ pub fn replace_forward(
         .position(|value| value == old_spec)
         .ok_or_else(|| anyhow::anyhow!("tunnel entry no longer exists"))?;
     old_specs.remove(index);
+    // Editing a row (label, kind or spec) keeps that row's auto-start opt-in.
+    let auto_start = meta_for(&candidate, old_kind, old_spec).is_some_and(|meta| meta.auto_start);
     candidate
         .ssh
         .tunnel_labels
-        .retain(|meta| !(meta.kind == TunnelKind::from(old_kind) && meta.spec == old_spec));
+        .retain(|meta| !matches_meta(meta, old_kind, old_spec));
     specs_mut(&mut candidate, kind).push(spec.clone());
-    set_label(&mut candidate, kind, &spec, label);
+    write_meta(&mut candidate, kind, &spec, label, auto_start);
     candidate.ssh_args()?;
     *session = candidate;
     Ok(())
@@ -227,7 +298,7 @@ pub fn remove_forward(session: &mut Session, kind: ForwardKind, spec: &str) -> R
     candidate
         .ssh
         .tunnel_labels
-        .retain(|meta| !(meta.kind == TunnelKind::from(kind) && meta.spec == spec));
+        .retain(|meta| !matches_meta(meta, kind, spec));
     candidate.ssh_args()?;
     *session = candidate;
     Ok(())
@@ -887,6 +958,197 @@ mod tests {
         .unwrap();
         assert!(rows_for(&session).is_empty());
         assert!(session.ssh.tunnel_labels.is_empty());
+    }
+
+    fn web_session() -> Session {
+        let mut session = Session {
+            name: "srv".into(),
+            host: "srv.example".into(),
+            ..Default::default()
+        };
+        add_forward(
+            &mut session,
+            ForwardKind::Local,
+            "127.0.0.1:8080:web:80".into(),
+            "",
+        )
+        .unwrap();
+        session
+    }
+
+    const WEB: &str = "127.0.0.1:8080:web:80";
+
+    #[test]
+    fn old_profile_metadata_defaults_auto_start_off_and_off_is_omitted() {
+        let meta: TunnelLabel = serde_json::from_str(
+            r#"{"kind":"local","spec":"127.0.0.1:8080:web:80","label":"Web"}"#,
+        )
+        .unwrap();
+        assert!(!meta.auto_start);
+        assert_eq!(meta.label, "Web");
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(!json.contains("auto_start"), "{json}");
+        let mut session = web_session();
+        session.ssh.tunnel_labels.push(meta);
+        assert!(!auto_start_for(&session, ForwardKind::Local, WEB));
+        assert!(auto_start_forwards(&session).is_empty());
+    }
+
+    #[test]
+    fn unknown_or_malformed_metadata_fields_are_rejected() {
+        let unknown = r#"{"kind":"local","spec":"127.0.0.1:8080:web:80","label":"","auto_start":true,"run_command":"rm -rf /"}"#;
+        assert!(serde_json::from_str::<TunnelLabel>(unknown).is_err());
+        let wrong_type =
+            r#"{"kind":"local","spec":"127.0.0.1:8080:web:80","label":"","auto_start":"yes"}"#;
+        assert!(serde_json::from_str::<TunnelLabel>(wrong_type).is_err());
+        let ok = r#"{"kind":"local","spec":"127.0.0.1:8080:web:80","label":"","auto_start":true}"#;
+        assert!(serde_json::from_str::<TunnelLabel>(ok).unwrap().auto_start);
+    }
+
+    #[test]
+    fn unlabeled_auto_start_survives_save_and_reload() {
+        let mut session = web_session();
+        assert!(session.ssh.tunnel_labels.is_empty());
+        set_auto_start(&mut session, ForwardKind::Local, WEB, true).unwrap();
+        assert_eq!(session.ssh.tunnel_labels.len(), 1);
+        assert!(session.ssh.tunnel_labels[0].label.is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+        crate::save_sessions(&path, std::slice::from_ref(&session)).unwrap();
+        let loaded = crate::load_sessions(&path).unwrap();
+        assert_eq!(loaded, vec![session]);
+        assert!(auto_start_for(&loaded[0], ForwardKind::Local, WEB));
+        assert_eq!(
+            auto_start_forwards(&loaded[0]),
+            vec![(ForwardKind::Local, WEB.to_owned())]
+        );
+        assert_eq!(rows_for(&loaded[0])[0].label, "127.0.0.1:8080 -> web:80");
+    }
+
+    #[test]
+    fn label_edits_preserve_auto_start_and_disabling_keeps_label() {
+        let mut session = web_session();
+        set_auto_start(&mut session, ForwardKind::Local, WEB, true).unwrap();
+        set_label(&mut session, ForwardKind::Local, WEB, "Web");
+        assert!(auto_start_for(&session, ForwardKind::Local, WEB));
+        assert_eq!(label_for(&session, ForwardKind::Local, WEB), "Web");
+        replace_forward(
+            &mut session,
+            ForwardKind::Local,
+            WEB,
+            ForwardKind::Local,
+            WEB.into(),
+            "Web app",
+        )
+        .unwrap();
+        assert!(auto_start_for(&session, ForwardKind::Local, WEB));
+        assert_eq!(label_for(&session, ForwardKind::Local, WEB), "Web app");
+        // Clearing the label keeps the row because it still carries auto-start.
+        set_label(&mut session, ForwardKind::Local, WEB, "  ");
+        assert_eq!(session.ssh.tunnel_labels.len(), 1);
+        assert!(auto_start_for(&session, ForwardKind::Local, WEB));
+        set_label(&mut session, ForwardKind::Local, WEB, "Web");
+        set_auto_start(&mut session, ForwardKind::Local, WEB, false).unwrap();
+        assert!(!auto_start_for(&session, ForwardKind::Local, WEB));
+        assert_eq!(label_for(&session, ForwardKind::Local, WEB), "Web");
+        set_label(&mut session, ForwardKind::Local, WEB, "");
+        assert!(session.ssh.tunnel_labels.is_empty());
+    }
+
+    #[test]
+    fn spec_change_carries_auto_start_to_the_edited_row_only() {
+        let mut session = web_session();
+        add_forward(
+            &mut session,
+            ForwardKind::Dynamic,
+            "127.0.0.1:1080".into(),
+            "Socks",
+        )
+        .unwrap();
+        set_auto_start(&mut session, ForwardKind::Local, WEB, true).unwrap();
+        let new_spec = "127.0.0.1:8081:web:80";
+        replace_forward(
+            &mut session,
+            ForwardKind::Local,
+            WEB,
+            ForwardKind::Local,
+            new_spec.into(),
+            "",
+        )
+        .unwrap();
+        assert!(auto_start_for(&session, ForwardKind::Local, new_spec));
+        assert!(!auto_start_for(&session, ForwardKind::Local, WEB));
+        assert!(!auto_start_for(
+            &session,
+            ForwardKind::Dynamic,
+            "127.0.0.1:1080"
+        ));
+        assert!(
+            session
+                .ssh
+                .tunnel_labels
+                .iter()
+                .all(|meta| meta.spec != WEB),
+            "old spec metadata must not dangle"
+        );
+        assert_eq!(
+            auto_start_forwards(&session),
+            vec![(ForwardKind::Local, new_spec.to_owned())]
+        );
+    }
+
+    #[test]
+    fn removing_a_forward_drops_its_auto_start() {
+        let mut session = web_session();
+        set_auto_start(&mut session, ForwardKind::Local, WEB, true).unwrap();
+        remove_forward(&mut session, ForwardKind::Local, WEB).unwrap();
+        assert!(session.ssh.tunnel_labels.is_empty());
+        assert!(!auto_start_for(&session, ForwardKind::Local, WEB));
+        // Re-adding the same spec starts opted out.
+        add_forward(&mut session, ForwardKind::Local, WEB.into(), "").unwrap();
+        assert!(!auto_start_for(&session, ForwardKind::Local, WEB));
+    }
+
+    #[test]
+    fn auto_start_rejects_unsaved_forwards_without_mutation() {
+        let mut session = web_session();
+        let before = session.clone();
+        assert!(set_auto_start(&mut session, ForwardKind::Local, "127.0.0.1:9:x:9", true).is_err());
+        // Same spec under another kind is a different forward.
+        assert!(set_auto_start(&mut session, ForwardKind::Remote, WEB, true).is_err());
+        assert_eq!(session, before);
+        // Dangling metadata (forward edited out of the vector) is ignored.
+        session.ssh.tunnel_labels.push(TunnelLabel {
+            kind: TunnelKind::Local,
+            spec: "127.0.0.1:9:x:9".into(),
+            label: String::new(),
+            auto_start: true,
+        });
+        assert!(!auto_start_for(
+            &session,
+            ForwardKind::Local,
+            "127.0.0.1:9:x:9"
+        ));
+        assert!(auto_start_forwards(&session).is_empty());
+    }
+
+    #[test]
+    fn duplicate_metadata_uses_first_row_and_setting_collapses_it() {
+        let mut session = web_session();
+        for (label, auto_start) in [("First", false), ("Second", true)] {
+            session.ssh.tunnel_labels.push(TunnelLabel {
+                kind: TunnelKind::Local,
+                spec: WEB.into(),
+                label: label.into(),
+                auto_start,
+            });
+        }
+        assert!(!auto_start_for(&session, ForwardKind::Local, WEB));
+        assert_eq!(label_for(&session, ForwardKind::Local, WEB), "First");
+        set_auto_start(&mut session, ForwardKind::Local, WEB, true).unwrap();
+        assert_eq!(session.ssh.tunnel_labels.len(), 1);
+        assert_eq!(session.ssh.tunnel_labels[0].label, "First");
+        assert!(auto_start_for(&session, ForwardKind::Local, WEB));
     }
 
     /// Forwarding-only `ssh -N` that stays alive without any server: the
