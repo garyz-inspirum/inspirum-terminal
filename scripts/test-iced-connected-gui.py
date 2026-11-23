@@ -90,6 +90,89 @@ class MonitoredServer(fixture.NativeServer):
 # Must not suppress any other echo.
 TOUR_WITHHOLD_ECHO = os.environ.get("INSPIRUM_GUI_TOUR_WITHHOLD_ECHO") == "1"
 FIND_INJECT_PTY_BYTE = os.environ.get("INSPIRUM_GUI_FIND_INJECT_PTY_BYTE") == "1"
+# Opt-in: the saved profile carries two labelled loopback -L forwards to a
+# fixture echo service, and the connected run toggles each one from the
+# Tunnels quick menu. Default mode keeps the empty-tunnel profile.
+POPULATED = os.environ.get("INSPIRUM_GUI_POPULATED") == "1"
+POPULATED_LABELS = ("Alpha forward", "Bravo forward")
+
+
+def free_loopback_port(exclude=()) -> int:
+    """An ephemeral loopback port that is currently free (bind, then close)."""
+    import socket
+    for _ in range(20):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = int(sock.getsockname()[1])
+        if port not in exclude:
+            return port
+    raise RuntimeError("no distinct free loopback port")
+
+
+def populated_profile_ssh(ports, echo_port: int) -> dict:
+    """``ssh`` block for the populated profile (schema: src/lib.rs SshOptions)."""
+    specs = [f"127.0.0.1:{port}:127.0.0.1:{echo_port}" for port in ports]
+    if len(set(specs)) != len(specs):
+        raise RuntimeError("populated forwards must be distinct")
+    return {
+        "local_forwards": specs,
+        "tunnel_labels": [
+            {"kind": "local", "spec": spec, "label": label}
+            for spec, label in zip(specs, POPULATED_LABELS)
+        ],
+    }
+
+
+async def forward_echo(port: int, message: bytes, *, timeout: float = 15) -> None:
+    """Connect to a GUI-started -L listener and require the fixture echo."""
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", port), 3,
+            )
+        except (OSError, asyncio.TimeoutError) as error:
+            last = error
+            await asyncio.sleep(.25)
+            continue
+        try:
+            writer.write(message)
+            await writer.drain()
+            data = await asyncio.wait_for(reader.readexactly(len(message)), 5)
+        except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError) as error:
+            last = error
+            data = b""
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except OSError:
+                pass
+        if data == message:
+            return
+        await asyncio.sleep(.25)
+    raise RuntimeError(f"forward listener {port} never echoed; last: {type(last).__name__}")
+
+
+async def forward_refused(port: int, context: str, *, timeout: float = 8) -> None:
+    """Require a real ECONNREFUSED on a stopped (or not yet started) listener."""
+    deadline = time.monotonic() + timeout
+    last = "connected"
+    while time.monotonic() < deadline:
+        try:
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", port), 3,
+            )
+        except ConnectionRefusedError:
+            return
+        except (OSError, asyncio.TimeoutError) as error:
+            last = type(error).__name__
+        else:
+            writer.close()
+            last = "connected"
+        await asyncio.sleep(.25)
+    raise RuntimeError(f"{context}: listener {port} did not refuse ({last})")
 
 
 def observe_pty_chunk(events, probe_state: dict[str, str | None], chunk: str) -> None:
@@ -2305,8 +2388,15 @@ async def main() -> int:
         upload_name = "999_GUI_UPLOAD_FIXTURE.bin"
         upload_bytes = b"GUI_UPLOAD_FIXTURE\x00\xfe\n" + bytes(reversed(range(256))) * 8
         (local_root / upload_name).write_bytes(upload_bytes)
+        echo_port = None
+        forward_ports: tuple[int, ...] = ()
+        if POPULATED:
+            echo_server = await asyncio.start_server(fixture.echo_service, "127.0.0.1", 0)
+            echo_port = int(echo_server.sockets[0].getsockname()[1])
+            first_port = free_loopback_port({echo_port})
+            forward_ports = (first_port, free_loopback_port({echo_port, first_port}))
         server = await asyncssh.create_server(
-            lambda: MonitoredServer(trusted, events),
+            lambda: MonitoredServer(trusted, events, echo_port=echo_port),
             "127.0.0.1", 0, server_host_keys=[str(host)], encoding="utf-8",
             # A real remote program receives cursor-key escape sequences from
             # its PTY. AsyncSSH's server-side line editor consumes those keys
@@ -2337,6 +2427,7 @@ async def main() -> int:
                 "user": "native-smoke",
                 "port": None,
                 "strict": True,
+                **({"ssh": populated_profile_ssh(forward_ports, echo_port)} if POPULATED else {}),
             }]), encoding="utf-8",
         )
 
@@ -4510,6 +4601,22 @@ async def main() -> int:
                         f"Tunnel Settings... {settings_bounds} outside right-hand "
                         f"Tunnels popup region {popup_region}"
                     )
+                if POPULATED:
+                    # Both saved forwards render as distinct rows above the
+                    # footer, nothing running yet (TCP-checked, not OCR).
+                    row_boxes = []
+                    for label in POPULATED_LABELS:
+                        box = await locate_rendered_label(
+                            window, destination / "connected-tunnels-popup-idle.png",
+                            label, env=env, region=popup_region, timeout=15,
+                        )
+                        if not (_bounds_inside(box, popup_region) and box[3] <= settings_bounds[1]):
+                            raise RuntimeError(f"{label} row {box} not inside popup list")
+                        row_boxes.append(box)
+                    if abs(row_boxes[0][1] - row_boxes[1][1]) < 20:
+                        raise RuntimeError(f"tunnel rows not distinct: {row_boxes}")
+                    for port in forward_ports:
+                        await forward_refused(port, "before any toggle")
                 command(
                     "xdotool", "mousemove", "--window", window,
                     *map(str, center(settings_bounds)), "click", "1", env=env,
@@ -4519,6 +4626,17 @@ async def main() -> int:
                     window, destination / "connected-tunnels-settings.png",
                     "Tunnel Manager", env=env, timeout=15,
                 )
+                if POPULATED:
+                    # Select the first saved tunnel in the editor list and
+                    # require its label to stay rendered (selected state).
+                    await click_label(
+                        window, destination / "connected-tunnels-settings.png",
+                        POPULATED_LABELS[0], env, timeout=15, settle=.8,
+                    )
+                    await locate_rendered_label(
+                        window, destination / "connected-tunnels-editor-selected.png",
+                        POPULATED_LABELS[0], env=env, timeout=15,
+                    )
                 command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
                 await asyncio.sleep(.6)
                 tunnels_closed = destination / "connected-tunnels-closed.png"
