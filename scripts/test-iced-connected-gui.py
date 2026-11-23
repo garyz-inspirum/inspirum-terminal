@@ -686,10 +686,14 @@ def _text_threshold(width, height, channels, rows) -> int:
 # "not rendered"; require_editor_selection compares this count around its
 # sibling read so a starved OCR cannot certify the sibling port absent.
 OCR_TIMEOUTS = 0
+# Tesseract calls that exited nonzero. Same hazard as a timeout (no words,
+# not a real read), counted separately so a genuine OCR miss -- exit 0 with
+# no matching word -- stays the only way to prove a port absent.
+OCR_FAILURES = 0
 
 
 def _ocr_tsv(tesseract: str, image: Path, psm: str) -> str:
-    global OCR_TIMEOUTS
+    global OCR_TIMEOUTS, OCR_FAILURES
     try:
         result = subprocess.run(
             [tesseract, str(image), "stdout", "--psm", psm, "tsv"],
@@ -699,6 +703,7 @@ def _ocr_tsv(tesseract: str, image: Path, psm: str) -> str:
         OCR_TIMEOUTS += 1
         return ""
     if result.returncode != 0:
+        OCR_FAILURES += 1
         return ""
     return result.stdout
 
@@ -1298,7 +1303,7 @@ def require_editor_selection(path, port: int, sibling_port: int, form_region, *,
         ) from exc
     if _bounds_inside(box, where) is None:
         raise RuntimeError(f"listen port {port} box {box} outside editor row {where}")
-    timeouts = OCR_TIMEOUTS
+    timeouts, failures = OCR_TIMEOUTS, OCR_FAILURES
     try:
         stale = locate(path, str(sibling_port), region=form_region)
     except RuntimeError:
@@ -1307,6 +1312,12 @@ def require_editor_selection(path, port: int, sibling_port: int, form_region, *,
                 f"cannot prove sibling port {sibling_port} absent from editor "
                 f"form {form_region}: {OCR_TIMEOUTS - timeouts} OCR call(s) "
                 f"timed out (raise INSPIRUM_GUI_TIME_SCALE on a slow host)"
+            ) from None
+        if OCR_FAILURES != failures:
+            raise RuntimeError(
+                f"cannot prove sibling port {sibling_port} absent from editor "
+                f"form {form_region}: {OCR_FAILURES - failures} tesseract "
+                f"call(s) exited nonzero"
             ) from None
         return box
     raise RuntimeError(

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+import subprocess
 import sys
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 try:
@@ -155,6 +157,32 @@ class EditorSelectionOnRealFrameTest(unittest.TestCase):
             module.require_editor_selection(
                 FIXTURE, 43231, 40369, self.form, row_region=self.row,
             )
+
+    def test_sibling_read_tesseract_exit_failure_is_not_absence(self):
+        # 40369 IS rendered in this card. Tesseract exiting nonzero during
+        # the sibling search (injected at subprocess.run, so the real
+        # _ocr_tsv / locate_visible_label path runs) reads no words; that
+        # must be inconclusive, never "sibling absent".
+        real_run = module.subprocess.run
+        calls = []
+
+        def failing_run(argv, *args, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="injected")
+
+        def locate(path, label, *, region=None, budget=None):
+            if label != "40369":
+                return module.locate_visible_label(path, label, region=region)
+            with mock.patch.object(module.subprocess, "run", failing_run):
+                return module.locate_visible_label(path, label, region=region)
+
+        with self.assertRaisesRegex(RuntimeError, "cannot prove sibling port 40369 absent"):
+            module.require_editor_selection(
+                FIXTURE, 43231, 40369, self.form, row_region=self.row, locate=locate,
+            )
+        self.assertTrue(calls, "injection never reached subprocess.run")
+        self.assertTrue(all("tesseract" in argv[0] for argv in calls), calls)
+        self.assertIs(module.subprocess.run, real_run)
 
 
 if __name__ == "__main__":
