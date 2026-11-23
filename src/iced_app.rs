@@ -2049,6 +2049,20 @@ const TUNNEL_MENU_NOTICE_HEIGHT: f32 = 18.0;
 const TUNNEL_MENU_SECONDARY_TEXT: f32 = 12.0;
 const TUNNEL_MENU_EMPTY: &str = "No saved tunnels.";
 const TUNNEL_MENU_FOOTER_HEIGHT: f32 = 28.0;
+/// Quick-menu footer entry; the dialog it opens carries the same name.
+const TUNNEL_SETTINGS_MENU_ITEM: &str = "Tunnel Settings...";
+const TUNNEL_SETTINGS_TITLE: &str = "Tunnel Settings";
+/// Interior heading, kept distinct from the window title for OCR acceptance.
+const TUNNEL_MANAGER_HEADING: &str = "Tunnel Manager";
+/// Creation guidance is shown once (editor empty state), not beside the list.
+const TUNNEL_CREATE_HINT: &str = "To create one, choose a session below the list and press +.";
+const TUNNEL_SESSION_PICKER_LABEL: &str = "Add to session";
+
+/// The session picker heads an interactive choice, so it uses primary dock
+/// ink rather than gray help text.
+fn tunnel_session_picker_label_color(p: &theme::Palette) -> Color {
+    p.text_dock
+}
 
 /// One saved forward as shown in the quick menu. Snapshot taken on open and
 /// after each action; `view` cannot poll the manager.
@@ -9105,7 +9119,7 @@ impl App {
             scrollable(rows).height(list_height).into()
         };
         let footer = button(
-            text("Tunnel Settings...")
+            text(TUNNEL_SETTINGS_MENU_ITEM)
                 .size(theme::metrics::UI_TEXT)
                 .color(ink),
         )
@@ -9263,11 +9277,7 @@ impl App {
             }
         }
         if !has_rows {
-            tunnel_list = tunnel_list.push(
-                text("No saved tunnels. Choose a session below and press +.")
-                    .size(12)
-                    .color(muted()),
-            );
+            tunnel_list = tunnel_list.push(text(TUNNEL_MENU_EMPTY).size(12).color(muted()));
         }
 
         // + uses the current owner (or first session); the session buttons
@@ -9289,7 +9299,12 @@ impl App {
         } else {
             button(text("−"))
         };
-        let mut session_picker = column![text("Add to session").size(11).color(muted())].spacing(3);
+        let mut session_picker = column![
+            text(TUNNEL_SESSION_PICKER_LABEL)
+                .size(11)
+                .color(tunnel_session_picker_label_color(theme::palette()))
+        ]
+        .spacing(3);
         for profile in &self.profiles {
             session_picker = session_picker.push(
                 action(
@@ -9484,9 +9499,7 @@ impl App {
                     text("Select a tunnel to edit its settings.")
                         .size(13)
                         .color(ink),
-                    text("To create one, choose a session below the list and press +.")
-                        .size(12)
-                        .color(muted()),
+                    text(TUNNEL_CREATE_HINT).size(12).color(muted()),
                 ]
                 .spacing(8),
             )
@@ -9514,7 +9527,7 @@ impl App {
         .align_y(iced::Center);
         let body = column![
             row![
-                text("Tunnel Manager").size(15).color(ink),
+                text(TUNNEL_MANAGER_HEADING).size(15).color(ink),
                 space::horizontal(),
                 action("Refresh", Message::TunnelRefresh).style(quiet),
             ]
@@ -9555,7 +9568,7 @@ impl App {
                 FileNameAction::RenameRemote { .. } => "Rename remote file",
             },
             Dialog::ImportProfiles => "Import SSH profiles",
-            Dialog::Tunnels => "Tunnel",
+            Dialog::Tunnels => TUNNEL_SETTINGS_TITLE,
             Dialog::About => "Inspirum Terminal · Iced",
             Dialog::Exit => "Exit",
         };
@@ -11218,6 +11231,25 @@ mod tests {
                 < TUNNEL_MENU_WIDTH - 22.0
         );
         assert!(!TUNNEL_MENU_EMPTY.contains("Settings"));
+    }
+
+    #[test]
+    fn tunnel_settings_naming_and_label_hierarchy() {
+        // The dialog title matches the quick-menu entry that opens it, while
+        // the interior heading stays distinct.
+        assert_eq!(
+            TUNNEL_SETTINGS_MENU_ITEM.trim_end_matches("..."),
+            TUNNEL_SETTINGS_TITLE
+        );
+        assert_ne!(TUNNEL_SETTINGS_TITLE, TUNNEL_MANAGER_HEADING);
+        // Creation guidance appears once: the list empty state omits it.
+        assert!(!TUNNEL_MENU_EMPTY.contains('+'));
+        assert!(TUNNEL_CREATE_HINT.contains("press +"));
+        for p in [super::theme::LIGHT, super::theme::DARK] {
+            let label = tunnel_session_picker_label_color(&p);
+            assert_eq!(label, p.text_dock);
+            assert_ne!(label, p.muted);
+        }
     }
 
     #[test]
