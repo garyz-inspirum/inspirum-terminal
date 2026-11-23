@@ -8750,105 +8750,114 @@ impl App {
     }
 
     fn tunnels_view(&self) -> Element<'_, Message> {
-        let mut tunnel_list = column![text("Saved forwards").size(11).color(muted()),].spacing(8);
+        let ink = theme::palette().text_dock;
+        let selected_key = self
+            .tunnel_edit
+            .as_ref()
+            .map(|edit| edit.profile_key.as_str());
+        let owner = selected_key.and_then(|key| {
+            self.profiles
+                .iter()
+                .find(|profile| session_profile_key(profile) == key)
+        });
 
-        if self
-            .profiles
-            .iter()
-            .all(|profile| tunnels::rows_for(profile).is_empty())
-        {
+        // A flat, scrollable list keeps the tunnel name prominent; its owning
+        // session is visible without exposing the internal profile key.
+        let mut tunnel_list = column![].spacing(2);
+        let mut has_rows = false;
+        for profile in &self.profiles {
+            let key = session_profile_key(profile);
+            for entry in tunnels::rows_for(profile) {
+                has_rows = true;
+                let selected = self.tunnel_edit.as_ref().is_some_and(|edit| {
+                    edit.profile_key == key
+                        && edit
+                            .original
+                            .as_ref()
+                            .is_some_and(|(kind, spec)| *kind == entry.kind && spec == &entry.spec)
+                });
+                let item = button(
+                    row![
+                        text(entry.kind.short()).size(12).color(ink).width(20),
+                        column![
+                            text(truncate(&entry.label, 25)).size(13).color(ink),
+                            text(truncate(&entry.profile_name, 30))
+                                .size(10)
+                                .color(if selected { ink } else { muted() }),
+                        ]
+                        .spacing(2),
+                    ]
+                    .align_y(iced::Center)
+                    .spacing(6),
+                )
+                .on_press(Message::TunnelEdit(key.clone(), entry.kind, entry.spec))
+                .width(Fill)
+                .padding([5, 8])
+                .style(if selected {
+                    session_row_selected
+                } else {
+                    quiet
+                });
+                tunnel_list = tunnel_list.push(item);
+            }
+        }
+        if !has_rows {
             tunnel_list = tunnel_list.push(
-                text("No tunnels yet. Use + on a profile to create one.")
+                text("No saved tunnels. Choose a session below and press +.")
                     .size(12)
                     .color(muted()),
             );
         }
 
+        // + uses the current owner (or first session); the session buttons
+        // below it let users explicitly choose where a new forward is saved.
+        let add_key = selected_key
+            .map(str::to_owned)
+            .or_else(|| self.profiles.first().map(session_profile_key));
+        let add = if let Some(key) = add_key {
+            action("+", Message::TunnelAdd(key))
+        } else {
+            button(text("+"))
+        };
+        let remove = if self
+            .tunnel_edit
+            .as_ref()
+            .is_some_and(|edit| edit.original.is_some())
+        {
+            action("−", Message::TunnelDeleteEdit)
+        } else {
+            button(text("−"))
+        };
+        let mut session_picker = column![text("Add to session").size(11).color(muted())].spacing(3);
         for profile in &self.profiles {
-            let key = session_profile_key(profile);
-            let status = self
-                .tunnel_status
-                .get(&key)
-                .cloned()
-                .unwrap_or(tunnels::Status::Stopped);
-            let status_color = if status.is_running() {
-                green()
-            } else {
-                muted()
-            };
-            let mut group = column![
-                row![
-                    text(truncate(&profile.name, 22)).size(13),
-                    space::horizontal(),
-                    text(status.label()).size(10).color(status_color),
-                    action("+", Message::TunnelAdd(key.clone())),
-                ]
-                .spacing(6)
-                .align_y(iced::Center)
-            ]
-            .spacing(4);
-
-            for row_data in tunnels::rows_for(profile) {
-                let selected = self.tunnel_edit.as_ref().is_some_and(|edit| {
-                    edit.profile_key == key
-                        && edit.original.as_ref().is_some_and(|(kind, spec)| {
-                            *kind == row_data.kind && spec == &row_data.spec
-                        })
-                });
-                let subtitle = if row_data.kind == tunnels::ForwardKind::Dynamic {
-                    format!("{} · {}", row_data.kind.label(), row_data.listen)
-                } else {
-                    format!(
-                        "{} · {}  →  {}",
-                        row_data.kind.label(),
-                        row_data.listen,
-                        row_data.target
-                    )
-                };
-                let item = button(
-                    column![
-                        text(truncate(&row_data.label, 28)).size(13),
-                        text(truncate(&subtitle, 42)).size(10).color(muted()),
-                    ]
-                    .spacing(2),
+            session_picker = session_picker.push(
+                action(
+                    truncate(&profile.name, 32),
+                    Message::TunnelAdd(session_profile_key(profile)),
                 )
-                .on_press(Message::TunnelEdit(
-                    key.clone(),
-                    row_data.kind,
-                    row_data.spec.clone(),
-                ))
                 .width(Fill)
-                .padding(8);
-                group = group.push(if selected {
-                    item.style(primary)
-                } else {
-                    item.style(quiet)
-                });
-            }
-
-            let acknowledged = self.tunnels.acknowledged(&key);
-            if session_requires_forward_risk_ack(profile) && !status.is_running() {
-                let ack_key = key.clone();
-                group = group.push(
-                    iced::widget::checkbox(acknowledged)
-                        .label("Allow non-loopback bind")
-                        .on_toggle(move |value| Message::TunnelAcknowledge(ack_key.clone(), value)),
-                );
-            }
-            group = group.push(if status.is_running() {
-                action("Stop", Message::TunnelStop(key.clone()))
-            } else {
-                action("Start", Message::TunnelStart(key.clone()))
-            });
-            tunnel_list = tunnel_list.push(container(group).padding(8).style(card));
+                .style(quiet),
+            );
         }
+        let list_panel = container(
+            column![
+                scrollable(tunnel_list).height(350),
+                row![add.style(quiet), remove.style(quiet)].spacing(4),
+                session_picker,
+            ]
+            .spacing(8),
+        )
+        .padding(8)
+        .width(300)
+        .style(card);
 
         let editor: Element<'_, Message> = if let Some(edit) = &self.tunnel_edit {
-            let title = if edit.original.is_some() {
-                "Edit Tunnel"
-            } else {
-                "New Tunnel"
-            };
+            let profile_name = owner.map_or("Session unavailable", |profile| profile.name.as_str());
+            let status = self
+                .tunnel_status
+                .get(&edit.profile_key)
+                .cloned()
+                .unwrap_or(tunnels::Status::Stopped);
             let kind_row = row![
                 action(
                     "Local",
@@ -8878,158 +8887,181 @@ impl App {
                     quiet
                 }),
             ]
-            .spacing(8);
-
-            let destination = if edit.draft.kind == tunnels::ForwardKind::Dynamic {
-                column![
-                    text("Dynamic SOCKS tunnel").size(12).color(muted()),
-                    text("SOCKS clients may send hostnames through the tunnel for remote resolution; there is no fixed destination host for -D.")
-                        .size(11)
-                        .color(muted()),
-                ]
-                .spacing(5)
-            } else {
-                column![
-                    text("Destination").size(13),
-                    row![
-                        column![
-                            text("Host").size(11).color(fg()),
-                            text_input("10.1.10.10", &edit.draft.destination_host)
-                                .style(flat_input)
-                                .on_input(Message::TunnelDraftDestinationHost)
-                                .size(13)
-                                .padding([3, 6])
-                        ]
-                        .spacing(3)
+            .spacing(4);
+            let destination_host: Element<'_, Message> =
+                if edit.draft.kind == tunnels::ForwardKind::Dynamic {
+                    text("Any (not applicable)").size(12).color(muted()).into()
+                } else {
+                    text_input("Destination host", &edit.draft.destination_host)
+                        .style(flat_input)
+                        .on_input(Message::TunnelDraftDestinationHost)
+                        .size(13)
+                        .padding([3, 6])
+                        .into()
+                };
+            let destination_port: Element<'_, Message> =
+                if edit.draft.kind == tunnels::ForwardKind::Dynamic {
+                    text("0 (not applicable)").size(12).color(muted()).into()
+                } else {
+                    text_input("Port", &edit.draft.destination_port)
+                        .style(flat_input)
+                        .on_input(Message::TunnelDraftDestinationPort)
+                        .size(13)
+                        .padding([3, 6])
+                        .into()
+                };
+            let label_width = 150;
+            let grid = column![
+                row![
+                    text("Name").size(12).color(ink).width(label_width),
+                    text_input("Tunnel name", &edit.draft.label)
+                        .style(flat_input)
+                        .on_input(Message::TunnelDraftLabel)
+                        .size(13)
+                        .padding([3, 6])
                         .width(Fill),
-                        column![
-                            text("Port").size(11).color(fg()),
-                            text_input("8000", &edit.draft.destination_port)
-                                .style(flat_input)
-                                .on_input(Message::TunnelDraftDestinationPort)
-                                .size(13)
-                                .padding([3, 6])
-                        ]
-                        .spacing(3)
-                        .width(120),
-                    ]
-                    .spacing(8)
-                ]
-                .spacing(5)
-            };
-
-            container(
-                column![
-                    text(title).size(13),
-                    text("WindTerm-style structured tunnel editor")
-                        .size(11)
-                        .color(muted()),
-                    text("Type").size(11).color(fg()),
-                    kind_row,
-                    column![
-                        text("Label").size(11).color(fg()),
-                        text_input("e.g. database", &edit.draft.label)
-                            .style(flat_input)
-                            .on_input(Message::TunnelDraftLabel)
-                            .size(13)
-                            .padding([3, 6])
-                    ]
-                    .spacing(3),
-                    text("Listen").size(13),
-                    row![
-                        column![
-                            text("Bind address").size(11).color(fg()),
-                            text_input("127.0.0.1", &edit.draft.bind_address)
-                                .style(flat_input)
-                                .on_input(Message::TunnelDraftBind)
-                                .size(13)
-                                .padding([3, 6])
-                        ]
-                        .spacing(3)
+                ],
+                row![
+                    text("Type").size(12).color(ink).width(label_width),
+                    kind_row
+                ],
+                row![
+                    text("Session / profile")
+                        .size(12)
+                        .color(ink)
+                        .width(label_width),
+                    text(profile_name).size(12).color(ink),
+                ],
+                row![
+                    text("Listen Port").size(12).color(ink).width(label_width),
+                    text_input("Port", &edit.draft.listen_port)
+                        .style(flat_input)
+                        .on_input(Message::TunnelDraftListenPort)
+                        .size(13)
+                        .padding([3, 6])
                         .width(Fill),
-                        column![
-                            text("Port").size(11).color(fg()),
-                            text_input("2000", &edit.draft.listen_port)
-                                .style(flat_input)
-                                .on_input(Message::TunnelDraftListenPort)
-                                .size(13)
-                                .padding([3, 6])
-                        ]
-                        .spacing(3)
-                        .width(120),
-                    ]
-                    .spacing(8),
-                    iced::widget::checkbox(true)
-                        .label("Check requested listener is available before reporting Running"),
-                    destination,
-                    if !self.tunnel_notice.is_empty() {
-                        text(&self.tunnel_notice).size(12).color(danger())
+                ],
+                row![
+                    text("Destination Host")
+                        .size(12)
+                        .color(ink)
+                        .width(label_width),
+                    destination_host,
+                ],
+                row![
+                    text("Destination Port")
+                        .size(12)
+                        .color(ink)
+                        .width(label_width),
+                    destination_port,
+                ],
+                row![
+                    text("Status (session)")
+                        .size(12)
+                        .color(ink)
+                        .width(label_width),
+                    text(status.label()).size(12).color(if status.is_running() {
+                        green()
                     } else {
-                        text("").size(1)
-                    },
-                    row![
-                        if edit.original.is_some() {
-                            action("Delete", Message::TunnelDeleteEdit).style(button::danger)
-                        } else {
-                            action("Reset", Message::TunnelCancelEdit)
-                        },
-                        space::horizontal(),
-                        action("Cancel", Message::TunnelCancelEdit),
-                        action("Save", Message::TunnelSaveEdit).style(primary),
-                    ]
-                    .spacing(8)
-                    .align_y(iced::Center),
+                        muted()
+                    }),
+                ],
+            ]
+            .spacing(12);
+            let has_owner_rows =
+                owner.is_some_and(|profile| !tunnels::rows_for(profile).is_empty());
+            let operation = if status.is_running() {
+                action(
+                    "Stop session tunnels",
+                    Message::TunnelStop(edit.profile_key.clone()),
+                )
+            } else if has_owner_rows {
+                action(
+                    "Start session tunnels",
+                    Message::TunnelStart(edit.profile_key.clone()),
+                )
+            } else {
+                button(text("Start session tunnels"))
+            };
+            let mut controls = column![
+                grid,
+                row![
+                    text("Bind address").size(12).color(ink).width(label_width),
+                    text_input("127.0.0.1", &edit.draft.bind_address)
+                        .style(flat_input)
+                        .on_input(Message::TunnelDraftBind)
+                        .size(13)
+                        .padding([3, 6])
+                        .width(Fill),
                 ]
-                .spacing(8),
-            )
-            .padding(8)
-            .width(Fill)
-            .style(card)
-            .into()
+                .align_y(iced::Center),
+                text("Use 127.0.0.1 to accept local connections only.")
+                    .size(11)
+                    .color(muted()),
+                operation.style(quiet),
+            ]
+            .spacing(10);
+            if let Some(profile) = owner {
+                if session_requires_forward_risk_ack(profile) && !status.is_running() {
+                    let key = edit.profile_key.clone();
+                    controls = controls.push(
+                        iced::widget::checkbox(self.tunnels.acknowledged(&key))
+                            .label("Allow non-loopback bind")
+                            .on_toggle(move |value| Message::TunnelAcknowledge(key.clone(), value)),
+                    );
+                }
+            }
+            container(controls)
+                .padding(12)
+                .width(Fill)
+                .style(card)
+                .into()
         } else {
             container(
                 column![
-                    text("Tunnel").size(13),
-                    text("Choose a tunnel on the left, or press + beside a profile to add one.")
+                    text("Select a tunnel to edit its settings.")
                         .size(13)
-                        .color(muted()),
-                    text("The editor exposes Local, Remote and Dynamic forwards as structured fields instead of raw OpenSSH -L/-R/-D strings.")
-                        .size(11)
+                        .color(ink),
+                    text("To create one, choose a session below the list and press +.")
+                        .size(12)
                         .color(muted()),
                 ]
                 .spacing(8),
             )
-            .padding(8)
+            .padding(12)
             .width(Fill)
             .style(card)
             .into()
         };
 
+        let footer = row![
+            if self.tunnel_notice.is_empty() {
+                text("").size(1)
+            } else {
+                text(&self.tunnel_notice).size(12).color(danger())
+            },
+            space::horizontal(),
+            action("Cancel", Message::CloseDialog).style(quiet),
+            if self.tunnel_edit.is_some() {
+                action("Save", Message::TunnelSaveEdit).style(primary)
+            } else {
+                button(text("Save")).style(quiet)
+            },
+        ]
+        .spacing(8)
+        .align_y(iced::Center);
         let body = column![
             row![
-                text("Tunnel Manager").size(13),
+                text("Tunnel Manager").size(15).color(ink),
                 space::horizontal(),
-                action("Refresh", Message::TunnelRefresh),
-                action("Close", Message::CloseDialog).style(primary),
+                action("Refresh", Message::TunnelRefresh).style(quiet),
             ]
-            .spacing(8)
             .align_y(iced::Center),
-            text("Manage saved SSH port forwards with a WindTerm-style list-and-editor workflow. Running tunnel processes are still isolated per profile and use OpenSSH ExitOnForwardFailure.")
-                .size(12)
-                .color(muted()),
-            row![
-                container(scrollable(tunnel_list).height(430))
-                    .padding(8)
-                    .width(300)
-                    .style(card),
-                editor,
-            ]
-            .spacing(8)
-            .height(Fill),
+            row![list_panel, editor].spacing(12).height(Fill),
+            footer,
         ]
-        .spacing(8);
-
-        container(body).padding(6).width(Fill).height(Fill).into()
+        .spacing(12);
+        container(body).padding(12).width(Fill).height(Fill).into()
     }
 
     fn dialog_view<'a>(&'a self, dialog: &'a Dialog) -> Element<'a, Message> {
