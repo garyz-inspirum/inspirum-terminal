@@ -55,6 +55,7 @@ LOGGED_ECHO_LINES = (
     "echo:FIND_P3_AFTER",
     "echo:AFTER_EXIT_CANCEL",
     "echo:AFTER_TUNNEL_SETTINGS",
+    "echo:AFTER_TUNNEL_TOGGLES",
 )
 
 
@@ -5014,6 +5015,8 @@ async def main() -> int:
                     "PASS: Session Exit asked for confirmation and Cancel left the shell answering AFTER_EXIT_CANCEL\n"
                     "PASS: Exit Cancel removed the confirmation before the workspace was clicked\n"
                     "PASS: top-right Tunnels popup showed Tunnel Settings..., which opened Tunnel Manager; Escape closed it and the shell answered AFTER_TUNNEL_SETTINGS without a terminal click\n"
+                    + ("PASS: populated Tunnel Manager started/stopped each forward independently and the shell answered AFTER_TUNNEL_TOGGLES after a terminal click\n"
+                       if POPULATED else "") +
                     "PASS: window-manager close request asked for confirmation; confirming Exit ended the process with exit code 0\n"
                     f"Exit Cancel dialog removal: {removed_pixels} pixels\n"
                     f"Window-manager close exit: {close_elapsed:.1f}s code {close_code}\n"
