@@ -87,6 +87,7 @@ impl Menu {
                 item("Focus Mode", "Alt+Enter", FocusMode),
                 Entry::Separator,
                 item("Session", "", ToggleSessions),
+                item("Files", "Ctrl+Shift+O", ToggleFiles),
                 item("Sender", "", TogglePanel(DockPanel::Sender)),
                 item("Transfer", "", TogglePanel(DockPanel::Transfer)),
                 item("Filer", "", TogglePanel(DockPanel::Filer)),
@@ -150,6 +151,7 @@ pub(super) enum Command {
     ZoomOut,
     FocusMode,
     ToggleSessions,
+    ToggleFiles,
     TogglePanel(DockPanel),
     EditSession,
     Reconnect,
@@ -247,5 +249,27 @@ mod tests {
             }) => {}
             other => panic!("Session menu must end with Exit and no shortcut, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn removed_toolbar_actions_remain_available_in_menus() {
+        let has = |menu: Menu, command| {
+            menu.entries().iter().any(
+                |entry| matches!(entry, Entry::Item { command: actual, .. } if *actual == command),
+            )
+        };
+        assert!(has(Menu::Session, Command::Tunnels));
+        assert!(has(Menu::Edit, Command::Copy));
+        assert!(has(Menu::Edit, Command::Paste));
+        assert!(has(Menu::View, Command::ToggleFiles));
+        assert!(has(Menu::View, Command::ToggleShell));
+        assert!(has(Menu::Mode, Command::LocalMode));
+        assert!(has(Menu::Mode, Command::FreeType));
+        assert!(has(Menu::Mode, Command::RemoteKeys));
+        assert!(has(Menu::Mode, Command::SyncInput));
+        assert!(has(Menu::Window, Command::Tool(Panel::Workspace)));
+        assert!(has(Menu::Window, Command::SplitRight));
+        assert!(has(Menu::Window, Command::SplitDown));
+        assert!(has(Menu::Window, Command::ClosePane));
     }
 }

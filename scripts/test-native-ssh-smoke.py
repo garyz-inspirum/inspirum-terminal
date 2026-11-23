@@ -476,8 +476,14 @@ async def main() -> int:
             "cargo",
             "test",
             "--locked",
+            "--features",
+            "iced-ui",
             "--test",
             "native_ssh_smoke",
+        ]
+        if test_filter := os.environ.get("INSPIRUM_NATIVE_SSH_TEST_FILTER"):
+            command.append(test_filter)
+        command += [
             "--",
             "--ignored",
             "--nocapture",
@@ -502,7 +508,7 @@ async def main() -> int:
         if "AUTH_ACCEPT:native-smoke" not in log:
             raise RuntimeError("native SSH fixture never authenticated the test key")
         jump_log = jump_events.path.read_text(encoding="utf-8")
-        if "JUMP_FORWARD_ALLOW" not in jump_log:
+        if not test_filter and "JUMP_FORWARD_ALLOW" not in jump_log:
             raise RuntimeError("the native ProxyJump acceptance never opened its hop")
         return 0
     finally:

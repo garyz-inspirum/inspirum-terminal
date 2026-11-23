@@ -1806,6 +1806,26 @@ def request_window_close(window: str, env: dict[str, str]) -> None:
 TOUR = os.environ.get("INSPIRUM_GUI_TOUR") == "1"
 
 
+def sync_badge_labels_visible(path: Path, tesseract: str, expected: str) -> bool:
+    """Require both full labels on one line inside the 640px status badge.
+
+    Full-width OCR treats the 240px badge outline as a glyph. Crop to the
+    badge and reject OCR boxes touching its border or outside the badge.
+    """
+    badge = (60, 455, 300, 480)
+    interior = (62, 461, 298, 477)
+    for psm, invert in (("6", False), ("11", False), ("6", True)):
+        words = region_upscaled_rows(path, tesseract, badge, psm=psm, invert=invert)
+        words = [(w[0].upper(), *w[1:]) for w in words if _word_inside(w, interior)]
+        count = match_visible_label(words, "2 SELECTED")
+        state = match_visible_label(words, expected)
+        if count and state and count[2] < state[0] \
+                and count[1] < state[3] and state[1] < count[3] \
+                and _bounds_inside(count, interior) and _bounds_inside(state, interior):
+            return True
+    return False
+
+
 async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app_log: Path) -> int:
     """LIGHT-theme screenshot tour (INSPIRUM_GUI_TOUR=1).
 
@@ -1871,13 +1891,134 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
         await asyncio.sleep(.5)
     await step("menu-view", s03)
 
+    async def tour_label(path: Path, label: str, region=None):
+        """Probe a saved frame only; never replace its evidence on an OCR miss."""
+        try:
+            return await asyncio.to_thread(
+                locate_visible_label, path, label, region=region,
+            )
+        except RuntimeError as error:
+            print(f"tour: WARNING {path.name}: {label!r} OCR miss: {error}", flush=True)
+            return None
+
+    def centre(box):
+        return ((box[0] + box[2]) // 2, (box[1] + box[3]) // 2)
+
+    async def resize_tour(w: int, h: int) -> tuple[int, int]:
+        command("xdotool", "windowsize", window, str(w), str(h), env=env)
+        await asyncio.sleep(1)
+        actual = window_size(window, env)
+        print(f"tour: requested window {w}x{h}; actual {actual[0]}x{actual[1]}", flush=True)
+        return actual
+
     async def s04():
+        # The 1280x800 fallback is measured from production-new-connection.png:
+        # Advanced control [353,549,552,572]. Prefer its live OCR box.
+        if window_size(window, env) != (1280, 800):
+            raise RuntimeError("tour-04 baseline requires actual 1280x800 window")
         key("ctrl+n")
-        await asyncio.sleep(1.5)
-        shot("tour-04-new-connection.png")
-        key("Escape")
-        await asyncio.sleep(.5)
+        try:
+            await asyncio.sleep(1.5)
+            shot("tour-04-new-connection.png")
+            collapsed = tour_dir / "tour-04-new-connection.png"
+            box = await tour_label(collapsed, "Advanced SSH options")
+            if box:
+                click(*centre(box))
+            elif window_size(window, env) == (1280, 800):
+                click(452, 560)
+            else:
+                raise RuntimeError("Advanced control not located at non-baseline size")
+            await asyncio.sleep(1)
+            shot("tour-04a-advanced-ssh-1280x800.png")
+        finally:
+            key("Escape")
+            await asyncio.sleep(.5)
     await step("new-connection", s04)
+
+    async def s04_min():
+        try:
+            min_width, min_height = await resize_tour(640, 480)
+            size_tag = f"{min_width}x{min_height}"
+            # iced may clamp the requested size to its configured 960x640.
+            # Every artifact name records the *observed* native dimensions.
+            key("ctrl+n")
+            try:
+                await asyncio.sleep(1)
+                collapsed = tour_dir / f"tour-04b-connection-{size_tag}.png"
+                shot(collapsed.name)
+                box = await tour_label(collapsed, "Advanced SSH options")
+                # At minimum height the disclosure may be below the fold.
+                # Scroll inside the dialog to find it, never use (452,560).
+                form_x, form_y = min_width // 2, min_height * 3 // 4
+                for _ in range(6):
+                    if box:
+                        break
+                    command("xdotool", "mousemove", "--window", window,
+                            str(form_x), str(form_y), "click", "5", env=env)
+                    await asyncio.sleep(.3)
+                    probe = tour_dir / "tour-04-min-locator.png"
+                    await asyncio.to_thread(screenshot, window, probe, env)
+                    box = await tour_label(probe, "Advanced SSH options")
+                if box:
+                    click(*centre(box))
+                    await asyncio.sleep(.8)
+                else:
+                    print("tour: WARNING minimum-size advanced control not found", flush=True)
+                # Return to the top so the selected authentication controls
+                # remain in the unscrolled expanded frame.
+                for _ in range(8):
+                    command("xdotool", "mousemove", "--window", window,
+                            str(form_x), str(form_y), "click", "4", env=env)
+                await asyncio.sleep(.7)
+                shot(f"tour-04c-advanced-ssh-{size_tag}.png")
+                for _ in range(6):
+                    command("xdotool", "mousemove", "--window", window,
+                            str(form_x), str(form_y), "click", "5", env=env)
+                await asyncio.sleep(.7)
+                shot(f"tour-04d-advanced-ssh-scrolled-{size_tag}.png")
+                # The six-wheel frame shows proxy controls, not the footer.
+                # Drive to the end and keep a separate frame as evidence.
+                for _ in range(30):
+                    command("xdotool", "mousemove", "--window", window,
+                            str(form_x), str(form_y), "click", "5", env=env)
+                await asyncio.sleep(1)
+                bottom = tour_dir / f"tour-04e-advanced-ssh-bottom-{size_tag}.png"
+                shot(bottom.name)
+                # Only check dark-on-light footer buttons in the bottom band.
+                # A miss is inconclusive; do not assert scroll reachability.
+                footer_region = (0, max(0, min_height - 160), min_width, min_height)
+                try:
+                    tesseract = shutil.which("tesseract")
+                    if tesseract is None:
+                        raise RuntimeError("tesseract unavailable")
+                    footer = None
+                    for psm in ("6", "11"):
+                        words = await asyncio.to_thread(
+                            region_upscaled_rows, bottom, tesseract, footer_region,
+                            psm=psm,
+                        )
+                        for label in ("Cancel", "Save only"):
+                            footer = _bounds_inside(
+                                match_visible_label(words, label), footer_region,
+                            )
+                            if footer:
+                                break
+                        if footer:
+                            break
+                    if footer:
+                        print(f"tour: minimum-size footer label visible at {footer}", flush=True)
+                    else:
+                        print(f"tour: WARNING minimum-size footer not detected in {bottom.name}", flush=True)
+                except Exception as error:  # best-effort visual evidence
+                    print(f"tour: WARNING minimum-size footer check failed in {bottom.name}: {error}", flush=True)
+            finally:
+                key("Escape")
+                await asyncio.sleep(.5)
+        finally:
+            restored = await resize_tour(1280, 800)
+            if restored != (1280, 800):
+                raise RuntimeError(f"tour baseline not restored: {restored}")
+    await step("new-connection-minimum", s04_min)
 
     # Steps 4-5 are mandatory: a real SSH session must start.
     if "SESSION_STARTED" not in log_text():
@@ -1897,6 +2038,24 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
         return 1
     await asyncio.sleep(2)
     shot("tour-05-terminal.png")
+
+    async def s05_tunnels():
+        # Only target the top-right control if its live label is there.
+        before = tour_dir / "tour-05-terminal.png"
+        box = await tour_label(before, "Tunnels", region=(width - 180, 0, width, 42))
+        if not box:
+            raise RuntimeError("top-right Tunnels button not visible")
+        click(*centre(box))
+        try:
+            await asyncio.sleep(1)
+            shot("tour-05a-tunnels-open.png")
+            await tour_label(tour_dir / "tour-05a-tunnels-open.png", "Tunnel Manager")
+        finally:
+            key("Escape")
+            await asyncio.sleep(.5)
+            # Escape closes the manager; focus remains with the connected
+            # terminal. The mandatory echo below proves input routing.
+    await step("tunnels-manager", s05_tunnels)
 
     # Required: a missed echo fails the tour. INSPIRUM_GUI_TOUR_WITHHOLD_ECHO=1
     # makes the fixture stay silent so this path can be proven.
@@ -1985,6 +2144,118 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
         key("Escape")
         await asyncio.sleep(.5)
     await step("tools", s14)
+
+    # Optional hard gate: do not put this in step(), which swallows failures.
+    if os.environ.get("INSPIRUM_GUI_SYNC_BADGE_PROBE") == "1":
+        original_size = window_size(window, env)
+        armed = False
+        try:
+            tesseract = shutil.which("tesseract")
+            if tesseract is None:
+                raise RuntimeError("sync badge probe requires tesseract")
+            if original_size != (1280, 800):
+                raise RuntimeError(f"sync badge probe requires 1280x800 setup: {original_size}")
+            key("ctrl+shift+r")  # Tour already split once; focus is in pane B.
+            await asyncio.sleep(2)
+            menu_frame = tour_dir / "tour-sync-workspace-menu.png"
+            click(245, 16)  # Window spans x212..275, per menu.rs title widths.
+            await asyncio.sleep(.5)
+            screenshot(window, menu_frame, env)
+            menu_box = await asyncio.to_thread(
+                locate_visible_label, menu_frame, "Workspace",
+                region=(210, 24, 455, 400),
+            )
+            if menu_box is None:
+                raise RuntimeError("Window menu Workspace entry not visible")
+            click(*centre(menu_box))
+            await asyncio.sleep(1)
+            panel_frame = tour_dir / "tour-sync-workspace-targets.png"
+            screenshot(window, panel_frame, env)
+            # At 1280x800 the controls are small light text near the bottom of
+            # the panel. Whole-window OCR drops them; upscale this panel slice.
+            targets_region = (205, 560, 900, 680)
+            rows = await asyncio.to_thread(
+                region_upscaled_rows, panel_frame, tesseract, targets_region, psm="6",
+            )
+            header_box = match_visible_label(rows, "Synchronized input targets")
+            if header_box is None:
+                raise RuntimeError("Workspace synchronized-input controls not visible")
+            # The checkboxes precede each profile name. Distinguish the three
+            # identical names by their 'pane <id>' suffix and vertical order.
+            pane_rows = []
+            for line in _group_lines(rows):
+                text = " ".join(word[0] for word in line).lower()
+                match = re.search(r"\bpane\s*([123])\b", text)
+                if match:
+                    left = min(word[1] for word in line)
+                    y = (min(word[2] for word in line) + max(word[2] + word[4] for word in line)) // 2
+                    if y > header_box[3] and left > targets_region[0]:
+                        pane_rows.append((y, left, int(match.group(1))))
+            pane_rows.sort()
+            if len(pane_rows) != 3 or [pane for _, _, pane in pane_rows] != [1, 2, 3]:
+                raise RuntimeError(f"expected three visible Workspace pane rows, got {pane_rows}")
+            for y, left, _ in pane_rows[:2]:
+                click(left - 16, y)  # Iced checkbox before its label.
+                await asyncio.sleep(.4)
+            # Checkbox changes can redraw the panel; target ARM from fresh pixels.
+            arm_frame = tour_dir / "tour-sync-workspace-arm.png"
+            screenshot(window, arm_frame, env)
+            arm_rows = await asyncio.to_thread(
+                region_upscaled_rows, arm_frame, tesseract, targets_region, psm="6",
+            )
+            arm_box = match_visible_label(arm_rows, "ARM synchronized input")
+            if arm_box is None or arm_box[1] <= pane_rows[-1][0]:
+                raise RuntimeError("ARM synchronized input checkbox not visible below targets")
+            click(arm_box[0] - 20, centre(arm_box)[1])
+            armed = True
+            await asyncio.sleep(.5)
+            key("Escape")
+            if await resize_tour(640, 480) != (640, 480):
+                raise RuntimeError("sync badge probe was not rendered at actual 640x480")
+
+            async def badge_frame(name: str, expected: str, x: int) -> None:
+                click(x, 160)  # Terminal canvas, clear of toolbar and footer.
+                await asyncio.sleep(.8)
+                path = tour_dir / name
+                shot(name)
+                crop = tour_dir / name.replace(".png", "-status.png")
+                await asyncio.to_thread(_region_crop_upscaled, path, (0, 440, 640, 480), 3, crop)
+                written.append(crop)
+                if not await asyncio.to_thread(sync_badge_labels_visible, path, tesseract, expected):
+                    raise RuntimeError(
+                        f"{name}: badge missing full 2 SELECTED / {expected} "
+                        "inside 640px status badge"
+                    )
+                print(f"tour: {name}: visible 2 SELECTED and {expected}", flush=True)
+
+            # Newly split C occupies the right edge; A occupies the left half
+            # of the terminal area after the session sidebar. OCR is the gate
+            # for both focused-source states, never an app-state substitute.
+            await badge_frame("tour-sync-badge-unselected-640x480.png", "THIS PANE ONLY", 600)
+            await badge_frame("tour-sync-badge-selected-640x480.png", "MIRRORING", 290)
+        except Exception as error:
+            print(f"tour: FAILED sync badge probe: {error}", flush=True)
+            return 1
+        finally:
+            if armed:
+                try:
+                    # The same Mode > Sync Input command toggles an armed group off.
+                    key("Escape")
+                    click(207, 16)
+                    await asyncio.sleep(.3)
+                    mode_frame = tour_dir / "tour-sync-mode-menu.png"
+                    screenshot(window, mode_frame, env)
+                    disarm_box = await asyncio.to_thread(
+                        locate_visible_label, mode_frame, "Sync Input",
+                        region=(170, 24, 450, 220),
+                    )
+                    if disarm_box:
+                        click(*centre(disarm_box))
+                except Exception as error:
+                    print(f"tour: WARNING sync badge cleanup: {error}", flush=True)
+            restored = await resize_tour(*original_size)
+            if restored != original_size:
+                raise RuntimeError(f"tour size not restored after sync probe: {restored}")
 
     print(f"tour: {len(written)} screenshots written:", flush=True)
     for path in written:

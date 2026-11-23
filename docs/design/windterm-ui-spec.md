@@ -3,6 +3,16 @@
 Status: **authoritative target** for the Iced production frontend. It supersedes
 sections 4 (Layout) and 5 (Visual system) of `gui-redesign.md` and the
 "every clickable control has a resting fill and outline" rule recorded there.
+This is a design target, not a current-control guide. After PR #145 the
+session toolbar and breadcrumb field described below are absent from the Iced
+UI; pane headers have no mode/sync action buttons. Current controls are **Edit → Copy/Paste**,
+**View → Files/Shell**, **Mode → Free Type Mode/Remote Keys/Sync Input...**,
+and **Window → Workspace** for per-pane sync target checkboxes and arming.
+**Mode → Sync Input...** opens Workspace with fewer than two selected targets;
+otherwise it toggles arm/disarm. When armed, the status badge counts selected
+targets; only a selected focused source can mirror to them. An unselected
+focused source receives input only to itself. Tunnels opens from the top-right
+menu-bar button or **Session → Tunnels**.
 
 The owner's instruction: the previous UI is hard to read and not intuitive;
 **copy the WindTerm UI and mimic it exactly**. Where this document is silent,
@@ -282,13 +292,15 @@ strips, quick bar, Find strip, drag-and-drop docking, session tab colours.
 
 ## 11. Implementation status
 
-Status of the build on branch `feat/windterm-ui-docs` (issue #140, PR #141),
-checked against the source. "Implemented" means present in the code; it is not
-an acceptance claim.
+The table records the issue #140 / PR #141 implementation snapshot; it is not
+a current-control inventory or an acceptance claim. In particular, the
+session toolbar and breadcrumb recorded below were removed by PR #145. For
+current menu locations use the note at the top of this document and
+[`workspace.md`](../workspace.md).
 
 | Spec section | Status | Note |
 | --- | --- | --- |
-| 1. Window structure | Implemented | Menu bar, session tab strip, session toolbar, dock areas, status bar. |
+| 1. Window structure | Changed after snapshot | Menu bar, session tab strip, dock areas and status bar remain; no session toolbar after PR #145. |
 | 2. Themes | Implemented | Light (default) and Dark, View > Theme, `INSPIRUM_THEME` override; persisted in `ui-state.json`. |
 | 3. Typography and metrics | Partly | Not measured against every value in the table. |
 | 4. Menu bar | Implemented | Session, Edit, View, Mode, Window, Help with drop-downs (items in `src/iced_app/menu.rs`). |
@@ -298,7 +310,7 @@ an acceptance claim.
 | 5.3 Transfer panel | Implemented | Transfer queue as a dock panel. |
 | 5.4 Shell, Sender, Outline | Partly | Sender is a dock panel. Shell opens as a split pane, not a dock panel. Outline not implemented. |
 | 6.1 Session tab strip | Partly | Tab strip present; no per-session tab colours. |
-| 6.2 Session toolbar | Implemented | Toolbar with breadcrumb. |
+| 6.2 Session toolbar | Target only; removed from current build | Toolbar with breadcrumb describes the original design, not PR #145's menu-driven UI. |
 | 6.3 Terminal panes | Partly | Pane headers only for split tabs. No timestamp/line-number/fold gutter. |
 | 6.4 Empty workspace | Implemented | Muted centred hint line. |
 | 7. Status bar | Implemented | Mode, `<cols>x<rows>`, `ssh`, counts, date-time. |

@@ -46,6 +46,10 @@ pub(super) struct Palette {
     pub text: Color,
     pub text_dock: Color,
     pub muted: Color,
+    /// High-visibility outline for selected dialog choices.
+    pub selection_indicator: Color,
+    /// Contextual preflight text; unlike the orange marker, readable on chrome.
+    pub warning_text: Color,
     pub accent: Color,
     pub magenta: Color,
     pub success: Color,
@@ -75,7 +79,9 @@ pub(super) const LIGHT: Palette = Palette {
     border: hex(0xBFBFBF),
     text: hex(0x151515),
     text_dock: hex(0x333333),
-    muted: hex(0x929292),
+    muted: hex(0x5C5C5C),
+    selection_indicator: hex(0x0066B3),
+    warning_text: hex(0x895000),
     accent: hex(0x1E90FF),
     magenta: hex(0xFF1493),
     success: hex(0x339333),
@@ -93,11 +99,13 @@ pub(super) const DARK: Palette = Palette {
     tab_inactive: hex(0x333333),
     raised: hex(0x333333),
     hover: hex(0x2A2A2A),
-    selected_row: hex(0x262626),
+    selected_row: hex(0x3A3A3A),
     border: hex(0x444444),
     text: hex(0xBFBFBF),
     text_dock: hex(0xBFBFBF),
-    muted: hex(0x808080),
+    muted: hex(0xAAAAAA),
+    selection_indicator: hex(0x70B8FF),
+    warning_text: hex(0xF6B84B),
     accent: hex(0x2196F3),
     magenta: hex(0xFF0099),
     success: hex(0xA6E22E),
@@ -220,5 +228,49 @@ mod tests {
             assert_eq!(ChromeTheme::parse(theme.as_str()), Some(theme));
         }
         assert_eq!(ChromeTheme::default(), ChromeTheme::Light);
+    }
+
+    /// WCAG 2.1 relative luminance for opaque sRGB chrome tokens.
+    fn luminance(color: Color) -> f32 {
+        let linear = |channel: f32| {
+            if channel <= 0.04045 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+    }
+
+    fn contrast(a: Color, b: Color) -> f32 {
+        let (low, high) = (luminance(a), luminance(b));
+        (high.max(low) + 0.05) / (high.min(low) + 0.05)
+    }
+
+    #[test]
+    fn small_chrome_text_meets_wcag_aa_on_all_relevant_surfaces() {
+        // Direct constants avoid changing the process-global runtime theme in parallel tests.
+        for p in [LIGHT, DARK] {
+            // A selected row must remain visibly distinct from its list background.
+            for (list, selected) in [
+                (p.list.r, p.selected_row.r),
+                (p.list.g, p.selected_row.g),
+                (p.list.b, p.selected_row.b),
+            ] {
+                assert!(
+                    (list - selected).abs() * 255.0 >= 25.0,
+                    "selected row visibility"
+                );
+            }
+            for surface in [p.chrome, p.dock, p.list, p.raised, p.hover, p.selected_row] {
+                assert!(contrast(p.muted, surface) >= 4.5, "muted on {surface:?}");
+            }
+            assert!(contrast(p.muted, p.list) >= 4.5, "input placeholder");
+            assert!(contrast(p.text, p.list) >= 4.5, "input value");
+            assert!(contrast(p.text, p.selected_row) >= 4.5, "selected choice");
+            assert!(contrast(p.warning_text, p.dock) >= 4.5, "preflight warning");
+            assert!(contrast(Color::BLACK, p.accent) >= 4.5, "primary action");
+            assert!(contrast(p.selection_indicator, p.selected_row) >= 3.0);
+        }
     }
 }

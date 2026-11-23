@@ -5,7 +5,7 @@ Feature #21 adds safety controls around the existing terminal selection and copy
 ## Copy
 
 Selection remains owned by the terminal widget. Platform keyboard shortcuts continue
-to work, and the toolbar provides **Copy selection**. Remote clipboard requests are
+to work; **Edit → Copy** copies the focused pane's selection. Remote clipboard requests are
 not forwarded to the desktop clipboard.
 
 ## Paste
@@ -147,11 +147,11 @@ Issue #78 reorganizes the default application surface around the operator workfl
 
 Advanced profile, authentication, forwarding, appearance, keyboard and snippet controls remain available but are hidden by default behind **Settings** or the application menus. This keeps the normal workspace terminal-centric while preserving all previously implemented capabilities and safety confirmations.
 
-The UI intentionally uses compact pane headers, restrained separators, dark neutral surfaces, clear selected/focused states and overflow menus for low-frequency tab operations. Existing keyboard shortcuts remain the fastest path for command palette, quick switching, retained-history search and tab management.
+The UI uses compact split-pane headers, restrained separators and clear focus states; pane headers show mode labels and close/reconnect controls, not sync or mode action buttons. Application menus hold Copy/Paste (**Edit**), Files/Shell (**View**), Free Type Mode/Remote Keys/Sync Input... (**Mode**) and workspace controls (**Window**). Existing keyboard shortcuts remain available for command palette, quick switching, retained-history search and tab management.
 
 
 ### Split-pane chrome
 
-The split-terminal workspace uses compact pane headers rather than full control panels. The focused pane is visually distinguished and carries the active marker; close is a small pane-local control. Workspace save/restore, split creation and synchronized-input targeting remain available under the collapsed **Workspace** section so they do not consume terminal space during ordinary use.
+The split-terminal workspace uses compact pane headers rather than full control panels. The focused pane is visually distinguished; close is a small pane-local control. Split creation is under **Window**. Save/restore and per-pane synchronized-input target checkboxes are under **Window → Workspace**, together with **ARM synchronized input**. **Mode → Sync Input...** opens Workspace when fewer than two targets are selected and otherwise toggles arm/disarm. Focusing an unselected pane while other targets are armed does not mirror its input; it receives its own input only.
 
-When two panes are active, a small split-mode indicator shows whether they are side-by-side or stacked and whether synchronized input is armed.
+When sync is armed, the status-bar badge counts N selected targets. A selected focused source is eligible to mirror to selected live targets, but delivery is not guaranteed if its source write fails. An unselected focused source receives input only to itself, even while the other targets remain armed. Changing selected targets disarms sync; it is never armed automatically.
