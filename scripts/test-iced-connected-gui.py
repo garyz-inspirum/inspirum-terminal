@@ -1447,13 +1447,18 @@ def require_label_absent(path, label, *, region, locate=None, attempts=2):
     injected ``locate`` that raises ``RuntimeError`` without recording
     anything is a clean miss.
     """
+    # Absence needs every stage: the default locator gets no time budget
+    # (each tesseract call is still bounded by _ocr_tsv's timeout). With the
+    # 12 s default the region stages alone used the budget on a slow host,
+    # so every miss was cut short.
+    kwargs = {"budget": float("inf")} if locate is None else {}
     locate = locate or locate_visible_label
     reasons = []
     for attempt in range(1, max(1, attempts) + 1):
         failures_before = len(_OCR_FAILURES)
         cut_before = len(_LOCATE_CUT_SHORT)
         try:
-            bounds = locate(path, label, region=region)
+            bounds = locate(path, label, region=region, **kwargs)
         except OcrInconclusive as exc:
             reasons.append(f"attempt {attempt}: {exc}")
             continue
