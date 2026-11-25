@@ -812,6 +812,9 @@ struct Workspace {
     profile: Session,
     panes: pane_grid::State<TerminalPane>,
     focus: pane_grid::Pane,
+    /// 1-based ordinal among open tabs of the same `session_profile_key`,
+    /// fixed when the tab opens so closing another tab never renumbers it.
+    instance: u32,
 }
 
 impl Workspace {
@@ -823,6 +826,16 @@ impl Workspace {
             profile,
             panes,
             focus,
+            instance: 1,
+        }
+    }
+
+    /// Static profile-based tab label: `name`, then `name (2)`, `name (3)`.
+    fn label(&self) -> String {
+        if self.instance > 1 {
+            format!("{} ({})", self.profile.name, self.instance)
+        } else {
+            self.profile.name.clone()
         }
     }
 
@@ -4724,20 +4737,37 @@ impl App {
         }
     }
 
+    /// Lowest instance number not used by an open tab of `profile`.
+    fn next_tab_instance(&self, profile: &Session) -> u32 {
+        let key = session_profile_key(profile);
+        let used: HashSet<u32> = self
+            .tabs
+            .iter()
+            .filter(|tab| session_profile_key(&tab.profile) == key)
+            .map(|tab| tab.instance)
+            .collect();
+        (1..).find(|instance| !used.contains(instance)).unwrap_or(1)
+    }
+
+    /// Every open creates a new, independent tab and SSH session, even when
+    /// a tab for the same profile is already open.
     fn open(&mut self, index: usize) {
         if let Some(profile) = self.profiles.get(index).cloned() {
-            let key = session_profile_key(&profile);
-            if let Some(existing) = self
-                .tabs
-                .iter()
-                .position(|tab| session_profile_key(&tab.profile) == key)
-            {
-                self.activate_tab(existing);
-            } else {
-                let terminal = self.new_terminal_pane(profile.clone());
-                self.tabs.push(Workspace::new(profile, terminal));
-                self.activate_tab(self.tabs.len() - 1);
+            let instance = self.next_tab_instance(&profile);
+            let mut pane_profile = profile.clone();
+            if instance > 1 {
+                // Instance 1 owns the profile's -L/-R/-D listeners. A second
+                // ssh binding the same ports would die on
+                // ExitOnForwardFailure, so duplicates are plain shells.
+                pane_profile.ssh.local_forwards.clear();
+                pane_profile.ssh.remote_forwards.clear();
+                pane_profile.ssh.dynamic_forwards.clear();
             }
+            let terminal = self.new_terminal_pane(pane_profile);
+            let mut tab = Workspace::new(profile, terminal);
+            tab.instance = instance;
+            self.tabs.push(tab);
+            self.activate_tab(self.tabs.len() - 1);
             self.status = if self.pty_bridge.is_some() {
                 "Session opened.".into()
             } else {
@@ -8477,9 +8507,8 @@ impl App {
             let active = index == self.active;
             let focused_pane = tab.panes.get(tab.focus);
             let tab_label = focused_pane
-                .and_then(|pane| pane.terminal_title.as_deref())
-                .unwrap_or(&tab.profile.name)
-                .to_owned();
+                .and_then(|pane| pane.terminal_title.clone())
+                .unwrap_or_else(|| tab.label());
             let connected = focused_pane.is_some_and(|pane| {
                 pane.terminal.is_some() && !pane.exited && pane.error.is_none()
             });
@@ -14567,8 +14596,73 @@ mod tests {
         assert_eq!(
             app.tabs.len(),
             1,
-            "a follow-up click must not open a second tab"
+            "a lone follow-up click must not open a second tab"
         );
+    }
+
+    #[test]
+    fn session_double_click_on_open_profile_opens_a_new_numbered_tab() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::SelectSession(1));
+        let _ = app.update(Message::SelectSession(1));
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs[0].label(), "beta");
+
+        // A second double-click on the already-open profile opens a new tab.
+        let _ = app.update(Message::SelectSession(1));
+        let _ = app.update(Message::SelectSession(1));
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active, 1, "the new tab is active");
+        assert_eq!(app.tabs[0].label(), "beta");
+        assert_eq!(app.tabs[1].label(), "beta (2)");
+        assert_ne!(app.tabs[0].id, app.tabs[1].id);
+        let first_pane = app.tabs[0].panes.get(app.tabs[0].focus).map(|pane| pane.id);
+        let second_pane = app.tabs[1].panes.get(app.tabs[1].focus).map(|pane| pane.id);
+        assert!(first_pane.is_some() && second_pane.is_some());
+        assert_ne!(first_pane, second_pane, "each tab has its own SSH pane");
+    }
+
+    #[test]
+    fn duplicate_tab_number_is_stable_and_lowest_free_is_reused() {
+        let mut app = session_click_app();
+        app.open(0);
+        app.open(0);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs[1].label(), "alpha (2)");
+
+        let _ = app.update(Message::ConfirmClose(0));
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(
+            app.tabs[0].label(),
+            "alpha (2)",
+            "closing tab 1 must not renumber the remaining tab"
+        );
+
+        // Lowest free number among open tabs of the profile.
+        app.open(0);
+        assert_eq!(app.tabs[1].label(), "alpha");
+        app.open(0);
+        assert_eq!(app.tabs[2].label(), "alpha (3)");
+        // Another profile numbers independently.
+        app.open(1);
+        assert_eq!(app.tabs[3].label(), "beta");
+    }
+
+    #[test]
+    fn duplicate_tab_does_not_rebind_saved_forwards() {
+        let mut app = session_click_app();
+        app.profiles[0].ssh.local_forwards = vec!["8080:localhost:80".into()];
+        app.open(0);
+        app.open(0);
+        let forwards = |tab: &Workspace| {
+            tab.panes
+                .get(tab.focus)
+                .map(|pane| pane.profile.ssh.local_forwards.len())
+        };
+        assert_eq!(forwards(&app.tabs[0]), Some(1));
+        assert_eq!(forwards(&app.tabs[1]), Some(0));
+        // Tab state still carries the saved profile.
+        assert_eq!(app.tabs[1].profile.ssh.local_forwards.len(), 1);
     }
 
     fn remote_context_labels(is_dir: bool) -> Vec<&'static str> {
