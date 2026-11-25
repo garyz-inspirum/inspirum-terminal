@@ -1994,18 +1994,61 @@ enum SessionContextAction {
     Import,
 }
 
-const FILE_CONTEXT_MENU_WIDTH: f32 = 200.0;
+/// Narrowest file/session context menu column.
+const FILE_CONTEXT_MENU_MIN_WIDTH: f32 = 200.0;
 const FILE_CONTEXT_ITEM_HEIGHT: f32 = 24.0;
+/// Horizontal padding on each side of a context-menu item label.
+const FILE_CONTEXT_ITEM_PAD_X: f32 = 10.0;
+/// Spare room beyond the estimate so a label never touches the clip edge.
+const FILE_CONTEXT_LABEL_SLACK: f32 = 8.0;
+
+/// Estimated rendered width of a context-menu label: the same ~0.62 em
+/// monospace advance the tunnel menu and top drop-down titles use.
+fn context_menu_label_width(label: &str) -> f32 {
+    label.chars().count() as f32 * theme::metrics::UI_TEXT * 0.62
+}
+
+/// Every label any file or session context menu can show.
+fn all_context_menu_labels() -> Vec<&'static str> {
+    let mut labels = Vec::new();
+    for side in [FileContextSide::Remote, FileContextSide::Local] {
+        for is_dir in [false, true] {
+            let menu = FileContextMenu {
+                side,
+                is_dir,
+                open_path: String::new(),
+                local_path: None,
+                anchor: iced::Point::ORIGIN,
+            };
+            labels.extend(file_context_entries(&menu).into_iter().map(|(l, _)| l));
+        }
+    }
+    labels.extend(session_context_entries().into_iter().map(|(l, _)| l));
+    labels
+}
+
+/// Column width shared by every file and session context menu: wide enough
+/// for the longest label of any variant plus item padding, never below
+/// [`FILE_CONTEXT_MENU_MIN_WIDTH`].
+fn context_menu_width() -> f32 {
+    let longest = all_context_menu_labels()
+        .into_iter()
+        .map(context_menu_label_width)
+        .fold(0.0_f32, f32::max);
+    (longest + 2.0 * FILE_CONTEXT_ITEM_PAD_X + FILE_CONTEXT_LABEL_SLACK)
+        .ceil()
+        .max(FILE_CONTEXT_MENU_MIN_WIDTH)
+}
 
 fn file_context_menu_height(item_count: usize) -> f32 {
     item_count as f32 * FILE_CONTEXT_ITEM_HEIGHT + 2.0
 }
 
 /// Visual popup size, including the 1px padding that holds the border.
-/// The column itself stays [`FILE_CONTEXT_MENU_WIDTH`] by [`FILE_CONTEXT_ITEM_HEIGHT`].
+/// The column itself is [`context_menu_width`] by [`FILE_CONTEXT_ITEM_HEIGHT`] rows.
 fn context_menu_popup_size(item_count: usize) -> iced::Size {
     iced::Size::new(
-        FILE_CONTEXT_MENU_WIDTH + 2.0,
+        context_menu_width() + 2.0,
         file_context_menu_height(item_count),
     )
 }
@@ -2562,17 +2605,27 @@ fn menu_popup_style(_: &Theme) -> container::Style {
 }
 
 fn context_popup<'a>(items: Vec<(&'static str, Message)>) -> Element<'a, Message> {
-    let mut rows = column![].width(FILE_CONTEXT_MENU_WIDTH);
+    let mut rows = column![].width(context_menu_width());
     for (label, message) in items {
         rows = rows.push(
             button(
-                text(label)
-                    .size(theme::metrics::UI_TEXT)
-                    .color(theme::palette().text),
+                container(
+                    text(label)
+                        .size(theme::metrics::UI_TEXT)
+                        .color(theme::palette().text)
+                        .wrapping(text::Wrapping::None),
+                )
+                .width(Fill)
+                .clip(true),
             )
             .width(Fill)
             .height(FILE_CONTEXT_ITEM_HEIGHT)
-            .padding([3, 10])
+            .padding(iced::Padding {
+                top: 3.0,
+                bottom: 3.0,
+                left: FILE_CONTEXT_ITEM_PAD_X,
+                right: FILE_CONTEXT_ITEM_PAD_X,
+            })
             .style(menu_item)
             .on_press(message),
         );
@@ -15265,6 +15318,50 @@ mod tests {
             inside,
             "an anchor already inside the free region is unchanged"
         );
+    }
+
+    #[test]
+    fn context_menu_labels_fit_on_one_line_in_the_menu_width() {
+        let width = context_menu_width();
+        assert!(width >= FILE_CONTEXT_MENU_MIN_WIDTH);
+        let mut variants = vec![
+            remote_context_labels(false),
+            remote_context_labels(true),
+            local_context_labels(false),
+            local_context_labels(true),
+        ];
+        variants.push(
+            session_context_entries()
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect(),
+        );
+        for labels in &variants {
+            for label in labels {
+                let needed = context_menu_label_width(label) + 2.0 * FILE_CONTEXT_ITEM_PAD_X;
+                assert!(
+                    needed <= width,
+                    "{label:?} needs {needed} px but the menu is {width} px"
+                );
+            }
+            // One fixed-height row per item, plus the 1px border padding.
+            let size = context_menu_popup_size(labels.len());
+            assert_eq!(
+                size.height,
+                labels.len() as f32 * FILE_CONTEXT_ITEM_HEIGHT + 2.0
+            );
+            assert_eq!(size.width, width + 2.0);
+        }
+        // The old fixed 200 px column wrapped this label.
+        let external =
+            context_menu_label_width("Open in External Editor") + 2.0 * FILE_CONTEXT_ITEM_PAD_X;
+        assert!(external > 200.0, "{external}");
+
+        // Opened at the right edge, the wider menu still stays inside.
+        let window = iced::Size::new(1280.0, 800.0);
+        let menu = context_menu_popup_size(variants[0].len());
+        let right = clamp_context_menu_anchor(iced::Point::new(1275.0, 300.0), window, menu);
+        assert!(right.x + menu.width <= window.width - 2.0);
     }
 
     fn local_context_labels(is_dir: bool) -> Vec<&'static str> {
