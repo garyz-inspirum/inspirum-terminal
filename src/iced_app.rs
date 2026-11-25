@@ -815,6 +815,13 @@ struct Workspace {
 }
 
 impl Workspace {
+    /// The tab strip always shows the saved session name. A remote OSC title
+    /// (usually the shell's cwd) can be arbitrarily long, so it is shown only
+    /// in the pane header, never in the tab.
+    fn tab_label(&self) -> &str {
+        &self.profile.name
+    }
+
     fn new(profile: Session, terminal: TerminalPane) -> Self {
         let id = terminal.id;
         let (panes, focus) = pane_grid::State::new(terminal);
@@ -8479,10 +8486,7 @@ impl App {
         for (index, tab) in self.tabs.iter().enumerate() {
             let active = index == self.active;
             let focused_pane = tab.panes.get(tab.focus);
-            let tab_label = focused_pane
-                .and_then(|pane| pane.terminal_title.as_deref())
-                .unwrap_or(&tab.profile.name)
-                .to_owned();
+            let tab_label = tab.tab_label().to_owned();
             let connected = focused_pane.is_some_and(|pane| {
                 pane.terminal.is_some() && !pane.exited && pane.error.is_none()
             });
@@ -13588,6 +13592,30 @@ mod tests {
             terminal_key_bytes(&key, none, None, terminal_core::TerminalMode::empty(),),
             None
         );
+    }
+
+    #[test]
+    fn tab_label_keeps_profile_name_after_remote_title() {
+        let profiles_path = std::env::temp_dir().join(format!(
+            "inspirum-iced-tab-title-{}-missing.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(profiles_path, None);
+        let profile = Session {
+            name: "prod web".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        let id = pane.id;
+        app.tabs.push(Workspace::new(profile, pane));
+        let long = format!("user@host:/{}", "very/long/directory/".repeat(20));
+        let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::Title(long)));
+        let (_, pane) = app.tabs[0].panes.iter().next().unwrap();
+        assert!(pane.terminal_title.is_some());
+        assert_eq!(app.tabs[0].tab_label(), "prod web");
+        let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::ResetTitle));
+        assert_eq!(app.tabs[0].tab_label(), "prod web");
     }
 
     #[test]
