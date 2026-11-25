@@ -56,7 +56,86 @@ LOGGED_ECHO_LINES = (
     "echo:AFTER_EXIT_CANCEL",
     "echo:AFTER_TUNNEL_SETTINGS",
     "echo:AFTER_TUNNEL_TOGGLES",
+    "echo:AFTER_EXTERNAL_EDIT",
+    "echo:IN_DUPLICATE_TAB",
+    "echo:AFTER_DUPLICATE_TAB",
 )
+
+# Opt-in duplicate-tab step: double-clicking an already-open saved session
+# opens a second tab "<name> (2)" with its own SSH session. Default OFF.
+DUPTAB = os.environ.get("INSPIRUM_GUI_DUPTAB") == "1"
+DUPTAB_PROFILE = "CI connected fixture"
+
+
+def duplicate_tab_label(name: str, ordinal: int = 2) -> str:
+    """Static tab-strip label of the ``ordinal``-th tab on one profile."""
+    return f"{name} ({ordinal})"
+
+
+def tab_strip_band(tab_label, width: int, pad: int = 8):
+    """Full-width band around a located tab label (left, top, right, bottom)."""
+    return (0, max(0, tab_label[1] - pad), width, tab_label[3] + pad)
+
+# Opt-in "Open in External Editor" acceptance step (default OFF so the CI
+# invocation is unchanged until the step has passed once).
+EXTEDIT = os.environ.get("INSPIRUM_GUI_EXTEDIT") == "1"
+EXTEDIT_MARKER = b"INSPIRUM_FAKE_EDITOR_MARKER\n"
+EXTEDIT_MENU_LABEL = "Open in External Editor"
+# The remote-file popup lists Download, Edit, Open in External Editor,
+# Rename, Delete, Refresh, New Folder: 7 rows of 24 px plus borders.
+EXTEDIT_MENU_ROWS = 7
+EXTEDIT_ROW_HEIGHT = 24
+
+
+def fake_editor_script(python: str, argv_log: Path, marker: bytes) -> str:
+    """Source of the fake external editor.
+
+    It records its argv (JSON, one line) to ``argv_log`` and appends
+    ``marker`` to its LAST argument, after a 2 s pause so the app has
+    certainly recorded the working copy's baseline stamp before the save.
+    """
+    return (
+        f"#!{python}\n"
+        "import json, sys, time\n"
+        f"with open({str(argv_log)!r}, 'a', encoding='utf-8') as log:\n"
+        "    log.write(json.dumps(sys.argv) + '\\n')\n"
+        "time.sleep(2)\n"
+        "with open(sys.argv[-1], 'ab') as target:\n"
+        f"    target.write({marker!r})\n"
+    )
+
+
+def external_editor_ui_state(editor: Path) -> dict:
+    """Partial ui-state.json: UiState is ``#[serde(default)]``, so theme
+    (forced by INSPIRUM_THEME anyway) and docks keep their defaults. The
+    path is double-quoted because the setting is whitespace-tokenized; no
+    ``{file}`` placeholder, so the working copy is the last argument."""
+    return {"external_editor": f'"{editor}"'}
+
+
+def extedit_menu_region(click_x: int, click_y: int, width: int, height: int):
+    """Search box for the widened 7-row remote-file popup around the click.
+
+    The popup may open below the pointer or be clamped upward, and it is
+    being widened (do not assume 200 px), so allow 7 rows plus slack on
+    both sides vertically and up to 460 px to the right.
+    """
+    reach = EXTEDIT_MENU_ROWS * EXTEDIT_ROW_HEIGHT + 60
+    return (
+        max(0, click_x - 10),
+        max(0, click_y - reach),
+        min(width, click_x + 460),
+        min(height, click_y + reach),
+    )
+
+
+def extedit_bytes_verdict(original: bytes, current: bytes, marker: bytes) -> str | None:
+    """None when ``current`` is exactly ``original + marker``, else why not."""
+    if current == original + marker:
+        return None
+    if not current.endswith(marker):
+        return f"remote file does not end with the marker ({len(current)} bytes)"
+    return "remote file ends with the marker but its other bytes changed"
 
 
 class MonitoredSession(fixture.NativeSession):
@@ -2957,6 +3036,18 @@ async def main() -> int:
         profiles.write_text(
             json.dumps(fixture_profiles(forward_ports, echo_port)), encoding="utf-8",
         )
+        extedit_editor = root / "fake-editor.py"
+        extedit_argv_log = root / "fake-editor-argv.log"
+        if EXTEDIT:
+            # The app reads ui-state.json BESIDE the profiles file.
+            extedit_editor.write_text(
+                fake_editor_script(sys.executable, extedit_argv_log, EXTEDIT_MARKER),
+                encoding="utf-8",
+            )
+            extedit_editor.chmod(0o755)
+            (root / "ui-state.json").write_text(
+                json.dumps(external_editor_ui_state(extedit_editor)), encoding="utf-8",
+            )
 
         runtime = root / "xdg-runtime"
         runtime.mkdir(mode=0o700)
@@ -4776,6 +4867,115 @@ async def main() -> int:
                 await asyncio.sleep(.4)
                 screenshot(window, destination / "connected-files-redocked-selected.png", env)
 
+                if EXTEDIT:
+                    # Filer "Open in External Editor" on the remote 444 row.
+                    # Every assertion on 444's remote bytes (download verify,
+                    # Transfer queue row, name-order oracle) has already run;
+                    # the dock closes right after this step, so the appended
+                    # marker cannot reach a later check.
+                    extedit_remote = remote_root / download_name
+                    extedit_original = extedit_remote.read_bytes()
+                    if extedit_original != download_bytes:
+                        raise RuntimeError(
+                            f"remote {download_name} changed before the external-edit step"
+                        )
+                    extedit_row_shot = destination / "connected-extedit-row.png"
+                    extedit_row = await locate_rendered_label(
+                        window, extedit_row_shot, download_name, env=env,
+                        region=dock_body_region(width, height), timeout=20,
+                    )
+                    ex_x, ex_y = center(extedit_row)
+                    ex_region = extedit_menu_region(ex_x, ex_y, width, height)
+                    # Same no-pause gesture as the context-menu step: move and
+                    # right-press in one xdotool command.
+                    command(
+                        "xdotool", "mousemove", "--window", window,
+                        str(ex_x), str(ex_y), "click", "3", env=env,
+                    )
+                    ex_menu_shot = destination / "connected-extedit-menu.png"
+                    paint_deadline = time.monotonic() + 8 * TIME_SCALE
+                    while True:
+                        await asyncio.to_thread(screenshot, window, ex_menu_shot, env)
+                        painted = await asyncio.to_thread(diff, extedit_row_shot, ex_menu_shot, env)
+                        if painted >= 50:
+                            break
+                        if time.monotonic() >= paint_deadline:
+                            raise RuntimeError(
+                                f"right-click on {download_name} at ({ex_x}, {ex_y}) did not "
+                                f"repaint for the external-edit menu ({painted} pixels)"
+                            )
+                        await asyncio.sleep(.3)
+                    try:
+                        ex_item = await locate_rendered_label(
+                            window, ex_menu_shot, EXTEDIT_MENU_LABEL, env=env,
+                            region=ex_region, timeout=20,
+                        )
+                    except RuntimeError as exc:
+                        raise RuntimeError(
+                            f"Filer context menu did not render '{EXTEDIT_MENU_LABEL}' "
+                            f"inside {ex_region} (click ({ex_x}, {ex_y}); see {ex_menu_shot.name})"
+                        ) from exc
+                    if _bounds_inside(ex_item, ex_region) is None:
+                        raise RuntimeError(
+                            f"'{EXTEDIT_MENU_LABEL}' bounds {ex_item} not inside {ex_region}"
+                        )
+                    command(
+                        "xdotool", "mousemove", "--window", window,
+                        *map(str, center(ex_item)), "click", "1", env=env,
+                    )
+                    ex_after_shot = destination / "connected-extedit-after.png"
+                    try:
+                        await wait_for(
+                            extedit_argv_log.exists,
+                            "fake external editor argv log (editor never launched)",
+                            timeout=20 * TIME_SCALE,
+                        )
+                        await wait_for(
+                            lambda: extedit_remote.read_bytes().endswith(EXTEDIT_MARKER),
+                            f"remote {download_name} to end with the fake editor marker "
+                            "(working copy never uploaded)",
+                            timeout=30 * TIME_SCALE,
+                        )
+                    except RuntimeError:
+                        await asyncio.to_thread(screenshot, window, ex_after_shot, env)
+                        raise
+                    await asyncio.to_thread(screenshot, window, ex_after_shot, env)
+                    ex_argv = [
+                        json.loads(line)
+                        for line in extedit_argv_log.read_text(encoding="utf-8").splitlines()
+                        if line.strip()
+                    ]
+                    if len(ex_argv) != 1:
+                        raise RuntimeError(f"fake editor launched {len(ex_argv)} times: {ex_argv}")
+                    if Path(ex_argv[0][-1]).name != download_name:
+                        raise RuntimeError(
+                            f"fake editor last argument {ex_argv[0][-1]!r} is not a "
+                            f"working copy named {download_name}"
+                        )
+                    verdict = extedit_bytes_verdict(
+                        extedit_original, extedit_remote.read_bytes(), EXTEDIT_MARKER,
+                    )
+                    if verdict is not None:
+                        raise RuntimeError(f"external-edit upload: {verdict}")
+                    print(
+                        f"PASS external edit: editor argv {ex_argv[0]}, remote "
+                        f"{download_name} == original + marker", flush=True,
+                    )
+                    command(
+                        "xdotool", "windowfocus", window, "mousemove", "--window", window,
+                        "640", "280", "click", "1", env=env,
+                    )
+                    await asyncio.sleep(.3)
+                    command(
+                        "xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:AFTER_EXTERNAL_EDIT", env=env,
+                    )
+                    command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                    await wait_for(
+                        lambda: "NATIVE_ECHO:AFTER_EXTERNAL_EDIT" in events.path.read_text(encoding="utf-8").splitlines(),
+                        "shell echo after Open in External Editor",
+                    )
+
                 # The file browser has completed the real SFTP handshake.
                 # End that UI task before testing the independent local-editor
                 # workflow; otherwise its remote listing can keep keyboard
@@ -5727,6 +5927,127 @@ async def main() -> int:
                           "(echo + refusal through fixture SSH)", flush=True)
                     await running_edit_delete_probe()
                     await profile_edit_probe()
+
+                if DUPTAB:
+                    # Last interactive step before the event-log snapshot: the
+                    # script has no tab-close gesture, so the duplicate tab is
+                    # left open; the WM-close step below confirms the exit.
+                    dt_w, dt_h = window_size(window, env)
+                    dt_body = dock_body_region(dt_w, dt_h)
+                    dt_first_shot = destination / "connected-duptab-before.png"
+                    # The only "CI connected fixture" above the dock body is
+                    # the first tab's label (the session row is in the body).
+                    try:
+                        dt_tab = await locate_rendered_label(
+                            window, dt_first_shot, DUPTAB_PROFILE, env=env,
+                            region=(0, 0, dt_w, dt_body[1]), timeout=15,
+                        )
+                    except RuntimeError as exc:
+                        raise RuntimeError(
+                            f"first tab label '{DUPTAB_PROFILE}' not found above the dock "
+                            f"body {dt_body} (see {dt_first_shot.name})"
+                        ) from exc
+                    dt_band = tab_strip_band(dt_tab, dt_w)
+                    dt_row_shot = destination / "connected-duptab-session-row.png"
+                    try:
+                        await locate_rendered_label(
+                            window, dt_row_shot, DUPTAB_PROFILE, env=env,
+                            region=dt_body, timeout=6,
+                        )
+                    except RuntimeError:
+                        # Another bottom tab is active; switch to Session via
+                        # its strip label just above the body.
+                        await click_label(
+                            window, destination / "connected-duptab-session-tab.png",
+                            "Session", env, region=(0, max(0, dt_body[1] - 40), dt_w, dt_body[1] + 4),
+                            timeout=10, settle=.8,
+                        )
+                    started_before_dup = count("SESSION_STARTED")
+                    try:
+                        await click_label(
+                            window, dt_row_shot, DUPTAB_PROFILE, env,
+                            region=dt_body, timeout=15, settle=0, clicks=2,
+                        )
+                    except RuntimeError as exc:
+                        raise RuntimeError(
+                            f"session row '{DUPTAB_PROFILE}' not found in dock body {dt_body} "
+                            "for the duplicate-tab double click"
+                        ) from exc
+                    dt_shot = destination / "connected-duptab.png"
+                    try:
+                        await wait_for(
+                            lambda: count("SESSION_STARTED") >= started_before_dup + 1,
+                            "SESSION_STARTED after double-clicking an already-open session",
+                            timeout=20 * TIME_SCALE,
+                        )
+                    except RuntimeError:
+                        await asyncio.to_thread(screenshot, window, dt_shot, env)
+                        raise
+                    await asyncio.sleep(1.5 * TIME_SCALE)
+                    if count("SESSION_STARTED") != started_before_dup + 1:
+                        await asyncio.to_thread(screenshot, window, dt_shot, env)
+                        raise RuntimeError(
+                            "duplicate-tab double click did not start exactly one session: "
+                            f"SESSION_STARTED {started_before_dup} -> {count('SESSION_STARTED')}"
+                        )
+                    dt_label = duplicate_tab_label(DUPTAB_PROFILE)
+                    try:
+                        dt_new_tab = await locate_rendered_label(
+                            window, dt_shot, dt_label, env=env, region=dt_band, timeout=20,
+                        )
+                    except RuntimeError as exc:
+                        raise RuntimeError(
+                            f"tab strip band {dt_band} (from first tab {dt_tab}) does not "
+                            f"show '{dt_label}' (see {dt_shot.name})"
+                        ) from exc
+                    # Pane point: below the located tab strip, above the dock.
+                    pane_x = str(center(dt_new_tab)[0])
+                    pane_y = str((dt_band[3] + dt_body[1]) // 2)
+                    command(
+                        "xdotool", "windowfocus", window, "mousemove", "--window", window,
+                        pane_x, pane_y, "click", "1", env=env,
+                    )
+                    await asyncio.sleep(.3)
+                    command(
+                        "xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:IN_DUPLICATE_TAB", env=env,
+                    )
+                    command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                    await wait_for(
+                        lambda: "NATIVE_ECHO:IN_DUPLICATE_TAB" in events.path.read_text(encoding="utf-8").splitlines(),
+                        "shell echo in the duplicate tab",
+                    )
+                    # Back to the original tab by its located label.
+                    command(
+                        "xdotool", "mousemove", "--window", window,
+                        *map(str, center(dt_tab)), "click", "1", env=env,
+                    )
+                    await asyncio.sleep(.6 * TIME_SCALE)
+                    command(
+                        "xdotool", "windowfocus", window, "mousemove", "--window", window,
+                        str(center(dt_tab)[0]), pane_y, "click", "1", env=env,
+                    )
+                    await asyncio.sleep(.3)
+                    command(
+                        "xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:AFTER_DUPLICATE_TAB", env=env,
+                    )
+                    command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                    try:
+                        await wait_for(
+                            lambda: "NATIVE_ECHO:AFTER_DUPLICATE_TAB" in events.path.read_text(encoding="utf-8").splitlines(),
+                            "shell echo in the original tab after the duplicate tab",
+                        )
+                    except RuntimeError:
+                        await asyncio.to_thread(
+                            screenshot, window, destination / "connected-duptab-back.png", env,
+                        )
+                        raise
+                    print(
+                        f"PASS duplicate tab: SESSION_STARTED {started_before_dup} -> "
+                        f"{started_before_dup + 1}, '{dt_label}' at {dt_new_tab} in {dt_band}",
+                        flush=True,
+                    )
 
                 event_log = events.path.read_text(encoding="utf-8")
                 if "SHELL_PTY_RESIZE" not in event_log:
