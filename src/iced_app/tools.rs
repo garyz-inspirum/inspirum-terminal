@@ -379,6 +379,19 @@ impl App {
             .and_then(|t| t.panes.get(t.focus))
             .map(|p| p.profile.clone())
     }
+    /// The layout Save Workspace writes for `tab`: each pane's canonical
+    /// profile, forwards included.
+    pub(super) fn workspace_layout_of(&self, tab: &Workspace) -> WorkspaceLayout {
+        let mut profiles = Vec::new();
+        let tree = capture_workspace_tree(tab.panes.layout(), &tab.panes, &mut profiles);
+        WorkspaceLayout {
+            version: 1,
+            axis: crate::workspace::SplitAxis::Vertical,
+            reconnect_on_restore: self.tools.workspace_reconnect,
+            panes: profiles,
+            tree: Some(tree),
+        }
+    }
     pub(super) fn open_profile_value(&mut self, profile: Session) {
         self.tools.sync.set_armed(false);
         let pane = self.new_terminal_pane(profile.clone());
@@ -701,16 +714,7 @@ impl App {
                         self.status = "Saved SSH workspaces cannot contain SFTP terminals.".into();
                         return Task::none();
                     }
-                    let mut profiles = Vec::new();
-                    let tree =
-                        capture_workspace_tree(tab.panes.layout(), &tab.panes, &mut profiles);
-                    let layout = WorkspaceLayout {
-                        version: 1,
-                        axis: crate::workspace::SplitAxis::Vertical,
-                        reconnect_on_restore: self.tools.workspace_reconnect,
-                        panes: profiles,
-                        tree: Some(tree),
-                    };
+                    let layout = self.workspace_layout_of(tab);
                     let path = PathBuf::from(self.tools.workspace_path.trim());
                     return self.tool_job(move || {
                         workspace::save_layout(&path, &layout)
@@ -745,12 +749,10 @@ impl App {
                         .panes
                         .into_iter()
                         .map(|p| {
-                            let p = if session_profile_key(&p) == key {
-                                Self::pane_profile_for_instance(&p, instance)
-                            } else {
-                                p
-                            };
-                            Some(self.new_terminal_pane(p))
+                            // Keep the full profile on the pane; only its
+                            // connection drops the forwards.
+                            let suppress = instance > 1 && session_profile_key(&p) == key;
+                            Some(self.new_terminal_pane_with(p, false, suppress))
                         })
                         .collect();
                     let id = panes[0].as_ref().expect("validated workspace").id;
