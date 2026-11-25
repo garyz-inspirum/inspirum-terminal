@@ -1451,7 +1451,7 @@ def require_label_absent(path, label, *, region, locate=None, attempts=2):
     # (each tesseract call is still bounded by _ocr_tsv's timeout). With the
     # 12 s default the region stages alone used the budget on a slow host,
     # so every miss was cut short.
-    kwargs = {"budget": float("inf")} if locate is None else {}
+    kwargs = {"budget": float("inf")} if locate in (None, locate_visible_label) else {}
     locate = locate or locate_visible_label
     reasons = []
     for attempt in range(1, max(1, attempts) + 1):
