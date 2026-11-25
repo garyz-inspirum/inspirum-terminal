@@ -3,6 +3,7 @@ use crate::{Session, sftp};
 use anyhow::{Context, Result, ensure};
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -109,8 +110,16 @@ impl RemoteEdit {
 
 /// Byte-exact check that the remote file still equals `expected`.
 ///
-/// Downloads a fresh copy into `scratch_dir/conflict-check` (removed afterwards).
-/// Binary-safe: shared by the in-panel text editor and the external-editor path.
+/// Bounded so server-side growth cannot exhaust memory or disk:
+/// 1. the remote size is queried first and any length mismatch is a conflict
+///    (`Ok(false)`) without downloading;
+/// 2. the download into `scratch_dir/conflict-check` is aborted (and its
+///    staging file removed) as soon as it exceeds `expected.len()` bytes;
+/// 3. the downloaded copy is compared in fixed-size chunks, never loaded whole.
+///
+/// Errors (missing remote, failed transfer, timeout) stay errors; they are
+/// never reported as a match. Binary-safe: shared by the in-panel text editor
+/// and the external-editor path.
 pub(crate) fn remote_matches(
     session: &Session,
     config: Option<&Path>,
@@ -118,12 +127,111 @@ pub(crate) fn remote_matches(
     scratch_dir: &Path,
     expected: &[u8],
 ) -> Result<bool> {
+    let expected_len = expected.len() as u64;
+    if sftp::remote_size(session, config, remote)? != expected_len {
+        return Ok(false);
+    }
     let current_path = scratch_dir.join("conflict-check");
     let _ = fs::remove_file(&current_path);
-    download_blocking(session, config, remote, &current_path, None)?;
-    let current = fs::read(&current_path).context("read remote conflict-check copy");
+    let result = sftp::start_download(session, config, remote, &current_path, true, None)
+        .and_then(|mut transfer| {
+            wait_transfer_bounded(&mut transfer, expected_len, TRANSFER_TIMEOUT)
+        })
+        .and_then(|within_bound| {
+            if within_bound {
+                file_matches_bounded(&current_path, expected)
+            } else {
+                Ok(false)
+            }
+        });
     let _ = fs::remove_file(&current_path);
-    Ok(current? == expected)
+    result
+}
+
+const COMPARE_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Compare a local file with `expected` without loading it into memory.
+/// Reads at most `expected.len() + 1` bytes even if the file is larger.
+fn file_matches_bounded(path: &Path, expected: &[u8]) -> Result<bool> {
+    let file = fs::File::open(path).context("open remote conflict-check copy")?;
+    let actual_len = file
+        .metadata()
+        .context("stat remote conflict-check copy")?
+        .len();
+    if actual_len != expected.len() as u64 {
+        return Ok(false);
+    }
+    reader_matches_bounded(file, expected)
+}
+
+/// Chunked comparison of `reader` against `expected`; consumes at most
+/// `expected.len() + 1` bytes (the extra byte detects a longer stream).
+fn reader_matches_bounded<R: Read>(reader: R, expected: &[u8]) -> Result<bool> {
+    let mut limited = reader.take(expected.len() as u64 + 1);
+    let mut buffer = vec![0_u8; COMPARE_CHUNK_BYTES];
+    let mut offset = 0_usize;
+    loop {
+        let read = match limited.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error).context("read remote conflict-check copy"),
+        };
+        let end = offset + read;
+        if end > expected.len() || buffer[..read] != expected[offset..end] {
+            return Ok(false);
+        }
+        offset = end;
+    }
+    Ok(offset == expected.len())
+}
+
+/// Minimal transfer surface needed by the bounded wait loop (test seam).
+trait BoundedTransfer {
+    fn poll(&mut self) -> Result<Option<()>>;
+    fn transferred_bytes(&self) -> u64;
+    fn cancel(&mut self) -> Result<Option<PathBuf>>;
+}
+
+impl BoundedTransfer for sftp::Transfer {
+    fn poll(&mut self) -> Result<Option<()>> {
+        sftp::Transfer::poll(self)
+    }
+
+    fn transferred_bytes(&self) -> u64 {
+        sftp::Transfer::transferred_bytes(self)
+    }
+
+    fn cancel(&mut self) -> Result<Option<PathBuf>> {
+        sftp::Transfer::cancel(self)
+    }
+}
+
+/// Wait for a download, aborting once more than `max_bytes` have arrived.
+///
+/// Returns `Ok(true)` when the transfer completed, `Ok(false)` when it was
+/// cancelled for exceeding the bound (its preserved partial is deleted), and
+/// `Err` on transfer failure or timeout. On error paths the transfer's own
+/// staging file is removed when the transfer is dropped.
+fn wait_transfer_bounded<T: BoundedTransfer>(
+    transfer: &mut T,
+    max_bytes: u64,
+    timeout: Duration,
+) -> Result<bool> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if transfer.poll()?.is_some() {
+            return Ok(true);
+        }
+        if transfer.transferred_bytes() > max_bytes {
+            if let Ok(Some(partial)) = transfer.cancel() {
+                let _ = fs::remove_file(partial);
+            }
+            return Ok(false);
+        }
+        ensure!(Instant::now() < deadline, "SFTP edit transfer timed out");
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Upload `local` to a staged remote name, then rename it over `remote`.
@@ -281,5 +389,151 @@ mod tests {
         assert!(!edit.is_dirty());
         edit.text_mut().push_str("two\n");
         assert!(edit.is_dirty());
+    }
+
+    #[test]
+    fn file_matches_bounded_compares_exact_bytes() {
+        let dir = private_temp_dir().unwrap();
+        let path = dir.path().join("current");
+        fs::write(&path, b"hello world").unwrap();
+        assert!(file_matches_bounded(&path, b"hello world").unwrap());
+        assert!(!file_matches_bounded(&path, b"hello worlD").unwrap());
+        assert!(!file_matches_bounded(&path, b"hello worl").unwrap());
+        assert!(!file_matches_bounded(&path, b"hello world!").unwrap());
+    }
+
+    #[test]
+    fn file_matches_bounded_rejects_much_larger_file() {
+        let dir = private_temp_dir().unwrap();
+        let path = dir.path().join("current");
+        fs::write(&path, vec![b'a'; 1024 * 1024]).unwrap();
+        assert!(!file_matches_bounded(&path, b"aaaaaaaaaa").unwrap());
+    }
+
+    #[test]
+    fn file_matches_bounded_handles_empty_and_missing() {
+        let dir = private_temp_dir().unwrap();
+        let path = dir.path().join("current");
+        fs::write(&path, b"").unwrap();
+        assert!(file_matches_bounded(&path, b"").unwrap());
+        assert!(!file_matches_bounded(&path, b"x").unwrap());
+        assert!(file_matches_bounded(&dir.path().join("missing"), b"").is_err());
+    }
+
+    struct CountingReader<R> {
+        inner: R,
+        consumed: usize,
+    }
+
+    impl<R: Read> Read for CountingReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.inner.read(buf)?;
+            self.consumed += read;
+            Ok(read)
+        }
+    }
+
+    #[test]
+    fn reader_matches_bounded_reads_at_most_expected_plus_one() {
+        let expected = b"aaaaaaaaaa";
+        let mut reader = CountingReader {
+            inner: std::io::Cursor::new(vec![b'a'; 1024 * 1024]),
+            consumed: 0,
+        };
+        assert!(!reader_matches_bounded(&mut reader, expected).unwrap());
+        assert!(reader.consumed <= expected.len() + 1);
+
+        let mut exact = CountingReader {
+            inner: std::io::Cursor::new(expected.to_vec()),
+            consumed: 0,
+        };
+        assert!(reader_matches_bounded(&mut exact, expected).unwrap());
+        assert_eq!(exact.consumed, expected.len());
+
+        let mut longer = CountingReader {
+            inner: std::io::Cursor::new(b"aaaaaaaaaab".to_vec()),
+            consumed: 0,
+        };
+        assert!(!reader_matches_bounded(&mut longer, expected).unwrap());
+        assert!(longer.consumed <= expected.len() + 1);
+
+        let mut empty = CountingReader {
+            inner: std::io::Cursor::new(Vec::new()),
+            consumed: 0,
+        };
+        assert!(reader_matches_bounded(&mut empty, b"").unwrap());
+    }
+
+    struct FakeTransfer {
+        polls_before_done: Option<usize>,
+        bytes_per_poll: u64,
+        bytes: u64,
+        partial: PathBuf,
+        cancelled: bool,
+    }
+
+    impl BoundedTransfer for FakeTransfer {
+        fn poll(&mut self) -> Result<Option<()>> {
+            self.bytes += self.bytes_per_poll;
+            fs::write(&self.partial, vec![0_u8; self.bytes as usize]).unwrap();
+            match self.polls_before_done {
+                Some(0) => Ok(Some(())),
+                Some(ref mut remaining) => {
+                    *remaining -= 1;
+                    Ok(None)
+                }
+                None => Ok(None),
+            }
+        }
+
+        fn transferred_bytes(&self) -> u64 {
+            self.bytes
+        }
+
+        fn cancel(&mut self) -> Result<Option<PathBuf>> {
+            self.cancelled = true;
+            Ok(Some(self.partial.clone()))
+        }
+    }
+
+    fn fake_transfer(
+        dir: &Path,
+        polls_before_done: Option<usize>,
+        bytes_per_poll: u64,
+    ) -> FakeTransfer {
+        FakeTransfer {
+            polls_before_done,
+            bytes_per_poll,
+            bytes: 0,
+            partial: dir.join(".inspirum-download-fake"),
+            cancelled: false,
+        }
+    }
+
+    #[test]
+    fn bounded_wait_cancels_and_removes_partial_when_remote_grows() {
+        let dir = private_temp_dir().unwrap();
+        let mut transfer = fake_transfer(dir.path(), None, 4);
+        let within = wait_transfer_bounded(&mut transfer, 10, Duration::from_secs(5)).unwrap();
+        assert!(!within);
+        assert!(transfer.cancelled);
+        assert!((11..=12).contains(&transfer.bytes));
+        assert!(!transfer.partial.exists());
+    }
+
+    #[test]
+    fn bounded_wait_accepts_completed_transfer_within_bound() {
+        let dir = private_temp_dir().unwrap();
+        let mut transfer = fake_transfer(dir.path(), Some(2), 3);
+        assert!(wait_transfer_bounded(&mut transfer, 10, Duration::from_secs(5)).unwrap());
+        assert!(!transfer.cancelled);
+    }
+
+    #[test]
+    fn bounded_wait_times_out_with_error() {
+        let dir = private_temp_dir().unwrap();
+        let mut transfer = fake_transfer(dir.path(), None, 0);
+        assert!(wait_transfer_bounded(&mut transfer, 10, Duration::ZERO).is_err());
+        assert!(!transfer.cancelled);
     }
 }
