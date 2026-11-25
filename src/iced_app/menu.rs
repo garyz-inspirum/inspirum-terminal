@@ -77,6 +77,8 @@ impl Menu {
                 Entry::Separator,
                 item("Command Palette", "", Palette),
                 item("Snippets", "", Tool(Panel::Snippets)),
+                Entry::Separator,
+                item("External Editor...", "", ExternalEditor),
             ],
             Menu::View => vec![
                 item("Theme: Light", "", ThemeLight),
@@ -172,6 +174,7 @@ pub(super) enum Command {
     LayoutBottomTabs,
     LayoutWindTerm,
     Exit,
+    ExternalEditor,
 }
 
 #[cfg(test)]

@@ -5,7 +5,10 @@
 //! host-key, argv, paste, process-lifecycle, or transfer safeguards.
 mod dock;
 mod dock_view;
+mod external_edit_ui;
+mod external_editor_setting;
 use dock_view::available_panels;
+use external_editor_setting::{EXTERNAL_EDITOR_HELP, EXTERNAL_EDITOR_INPUT_ID};
 mod icons;
 mod menu;
 mod terminal_ime;
@@ -18,7 +21,7 @@ mod ui_state;
 use crate::{
     ProxyAuth, ProxyKind, Session, SessionImportMode,
     command_palette::{self, PaletteItem, Snippet, SnippetLibrary},
-    import_sessions, load_sessions,
+    external_edit, import_sessions, load_sessions,
     remote_edit::{self, SaveOutcome},
     save_session_edit, save_sessions, session_matches_query, session_profile_key,
     session_requires_forward_risk_ack, sftp, terminal,
@@ -805,6 +808,24 @@ struct TerminalPane {
     error: Option<String>,
     exited: bool,
     refresh_pending: Arc<AtomicBool>,
+    /// True for panes of a 2nd+ tab of the same profile. Instance 1 owns the
+    /// profile's -L/-R/-D listeners; a second ssh binding the same ports would
+    /// die on ExitOnForwardFailure. `profile` keeps the saved forwards so
+    /// lookups and Save Workspace see the canonical profile.
+    suppress_forwards: bool,
+}
+
+impl TerminalPane {
+    /// The profile this pane's ssh/sftp connection is started with.
+    fn launch_profile(&self) -> Session {
+        let mut profile = self.profile.clone();
+        if self.suppress_forwards {
+            profile.ssh.local_forwards.clear();
+            profile.ssh.remote_forwards.clear();
+            profile.ssh.dynamic_forwards.clear();
+        }
+        profile
+    }
 }
 
 struct Workspace {
@@ -812,6 +833,9 @@ struct Workspace {
     profile: Session,
     panes: pane_grid::State<TerminalPane>,
     focus: pane_grid::Pane,
+    /// 1-based ordinal among open tabs of the same `session_profile_key`,
+    /// fixed when the tab opens so closing another tab never renumbers it.
+    instance: u32,
 }
 
 impl Workspace {
@@ -823,6 +847,16 @@ impl Workspace {
             profile,
             panes,
             focus,
+            instance: 1,
+        }
+    }
+
+    /// Static profile-based tab label: `name`, then `name (2)`, `name (3)`.
+    fn label(&self) -> String {
+        if self.instance > 1 {
+            format!("{} ({})", self.profile.name, self.instance)
+        } else {
+            self.profile.name.clone()
         }
     }
 
@@ -864,6 +898,32 @@ struct PendingTransfer {
 struct PreparedTransfer {
     pending: PendingTransfer,
     conflict: bool,
+}
+
+/// Shared so the blocking upload task can borrow the edit while the App
+/// keeps owning it. The UI thread only ever `try_lock`s it.
+#[derive(Clone)]
+struct ExternalEditHandle(Arc<Mutex<external_edit::ExternalEdit>>);
+
+impl std::fmt::Debug for ExternalEditHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_tuple("ExternalEditHandle").finish()
+    }
+}
+
+/// One remote file open in a desktop editor.
+struct ExternalEditState {
+    id: u64,
+    session: Session,
+    session_key: String,
+    remote: String,
+    working_path: PathBuf,
+    handle: ExternalEditHandle,
+    /// An upload task for this edit is running; never start a second one.
+    uploading: bool,
+    /// A detected save failed to upload (conflict or error). The working
+    /// copy is kept until a later save uploads.
+    unsaved: bool,
 }
 
 #[derive(Clone)]
@@ -1912,6 +1972,7 @@ enum FileContextAction {
     Rename,
     Delete,
     Refresh,
+    OpenExternal,
 }
 
 /// One right-click menu. File rows and session rows share this state so the
@@ -1951,18 +2012,61 @@ enum SessionContextAction {
     Import,
 }
 
-const FILE_CONTEXT_MENU_WIDTH: f32 = 200.0;
+/// Narrowest file/session context menu column.
+const FILE_CONTEXT_MENU_MIN_WIDTH: f32 = 200.0;
 const FILE_CONTEXT_ITEM_HEIGHT: f32 = 24.0;
+/// Horizontal padding on each side of a context-menu item label.
+const FILE_CONTEXT_ITEM_PAD_X: f32 = 10.0;
+/// Spare room beyond the estimate so a label never touches the clip edge.
+const FILE_CONTEXT_LABEL_SLACK: f32 = 8.0;
+
+/// Estimated rendered width of a context-menu label: the same ~0.62 em
+/// monospace advance the tunnel menu and top drop-down titles use.
+fn context_menu_label_width(label: &str) -> f32 {
+    label.chars().count() as f32 * theme::metrics::UI_TEXT * 0.62
+}
+
+/// Every label any file or session context menu can show.
+fn all_context_menu_labels() -> Vec<&'static str> {
+    let mut labels = Vec::new();
+    for side in [FileContextSide::Remote, FileContextSide::Local] {
+        for is_dir in [false, true] {
+            let menu = FileContextMenu {
+                side,
+                is_dir,
+                open_path: String::new(),
+                local_path: None,
+                anchor: iced::Point::ORIGIN,
+            };
+            labels.extend(file_context_entries(&menu).into_iter().map(|(l, _)| l));
+        }
+    }
+    labels.extend(session_context_entries().into_iter().map(|(l, _)| l));
+    labels
+}
+
+/// Column width shared by every file and session context menu: wide enough
+/// for the longest label of any variant plus item padding, never below
+/// [`FILE_CONTEXT_MENU_MIN_WIDTH`].
+fn context_menu_width() -> f32 {
+    let longest = all_context_menu_labels()
+        .into_iter()
+        .map(context_menu_label_width)
+        .fold(0.0_f32, f32::max);
+    (longest + 2.0 * FILE_CONTEXT_ITEM_PAD_X + FILE_CONTEXT_LABEL_SLACK)
+        .ceil()
+        .max(FILE_CONTEXT_MENU_MIN_WIDTH)
+}
 
 fn file_context_menu_height(item_count: usize) -> f32 {
     item_count as f32 * FILE_CONTEXT_ITEM_HEIGHT + 2.0
 }
 
 /// Visual popup size, including the 1px padding that holds the border.
-/// The column itself stays [`FILE_CONTEXT_MENU_WIDTH`] by [`FILE_CONTEXT_ITEM_HEIGHT`].
+/// The column itself is [`context_menu_width`] by [`FILE_CONTEXT_ITEM_HEIGHT`] rows.
 fn context_menu_popup_size(item_count: usize) -> iced::Size {
     iced::Size::new(
-        FILE_CONTEXT_MENU_WIDTH + 2.0,
+        context_menu_width() + 2.0,
         file_context_menu_height(item_count),
     )
 }
@@ -1999,6 +2103,7 @@ fn file_context_entries(menu: &FileContextMenu) -> Vec<(&'static str, FileContex
             if !menu.is_dir {
                 items.push(("Download", FileContextAction::Download));
                 items.push(("Edit", FileContextAction::Edit));
+                items.push(("Open in External Editor", FileContextAction::OpenExternal));
             }
         }
         FileContextSide::Local => {
@@ -2052,6 +2157,9 @@ fn file_context_action_message(
             Some(Message::FilesRequestDeleteLocal)
         }
         (_, FileContextAction::Refresh) => Some(Message::FilesRefresh),
+        (FileContextSide::Remote, FileContextAction::OpenExternal) if !menu.is_dir => {
+            Some(Message::FilesRequestEditExternal)
+        }
         // Cross-side items (local Download, remote Upload) and Edit on a
         // directory or a local row are not offered. Drop a stale message.
         _ => None,
@@ -2515,17 +2623,27 @@ fn menu_popup_style(_: &Theme) -> container::Style {
 }
 
 fn context_popup<'a>(items: Vec<(&'static str, Message)>) -> Element<'a, Message> {
-    let mut rows = column![].width(FILE_CONTEXT_MENU_WIDTH);
+    let mut rows = column![].width(context_menu_width());
     for (label, message) in items {
         rows = rows.push(
             button(
-                text(label)
-                    .size(theme::metrics::UI_TEXT)
-                    .color(theme::palette().text),
+                container(
+                    text(label)
+                        .size(theme::metrics::UI_TEXT)
+                        .color(theme::palette().text)
+                        .wrapping(text::Wrapping::None),
+                )
+                .width(Fill)
+                .clip(true),
             )
             .width(Fill)
             .height(FILE_CONTEXT_ITEM_HEIGHT)
-            .padding([3, 10])
+            .padding(iced::Padding {
+                top: 3.0,
+                bottom: 3.0,
+                left: FILE_CONTEXT_ITEM_PAD_X,
+                right: FILE_CONTEXT_ITEM_PAD_X,
+            })
             .style(menu_item)
             .on_press(message),
         );
@@ -2645,6 +2763,12 @@ enum Dialog {
     ImportProfiles,
     About,
     Exit,
+    /// External editor command setting; `input` is the unsaved text and
+    /// `error` the last rejected Save.
+    ExternalEditor {
+        input: String,
+        error: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2931,6 +3055,20 @@ enum Message {
     FindClose,
     FindFocusProbe,
     FindFocusSynced(bool),
+    FilesRequestEditExternal,
+    ExternalEditOpened {
+        session: Session,
+        session_key: String,
+        remote: String,
+        result: Result<ExternalEditHandle, String>,
+    },
+    ExternalEditTick,
+    ExternalEditUploaded {
+        id: u64,
+        result: Result<external_edit::UploadOutcome, String>,
+    },
+    ExternalEditorInput(String),
+    ExternalEditorSave,
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -3179,7 +3317,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
         bounds: iced::Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
-        let position = cursor.position_in(bounds);
+        let position = cursor.position_in(bounds).map(terminal_text_point);
         if let Some(position) = position {
             state.last_position = Some(position);
         }
@@ -3194,8 +3332,12 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                 let (width, height) = terminal_cell_size(&self.appearance);
                 let cell = self.snapshot.cells.iter().find(|cell| cell.cursor);
                 let rectangle = iced::Rectangle {
-                    x: bounds.x + cell.map_or(0.0, |c| c.column as f32 * width),
-                    y: bounds.y + cell.map_or(0.0, |c| c.row as f32 * height),
+                    x: bounds.x
+                        + TERMINAL_TEXT_INSET.x
+                        + cell.map_or(0.0, |c| c.column as f32 * width),
+                    y: bounds.y
+                        + TERMINAL_TEXT_INSET.y
+                        + cell.map_or(0.0, |c| c.row as f32 * height),
                     width,
                     height,
                 };
@@ -3416,9 +3558,12 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
             if state.pointer_hidden && self.appearance.hide_pointer_while_typing {
                 mouse::Interaction::Hidden
             } else if state.selecting {
-                mouse::Interaction::Grabbing
+                // Keep the I-beam while a press-and-hold selects text; a
+                // grabbing hand reads as "drag the pane".
+                mouse::Interaction::Text
             } else if self.remote_mouse_enabled(state.modifiers) {
-                mouse::Interaction::Pointer
+                // The remote app owns the mouse: plain arrow, never a hand.
+                mouse::Interaction::default()
             } else {
                 mouse::Interaction::Text
             }
@@ -3513,9 +3658,11 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
             let geometry = caches[row].draw(renderer, bounds.size(), |frame| {
                 let url_spans = visible_url_ranges(&self.snapshot.cells[start..end]);
                 for (cell_index, cell) in self.snapshot.cells[start..end].iter().enumerate() {
-                    let x = cell.column as f32 * cell_width;
-                    let y = cell.row as f32 * cell_height;
-                    if x >= bounds.width || y >= bounds.height {
+                    let x = TERMINAL_TEXT_INSET.x + cell.column as f32 * cell_width;
+                    let y = TERMINAL_TEXT_INSET.y + cell.row as f32 * cell_height;
+                    if x >= bounds.width - TERMINAL_TEXT_INSET.x
+                        || y >= bounds.height - TERMINAL_TEXT_INSET.y
+                    {
                         continue;
                     }
 
@@ -3645,6 +3792,32 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
 
         geometries
     }
+}
+
+/// Clear space between the terminal pane edge and the first/last glyphs
+/// (x = left and right, y = top and bottom). Drawing, pointer-to-cell
+/// mapping, the IME cursor and the PTY grid size all use this one inset.
+const TERMINAL_TEXT_INSET: iced::Vector = iced::Vector { x: 10.0, y: 6.0 };
+
+/// Map a point relative to the canvas bounds to the text area's origin.
+/// Points inside the inset clamp to the first row/column.
+fn terminal_text_point(position: iced::Point) -> iced::Point {
+    iced::Point::new(
+        (position.x - TERMINAL_TEXT_INSET.x).max(0.0),
+        (position.y - TERMINAL_TEXT_INSET.y).max(0.0),
+    )
+}
+
+/// Columns and lines that fit in a terminal viewport of `size` after the
+/// inset is removed from both sides.
+fn terminal_grid_size(size: iced::Size, cell: (f32, f32)) -> (u16, u16) {
+    let columns = ((size.width - 2.0 * TERMINAL_TEXT_INSET.x).max(1.0) / cell.0)
+        .floor()
+        .max(1.0) as u16;
+    let lines = ((size.height - 2.0 * TERMINAL_TEXT_INSET.y).max(1.0) / cell.1)
+        .floor()
+        .max(1.0) as u16;
+    (columns, lines)
 }
 
 fn terminal_cell_size(appearance: &crate::appearance::TerminalAppearance) -> (f32, f32) {
@@ -4100,6 +4273,13 @@ struct App {
     /// True while the Find input owns keyboard input. Cleared when the strip
     /// closes, on Escape, and when a terminal pane is focused.
     find_focused: bool,
+    /// Remote files open in a desktop editor; saves upload on the tick.
+    external_edits: Vec<ExternalEditState>,
+    next_external_edit_id: u64,
+    /// One sleep task is in flight; only scheduled while edits exist.
+    external_edit_tick_scheduled: bool,
+    /// Editor command setting; empty means the OS default application.
+    external_editor: String,
 }
 
 const FILES_PANELS: [dock::Panel; 3] = [
@@ -4116,6 +4296,7 @@ impl App {
         let state = ui_state::UiState {
             theme: theme::current().as_str().to_string(),
             docks: Some(self.docks.clone()),
+            external_editor: self.external_editor.clone(),
         };
         if let Err(error) = ui_state::save(path, &state) {
             self.status = format!("Could not save UI layout: {error}");
@@ -4251,6 +4432,10 @@ impl App {
             context_menu: None,
             find_open: false,
             find_focused: false,
+            external_edits: Vec::new(),
+            next_external_edit_id: 1,
+            external_edit_tick_scheduled: false,
+            external_editor: std::mem::take(&mut saved_ui.external_editor),
         }
     }
 
@@ -4275,6 +4460,17 @@ impl App {
     }
 
     fn new_terminal_pane_kind(&mut self, profile: Session, sftp: bool) -> TerminalPane {
+        self.new_terminal_pane_with(profile, sftp, false)
+    }
+
+    /// Build a pane and start it at once when the pty bridge exists, so
+    /// `suppress_forwards` is fixed before the connection is built.
+    fn new_terminal_pane_with(
+        &mut self,
+        profile: Session,
+        sftp: bool,
+        suppress_forwards: bool,
+    ) -> TerminalPane {
         let id = self.next_terminal_id;
         self.next_terminal_id = self.next_terminal_id.saturating_add(1);
 
@@ -4294,6 +4490,7 @@ impl App {
             error: None,
             exited: false,
             refresh_pending: Arc::new(AtomicBool::new(false)),
+            suppress_forwards,
         };
 
         // Iced subscriptions are initialized asynchronously. A fast click on a saved
@@ -4330,10 +4527,11 @@ impl App {
                 }
             });
 
+        let profile = pane.launch_profile();
         let connection = if pane.sftp {
-            terminal::connect_sftp_with_event_sink(pane.id, &pane.profile, config, event_sink)
+            terminal::connect_sftp_with_event_sink(pane.id, &profile, config, event_sink)
         } else {
-            terminal::connect_with_event_sink(pane.id, &pane.profile, config, event_sink)
+            terminal::connect_with_event_sink(pane.id, &profile, config, event_sink)
         };
         match connection {
             Ok(mut terminal) => {
@@ -4705,8 +4903,7 @@ impl App {
                     .appearance
                     .effective_for(&session_profile_key(&pane.profile));
                 let cell = terminal_cell_size(&appearance);
-                let columns = ((size.width - 28.0).max(1.0) / cell.0).floor().max(1.0) as u16;
-                let lines = ((size.height - 28.0).max(1.0) / cell.1).floor().max(1.0) as u16;
+                let (columns, lines) = terminal_grid_size(size, cell);
                 pane.canvas_size = Some(size);
                 if pane.terminal_grid_size == Some((columns, lines)) && pane.cell_size == cell {
                     return;
@@ -4724,20 +4921,29 @@ impl App {
         }
     }
 
+    /// Lowest instance number not used by an open tab of `profile`.
+    fn next_tab_instance(&self, profile: &Session) -> u32 {
+        let key = session_profile_key(profile);
+        let used: HashSet<u32> = self
+            .tabs
+            .iter()
+            .filter(|tab| session_profile_key(&tab.profile) == key)
+            .map(|tab| tab.instance)
+            .collect();
+        (1..).find(|instance| !used.contains(instance)).unwrap_or(1)
+    }
+
+    /// Every open creates a new, independent tab and SSH session, even when
+    /// a tab for the same profile is already open.
     fn open(&mut self, index: usize) {
         if let Some(profile) = self.profiles.get(index).cloned() {
-            let key = session_profile_key(&profile);
-            if let Some(existing) = self
-                .tabs
-                .iter()
-                .position(|tab| session_profile_key(&tab.profile) == key)
-            {
-                self.activate_tab(existing);
-            } else {
-                let terminal = self.new_terminal_pane(profile.clone());
-                self.tabs.push(Workspace::new(profile, terminal));
-                self.activate_tab(self.tabs.len() - 1);
-            }
+            let instance = self.next_tab_instance(&profile);
+            // Panes of a 2nd+ tab are plain shells; see `suppress_forwards`.
+            let terminal = self.new_terminal_pane_with(profile.clone(), false, instance > 1);
+            let mut tab = Workspace::new(profile, terminal);
+            tab.instance = instance;
+            self.tabs.push(tab);
+            self.activate_tab(self.tabs.len() - 1);
             self.status = if self.pty_bridge.is_some() {
                 "Session opened.".into()
             } else {
@@ -5717,7 +5923,7 @@ impl App {
             Message::MenuCommand(command) => {
                 // The menu is not shown under the privacy curtain or a modal.
                 // A queued Exit must not close the window or replace that modal.
-                if matches!(command, menu::Command::Exit)
+                if matches!(command, menu::Command::Exit | menu::Command::ExternalEditor)
                     && (self.privacy_locked || self.dialog.is_some())
                 {
                     return Task::none();
@@ -5799,6 +6005,7 @@ impl App {
                     C::Tool(panel) => Message::Tool(tools::Action::Open(panel)),
                     C::About => Message::About,
                     C::Exit => Message::Exit,
+                    C::ExternalEditor => return self.open_external_editor_dialog(),
                 };
                 return self.update(message);
             }
@@ -6191,6 +6398,7 @@ impl App {
                         self.remote_editor = None;
                     }
                     self.tabs.remove(index);
+                    self.close_orphaned_external_edits();
                     self.close_find_strip();
                     self.prune_tool_panes();
                     self.prune_free_type();
@@ -7114,10 +7322,18 @@ impl App {
                     .tabs
                     .get(self.active)
                     .and_then(|tab| tab.panes.get(pane_id))
-                    .map(|pane| (pane.profile.clone(), pane.sftp, pane.auxiliary_shell));
+                    .map(|pane| {
+                        (
+                            pane.profile.clone(),
+                            pane.sftp,
+                            pane.auxiliary_shell,
+                            pane.suppress_forwards,
+                        )
+                    });
 
-                if let Some((profile, sftp, auxiliary_shell)) = profile {
-                    let mut replacement = self.new_terminal_pane_kind(profile, sftp);
+                if let Some((profile, sftp, auxiliary_shell, suppress_forwards)) = profile {
+                    let mut replacement =
+                        self.new_terminal_pane_with(profile, sftp, suppress_forwards);
                     replacement.auxiliary_shell = auxiliary_shell;
                     if let Some(previous_id) = self
                         .tabs
@@ -7159,13 +7375,13 @@ impl App {
                 }
                 self.tools.sync.set_armed(false);
                 self.dialog = None;
-                if let Some((profile, sftp)) = self
+                if let Some((profile, sftp, suppress_forwards)) = self
                     .tabs
                     .get(self.active)
                     .and_then(|tab| tab.panes.get(tab.focus))
-                    .map(|p| (p.profile.clone(), p.sftp))
+                    .map(|p| (p.profile.clone(), p.sftp, p.suppress_forwards))
                 {
-                    let terminal = self.new_terminal_pane_kind(profile, sftp);
+                    let terminal = self.new_terminal_pane_with(profile, sftp, suppress_forwards);
                     if let Some(tab) = self.tabs.get_mut(self.active) {
                         tab.split(axis, terminal);
                     }
@@ -7201,8 +7417,10 @@ impl App {
                 // Open an independent authenticated PTY for the same profile.
                 // Never reuse the original pane's terminal backend or input.
                 let profile = tab.profile.clone();
+                // A duplicate tab's shell must not bind the listeners either.
+                let suppress_forwards = tab.instance > 1;
                 self.tools.sync.set_armed(false);
-                let mut shell = self.new_terminal_pane_kind(profile, false);
+                let mut shell = self.new_terminal_pane_with(profile, false, suppress_forwards);
                 shell.auxiliary_shell = true;
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.split(pane_grid::Axis::Vertical, shell);
@@ -7710,6 +7928,7 @@ impl App {
                 self.dock_menu = None;
                 self.context_menu = None;
                 if self.tabs.is_empty() {
+                    self.close_external_edits_for_exit();
                     return iced::exit();
                 }
                 self.dialog = Some(Dialog::Exit);
@@ -7718,6 +7937,7 @@ impl App {
                 if !matches!(self.dialog, Some(Dialog::Exit)) {
                     return Task::none();
                 }
+                self.close_external_edits_for_exit();
                 return iced::exit();
             }
             Message::SelectSession(index) => {
@@ -7880,6 +8100,19 @@ impl App {
                     self.sender_focused = false;
                 }
             }
+            Message::FilesRequestEditExternal => return self.request_external_edit(),
+            Message::ExternalEditOpened {
+                session,
+                session_key,
+                remote,
+                result,
+            } => return self.external_edit_opened(session, session_key, remote, result),
+            Message::ExternalEditTick => return self.external_edit_tick(),
+            Message::ExternalEditUploaded { id, result } => {
+                self.external_edit_uploaded(id, result);
+            }
+            Message::ExternalEditorInput(value) => self.external_editor_input(value),
+            Message::ExternalEditorSave => return self.save_external_editor_setting(),
         }
         Task::none()
     }
@@ -8476,10 +8709,7 @@ impl App {
         for (index, tab) in self.tabs.iter().enumerate() {
             let active = index == self.active;
             let focused_pane = tab.panes.get(tab.focus);
-            let tab_label = focused_pane
-                .and_then(|pane| pane.terminal_title.as_deref())
-                .unwrap_or(&tab.profile.name)
-                .to_owned();
+            let tab_label = tab.label();
             let connected = focused_pane.is_some_and(|pane| {
                 pane.terminal.is_some() && !pane.exited && pane.error.is_none()
             });
@@ -9987,6 +10217,7 @@ impl App {
             Dialog::Tunnels => TUNNEL_SETTINGS_TITLE,
             Dialog::About => "Inspirum Terminal · Iced",
             Dialog::Exit => "Exit",
+            Dialog::ExternalEditor { .. } => "External Editor",
         };
         let body: Element<'_, Message> = match dialog {
             Dialog::Tools => self.tools_view(),
@@ -10658,6 +10889,32 @@ impl App {
             ]
             .spacing(8)
             .into(),
+            Dialog::ExternalEditor { input, error } => {
+                let mut form = column![
+                    text("Editor command used by Open in External Editor.").color(fg()),
+                    text_input("System default", input)
+                        .style(flat_input)
+                        .id(EXTERNAL_EDITOR_INPUT_ID)
+                        .on_input(Message::ExternalEditorInput)
+                        .on_submit(Message::ExternalEditorSave)
+                        .size(13)
+                        .padding([3, 6]),
+                    text(EXTERNAL_EDITOR_HELP).size(12).color(muted()),
+                ]
+                .spacing(8);
+                if let Some(error) = error {
+                    form = form.push(text(error).size(12).color(fg()));
+                }
+                form.push(
+                    row![
+                        space::horizontal(),
+                        action("Cancel", Message::CloseDialog),
+                        action("Save", Message::ExternalEditorSave).style(primary)
+                    ]
+                    .spacing(8),
+                )
+                .into()
+            }
         };
 
         // Keep form controls inside the scroll rail, not underneath it. The
@@ -12552,6 +12809,97 @@ mod tests {
     }
 
     #[test]
+    fn terminal_canvas_never_shows_a_hand_cursor() {
+        use iced::widget::canvas::Program;
+        let snapshot = terminal_core::DisplaySnapshot {
+            rows: 24,
+            columns: 80,
+            background: [0, 0, 0],
+            row_ranges: vec![(0, 0); 24],
+            cells: Vec::new(),
+        };
+        let (_panes, pane) = pane_grid::State::new(0_u8);
+        let plain = TerminalCanvas {
+            focused: true,
+            remote_key_mode: false,
+            pane,
+            id: 7,
+            generation: 0,
+            terminal_mode: terminal_core::TerminalMode::empty(),
+            snapshot: &snapshot,
+            appearance: crate::appearance::TerminalAppearance::default(),
+        };
+        let bounds = iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(200.0, 200.0));
+        let inside = mouse::Cursor::Available(iced::Point::new(50.0, 50.0));
+        let idle = TerminalCanvasState::default();
+        assert_eq!(
+            plain.mouse_interaction(&idle, bounds, inside),
+            mouse::Interaction::Text
+        );
+        let selecting = TerminalCanvasState {
+            selecting: true,
+            ..TerminalCanvasState::default()
+        };
+        assert_eq!(
+            plain.mouse_interaction(&selecting, bounds, inside),
+            mouse::Interaction::Text
+        );
+        let remote = TerminalCanvas {
+            terminal_mode: terminal_core::TerminalMode::MOUSE_MODE,
+            ..plain
+        };
+        let shown = remote.mouse_interaction(&idle, bounds, inside);
+        assert_eq!(shown, mouse::Interaction::default());
+        assert!(!matches!(
+            shown,
+            mouse::Interaction::Pointer | mouse::Interaction::Grabbing | mouse::Interaction::Grab
+        ));
+    }
+
+    #[test]
+    fn terminal_text_inset_aligns_pointer_cells_and_grid_size() {
+        let snapshot = terminal_core::DisplaySnapshot {
+            rows: 24,
+            columns: 80,
+            background: [0, 0, 0],
+            row_ranges: vec![(0, 0); 24],
+            cells: Vec::new(),
+        };
+        let (_panes, pane) = pane_grid::State::new(0_u8);
+        let canvas = TerminalCanvas {
+            focused: true,
+            remote_key_mode: false,
+            pane,
+            id: 7,
+            generation: 0,
+            terminal_mode: terminal_core::TerminalMode::empty(),
+            snapshot: &snapshot,
+            appearance: crate::appearance::TerminalAppearance::default(),
+        };
+        let (width, height) = canvas.cell_size();
+        let origin = iced::Point::new(TERMINAL_TEXT_INSET.x, TERMINAL_TEXT_INSET.y);
+        assert_eq!(canvas.cell_at(terminal_text_point(origin)), (0, 0));
+        // The inset band itself clamps to the first cell.
+        assert_eq!(
+            canvas.cell_at(terminal_text_point(iced::Point::ORIGIN)),
+            (0, 0)
+        );
+        let second = iced::Point::new(
+            TERMINAL_TEXT_INSET.x + width + 0.5,
+            TERMINAL_TEXT_INSET.y + height + 0.5,
+        );
+        assert_eq!(canvas.cell_at(terminal_text_point(second)), (1, 1));
+
+        let size = iced::Size::new(
+            2.0 * TERMINAL_TEXT_INSET.x + 80.0 * width + 0.5,
+            2.0 * TERMINAL_TEXT_INSET.y + 24.0 * height + 0.5,
+        );
+        assert_eq!(terminal_grid_size(size, (width, height)), (80, 24));
+        let short = iced::Size::new(size.width - 1.0, size.height - 1.0);
+        assert_eq!(terminal_grid_size(short, (width, height)), (79, 23));
+    }
+
+    #[test]
     fn unix_mode_strings_match_ls() {
         assert_eq!(unix_mode_string('-', 0o644), "-rw-r--r--");
         assert_eq!(unix_mode_string('d', 0o755), "drwxr-xr-x");
@@ -13537,6 +13885,30 @@ mod tests {
             terminal_key_bytes(&key, none, None, terminal_core::TerminalMode::empty(),),
             None
         );
+    }
+
+    #[test]
+    fn tab_label_keeps_profile_name_after_remote_title() {
+        let profiles_path = std::env::temp_dir().join(format!(
+            "inspirum-iced-tab-title-{}-missing.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(profiles_path, None);
+        let profile = Session {
+            name: "prod web".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        let id = pane.id;
+        app.tabs.push(Workspace::new(profile, pane));
+        let long = format!("user@host:/{}", "very/long/directory/".repeat(20));
+        let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::Title(long)));
+        let (_, pane) = app.tabs[0].panes.iter().next().unwrap();
+        assert!(pane.terminal_title.is_some());
+        assert_eq!(app.tabs[0].label(), "prod web");
+        let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::ResetTitle));
+        assert_eq!(app.tabs[0].label(), "prod web");
     }
 
     #[test]
@@ -14567,8 +14939,365 @@ mod tests {
         assert_eq!(
             app.tabs.len(),
             1,
-            "a follow-up click must not open a second tab"
+            "a lone follow-up click must not open a second tab"
         );
+    }
+
+    #[test]
+    fn session_double_click_on_open_profile_opens_a_new_numbered_tab() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::SelectSession(1));
+        let _ = app.update(Message::SelectSession(1));
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs[0].label(), "beta");
+
+        // A second double-click on the already-open profile opens a new tab.
+        let _ = app.update(Message::SelectSession(1));
+        let _ = app.update(Message::SelectSession(1));
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active, 1, "the new tab is active");
+        assert_eq!(app.tabs[0].label(), "beta");
+        assert_eq!(app.tabs[1].label(), "beta (2)");
+        assert_ne!(app.tabs[0].id, app.tabs[1].id);
+        let first_pane = app.tabs[0].panes.get(app.tabs[0].focus).map(|pane| pane.id);
+        let second_pane = app.tabs[1].panes.get(app.tabs[1].focus).map(|pane| pane.id);
+        assert!(first_pane.is_some() && second_pane.is_some());
+        assert_ne!(first_pane, second_pane, "each tab has its own SSH pane");
+    }
+
+    #[test]
+    fn duplicate_tab_number_is_stable_and_lowest_free_is_reused() {
+        let mut app = session_click_app();
+        app.open(0);
+        app.open(0);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs[1].label(), "alpha (2)");
+
+        let _ = app.update(Message::ConfirmClose(0));
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(
+            app.tabs[0].label(),
+            "alpha (2)",
+            "closing tab 1 must not renumber the remaining tab"
+        );
+
+        // Lowest free number among open tabs of the profile.
+        app.open(0);
+        assert_eq!(app.tabs[1].label(), "alpha");
+        app.open(0);
+        assert_eq!(app.tabs[2].label(), "alpha (3)");
+        // Another profile numbers independently.
+        app.open(1);
+        assert_eq!(app.tabs[3].label(), "beta");
+    }
+
+    #[test]
+    fn duplicate_tab_does_not_rebind_saved_forwards() {
+        let mut app = session_click_app();
+        app.profiles[0].ssh.local_forwards = vec!["8080:localhost:80".into()];
+        app.open(0);
+        app.open(0);
+        let forwards = |tab: &Workspace| {
+            tab.panes
+                .get(tab.focus)
+                .map(|pane| pane.launch_profile().ssh.local_forwards.len())
+        };
+        assert_eq!(forwards(&app.tabs[0]), Some(1));
+        assert_eq!(forwards(&app.tabs[1]), Some(0));
+        // Tab state still carries the saved profile.
+        assert_eq!(app.tabs[1].profile.ssh.local_forwards.len(), 1);
+    }
+
+    fn forwards_profile_app() -> App {
+        let mut app = session_click_app();
+        app.profiles[0].ssh.local_forwards = vec!["8080:localhost:80".into()];
+        app.profiles[0].ssh.remote_forwards = vec!["9090:localhost:90".into()];
+        app.profiles[0].ssh.dynamic_forwards = vec!["1080".into()];
+        app
+    }
+
+    fn has_forwards(profile: &Session) -> bool {
+        !profile.ssh.local_forwards.is_empty()
+            && !profile.ssh.remote_forwards.is_empty()
+            && !profile.ssh.dynamic_forwards.is_empty()
+    }
+
+    fn has_no_forwards(profile: &Session) -> bool {
+        profile.ssh.local_forwards.is_empty()
+            && profile.ssh.remote_forwards.is_empty()
+            && profile.ssh.dynamic_forwards.is_empty()
+    }
+
+    #[test]
+    fn duplicate_tab_pane_keeps_canonical_profile_and_strips_only_launch() {
+        let mut app = forwards_profile_app();
+        app.open(0);
+        app.open(0);
+        let first = app.tabs[0].panes.get(app.tabs[0].focus).unwrap();
+        assert!(!first.suppress_forwards);
+        assert!(has_forwards(&first.profile));
+        assert!(has_forwards(&first.launch_profile()));
+        let second = app.tabs[1].panes.get(app.tabs[1].focus).unwrap();
+        assert!(second.suppress_forwards);
+        assert!(has_forwards(&second.profile));
+        assert_eq!(second.profile, app.profiles[0]);
+        assert!(has_no_forwards(&second.launch_profile()));
+        // Only the forwards differ from the saved profile.
+        let mut expected = app.profiles[0].clone();
+        expected.ssh.local_forwards.clear();
+        expected.ssh.remote_forwards.clear();
+        expected.ssh.dynamic_forwards.clear();
+        assert_eq!(second.launch_profile(), expected);
+    }
+
+    #[test]
+    fn duplicate_tab_saved_workspace_restores_forwards_as_first_tab() {
+        let mut app = forwards_profile_app();
+        app.open(0);
+        app.open(0);
+        assert_eq!(app.tabs[1].instance, 2);
+        let layout = app.workspace_layout_of(&app.tabs[1]);
+        assert_eq!(layout.panes.len(), 1);
+        assert!(layout.panes.iter().all(has_forwards));
+        let json = serde_json::to_string(&layout).unwrap();
+        assert!(json.contains("8080:localhost:80"));
+        assert!(json.contains("9090:localhost:90"));
+
+        while !app.tabs.is_empty() {
+            let _ = app.update(Message::ConfirmClose(0));
+        }
+        let mut layout = layout;
+        layout.reconnect_on_restore = true;
+        app.tools.workspace = Some(layout);
+        let _ = app.update(Message::Tool(tools::Action::RestoreWorkspace));
+
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs[0].instance, 1);
+        assert!(has_forwards(&app.tabs[0].profile));
+        let pane = app.tabs[0].panes.get(app.tabs[0].focus).unwrap();
+        assert!(!pane.suppress_forwards);
+        assert!(has_forwards(&pane.profile));
+        assert!(has_forwards(&pane.launch_profile()));
+    }
+
+    #[test]
+    fn restoring_layout_beside_first_tab_suppresses_but_keeps_full_profile() {
+        let mut app = forwards_profile_app();
+        app.open(0);
+        let mut layout = app.workspace_layout_of(&app.tabs[0]);
+        layout.reconnect_on_restore = true;
+        app.tools.workspace = Some(layout);
+        let _ = app.update(Message::Tool(tools::Action::RestoreWorkspace));
+
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs[1].instance, 2);
+        assert!(has_forwards(&app.tabs[1].profile));
+        for (_, pane) in app.tabs[1].panes.iter() {
+            assert!(pane.suppress_forwards);
+            assert!(has_forwards(&pane.profile));
+            assert!(has_no_forwards(&pane.launch_profile()));
+        }
+        // Saving the restored duplicate again still persists the forwards.
+        let resaved = app.workspace_layout_of(&app.tabs[1]);
+        assert!(resaved.panes.iter().all(has_forwards));
+    }
+
+    #[test]
+    fn split_reconnect_and_shell_in_duplicate_tab_keep_forwards_suppressed() {
+        let mut app = forwards_profile_app();
+        app.open(0);
+        app.open(0);
+        assert_eq!(app.active, 1);
+        let _ = app.update(Message::Split(pane_grid::Axis::Vertical));
+        let _ = app.update(Message::ToggleAuxiliaryShell);
+        assert_eq!(app.tabs[1].panes.len(), 3);
+        let focus = app.tabs[1].focus;
+        let _ = app.update(Message::Reconnect(focus));
+        assert_eq!(app.tabs[1].panes.len(), 3);
+        for (_, pane) in app.tabs[1].panes.iter() {
+            assert!(pane.suppress_forwards);
+            assert!(has_forwards(&pane.profile));
+            assert!(has_no_forwards(&pane.launch_profile()));
+        }
+
+        // The first tab keeps today's behaviour: forwards on every new pane.
+        app.activate_tab(0);
+        let _ = app.update(Message::Split(pane_grid::Axis::Vertical));
+        let focus = app.tabs[0].focus;
+        let _ = app.update(Message::Reconnect(focus));
+        assert_eq!(app.tabs[0].panes.len(), 2);
+        for (_, pane) in app.tabs[0].panes.iter() {
+            assert!(!pane.suppress_forwards);
+            assert!(has_forwards(&pane.launch_profile()));
+        }
+    }
+
+    #[test]
+    fn external_editor_menu_item_is_offered_for_remote_files_only() {
+        assert!(remote_context_labels(false).contains(&"Open in External Editor"));
+        assert!(!remote_context_labels(true).contains(&"Open in External Editor"));
+        let file_menu = FileContextMenu {
+            side: FileContextSide::Remote,
+            is_dir: false,
+            open_path: "/srv/item".into(),
+            local_path: None,
+            anchor: iced::Point::ORIGIN,
+        };
+        assert!(matches!(
+            file_context_action_message(&file_menu, FileContextAction::OpenExternal),
+            Some(Message::FilesRequestEditExternal)
+        ));
+        let dir_menu = FileContextMenu {
+            is_dir: true,
+            ..file_menu
+        };
+        assert!(file_context_action_message(&dir_menu, FileContextAction::OpenExternal).is_none());
+    }
+
+    #[test]
+    fn stale_external_edit_open_result_for_a_closed_tab_is_dropped() {
+        let mut app = session_click_app();
+        let closed = Session {
+            name: "closed".into(),
+            host: "closed.example.invalid".into(),
+            ..Session::default()
+        };
+        let _ = app.update(Message::ExternalEditOpened {
+            session_key: session_profile_key(&closed),
+            session: closed,
+            remote: "/srv/notes.txt".into(),
+            result: Err("never reached".into()),
+        });
+        assert!(app.external_edits.is_empty());
+        assert!(app.status.contains("its SSH session was closed"));
+        // A tick with nothing open must not reschedule itself.
+        let _ = app.update(Message::ExternalEditTick);
+        assert!(!app.external_edit_tick_scheduled);
+    }
+
+    /// Register a real (network-free) external edit for `session` holding
+    /// `content`; returns the working copy and its private root directory.
+    fn push_test_external_edit(
+        app: &mut App,
+        session: &Session,
+        content: &[u8],
+    ) -> (u64, PathBuf, PathBuf) {
+        let edit = external_edit::ExternalEdit::for_test("/srv/notes.txt", content).unwrap();
+        let working_path = edit.working_path().to_owned();
+        // `<private root>/edit/<file>`.
+        let root = working_path
+            .parent()
+            .and_then(std::path::Path::parent)
+            .unwrap()
+            .to_owned();
+        let id = app.next_external_edit_id;
+        app.next_external_edit_id += 1;
+        app.external_edits.push(ExternalEditState {
+            id,
+            session: session.clone(),
+            session_key: session_profile_key(session),
+            remote: "/srv/notes.txt".into(),
+            working_path: working_path.clone(),
+            handle: ExternalEditHandle(Arc::new(Mutex::new(edit))),
+            uploading: false,
+            unsaved: false,
+        });
+        (id, working_path, root)
+    }
+
+    #[test]
+    fn closing_last_tab_right_after_a_save_keeps_the_external_edit_copy() {
+        let mut app = session_click_app();
+        app.open(0);
+        let session = app.tabs[0].profile.clone();
+        let (_, working, root) = push_test_external_edit(&mut app, &session, b"v1");
+        // Saved in the editor; no tick has run, so `unsaved` is still false.
+        std::fs::write(&working, b"v2 saved").unwrap();
+
+        let _ = app.update(Message::ConfirmClose(0));
+        assert!(app.tabs.is_empty());
+        assert!(working.is_file(), "the just-saved copy must not be deleted");
+        assert_eq!(std::fs::read(&working).unwrap(), b"v2 saved");
+        assert_eq!(app.external_edits.len(), 1);
+        assert!(app.external_edits[0].unsaved);
+        assert!(app.status.contains(&working.display().to_string()));
+        assert!(app.status.contains("was not uploaded"));
+
+        // A later orphan sweep (e.g. another tab closing) keeps it too.
+        app.close_orphaned_external_edits();
+        assert_eq!(app.external_edits.len(), 1);
+        assert!(working.is_file());
+
+        app.external_edits.clear();
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn exit_right_after_a_save_leaks_the_external_edit_copy() {
+        let mut app = session_click_app();
+        let session = app.profiles[0].clone();
+        let (_, working, root) = push_test_external_edit(&mut app, &session, b"v1");
+        let (_, _, clean_root) = push_test_external_edit(&mut app, &session, b"clean");
+        std::fs::write(&working, b"v2 saved").unwrap();
+
+        // No tabs: Exit closes external edits immediately, no tick first.
+        assert!(app.tabs.is_empty());
+        let _ = app.update(Message::Exit);
+        assert!(app.external_edits.is_empty());
+        assert!(working.is_file(), "the just-saved copy must survive exit");
+        assert_eq!(std::fs::read(&working).unwrap(), b"v2 saved");
+        assert!(
+            !clean_root.exists(),
+            "a synced copy is still removed on exit"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn closing_last_tab_removes_an_unmodified_external_edit_copy() {
+        let mut app = session_click_app();
+        app.open(0);
+        let session = app.tabs[0].profile.clone();
+        let (_, working, root) = push_test_external_edit(&mut app, &session, b"v1");
+        assert!(working.is_file());
+
+        let _ = app.update(Message::ConfirmClose(0));
+        assert!(app.tabs.is_empty());
+        assert!(app.external_edits.is_empty());
+        assert!(!root.exists(), "a synced copy is cleaned up");
+    }
+
+    #[test]
+    fn save_during_in_flight_upload_survives_close_and_exit() {
+        let mut app = session_click_app();
+        app.open(0);
+        let session = app.tabs[0].profile.clone();
+        let (id, working, root) = push_test_external_edit(&mut app, &session, b"v1");
+        // An upload of the first save is running when the tab closes.
+        app.external_edits[0].uploading = true;
+        let _ = app.update(Message::ConfirmClose(0));
+        assert!(app.tabs.is_empty());
+        assert_eq!(app.external_edits.len(), 1, "kept while uploading");
+
+        // Saved again meanwhile: the disk now differs from what the upload
+        // sent (the test edit's synced bytes stay "v1").
+        std::fs::write(&working, b"v3 saved during upload").unwrap();
+        let _ = app.update(Message::ExternalEditUploaded {
+            id,
+            result: Ok(external_edit::UploadOutcome::Uploaded),
+        });
+        assert_eq!(app.external_edits.len(), 1, "newer save must be kept");
+        assert!(app.external_edits[0].unsaved);
+        assert!(working.is_file());
+        assert!(app.status.contains(&working.display().to_string()));
+
+        let _ = app.update(Message::Exit);
+        assert!(app.external_edits.is_empty());
+        assert!(working.is_file(), "exit leaks the kept copy");
+        assert_eq!(std::fs::read(&working).unwrap(), b"v3 saved during upload");
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     fn remote_context_labels(is_dir: bool) -> Vec<&'static str> {
@@ -14612,6 +15341,7 @@ mod tests {
             vec![
                 "Download",
                 "Edit",
+                "Open in External Editor",
                 "New Folder",
                 "Rename",
                 "Delete",
@@ -14865,6 +15595,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn context_menu_labels_fit_on_one_line_in_the_menu_width() {
+        let width = context_menu_width();
+        assert!(width >= FILE_CONTEXT_MENU_MIN_WIDTH);
+        let mut variants = vec![
+            remote_context_labels(false),
+            remote_context_labels(true),
+            local_context_labels(false),
+            local_context_labels(true),
+        ];
+        variants.push(
+            session_context_entries()
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect(),
+        );
+        for labels in &variants {
+            for label in labels {
+                let needed = context_menu_label_width(label) + 2.0 * FILE_CONTEXT_ITEM_PAD_X;
+                assert!(
+                    needed <= width,
+                    "{label:?} needs {needed} px but the menu is {width} px"
+                );
+            }
+            // One fixed-height row per item, plus the 1px border padding.
+            let size = context_menu_popup_size(labels.len());
+            assert_eq!(
+                size.height,
+                labels.len() as f32 * FILE_CONTEXT_ITEM_HEIGHT + 2.0
+            );
+            assert_eq!(size.width, width + 2.0);
+        }
+        // The old fixed 200 px column wrapped this label.
+        let external =
+            context_menu_label_width("Open in External Editor") + 2.0 * FILE_CONTEXT_ITEM_PAD_X;
+        assert!(external > 200.0, "{external}");
+
+        // Opened at the right edge, the wider menu still stays inside.
+        let window = iced::Size::new(1280.0, 800.0);
+        let menu = context_menu_popup_size(variants[0].len());
+        let right = clamp_context_menu_anchor(iced::Point::new(1275.0, 300.0), window, menu);
+        assert!(right.x + menu.width <= window.width - 2.0);
+    }
+
     fn local_context_labels(is_dir: bool) -> Vec<&'static str> {
         file_context_entries(&FileContextMenu {
             side: FileContextSide::Local,
@@ -14946,6 +15720,7 @@ mod tests {
             vec![
                 "Download",
                 "Edit",
+                "Open in External Editor",
                 "New Folder",
                 "Rename",
                 "Delete",

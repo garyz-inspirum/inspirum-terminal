@@ -56,7 +56,86 @@ LOGGED_ECHO_LINES = (
     "echo:AFTER_EXIT_CANCEL",
     "echo:AFTER_TUNNEL_SETTINGS",
     "echo:AFTER_TUNNEL_TOGGLES",
+    "echo:AFTER_EXTERNAL_EDIT",
+    "echo:IN_DUPLICATE_TAB",
+    "echo:AFTER_DUPLICATE_TAB",
 )
+
+# Opt-in duplicate-tab step: double-clicking an already-open saved session
+# opens a second tab "<name> (2)" with its own SSH session. Default OFF.
+DUPTAB = os.environ.get("INSPIRUM_GUI_DUPTAB") == "1"
+DUPTAB_PROFILE = "CI connected fixture"
+
+
+def duplicate_tab_label(name: str, ordinal: int = 2) -> str:
+    """Static tab-strip label of the ``ordinal``-th tab on one profile."""
+    return f"{name} ({ordinal})"
+
+
+def tab_strip_band(tab_label, width: int, pad: int = 8):
+    """Full-width band around a located tab label (left, top, right, bottom)."""
+    return (0, max(0, tab_label[1] - pad), width, tab_label[3] + pad)
+
+# Opt-in "Open in External Editor" acceptance step (default OFF so the CI
+# invocation is unchanged until the step has passed once).
+EXTEDIT = os.environ.get("INSPIRUM_GUI_EXTEDIT") == "1"
+EXTEDIT_MARKER = b"INSPIRUM_FAKE_EDITOR_MARKER\n"
+EXTEDIT_MENU_LABEL = "Open in External Editor"
+# The remote-file popup lists Download, Edit, Open in External Editor,
+# Rename, Delete, Refresh, New Folder: 7 rows of 24 px plus borders.
+EXTEDIT_MENU_ROWS = 7
+EXTEDIT_ROW_HEIGHT = 24
+
+
+def fake_editor_script(python: str, argv_log: Path, marker: bytes) -> str:
+    """Source of the fake external editor.
+
+    It records its argv (JSON, one line) to ``argv_log`` and appends
+    ``marker`` to its LAST argument, after a 2 s pause so the app has
+    certainly recorded the working copy's baseline stamp before the save.
+    """
+    return (
+        f"#!{python}\n"
+        "import json, sys, time\n"
+        f"with open({str(argv_log)!r}, 'a', encoding='utf-8') as log:\n"
+        "    log.write(json.dumps(sys.argv) + '\\n')\n"
+        "time.sleep(2)\n"
+        "with open(sys.argv[-1], 'ab') as target:\n"
+        f"    target.write({marker!r})\n"
+    )
+
+
+def external_editor_ui_state(editor: Path) -> dict:
+    """Partial ui-state.json: UiState is ``#[serde(default)]``, so theme
+    (forced by INSPIRUM_THEME anyway) and docks keep their defaults. The
+    path is double-quoted because the setting is whitespace-tokenized; no
+    ``{file}`` placeholder, so the working copy is the last argument."""
+    return {"external_editor": f'"{editor}"'}
+
+
+def extedit_menu_region(click_x: int, click_y: int, width: int, height: int):
+    """Search box for the widened 7-row remote-file popup around the click.
+
+    The popup may open below the pointer or be clamped upward, and it is
+    being widened (do not assume 200 px), so allow 7 rows plus slack on
+    both sides vertically and up to 460 px to the right.
+    """
+    reach = EXTEDIT_MENU_ROWS * EXTEDIT_ROW_HEIGHT + 60
+    return (
+        max(0, click_x - 10),
+        max(0, click_y - reach),
+        min(width, click_x + 460),
+        min(height, click_y + reach),
+    )
+
+
+def extedit_bytes_verdict(original: bytes, current: bytes, marker: bytes) -> str | None:
+    """None when ``current`` is exactly ``original + marker``, else why not."""
+    if current == original + marker:
+        return None
+    if not current.endswith(marker):
+        return f"remote file does not end with the marker ({len(current)} bytes)"
+    return "remote file ends with the marker but its other bytes changed"
 
 
 class MonitoredSession(fixture.NativeSession):
@@ -681,6 +760,22 @@ def _text_threshold(width, height, channels, rows) -> int:
     return max(90, min(160, (p90 + p99) // 2))
 
 
+class OcrInconclusive(RuntimeError):
+    """OCR could not answer: tesseract missing, timed out, failed, or cut short.
+
+    Distinct from a plain ``RuntimeError`` miss, which is a completed search
+    that found nothing. Never treat this as proof that a label is absent.
+    """
+
+
+# Append-only records read by ``require_label_absent`` (compare lengths
+# before/after a call). ``_ocr_tsv`` still returns "" on failure so the poll
+# loops that tolerate a slow tesseract behave as before.
+_OCR_FAILURES: list[str] = []
+# ``locate_visible_label`` stages skipped (or abandoned) by its time budget.
+_LOCATE_CUT_SHORT: list[str] = []
+
+
 def _ocr_tsv(tesseract: str, image: Path, psm: str) -> str:
     try:
         result = subprocess.run(
@@ -688,8 +783,13 @@ def _ocr_tsv(tesseract: str, image: Path, psm: str) -> str:
             capture_output=True, text=True, timeout=15 * TIME_SCALE,
         )
     except subprocess.TimeoutExpired:
+        _OCR_FAILURES.append(f"tesseract timed out after {15 * TIME_SCALE:.0f}s (psm {psm})")
         return ""
     if result.returncode != 0:
+        _OCR_FAILURES.append(
+            f"tesseract exited {result.returncode} (psm {psm}): "
+            f"{(result.stderr or '').strip()[:200]}"
+        )
         return ""
     return result.stdout
 
@@ -826,6 +926,7 @@ def visible_segment_rows(path: Path, tesseract: str, *, invert: bool = False):
     cached = _PIXEL_CACHE.get(key)
     if cached is not None:
         return cached
+    failures_before = len(_OCR_FAILURES)
     width, height, channels, rows = _read_png(path)
     thresh = _text_threshold(width, height, channels, rows)
     segments = []
@@ -849,7 +950,8 @@ def visible_segment_rows(path: Path, tesseract: str, *, invert: bool = False):
                 ))
     finally:
         temporary.unlink(missing_ok=True)
-    _PIXEL_CACHE[key] = segments
+    if len(_OCR_FAILURES) == failures_before:  # never cache a failed read
+        _PIXEL_CACHE[key] = segments
     return segments
 
 
@@ -866,6 +968,7 @@ def visible_pixel_rows(path: Path, tesseract: str, *, clusters: bool = False):
     cached = _PIXEL_CACHE.get(key)
     if cached is not None:
         return cached
+    failures_before = len(_OCR_FAILURES)
     width, height, channels, rows = _read_png(path)
     thresh = _text_threshold(width, height, channels, rows)
     words = []
@@ -900,7 +1003,8 @@ def visible_pixel_rows(path: Path, tesseract: str, *, clusters: bool = False):
                 ))
     finally:
         temporary.unlink(missing_ok=True)
-    _PIXEL_CACHE[key] = words
+    if len(_OCR_FAILURES) == failures_before:  # never cache a failed read
+        _PIXEL_CACHE[key] = words
     return words
 
 
@@ -1271,32 +1375,706 @@ def light_popup_row(path: Path, name: str, port: int, sibling_port: int, *,
 
 
 def require_editor_selection(path, port: int, sibling_port: int, form_region, *,
-                             row_region=None, locate=None):
+                             row_region=None, locate=None, read_digits=None):
     """Prove the editor form shows ``port`` and NOT ``sibling_port``.
 
-    A no-op click leaves the previous selection's port in the form, so the
-    sibling must be absent anywhere in ``form_region``. The selected port
-    must be inside ``row_region`` (the Listen Port input) when given, else
-    inside ``form_region`` -- never a list subtitle. Returns its bounds.
+    With ``row_region`` (the Listen Port input) the row is read by the
+    template reader ``read_port_digits`` and its digit string must EQUAL
+    ``str(port)``: no substring, no confusion table. The general locator
+    read the focused input's ``0`` as ``@`` on the Ubuntu runner, so it
+    cannot be the oracle for a random port. The same row reading must not
+    be the sibling's port, and ``sibling_port`` must also be absent
+    anywhere in ``form_region`` (a no-op click leaves the previous
+    selection in the form). Absence is proven by ``require_label_absent``:
+    when OCR is unavailable, times out, fails or is cut short by its budget
+    this raises ``OcrInconclusive`` instead of passing. Without ``row_region`` the selected port is
+    located inside ``form_region`` -- never a list subtitle. Returns the
+    port's bounds.
     """
     locate = locate or locate_visible_label
-    where = row_region or form_region
-    try:
-        box = locate(path, str(port), region=where)
-    except RuntimeError as exc:
-        raise RuntimeError(
-            f"editor form {where} does not show selected listen port {port}"
-        ) from exc
+    if row_region is not None:
+        read_digits = read_digits or read_port_digits
+        digits, box = read_digits(path, row_region)
+        if digits != str(port):
+            raise RuntimeError(
+                f"editor form {row_region} does not show selected listen port {port}; "
+                f"Listen Port row reads {digits!r}"
+            )
+        if digits == str(sibling_port):
+            raise RuntimeError(
+                f"Listen Port row {row_region} shows sibling port {sibling_port}"
+            )
+        where = row_region
+    else:
+        where = form_region
+        try:
+            box = locate(path, str(port), region=where)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"editor form {where} does not show selected listen port {port}"
+            ) from exc
     if _bounds_inside(box, where) is None:
         raise RuntimeError(f"listen port {port} box {box} outside editor row {where}")
     try:
-        stale = locate(path, str(sibling_port), region=form_region)
-    except RuntimeError:
-        return box
-    raise RuntimeError(
-        f"editor form still shows sibling port {sibling_port} at {stale}; "
-        f"selection click was a no-op"
+        require_label_absent(path, str(sibling_port), region=form_region, locate=locate)
+    except OcrInconclusive:
+        raise
+    except LabelVisible as exc:
+        raise RuntimeError(
+            f"editor form still shows sibling port {sibling_port} at {exc.bounds}; "
+            f"selection click was a no-op"
+        ) from exc
+    return box
+
+
+class LabelVisible(RuntimeError):
+    """``require_label_absent`` found the label; ``bounds`` is where."""
+
+    def __init__(self, message, bounds):
+        super().__init__(message)
+        self.bounds = bounds
+
+
+def require_label_absent(path, label, *, region, locate=None, attempts=2):
+    """Prove ``label`` is NOT rendered in ``region``; return None.
+
+    A locator miss only counts as absence when the search completed: no OCR
+    failure was recorded (tesseract missing, timeout, nonzero exit) and
+    ``locate_visible_label`` did not skip a stage on its time budget. Such
+    an inconclusive miss is retried (failed reads are not cached) up to
+    ``attempts`` calls in total, then ``OcrInconclusive`` is raised. A hit
+    raises ``LabelVisible`` (a ``RuntimeError``) with the bounds. An
+    injected ``locate`` that raises ``RuntimeError`` without recording
+    anything is a clean miss.
+    """
+    # Absence needs every stage: the default locator gets no time budget
+    # (each tesseract call is still bounded by _ocr_tsv's timeout). With the
+    # 12 s default the region stages alone used the budget on a slow host,
+    # so every miss was cut short.
+    kwargs = {"budget": float("inf")} if locate in (None, locate_visible_label) else {}
+    locate = locate or locate_visible_label
+    reasons = []
+    for attempt in range(1, max(1, attempts) + 1):
+        failures_before = len(_OCR_FAILURES)
+        cut_before = len(_LOCATE_CUT_SHORT)
+        try:
+            bounds = locate(path, label, region=region, **kwargs)
+        except OcrInconclusive as exc:
+            reasons.append(f"attempt {attempt}: {exc}")
+            continue
+        except RuntimeError as exc:
+            failed = _OCR_FAILURES[failures_before:]
+            cut = _LOCATE_CUT_SHORT[cut_before:]
+            if not failed and not cut:
+                return None
+            detail = sorted(set(failed + cut))
+            reasons.append(f"attempt {attempt}: miss not conclusive ({'; '.join(detail)}): {exc}")
+            continue
+        raise LabelVisible(
+            f"{label!r} is visible in {region} at {bounds} of {path}", bounds,
+        )
+    raise OcrInconclusive(
+        f"could not prove {label!r} absent from {region} of {path}: " + " | ".join(reasons)
     )
+
+
+# Listen Port digits are 9-10 px tall; the input's vertical edges are 23 px
+# and the focused caret is an 18 px 1-px column (measured on CI frames).
+_PORT_VERT_RULE = 13
+
+
+# Glyph patch matched per digit. The font is monospace with a fractional
+# advance (measured ~8 px: integer gaps 7..9 px), so glyphs are rendered at
+# different sub-pixel phases; patches are greyscale ink sampled around the
+# glyph's ink centroid with linear interpolation, which aligns phases.
+_PORT_PATCH_W = 10
+_PORT_PATCH_H = 11
+_PORT_HORIZ_RULE = 12
+_PORT_MAX_GLYPH_W = 7
+
+
+def _port_ink_mask(path, row_region):
+    """Greyscale ink (0..1) of ``row_region`` with input edges and caret erased.
+
+    Pure Python over ``_read_png`` (no Pillow, ImageMagick or tesseract).
+    Ink is luma scaled between the row's median (background) and its
+    brightest pixel. Pixels above half ink in vertical runs >=
+    ``_PORT_VERT_RULE`` (input side edges, focused caret) or horizontal runs
+    >= ``_PORT_HORIZ_RULE`` (top/bottom edges) are not glyph strokes and are
+    cleared, with their 1 px neighbours across the run. Returns
+    ``(ink, (x1, y1))``; ink is all 0 for an empty row. A light background
+    raises: the digit templates are dark-theme renderings only.
+    """
+    width, height, channels, rows = _read_png(Path(path))
+    x1, y1, x2, y2 = (int(edge) for edge in row_region)
+    x1 = max(0, min(width - 1, x1))
+    y1 = max(0, min(height - 1, y1))
+    x2 = max(x1 + 1, min(width, x2))
+    y2 = max(y1 + 1, min(height, y2))
+    luma = []
+    for y in range(y1, y2):
+        row = rows[y]
+        luma.append([
+            (row[x * channels] * 299 + row[x * channels + 1] * 587
+             + row[x * channels + 2] * 114) // 1000
+            for x in range(x1, x2)
+        ])
+    flat = sorted(v for line in luma for v in line)
+    background = flat[len(flat) // 2]
+    if background > 128:
+        raise RuntimeError(
+            f"no listen-port digit templates for light theme (row {row_region} "
+            f"background luma {background}); templates are dark-theme only"
+        )
+    peak = flat[-1]
+    h, w = len(luma), len(luma[0])
+    if peak - background < 60:
+        return [[0.0] * w for _ in range(h)], (x1, y1)
+    span = float(peak - background)
+    ink = [[min(1.0, max(0.0, (v - background) / span)) for v in line] for line in luma]
+    hard = [[v > 0.5 for v in line] for line in ink]
+    erase = set()
+    for x in range(w):
+        y = 0
+        while y < h:
+            if hard[y][x]:
+                end = y
+                while end < h and hard[end][x]:
+                    end += 1
+                if end - y >= _PORT_VERT_RULE:
+                    erase.update((yy, xx) for yy in range(y, end) for xx in (x - 1, x, x + 1))
+                y = end
+            else:
+                y += 1
+    for y in range(h):
+        x = 0
+        while x < w:
+            if hard[y][x]:
+                end = x
+                while end < w and hard[y][end]:
+                    end += 1
+                if end - x >= _PORT_HORIZ_RULE:
+                    erase.update((yy, xx) for xx in range(x, end) for yy in (y - 1, y, y + 1))
+                x = end
+            else:
+                x += 1
+    for yy, xx in erase:
+        if 0 <= yy < h and 0 <= xx < w:
+            ink[yy][xx] = 0.0
+    return ink, (x1, y1)
+
+
+def _port_patch(ink, centre, top, cols):
+    """``_PORT_PATCH_H`` x ``_PORT_PATCH_W`` ink patch centred on ``centre``
+    (sub-pixel x), first row ``top``. Only columns in the half-open range
+    ``cols`` contribute, so a neighbouring glyph cannot leak in."""
+    lo, hi = cols
+    patch = []
+    for y in range(top, top + _PORT_PATCH_H):
+        line = []
+        for u in range(_PORT_PATCH_W):
+            x = centre + u - (_PORT_PATCH_W - 1) / 2
+            x0 = int(x // 1)
+            frac = x - x0
+            value = 0.0
+            for xx, weight in ((x0, 1 - frac), (x0 + 1, frac)):
+                if lo <= xx < hi and 0 <= y < len(ink):
+                    value += ink[y][xx] * weight
+            line.append(round(value, 3))
+        patch.append(tuple(line))
+    return tuple(patch)
+
+
+def _port_glyph_cells(path, row_region):
+    """Segment the Listen Port row into glyph cells.
+
+    Returns ``[(left, top, patch), ...]`` left to right in source pixels;
+    ``patch`` is the greyscale ink ``_PORT_PATCH_W`` x ``_PORT_PATCH_H``
+    window centred on the glyph's ink centroid, starting 1 px above the
+    row's ink. A glyph is a run of ink columns; one wider than a digit or
+    ink taller than a digit is rejected (not a port digit).
+    """
+    ink, (ox, oy) = _port_ink_mask(path, row_region)
+    h, w = len(ink), len(ink[0])
+    cols = [any(ink[y][x] > 0.5 for y in range(h)) for x in range(w)]
+    groups = []
+    x = 0
+    while x < w:
+        if cols[x]:
+            end = x
+            while end < w and cols[end]:
+                end += 1
+            groups.append((x, end))
+            x = end
+        else:
+            x += 1
+    if not groups:
+        return []
+    ink_rows = [y for y in range(h) if any(ink[y][gx] > 0.5 for a, b in groups for gx in range(a, b))]
+    top, bottom = ink_rows[0], ink_rows[-1]
+    if bottom - top + 1 > _PORT_PATCH_H - 1:
+        raise RuntimeError(
+            f"Listen Port row {row_region} ink is {bottom - top + 1} px tall "
+            f"(y {oy + top}..{oy + bottom}); digits are 9 px: not a port"
+        )
+    cells = []
+    for index, (a, b) in enumerate(groups):
+        if b - a > _PORT_MAX_GLYPH_W:
+            raise RuntimeError(
+                f"Listen Port row {row_region} glyph at x {ox + a}..{ox + b - 1} is "
+                f"{b - a} px wide; digits are at most {_PORT_MAX_GLYPH_W} px: not a port"
+            )
+        lo = a - 1 if index == 0 else max(a - 1, groups[index - 1][1] + 1)
+        hi = b + 1 if index == len(groups) - 1 else min(b + 1, groups[index + 1][0] - 1)
+        hi = max(hi, b)
+        mass = sum(ink[y][xx] for y in range(h) for xx in range(lo, hi))
+        centre = sum(xx * ink[y][xx] for y in range(h) for xx in range(lo, hi)) / mass
+        cells.append((ox + a, oy + top, _port_patch(ink, centre, top - 1, (lo, hi))))
+    return cells
+
+
+# Reference digit patches (``_port_glyph_cells`` output, ink quantised to
+# 0..9), per digit and rendering: "gh" = GitHub ubuntu runner frames,
+# "host" = gsb-dev GUI container frames. The renderings differ (host 0 is
+# 11.37 from the runner 0), so both sets must cover every digit 0-9
+# (asserted by the unit tests). Host digits with two sub-pixel phases or
+# two runs keep two instances. Source frame
+# (scripts/tests/fixtures/<name>#<glyph index>) is recorded per entry;
+# regenerate with ``build_port_templates``.
+_PORT_TEMPLATE_TABLE = (
+    ('0', 'gh', 'connected-tunnels-edit-bravo-draft-50835-ci.png#1', (
+        '0000000000',
+        '0015885200',
+        '0056227410',
+        '0163047620',
+        '0253265520',
+        '0353542530',
+        '0256522530',
+        '0168303520',
+        '0056226410',
+        '0015885200',
+        '0000000000',
+    )),
+    ('0', 'host', 'connected-tunnels-edit-bravo-draft-52045-host.png#2', (
+        '0000000000',
+        '0026996200',
+        '0058448510',
+        '0275105720',
+        '0383005730',
+        '0474666730',
+        '0383005730',
+        '0275105720',
+        '0058448510',
+        '0026996200',
+        '0000000000',
+    )),
+    ('0', 'host', 'connected-tunnels-editor-selected-alpha-60989-host.png#1', (
+        '0000000000',
+        '0026996200',
+        '0058448510',
+        '0275105720',
+        '0383005730',
+        '0474666730',
+        '0383005730',
+        '0275105720',
+        '0058448510',
+        '0026996200',
+        '0000000000',
+    )),
+    ('1', 'gh', 'connected-tunnels-edit-alpha-draft-47031-ci.png#4', (
+        '0000000000',
+        '0013771000',
+        '0047571000',
+        '0001271000',
+        '0000371000',
+        '0000371000',
+        '0000371000',
+        '0000371000',
+        '0000371000',
+        '0028898600',
+        '0000000000',
+    )),
+    ('1', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#4', (
+        '0000000000',
+        '0169973000',
+        '0001473000',
+        '0001473000',
+        '0001473000',
+        '0001473000',
+        '0001473000',
+        '0001473000',
+        '0001473000',
+        '0049999600',
+        '0000000000',
+    )),
+    ('2', 'gh', 'connected-tunnels-edit-bravo-draft-45257-ci.png#2', (
+        '0000000000',
+        '0037884100',
+        '0143136300',
+        '0000016400',
+        '0000026300',
+        '0000156200',
+        '0001562000',
+        '0015620000',
+        '0156200000',
+        '0389999720',
+        '0000000000',
+    )),
+    ('2', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#2', (
+        '0000000000',
+        '0048986100',
+        '0364258510',
+        '0000007610',
+        '0000038510',
+        '0000167200',
+        '0001672000',
+        '0016720000',
+        '0167200000',
+        '0389999720',
+        '0000000000',
+    )),
+    ('3', 'gh', 'connected-tunnels-edit-bravo-draft-50835-ci.png#3', (
+        '0000000000',
+        '0158973100',
+        '0142047200',
+        '0000028200',
+        '0000156100',
+        '0017972000',
+        '0000138200',
+        '0000007400',
+        '0221038200',
+        '0378973100',
+        '0000000000',
+    )),
+    ('3', 'host', 'connected-tunnels-editor-selected-alpha.png#1', (
+        '0000000000',
+        '0058985000',
+        '0274159300',
+        '0000009500',
+        '0000169300',
+        '0008995000',
+        '0000159400',
+        '0000008700',
+        '0563159500',
+        '0168986000',
+        '0000000000',
+    )),
+    ('4', 'gh', 'connected-tunnels-edit-bravo-draft-45257-ci.png#0', (
+        '0000000000',
+        '0000176000',
+        '0001576000',
+        '0003746000',
+        '0016346000',
+        '0146146000',
+        '0271146000',
+        '0499999810',
+        '0000146000',
+        '0000146000',
+        '0000000000',
+    )),
+    ('4', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#0', (
+        '0000000000',
+        '0000189100',
+        '0000689100',
+        '0003858100',
+        '0018458100',
+        '0067158100',
+        '0382058100',
+        '0599999910',
+        '0000058100',
+        '0000058100',
+        '0000000000',
+    )),
+    ('4', 'host', 'connected-tunnels-edit-bravo-draft-52045-host.png#3', (
+        '0000000000',
+        '0000487200',
+        '0002786200',
+        '0006676200',
+        '0047266200',
+        '0274166200',
+        '0562066200',
+        '0699999820',
+        '0000066200',
+        '0000066200',
+        '0000000000',
+    )),
+    ('5', 'gh', 'connected-tunnels-edit-bravo-draft-45257-ci.png#1', (
+        '0000000000',
+        '0048998300',
+        '0054100000',
+        '0054100000',
+        '0068984100',
+        '0011137410',
+        '0000005510',
+        '0000005510',
+        '0121027400',
+        '0158874100',
+        '0000000000',
+    )),
+    ('5', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#1', (
+        '0000000000',
+        '0069999300',
+        '0066200000',
+        '0066200000',
+        '0069986200',
+        '0000158510',
+        '0000006720',
+        '0000006720',
+        '0364258510',
+        '0158986200',
+        '0000000000',
+    )),
+    ('6', 'gh', 'connected-tunnels-edit-alpha-draft-35649-ci.png#2', (
+        '0000000000',
+        '0001688500',
+        '0017510000',
+        '0146000000',
+        '0156787300',
+        '0167213820',
+        '0164001640',
+        '0155001630',
+        '0038213710',
+        '0013887200',
+        '0000000000',
+    )),
+    ('6', 'host', 'connected-tunnels-editor-selected-alpha-60989-host.png#0', (
+        '0000000000',
+        '0004898300',
+        '0048624510',
+        '0066200000',
+        '0277898410',
+        '0278436720',
+        '0276204830',
+        '0066204830',
+        '0058436720',
+        '0016898410',
+        '0000000000',
+    )),
+    ('6', 'host', 'connected-tunnels-editor-selected-bravo-41675-host.png#2', (
+        '0000000000',
+        '0014897300',
+        '0038634410',
+        '0166200000',
+        '0278898400',
+        '0278536730',
+        '0276103740',
+        '0266103740',
+        '0048536730',
+        '0025898400',
+        '0000000000',
+    )),
+    ('7', 'gh', 'connected-tunnels-edit-bravo-draft-45257-ci.png#4', (
+        '0000000000',
+        '0389999600',
+        '0000014600',
+        '0000025300',
+        '0000036100',
+        '0000254000',
+        '0000362000',
+        '0001550000',
+        '0003630000',
+        '0014600000',
+        '0000000000',
+    )),
+    ('7', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#3', (
+        '0000000000',
+        '0599999610',
+        '0000048300',
+        '0000067200',
+        '0000285100',
+        '0000572000',
+        '0001761000',
+        '0004830000',
+        '0006720000',
+        '0038510000',
+        '0000000000',
+    )),
+    ('8', 'gh', 'connected-tunnels-edit-bravo-draft-50835-ci.png#2', (
+        '0000000000',
+        '0025885200',
+        '0156126500',
+        '0155014600',
+        '0036436300',
+        '0015875100',
+        '0155125510',
+        '0253003620',
+        '0255115610',
+        '0026886200',
+        '0000000000',
+    )),
+    ('8', 'host', 'connected-tunnels-editor-selected-alpha-60989-host.png#3', (
+        '0000000000',
+        '0037997300',
+        '0267337610',
+        '0275015720',
+        '0157337510',
+        '0027997300',
+        '0267336720',
+        '0374004730',
+        '0277337730',
+        '0037997300',
+        '0000000000',
+    )),
+    ('8', 'host', 'connected-tunnels-editor-selected-bravo-58191-host.png#1', (
+        '0000000000',
+        '0037997200',
+        '0177337620',
+        '0275106720',
+        '0167337510',
+        '0037997200',
+        '0276237620',
+        '0483005720',
+        '0376237720',
+        '0047997310',
+        '0000000000',
+    )),
+    ('9', 'gh', 'connected-tunnels-edit-alpha-draft-35649-ci.png#4', (
+        '0000000000',
+        '0026885100',
+        '0165126500',
+        '0262003700',
+        '0272002600',
+        '0165126700',
+        '0026875700',
+        '0000014600',
+        '0000147200',
+        '0039862000',
+        '0000000000',
+    )),
+    ('9', 'host', 'connected-tunnels-editor-selected-alpha-60989-host.png#2', (
+        '0000000000',
+        '0047986100',
+        '0286248410',
+        '0482006710',
+        '0482006720',
+        '0286248820',
+        '0048987720',
+        '0000006610',
+        '0054268300',
+        '0037984100',
+        '0000000000',
+    )),
+    ('9', 'host', 'connected-tunnels-editor-selected-bravo-58191-host.png#3', (
+        '0000000000',
+        '0048985100',
+        '0376258300',
+        '0573016620',
+        '0573016720',
+        '0375258720',
+        '0048978620',
+        '0000027510',
+        '0054368300',
+        '0048984100',
+        '0000000000',
+    )),
+)
+# A cell's nearest template must be at most this far (sum of absolute ink
+# differences over the 10x11 patch, best of a +-1 px vertical shift) and
+# the nearest template of any OTHER digit at least _PORT_MIN_GAP further.
+# Measured, leave-one-frame-out over 20 frames (6 runner, 14 host from
+# three host runs; 100 glyphs): worst nearest same-digit 5.04, smallest gap
+# to another digit 7.07; host leads 0/8 10.33, 3/5 11.53, 6/8 12.31,
+# 8/9 12.52 (9.81 for 6/8 when every frame of the same port is held out).
+# Over the 12 committed fixture frames alone: worst 7.23, smallest gap 5.12.
+_PORT_MAX_DISTANCE = 9.0
+_PORT_MIN_GAP = 3.0
+
+
+def _port_templates_from_table(table=_PORT_TEMPLATE_TABLE):
+    return [(digit, f"{env}:{source}", tuple(tuple(int(c) / 9 for c in row) for row in rows))
+            for digit, env, source, rows in table]
+
+
+def build_port_templates(frames):
+    """Templates from labelled frames: ``[(path, row_region, digits), ...]``.
+
+    Every glyph instance becomes a template ``(digit, source, patch)``.
+    Used by the tests for leave-one-frame-out checks."""
+    templates = []
+    for path, row_region, digits in frames:
+        cells = _port_glyph_cells(path, row_region)
+        if len(cells) != len(digits):
+            raise RuntimeError(f"{path}: {len(cells)} glyphs for label {digits!r}")
+        for index, (cell, digit) in enumerate(zip(cells, digits)):
+            templates.append((digit, f"{Path(path).name}#{index}", cell[2]))
+    return templates
+
+
+def _port_patch_distance(patch, template):
+    best = None
+    for dy in (-1, 0, 1):
+        total = 0.0
+        for y, line in enumerate(patch):
+            yy = y + dy
+            other = template[yy] if 0 <= yy < len(template) else None
+            for x, value in enumerate(line):
+                total += abs(value - (other[x] if other is not None else 0.0))
+        best = total if best is None else min(best, total)
+    return best
+
+
+def classify_port_cells(cells, templates):
+    """Nearest-template digit per cell. Returns ``(digits, report)``;
+    raises when any cell's best distance exceeds ``_PORT_MAX_DISTANCE`` or
+    beats the nearest other digit by less than ``_PORT_MIN_GAP``."""
+    report = []
+    rejected = False
+    digits = ""
+    for left, _top, patch in cells:
+        per_digit = {}
+        for digit, _source, template in templates:
+            d = _port_patch_distance(patch, template)
+            if d < per_digit.get(digit, float("inf")):
+                per_digit[digit] = d
+        ranked = sorted(per_digit.items(), key=lambda item: item[1])
+        best_digit, best = ranked[0]
+        second = ranked[1][1] if len(ranked) > 1 else float("inf")
+        ok = best <= _PORT_MAX_DISTANCE and second - best >= _PORT_MIN_GAP
+        rejected |= not ok
+        digits += best_digit
+        report.append(f"x{left}:{best_digit}@{best:.2f}/{ranked[1][0] if len(ranked) > 1 else '-'}"
+                      f"@{second:.2f}{'' if ok else '!'}")
+    return digits, report, rejected
+
+
+def located_row_digits(locate, port):
+    """``read_digits`` seam for rows without digit templates (light theme):
+    the row shows ``port`` when ``locate`` finds its text inside the row.
+    This is the general locator's match, weaker than the template reader."""
+    def read(path, row_region):
+        try:
+            return str(port), locate(path, str(port), region=row_region)
+        except RuntimeError:
+            return "", None
+    return read
+
+
+def read_port_digits(path, row_region, templates=None):
+    """Read the Listen Port row as a digit string. Returns ``(digits, bounds)``.
+
+    Deterministic, no OCR engine: the row is segmented into glyphs
+    (``_port_glyph_cells``) and each glyph is assigned its nearest
+    reference digit (``_PORT_TEMPLATE_TABLE``, dark theme, two renderings).
+    A glyph that is not clearly one digit (best distance above
+    ``_PORT_MAX_DISTANCE`` or less than ``_PORT_MIN_GAP`` ahead of another
+    digit) raises with the per-cell distances. ``("", None)`` for an empty
+    row. A light-theme row raises (no templates). Bounds are source pixels.
+    """
+    if templates is None:
+        templates = _port_templates_from_table()
+    cells = _port_glyph_cells(path, row_region)
+    if not cells:
+        return "", None
+    digits, report, rejected = classify_port_cells(cells, templates)
+    if rejected:
+        raise RuntimeError(
+            f"Listen Port row {row_region} of {Path(path).name} is not a clear digit "
+            f"string (best {digits!r}; per cell digit@distance/second@distance, "
+            f"! = rejected, max {_PORT_MAX_DISTANCE}, min gap {_PORT_MIN_GAP}): "
+            + " ".join(report)
+        )
+    bounds = (cells[0][0], cells[0][1], cells[-1][0] + _PORT_MAX_GLYPH_W, cells[0][1] + 9)
+    return digits, bounds
 
 
 def _bounds_inside(bounds, region):
@@ -1346,6 +2124,7 @@ def _inverted_segment_search(path: Path, tesseract: str, label: str, region, dea
                 if x2 < rx1 or x1 > rx2:
                     continue
                 if time.monotonic() >= deadline:
+                    _LOCATE_CUT_SHORT.append("inverted segment search hit its deadline")
                     return None, segments
                 box = (
                     min(width - 1, x1 + 3),
@@ -1439,6 +2218,7 @@ def locate_visible_label(
     """
     tesseract = shutil.which("tesseract")
     if tesseract is None:
+        _OCR_FAILURES.append("tesseract not found")
         raise RuntimeError("visible label targeting requires tesseract")
     started = time.monotonic()
     deadline = started + budget
@@ -1466,16 +2246,22 @@ def locate_visible_label(
     else:
         first_words = ocr_rows(path, tesseract, None)
         bounds = match_visible_label(first_words, label)
+    if bounds is None and time.monotonic() >= deadline:
+        _LOCATE_CUT_SHORT.append("pixel rows stage skipped by budget")
     if bounds is None and time.monotonic() < deadline:
         pixel_rows = visible_pixel_rows(path, tesseract, clusters=False)
         if region is not None:
             pixel_rows = [row for row in pixel_rows if _word_inside(row, region)]
         bounds = _bounds_inside(match_visible_label(pixel_rows, label), region)
+    if bounds is None and time.monotonic() >= deadline:
+        _LOCATE_CUT_SHORT.append("clustered rows stage skipped by budget")
     if bounds is None and time.monotonic() < deadline:
         clustered = visible_pixel_rows(path, tesseract, clusters=True)
         if region is not None:
             clustered = [row for row in clustered if _word_inside(row, region)]
         bounds = _bounds_inside(match_visible_label(clustered, label), region)
+    if bounds is None and time.monotonic() >= deadline:
+        _LOCATE_CUT_SHORT.append("segment rows stage skipped by budget")
     if bounds is None and time.monotonic() < deadline:
         segments = visible_segment_rows(path, tesseract)
         if region is not None:
@@ -1641,7 +2427,7 @@ def _strip_luma(image):
     return median, grey, median < 128
 
 
-def _erase_strip_rules(grey, median, dark_background):
+def _erase_strip_rules(grey, median, dark_background, *, vert_rule=_STRIP_VERT_RULE):
     """Paint out ink runs longer than a glyph so 1px borders are not strokes.
 
     Measured on the dark Find strip: the input's blue edge and a button
@@ -1667,7 +2453,7 @@ def _erase_strip_rules(grey, median, dark_background):
             end = y + 1
             while end < height and ink(pixels[x, end]):
                 end += 1
-            if end - y >= _STRIP_VERT_RULE:
+            if end - y >= vert_rule:
                 for row in range(y, end):
                     pixels[x, row] = median
             y = end
@@ -2662,6 +3448,9 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
                     editor_form_region(min_w, min_h),
                     row_region=listen_port_row_region(heading, min_w),
                     locate=light_locate,
+                    # No light-theme digit templates exist (read_port_digits
+                    # raises on a light row): keep the light locator here.
+                    read_digits=located_row_digits(light_locate, forward_ports[0]),
                 )
                 print(f"tour: {tag} Alpha listen port {forward_ports[0]} at {port_box}",
                       flush=True)
@@ -2957,6 +3746,18 @@ async def main() -> int:
         profiles.write_text(
             json.dumps(fixture_profiles(forward_ports, echo_port)), encoding="utf-8",
         )
+        extedit_editor = root / "fake-editor.py"
+        extedit_argv_log = root / "fake-editor-argv.log"
+        if EXTEDIT:
+            # The app reads ui-state.json BESIDE the profiles file.
+            extedit_editor.write_text(
+                fake_editor_script(sys.executable, extedit_argv_log, EXTEDIT_MARKER),
+                encoding="utf-8",
+            )
+            extedit_editor.chmod(0o755)
+            (root / "ui-state.json").write_text(
+                json.dumps(external_editor_ui_state(extedit_editor)), encoding="utf-8",
+            )
 
         runtime = root / "xdg-runtime"
         runtime.mkdir(mode=0o700)
@@ -4776,6 +5577,115 @@ async def main() -> int:
                 await asyncio.sleep(.4)
                 screenshot(window, destination / "connected-files-redocked-selected.png", env)
 
+                if EXTEDIT:
+                    # Filer "Open in External Editor" on the remote 444 row.
+                    # Every assertion on 444's remote bytes (download verify,
+                    # Transfer queue row, name-order oracle) has already run;
+                    # the dock closes right after this step, so the appended
+                    # marker cannot reach a later check.
+                    extedit_remote = remote_root / download_name
+                    extedit_original = extedit_remote.read_bytes()
+                    if extedit_original != download_bytes:
+                        raise RuntimeError(
+                            f"remote {download_name} changed before the external-edit step"
+                        )
+                    extedit_row_shot = destination / "connected-extedit-row.png"
+                    extedit_row = await locate_rendered_label(
+                        window, extedit_row_shot, download_name, env=env,
+                        region=dock_body_region(width, height), timeout=20,
+                    )
+                    ex_x, ex_y = center(extedit_row)
+                    ex_region = extedit_menu_region(ex_x, ex_y, width, height)
+                    # Same no-pause gesture as the context-menu step: move and
+                    # right-press in one xdotool command.
+                    command(
+                        "xdotool", "mousemove", "--window", window,
+                        str(ex_x), str(ex_y), "click", "3", env=env,
+                    )
+                    ex_menu_shot = destination / "connected-extedit-menu.png"
+                    paint_deadline = time.monotonic() + 8 * TIME_SCALE
+                    while True:
+                        await asyncio.to_thread(screenshot, window, ex_menu_shot, env)
+                        painted = await asyncio.to_thread(diff, extedit_row_shot, ex_menu_shot, env)
+                        if painted >= 50:
+                            break
+                        if time.monotonic() >= paint_deadline:
+                            raise RuntimeError(
+                                f"right-click on {download_name} at ({ex_x}, {ex_y}) did not "
+                                f"repaint for the external-edit menu ({painted} pixels)"
+                            )
+                        await asyncio.sleep(.3)
+                    try:
+                        ex_item = await locate_rendered_label(
+                            window, ex_menu_shot, EXTEDIT_MENU_LABEL, env=env,
+                            region=ex_region, timeout=20,
+                        )
+                    except RuntimeError as exc:
+                        raise RuntimeError(
+                            f"Filer context menu did not render '{EXTEDIT_MENU_LABEL}' "
+                            f"inside {ex_region} (click ({ex_x}, {ex_y}); see {ex_menu_shot.name})"
+                        ) from exc
+                    if _bounds_inside(ex_item, ex_region) is None:
+                        raise RuntimeError(
+                            f"'{EXTEDIT_MENU_LABEL}' bounds {ex_item} not inside {ex_region}"
+                        )
+                    command(
+                        "xdotool", "mousemove", "--window", window,
+                        *map(str, center(ex_item)), "click", "1", env=env,
+                    )
+                    ex_after_shot = destination / "connected-extedit-after.png"
+                    try:
+                        await wait_for(
+                            extedit_argv_log.exists,
+                            "fake external editor argv log (editor never launched)",
+                            timeout=20 * TIME_SCALE,
+                        )
+                        await wait_for(
+                            lambda: extedit_remote.read_bytes().endswith(EXTEDIT_MARKER),
+                            f"remote {download_name} to end with the fake editor marker "
+                            "(working copy never uploaded)",
+                            timeout=30 * TIME_SCALE,
+                        )
+                    except RuntimeError:
+                        await asyncio.to_thread(screenshot, window, ex_after_shot, env)
+                        raise
+                    await asyncio.to_thread(screenshot, window, ex_after_shot, env)
+                    ex_argv = [
+                        json.loads(line)
+                        for line in extedit_argv_log.read_text(encoding="utf-8").splitlines()
+                        if line.strip()
+                    ]
+                    if len(ex_argv) != 1:
+                        raise RuntimeError(f"fake editor launched {len(ex_argv)} times: {ex_argv}")
+                    if Path(ex_argv[0][-1]).name != download_name:
+                        raise RuntimeError(
+                            f"fake editor last argument {ex_argv[0][-1]!r} is not a "
+                            f"working copy named {download_name}"
+                        )
+                    verdict = extedit_bytes_verdict(
+                        extedit_original, extedit_remote.read_bytes(), EXTEDIT_MARKER,
+                    )
+                    if verdict is not None:
+                        raise RuntimeError(f"external-edit upload: {verdict}")
+                    print(
+                        f"PASS external edit: editor argv {ex_argv[0]}, remote "
+                        f"{download_name} == original + marker", flush=True,
+                    )
+                    command(
+                        "xdotool", "windowfocus", window, "mousemove", "--window", window,
+                        "640", "280", "click", "1", env=env,
+                    )
+                    await asyncio.sleep(.3)
+                    command(
+                        "xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:AFTER_EXTERNAL_EDIT", env=env,
+                    )
+                    command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                    await wait_for(
+                        lambda: "NATIVE_ECHO:AFTER_EXTERNAL_EDIT" in events.path.read_text(encoding="utf-8").splitlines(),
+                        "shell echo after Open in External Editor",
+                    )
+
                 # The file browser has completed the real SFTP handshake.
                 # End that UI task before testing the independent local-editor
                 # workflow; otherwise its remote listing can keep keyboard
@@ -5727,6 +6637,127 @@ async def main() -> int:
                           "(echo + refusal through fixture SSH)", flush=True)
                     await running_edit_delete_probe()
                     await profile_edit_probe()
+
+                if DUPTAB:
+                    # Last interactive step before the event-log snapshot: the
+                    # script has no tab-close gesture, so the duplicate tab is
+                    # left open; the WM-close step below confirms the exit.
+                    dt_w, dt_h = window_size(window, env)
+                    dt_body = dock_body_region(dt_w, dt_h)
+                    dt_first_shot = destination / "connected-duptab-before.png"
+                    # The only "CI connected fixture" above the dock body is
+                    # the first tab's label (the session row is in the body).
+                    try:
+                        dt_tab = await locate_rendered_label(
+                            window, dt_first_shot, DUPTAB_PROFILE, env=env,
+                            region=(0, 0, dt_w, dt_body[1]), timeout=15,
+                        )
+                    except RuntimeError as exc:
+                        raise RuntimeError(
+                            f"first tab label '{DUPTAB_PROFILE}' not found above the dock "
+                            f"body {dt_body} (see {dt_first_shot.name})"
+                        ) from exc
+                    dt_band = tab_strip_band(dt_tab, dt_w)
+                    dt_row_shot = destination / "connected-duptab-session-row.png"
+                    try:
+                        await locate_rendered_label(
+                            window, dt_row_shot, DUPTAB_PROFILE, env=env,
+                            region=dt_body, timeout=6,
+                        )
+                    except RuntimeError:
+                        # Another bottom tab is active; switch to Session via
+                        # its strip label just above the body.
+                        await click_label(
+                            window, destination / "connected-duptab-session-tab.png",
+                            "Session", env, region=(0, max(0, dt_body[1] - 40), dt_w, dt_body[1] + 4),
+                            timeout=10, settle=.8,
+                        )
+                    started_before_dup = count("SESSION_STARTED")
+                    try:
+                        await click_label(
+                            window, dt_row_shot, DUPTAB_PROFILE, env,
+                            region=dt_body, timeout=15, settle=0, clicks=2,
+                        )
+                    except RuntimeError as exc:
+                        raise RuntimeError(
+                            f"session row '{DUPTAB_PROFILE}' not found in dock body {dt_body} "
+                            "for the duplicate-tab double click"
+                        ) from exc
+                    dt_shot = destination / "connected-duptab.png"
+                    try:
+                        await wait_for(
+                            lambda: count("SESSION_STARTED") >= started_before_dup + 1,
+                            "SESSION_STARTED after double-clicking an already-open session",
+                            timeout=20 * TIME_SCALE,
+                        )
+                    except RuntimeError:
+                        await asyncio.to_thread(screenshot, window, dt_shot, env)
+                        raise
+                    await asyncio.sleep(1.5 * TIME_SCALE)
+                    if count("SESSION_STARTED") != started_before_dup + 1:
+                        await asyncio.to_thread(screenshot, window, dt_shot, env)
+                        raise RuntimeError(
+                            "duplicate-tab double click did not start exactly one session: "
+                            f"SESSION_STARTED {started_before_dup} -> {count('SESSION_STARTED')}"
+                        )
+                    dt_label = duplicate_tab_label(DUPTAB_PROFILE)
+                    try:
+                        dt_new_tab = await locate_rendered_label(
+                            window, dt_shot, dt_label, env=env, region=dt_band, timeout=20,
+                        )
+                    except RuntimeError as exc:
+                        raise RuntimeError(
+                            f"tab strip band {dt_band} (from first tab {dt_tab}) does not "
+                            f"show '{dt_label}' (see {dt_shot.name})"
+                        ) from exc
+                    # Pane point: below the located tab strip, above the dock.
+                    pane_x = str(center(dt_new_tab)[0])
+                    pane_y = str((dt_band[3] + dt_body[1]) // 2)
+                    command(
+                        "xdotool", "windowfocus", window, "mousemove", "--window", window,
+                        pane_x, pane_y, "click", "1", env=env,
+                    )
+                    await asyncio.sleep(.3)
+                    command(
+                        "xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:IN_DUPLICATE_TAB", env=env,
+                    )
+                    command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                    await wait_for(
+                        lambda: "NATIVE_ECHO:IN_DUPLICATE_TAB" in events.path.read_text(encoding="utf-8").splitlines(),
+                        "shell echo in the duplicate tab",
+                    )
+                    # Back to the original tab by its located label.
+                    command(
+                        "xdotool", "mousemove", "--window", window,
+                        *map(str, center(dt_tab)), "click", "1", env=env,
+                    )
+                    await asyncio.sleep(.6 * TIME_SCALE)
+                    command(
+                        "xdotool", "windowfocus", window, "mousemove", "--window", window,
+                        str(center(dt_tab)[0]), pane_y, "click", "1", env=env,
+                    )
+                    await asyncio.sleep(.3)
+                    command(
+                        "xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:AFTER_DUPLICATE_TAB", env=env,
+                    )
+                    command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                    try:
+                        await wait_for(
+                            lambda: "NATIVE_ECHO:AFTER_DUPLICATE_TAB" in events.path.read_text(encoding="utf-8").splitlines(),
+                            "shell echo in the original tab after the duplicate tab",
+                        )
+                    except RuntimeError:
+                        await asyncio.to_thread(
+                            screenshot, window, destination / "connected-duptab-back.png", env,
+                        )
+                        raise
+                    print(
+                        f"PASS duplicate tab: SESSION_STARTED {started_before_dup} -> "
+                        f"{started_before_dup + 1}, '{dt_label}' at {dt_new_tab} in {dt_band}",
+                        flush=True,
+                    )
 
                 event_log = events.path.read_text(encoding="utf-8")
                 if "SHELL_PTY_RESIZE" not in event_log:

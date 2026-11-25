@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+import subprocess
 import sys
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 try:
     import asyncssh  # noqa: F401
@@ -39,6 +41,12 @@ def fake_locator(visible: dict[str, tuple[int, int, int, int]]):
             raise RuntimeError(f"{label!r} not visible")
         return box
     return locate
+
+
+def fake_reader(digits: str, box=(725, 295, 759, 304)):
+    def read(_path, _row):
+        return digits, (box if digits else None)
+    return read
 
 
 class EditorSelectionOracleTest(unittest.TestCase):
@@ -98,6 +106,32 @@ class EditorSelectionOracleTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             module.require_editor_selection(
                 Path("x.png"), 41002, 41001, FORM, row_region=row, locate=loc,
+                read_digits=fake_reader(""),
+            )
+
+    def test_row_digits_must_equal_port_exactly(self):
+        row = module.listen_port_row_region((249, 151, 367, 159), 1280)
+        loc = fake_locator({})
+        box = module.require_editor_selection(
+            Path("x.png"), 47031, 40001, FORM, row_region=row, locate=loc,
+            read_digits=fake_reader("47031"),
+        )
+        self.assertEqual(box, (725, 295, 759, 304))
+        # Superstring, prefix and one-digit-off readings are all misses.
+        for reading in ("470310", "4703", "47032", "147031", ""):
+            with self.assertRaises(RuntimeError, msg=reading):
+                module.require_editor_selection(
+                    Path("x.png"), 47031, 40001, FORM, row_region=row, locate=loc,
+                    read_digits=fake_reader(reading),
+                )
+
+    def test_row_ok_but_sibling_elsewhere_in_form_fails(self):
+        row = module.listen_port_row_region((249, 151, 367, 159), 1280)
+        loc = fake_locator({"40001": (729, 362, 760, 372)})
+        with self.assertRaises(RuntimeError):
+            module.require_editor_selection(
+                Path("x.png"), 47031, 40001, FORM, row_region=row, locate=loc,
+                read_digits=fake_reader("47031"),
             )
 
 
@@ -134,6 +168,315 @@ class EditorSelectionOnRealFrameTest(unittest.TestCase):
             module.require_editor_selection(
                 FIXTURE, 43231, 40369, self.form, row_region=self.row,
             )
+
+
+def _reset_ocr_state():
+    module._OCR_FAILURES.clear()
+    module._LOCATE_CUT_SHORT.clear()
+    module._PIXEL_CACHE.clear()
+
+
+class RequireLabelAbsentTest(unittest.TestCase):
+    """Absence needs a completed search; an OCR failure is not absence."""
+
+    def setUp(self):
+        _reset_ocr_state()
+
+    def test_clean_miss_is_absent(self):
+        self.assertIsNone(module.require_label_absent(
+            Path("x.png"), "41001", region=FORM, locate=fake_locator({})))
+
+    def test_found_label_raises_visible(self):
+        loc = fake_locator({"41001": (700, 200, 760, 215)})
+        with self.assertRaises(RuntimeError) as ctx:
+            module.require_label_absent(Path("x.png"), "41001", region=FORM, locate=loc)
+        self.assertNotIsInstance(ctx.exception, module.OcrInconclusive)
+        self.assertIn("(700, 200, 760, 215)", str(ctx.exception))
+
+    def test_failure_on_every_attempt_is_inconclusive(self):
+        calls = []
+
+        def locate(_path, label, *, region=None, budget=None):
+            calls.append(label)
+            module._OCR_FAILURES.append("tesseract timed out")
+            raise RuntimeError("miss")
+        with self.assertRaisesRegex(module.OcrInconclusive, "timed out"):
+            module.require_label_absent(Path("x.png"), "41001", region=FORM,
+                                        locate=locate, attempts=3)
+        self.assertEqual(len(calls), 3)
+
+    def test_failure_then_clean_miss_is_absent(self):
+        calls = []
+
+        def locate(_path, label, *, region=None, budget=None):
+            calls.append(label)
+            if len(calls) == 1:
+                module._OCR_FAILURES.append("tesseract exited 1")
+            raise RuntimeError("miss")
+        self.assertIsNone(module.require_label_absent(
+            Path("x.png"), "41001", region=FORM, locate=locate))
+        self.assertEqual(len(calls), 2)
+
+    def test_budget_cut_miss_is_inconclusive(self):
+        def locate(_path, label, *, region=None, budget=None):
+            module._LOCATE_CUT_SHORT.append("pixel rows stage skipped by budget")
+            raise RuntimeError("miss")
+        with self.assertRaisesRegex(module.OcrInconclusive, "budget"):
+            module.require_label_absent(Path("x.png"), "41001", region=FORM, locate=locate)
+
+
+def _fake_run(returncode=None, timeout=False):
+    def run(args, **kwargs):
+        if timeout:
+            raise subprocess.TimeoutExpired(args, kwargs.get("timeout", 1))
+        return subprocess.CompletedProcess(args, returncode, "", "fake tesseract failure")
+    return run
+
+
+@unittest.skipUnless(FIXTURE.is_file(), "editor fixture missing")
+class SiblingCheckOcrFailureOnRealFrameTest(unittest.TestCase):
+    """Reviewer's case: template reader reads 43231, OCR down, 40369 visible.
+
+    Real ``read_port_digits`` and real ``locate_visible_label``; only
+    tesseract discovery / ``subprocess.run`` are faked, so no tesseract is
+    needed and these run in CI.
+    """
+
+    def setUp(self):
+        _reset_ocr_state()
+        self.form = module.editor_form_region(1280, 800)
+        self.row = module.listen_port_row_region(HEADING, 1280)
+        self.assertEqual(module.read_port_digits(FIXTURE, self.row)[0], "43231")
+
+    def _require(self):
+        return module.require_editor_selection(
+            FIXTURE, 43231, 40369, self.form, row_region=self.row)
+
+    def test_tesseract_unavailable_is_inconclusive_not_pass(self):
+        with mock.patch.object(module.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(module.OcrInconclusive, "tesseract not found"):
+                self._require()
+
+    def test_tesseract_timeout_is_inconclusive_not_pass(self):
+        with mock.patch.object(module.shutil, "which", return_value="/fake/tesseract"), \
+                mock.patch.object(module.subprocess, "run", _fake_run(timeout=True)):
+            with self.assertRaisesRegex(module.OcrInconclusive, "timed out"):
+                self._require()
+
+    def test_tesseract_nonzero_exit_is_inconclusive_not_pass(self):
+        with mock.patch.object(module.shutil, "which", return_value="/fake/tesseract"), \
+                mock.patch.object(module.subprocess, "run", _fake_run(returncode=1)):
+            with self.assertRaisesRegex(module.OcrInconclusive, "exited 1"):
+                self._require()
+
+    def test_failed_reads_are_not_cached(self):
+        for run in (_fake_run(timeout=True), _fake_run(returncode=1)):
+            _reset_ocr_state()
+            with mock.patch.object(module.shutil, "which", return_value="/fake/tesseract"), \
+                    mock.patch.object(module.subprocess, "run", run):
+                with self.assertRaises(module.OcrInconclusive):
+                    self._require()
+            self.assertTrue(module._OCR_FAILURES)
+            self.assertEqual(module._PIXEL_CACHE, {})
+
+
+@unittest.skipUnless(shutil.which("tesseract"), "tesseract is not installed")
+@unittest.skipUnless(FIXTURE.is_file(), "editor fixture missing")
+class SiblingCheckHealthyOcrOnRealFrameTest(unittest.TestCase):
+    def setUp(self):
+        _reset_ocr_state()
+        self.form = module.editor_form_region(1280, 800)
+        self.row = module.listen_port_row_region(HEADING, 1280)
+
+    def test_visible_sibling_is_found_not_inconclusive(self):
+        with self.assertRaisesRegex(RuntimeError, "still shows sibling port 40369") as ctx:
+            module.require_editor_selection(
+                FIXTURE, 43231, 40369, self.form, row_region=self.row)
+        self.assertNotIsInstance(ctx.exception, module.OcrInconclusive)
+
+    def test_healthy_call_after_failed_read_still_finds_sibling(self):
+        with mock.patch.object(module.subprocess, "run", _fake_run(returncode=1)):
+            with self.assertRaises(module.OcrInconclusive):
+                module.require_editor_selection(
+                    FIXTURE, 43231, 40369, self.form, row_region=self.row)
+        with self.assertRaisesRegex(RuntimeError, "still shows sibling port 40369") as ctx:
+            module.require_editor_selection(
+                FIXTURE, 43231, 40369, self.form, row_region=self.row)
+        self.assertNotIsInstance(ctx.exception, module.OcrInconclusive)
+
+    def test_absent_sibling_passes(self):
+        box = module.require_editor_selection(
+            FIXTURE, 43231, 61234, self.form, row_region=self.row)
+        self.assertIsNotNone(module._bounds_inside(box, self.row))
+
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+# 1280x800 dark frames of the Tunnel Settings editor; the Listen Port input
+# shows the port in the name (zoomed visual read). "-ci" = GitHub ubuntu
+# runner, "-host" = gsb-dev GUI container. Heading OCR top y=152 on CI
+# frames (row 691,276..322) and y=151 on host frames (row 691,275..321).
+# The host 45271 frame was saved as gsbdev-52045.png, but its input shows
+# 45271 (the 32045 misread frame itself is not available).
+CI_HEADING = (249, 152, 367, 160)
+HOST_HEADING = (249, 151, 367, 159)
+TEMPLATE_FRAMES = {
+    "connected-tunnels-edit-alpha-draft-47031-ci.png": (CI_HEADING, "47031"),
+    "connected-tunnels-edit-alpha-draft-58881-ci.png": (CI_HEADING, "58881"),
+    "connected-tunnels-edit-alpha-draft-35649-ci.png": (CI_HEADING, "35649"),
+    # Unfocused row (no caret, grey border).
+    "connected-tunnels-edit-alpha-selected-38569-ci.png": (CI_HEADING, "38569"),
+    "connected-tunnels-edit-bravo-draft-45257-ci.png": (CI_HEADING, "45257"),
+    "connected-tunnels-edit-bravo-draft-50835-ci.png": (CI_HEADING, "50835"),
+    "connected-tunnels-edit-alpha-draft-45271-host.png": (HOST_HEADING, "45271"),
+    "connected-tunnels-editor-selected-alpha.png": (HOST_HEADING, "43231"),
+    # Host frames of two later runs. Ground truth: every glyph clusters with
+    # glyphs of the same digit across frames (distance < 4); 1-5 and 7 match
+    # the existing host templates, 52045 was read visually, and the run's
+    # saved-port pair {58191, 60989} / {41675, 54813} fixes the rest (only
+    # 58191 fits glyph pattern A B 1 C 1; 60989 has equal glyphs at 2 and 4).
+    "connected-tunnels-edit-bravo-draft-52045-host.png": (HOST_HEADING, "52045"),
+    "connected-tunnels-editor-selected-alpha-60989-host.png": (HOST_HEADING, "60989"),
+    "connected-tunnels-editor-selected-bravo-58191-host.png": (HOST_HEADING, "58191"),
+    "connected-tunnels-editor-selected-bravo-41675-host.png": (HOST_HEADING, "41675"),
+}
+# Input boxes are 35 px apart: Listen 287..310, Destination Host 322..345,
+# Destination Port 357..380.
+ROW_PITCH = 35
+W47031 = "connected-tunnels-edit-alpha-draft-47031-ci.png"
+
+
+def _absent(_path, label, *, region=None, budget=None):
+    raise RuntimeError(f"{label} not visible")
+
+
+def _row(name):
+    return module.listen_port_row_region(TEMPLATE_FRAMES[name][0], 1280)
+
+
+class ListenPortTemplateReaderTest(unittest.TestCase):
+    """Template reader on real frames. Pure Python: no tesseract/Pillow."""
+
+    form = module.editor_form_region(1280, 800)
+
+    def test_each_frame_reads_exactly_its_port(self):
+        for name, (_heading, port) in TEMPLATE_FRAMES.items():
+            with self.subTest(name=name):
+                digits, box = module.read_port_digits(FIXTURES / name, _row(name))
+                print(f"read_port_digits {name}: {digits!r} {box}", flush=True)
+                self.assertEqual(digits, port)
+                self.assertIsNotNone(module._bounds_inside(box, _row(name)))
+
+    def test_host_52045_draft_reads_exactly(self):
+        # The frame that failed the full build-host run (0 had no host template).
+        name = "connected-tunnels-edit-bravo-draft-52045-host.png"
+        digits, _box = module.read_port_digits(FIXTURES / name, _row(name))
+        self.assertEqual(digits, "52045")
+
+    def test_template_table_covers_every_digit_in_both_renderings(self):
+        table = module._PORT_TEMPLATE_TABLE
+        for env in ("gh", "host"):
+            with self.subTest(env=env):
+                covered = {digit for digit, e, _src, _rows in table if e == env}
+                self.assertEqual(covered, set("0123456789"), f"{env} templates missing digits")
+        for env in ("gh", "host"):
+            covered = {d for _n, (h, port) in TEMPLATE_FRAMES.items() for d in port
+                       if (h == HOST_HEADING) == (env == "host")}
+            self.assertEqual(covered, set("0123456789"), f"{env} fixture frames missing digits")
+
+    def test_leave_one_frame_out_still_reads_frame(self):
+        worst, gap = 0.0, float("inf")
+        for held, (_heading, port) in TEMPLATE_FRAMES.items():
+            others = [(FIXTURES / n, _row(n), d) for n, (_h, d) in TEMPLATE_FRAMES.items() if n != held]
+            templates = module.build_port_templates(others)
+            with self.subTest(held=held):
+                digits, _box = module.read_port_digits(FIXTURES / held, _row(held), templates=templates)
+                self.assertEqual(digits, port)
+            cells = module._port_glyph_cells(FIXTURES / held, _row(held))
+            for (_l, _t, patch), digit in zip(cells, port):
+                d = {}
+                for t_digit, _src, tpl in templates:
+                    d[t_digit] = min(d.get(t_digit, 1e9), module._port_patch_distance(patch, tpl))
+                own = d[digit]
+                other = min(v for k, v in d.items() if k != digit)
+                worst, gap = max(worst, own), min(gap, other - own)
+        print(f"leave-one-out worst best distance {worst:.2f}, smallest gap {gap:.2f}", flush=True)
+        self.assertLessEqual(worst, module._PORT_MAX_DISTANCE)
+        self.assertGreaterEqual(gap, module._PORT_MIN_GAP)
+
+    def test_draft_frames_pass_require_editor_selection(self):
+        for name, (_heading, port) in TEMPLATE_FRAMES.items():
+            with self.subTest(name=name):
+                box = module.require_editor_selection(
+                    FIXTURES / name, int(port), 40001, self.form, row_region=_row(name),
+                    locate=_absent,
+                )
+                self.assertIsNotNone(module._bounds_inside(box, _row(name)))
+
+    def test_wrong_port_by_one_digit_fails(self):
+        with self.assertRaisesRegex(RuntimeError, "reads '47031'"):
+            module.require_editor_selection(
+                FIXTURES / W47031, 47032, 40001, self.form, row_region=_row(W47031),
+                locate=_absent,
+            )
+
+    def test_pre_edit_sibling_port_fails_on_draft_frame(self):
+        with self.assertRaises(RuntimeError):
+            module.require_editor_selection(
+                FIXTURES / W47031, 40001, 47031, self.form, row_region=_row(W47031),
+                locate=_absent,
+            )
+
+    def test_destination_rows_do_not_satisfy_listen_port(self):
+        x1, y1, x2, y2 = _row(W47031)
+        host = (x1, y1 + ROW_PITCH, x2, y2 + ROW_PITCH)
+        with self.assertRaisesRegex(RuntimeError, "not a clear digit string|not a port"):
+            module.read_port_digits(FIXTURES / W47031, host)
+        dest = (x1, y1 + 2 * ROW_PITCH, x2, y2 + 2 * ROW_PITCH)
+        digits, _box = module.read_port_digits(FIXTURES / W47031, dest)
+        self.assertEqual(digits, "41451")
+        for region in (host, dest):
+            with self.subTest(region=region), self.assertRaises(RuntimeError):
+                module.require_editor_selection(
+                    FIXTURES / W47031, 47031, 40001, self.form, row_region=region,
+                    locate=_absent,
+                )
+
+    def test_empty_row_reads_nothing(self):
+        # The Listen Port input to the right of the digits and caret: input
+        # fill and border only.
+        _x1, y1, x2, y2 = _row(W47031)
+        empty = (775, y1, x2, y2)
+        self.assertEqual(module.read_port_digits(FIXTURES / W47031, empty), ("", None))
+        with self.assertRaisesRegex(RuntimeError, "reads ''"):
+            module.require_editor_selection(
+                FIXTURES / W47031, 47031, 40001, self.form, row_region=empty, locate=_absent,
+            )
+
+    def test_non_digit_glyph_is_rejected(self):
+        # Replace the 0 (third glyph) with a synthetic "-" bar: ink, but no digit.
+        cells = module._port_glyph_cells(FIXTURES / W47031, _row(W47031))
+        bar = tuple(tuple(1.0 if y == 5 and 2 <= x <= 7 else 0.0 for x in range(10))
+                    for y in range(11))
+        cells[2] = (cells[2][0], cells[2][1], bar)
+        digits, report, rejected = module.classify_port_cells(
+            cells, module._port_templates_from_table())
+        print("non-digit cell report:", " ".join(report), flush=True)
+        self.assertTrue(rejected)
+        self.assertIn("!", report[2])
+
+    def test_light_row_has_no_templates(self):
+        light = FIXTURES / "tour-tunnel-manager-light-empty.png"
+        with self.assertRaisesRegex(RuntimeError, "no listen-port digit templates for light theme"):
+            module.read_port_digits(light, (300, 200, 600, 240))
+
+    def test_embedded_table_matches_fixture_patches(self):
+        # Every embedded template is within quantisation error of the
+        # fixture glyph it names, so the table is traceable to the frames.
+        for digit, source, tpl in module._port_templates_from_table():
+            name, index = source.split(":", 1)[1].rsplit("#", 1)
+            cells = module._port_glyph_cells(FIXTURES / name, _row(name))
+            self.assertEqual(TEMPLATE_FRAMES[name][1][int(index)], digit)
+            self.assertLess(module._port_patch_distance(cells[int(index)][2], tpl), 3.0, source)
 
 
 if __name__ == "__main__":
