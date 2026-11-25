@@ -3186,7 +3186,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
         bounds: iced::Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
-        let position = cursor.position_in(bounds);
+        let position = cursor.position_in(bounds).map(terminal_text_point);
         if let Some(position) = position {
             state.last_position = Some(position);
         }
@@ -3201,8 +3201,12 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                 let (width, height) = terminal_cell_size(&self.appearance);
                 let cell = self.snapshot.cells.iter().find(|cell| cell.cursor);
                 let rectangle = iced::Rectangle {
-                    x: bounds.x + cell.map_or(0.0, |c| c.column as f32 * width),
-                    y: bounds.y + cell.map_or(0.0, |c| c.row as f32 * height),
+                    x: bounds.x
+                        + TERMINAL_TEXT_INSET.x
+                        + cell.map_or(0.0, |c| c.column as f32 * width),
+                    y: bounds.y
+                        + TERMINAL_TEXT_INSET.y
+                        + cell.map_or(0.0, |c| c.row as f32 * height),
                     width,
                     height,
                 };
@@ -3523,9 +3527,11 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
             let geometry = caches[row].draw(renderer, bounds.size(), |frame| {
                 let url_spans = visible_url_ranges(&self.snapshot.cells[start..end]);
                 for (cell_index, cell) in self.snapshot.cells[start..end].iter().enumerate() {
-                    let x = cell.column as f32 * cell_width;
-                    let y = cell.row as f32 * cell_height;
-                    if x >= bounds.width || y >= bounds.height {
+                    let x = TERMINAL_TEXT_INSET.x + cell.column as f32 * cell_width;
+                    let y = TERMINAL_TEXT_INSET.y + cell.row as f32 * cell_height;
+                    if x >= bounds.width - TERMINAL_TEXT_INSET.x
+                        || y >= bounds.height - TERMINAL_TEXT_INSET.y
+                    {
                         continue;
                     }
 
@@ -3655,6 +3661,32 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
 
         geometries
     }
+}
+
+/// Clear space between the terminal pane edge and the first/last glyphs
+/// (x = left and right, y = top and bottom). Drawing, pointer-to-cell
+/// mapping, the IME cursor and the PTY grid size all use this one inset.
+const TERMINAL_TEXT_INSET: iced::Vector = iced::Vector { x: 10.0, y: 6.0 };
+
+/// Map a point relative to the canvas bounds to the text area's origin.
+/// Points inside the inset clamp to the first row/column.
+fn terminal_text_point(position: iced::Point) -> iced::Point {
+    iced::Point::new(
+        (position.x - TERMINAL_TEXT_INSET.x).max(0.0),
+        (position.y - TERMINAL_TEXT_INSET.y).max(0.0),
+    )
+}
+
+/// Columns and lines that fit in a terminal viewport of `size` after the
+/// inset is removed from both sides.
+fn terminal_grid_size(size: iced::Size, cell: (f32, f32)) -> (u16, u16) {
+    let columns = ((size.width - 2.0 * TERMINAL_TEXT_INSET.x).max(1.0) / cell.0)
+        .floor()
+        .max(1.0) as u16;
+    let lines = ((size.height - 2.0 * TERMINAL_TEXT_INSET.y).max(1.0) / cell.1)
+        .floor()
+        .max(1.0) as u16;
+    (columns, lines)
 }
 
 fn terminal_cell_size(appearance: &crate::appearance::TerminalAppearance) -> (f32, f32) {
@@ -4715,8 +4747,7 @@ impl App {
                     .appearance
                     .effective_for(&session_profile_key(&pane.profile));
                 let cell = terminal_cell_size(&appearance);
-                let columns = ((size.width - 28.0).max(1.0) / cell.0).floor().max(1.0) as u16;
-                let lines = ((size.height - 28.0).max(1.0) / cell.1).floor().max(1.0) as u16;
+                let (columns, lines) = terminal_grid_size(size, cell);
                 pane.canvas_size = Some(size);
                 if pane.terminal_grid_size == Some((columns, lines)) && pane.cell_size == cell {
                     return;
@@ -12604,6 +12635,49 @@ mod tests {
             shown,
             mouse::Interaction::Pointer | mouse::Interaction::Grabbing | mouse::Interaction::Grab
         ));
+    }
+
+    #[test]
+    fn terminal_text_inset_aligns_pointer_cells_and_grid_size() {
+        let snapshot = terminal_core::DisplaySnapshot {
+            rows: 24,
+            columns: 80,
+            background: [0, 0, 0],
+            row_ranges: vec![(0, 0); 24],
+            cells: Vec::new(),
+        };
+        let (_panes, pane) = pane_grid::State::new(0_u8);
+        let canvas = TerminalCanvas {
+            focused: true,
+            remote_key_mode: false,
+            pane,
+            id: 7,
+            generation: 0,
+            terminal_mode: terminal_core::TerminalMode::empty(),
+            snapshot: &snapshot,
+            appearance: crate::appearance::TerminalAppearance::default(),
+        };
+        let (width, height) = canvas.cell_size();
+        let origin = iced::Point::new(TERMINAL_TEXT_INSET.x, TERMINAL_TEXT_INSET.y);
+        assert_eq!(canvas.cell_at(terminal_text_point(origin)), (0, 0));
+        // The inset band itself clamps to the first cell.
+        assert_eq!(
+            canvas.cell_at(terminal_text_point(iced::Point::ORIGIN)),
+            (0, 0)
+        );
+        let second = iced::Point::new(
+            TERMINAL_TEXT_INSET.x + width + 0.5,
+            TERMINAL_TEXT_INSET.y + height + 0.5,
+        );
+        assert_eq!(canvas.cell_at(terminal_text_point(second)), (1, 1));
+
+        let size = iced::Size::new(
+            2.0 * TERMINAL_TEXT_INSET.x + 80.0 * width + 0.5,
+            2.0 * TERMINAL_TEXT_INSET.y + 24.0 * height + 0.5,
+        );
+        assert_eq!(terminal_grid_size(size, (width, height)), (80, 24));
+        let short = iced::Size::new(size.width - 1.0, size.height - 1.0);
+        assert_eq!(terminal_grid_size(short, (width, height)), (79, 23));
     }
 
     #[test]
