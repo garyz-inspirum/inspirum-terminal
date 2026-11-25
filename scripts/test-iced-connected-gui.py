@@ -1554,11 +1554,13 @@ def _port_glyph_cells(path, row_region):
 
 
 # Reference digit patches (``_port_glyph_cells`` output, ink quantised to
-# 0..9), one per digit and rendering: "gh" = GitHub ubuntu runner frames,
-# "host" = gsb-dev GUI container frames. Same-digit patches differ by up to
-# 8.35 between the two renderings, so both sets are kept and matched.
-# Source frame (scripts/tests/fixtures/<name>#<glyph index>) is recorded per
-# entry; regenerate with ``build_port_templates``.
+# 0..9), per digit and rendering: "gh" = GitHub ubuntu runner frames,
+# "host" = gsb-dev GUI container frames. The renderings differ (host 0 is
+# 11.37 from the runner 0), so both sets must cover every digit 0-9
+# (asserted by the unit tests). Host digits with two sub-pixel phases or
+# two runs keep two instances. Source frame
+# (scripts/tests/fixtures/<name>#<glyph index>) is recorded per entry;
+# regenerate with ``build_port_templates``.
 _PORT_TEMPLATE_TABLE = (
     ('0', 'gh', 'connected-tunnels-edit-bravo-draft-50835-ci.png#1', (
         '0000000000',
@@ -1571,6 +1573,32 @@ _PORT_TEMPLATE_TABLE = (
         '0168303520',
         '0056226410',
         '0015885200',
+        '0000000000',
+    )),
+    ('0', 'host', 'connected-tunnels-edit-bravo-draft-52045-host.png#2', (
+        '0000000000',
+        '0026996200',
+        '0058448510',
+        '0275105720',
+        '0383005730',
+        '0474666730',
+        '0383005730',
+        '0275105720',
+        '0058448510',
+        '0026996200',
+        '0000000000',
+    )),
+    ('0', 'host', 'connected-tunnels-editor-selected-alpha-60989-host.png#1', (
+        '0000000000',
+        '0026996200',
+        '0058448510',
+        '0275105720',
+        '0383005730',
+        '0474666730',
+        '0383005730',
+        '0275105720',
+        '0058448510',
+        '0026996200',
         '0000000000',
     )),
     ('1', 'gh', 'connected-tunnels-edit-alpha-draft-47031-ci.png#4', (
@@ -1677,6 +1705,19 @@ _PORT_TEMPLATE_TABLE = (
         '0000058100',
         '0000000000',
     )),
+    ('4', 'host', 'connected-tunnels-edit-bravo-draft-52045-host.png#3', (
+        '0000000000',
+        '0000487200',
+        '0002786200',
+        '0006676200',
+        '0047266200',
+        '0274166200',
+        '0562066200',
+        '0699999820',
+        '0000066200',
+        '0000066200',
+        '0000000000',
+    )),
     ('5', 'gh', 'connected-tunnels-edit-bravo-draft-45257-ci.png#1', (
         '0000000000',
         '0048998300',
@@ -1714,6 +1755,32 @@ _PORT_TEMPLATE_TABLE = (
         '0155001630',
         '0038213710',
         '0013887200',
+        '0000000000',
+    )),
+    ('6', 'host', 'connected-tunnels-editor-selected-alpha-60989-host.png#0', (
+        '0000000000',
+        '0004898300',
+        '0048624510',
+        '0066200000',
+        '0277898410',
+        '0278436720',
+        '0276204830',
+        '0066204830',
+        '0058436720',
+        '0016898410',
+        '0000000000',
+    )),
+    ('6', 'host', 'connected-tunnels-editor-selected-bravo-41675-host.png#2', (
+        '0000000000',
+        '0014897300',
+        '0038634410',
+        '0166200000',
+        '0278898400',
+        '0278536730',
+        '0276103740',
+        '0266103740',
+        '0048536730',
+        '0025898400',
         '0000000000',
     )),
     ('7', 'gh', 'connected-tunnels-edit-bravo-draft-45257-ci.png#4', (
@@ -1755,6 +1822,32 @@ _PORT_TEMPLATE_TABLE = (
         '0026886200',
         '0000000000',
     )),
+    ('8', 'host', 'connected-tunnels-editor-selected-alpha-60989-host.png#3', (
+        '0000000000',
+        '0037997300',
+        '0267337610',
+        '0275015720',
+        '0157337510',
+        '0027997300',
+        '0267336720',
+        '0374004730',
+        '0277337730',
+        '0037997300',
+        '0000000000',
+    )),
+    ('8', 'host', 'connected-tunnels-editor-selected-bravo-58191-host.png#1', (
+        '0000000000',
+        '0037997200',
+        '0177337620',
+        '0275106720',
+        '0167337510',
+        '0037997200',
+        '0276237620',
+        '0483005720',
+        '0376237720',
+        '0047997310',
+        '0000000000',
+    )),
     ('9', 'gh', 'connected-tunnels-edit-alpha-draft-35649-ci.png#4', (
         '0000000000',
         '0026885100',
@@ -1768,13 +1861,41 @@ _PORT_TEMPLATE_TABLE = (
         '0039862000',
         '0000000000',
     )),
+    ('9', 'host', 'connected-tunnels-editor-selected-alpha-60989-host.png#2', (
+        '0000000000',
+        '0047986100',
+        '0286248410',
+        '0482006710',
+        '0482006720',
+        '0286248820',
+        '0048987720',
+        '0000006610',
+        '0054268300',
+        '0037984100',
+        '0000000000',
+    )),
+    ('9', 'host', 'connected-tunnels-editor-selected-bravo-58191-host.png#3', (
+        '0000000000',
+        '0048985100',
+        '0376258300',
+        '0573016620',
+        '0573016720',
+        '0375258720',
+        '0048978620',
+        '0000027510',
+        '0054368300',
+        '0048984100',
+        '0000000000',
+    )),
 )
 # A cell's nearest template must be at most this far (sum of absolute ink
 # differences over the 10x11 patch, best of a +-1 px vertical shift) and
 # the nearest template of any OTHER digit at least _PORT_MIN_GAP further.
-# Measured, leave-one-frame-out over the 8 fixture frames (40 glyphs):
-# worst nearest same-digit 7.23, smallest gap to another digit 5.12;
-# closest two different digits (0 vs 8) 10.07 apart.
+# Measured, leave-one-frame-out over 20 frames (6 runner, 14 host from
+# three host runs; 100 glyphs): worst nearest same-digit 5.04, smallest gap
+# to another digit 7.07; host leads 0/8 10.33, 3/5 11.53, 6/8 12.31,
+# 8/9 12.52 (9.81 for 6/8 when every frame of the same port is held out).
+# Over the 12 committed fixture frames alone: worst 7.23, smallest gap 5.12.
 _PORT_MAX_DISTANCE = 9.0
 _PORT_MIN_GAP = 3.0
 

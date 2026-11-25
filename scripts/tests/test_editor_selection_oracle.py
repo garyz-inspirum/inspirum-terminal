@@ -187,6 +187,15 @@ TEMPLATE_FRAMES = {
     "connected-tunnels-edit-bravo-draft-50835-ci.png": (CI_HEADING, "50835"),
     "connected-tunnels-edit-alpha-draft-45271-host.png": (HOST_HEADING, "45271"),
     "connected-tunnels-editor-selected-alpha.png": (HOST_HEADING, "43231"),
+    # Host frames of two later runs. Ground truth: every glyph clusters with
+    # glyphs of the same digit across frames (distance < 4); 1-5 and 7 match
+    # the existing host templates, 52045 was read visually, and the run's
+    # saved-port pair {58191, 60989} / {41675, 54813} fixes the rest (only
+    # 58191 fits glyph pattern A B 1 C 1; 60989 has equal glyphs at 2 and 4).
+    "connected-tunnels-edit-bravo-draft-52045-host.png": (HOST_HEADING, "52045"),
+    "connected-tunnels-editor-selected-alpha-60989-host.png": (HOST_HEADING, "60989"),
+    "connected-tunnels-editor-selected-bravo-58191-host.png": (HOST_HEADING, "58191"),
+    "connected-tunnels-editor-selected-bravo-41675-host.png": (HOST_HEADING, "41675"),
 }
 # Input boxes are 35 px apart: Listen 287..310, Destination Host 322..345,
 # Destination Port 357..380.
@@ -214,6 +223,23 @@ class ListenPortTemplateReaderTest(unittest.TestCase):
                 print(f"read_port_digits {name}: {digits!r} {box}", flush=True)
                 self.assertEqual(digits, port)
                 self.assertIsNotNone(module._bounds_inside(box, _row(name)))
+
+    def test_host_52045_draft_reads_exactly(self):
+        # The frame that failed the full build-host run (0 had no host template).
+        name = "connected-tunnels-edit-bravo-draft-52045-host.png"
+        digits, _box = module.read_port_digits(FIXTURES / name, _row(name))
+        self.assertEqual(digits, "52045")
+
+    def test_template_table_covers_every_digit_in_both_renderings(self):
+        table = module._PORT_TEMPLATE_TABLE
+        for env in ("gh", "host"):
+            with self.subTest(env=env):
+                covered = {digit for digit, e, _src, _rows in table if e == env}
+                self.assertEqual(covered, set("0123456789"), f"{env} templates missing digits")
+        for env in ("gh", "host"):
+            covered = {d for _n, (h, port) in TEMPLATE_FRAMES.items() for d in port
+                       if (h == HOST_HEADING) == (env == "host")}
+            self.assertEqual(covered, set("0123456789"), f"{env} fixture frames missing digits")
 
     def test_leave_one_frame_out_still_reads_frame(self):
         worst, gap = 0.0, float("inf")
