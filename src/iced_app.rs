@@ -15025,6 +15025,131 @@ mod tests {
         assert!(!app.external_edit_tick_scheduled);
     }
 
+    /// Register a real (network-free) external edit for `session` holding
+    /// `content`; returns the working copy and its private root directory.
+    fn push_test_external_edit(
+        app: &mut App,
+        session: &Session,
+        content: &[u8],
+    ) -> (u64, PathBuf, PathBuf) {
+        let edit = external_edit::ExternalEdit::for_test("/srv/notes.txt", content).unwrap();
+        let working_path = edit.working_path().to_owned();
+        // `<private root>/edit/<file>`.
+        let root = working_path
+            .parent()
+            .and_then(std::path::Path::parent)
+            .unwrap()
+            .to_owned();
+        let id = app.next_external_edit_id;
+        app.next_external_edit_id += 1;
+        app.external_edits.push(ExternalEditState {
+            id,
+            session: session.clone(),
+            session_key: session_profile_key(session),
+            remote: "/srv/notes.txt".into(),
+            working_path: working_path.clone(),
+            handle: ExternalEditHandle(Arc::new(Mutex::new(edit))),
+            uploading: false,
+            unsaved: false,
+        });
+        (id, working_path, root)
+    }
+
+    #[test]
+    fn closing_last_tab_right_after_a_save_keeps_the_external_edit_copy() {
+        let mut app = session_click_app();
+        app.open(0);
+        let session = app.tabs[0].profile.clone();
+        let (_, working, root) = push_test_external_edit(&mut app, &session, b"v1");
+        // Saved in the editor; no tick has run, so `unsaved` is still false.
+        std::fs::write(&working, b"v2 saved").unwrap();
+
+        let _ = app.update(Message::ConfirmClose(0));
+        assert!(app.tabs.is_empty());
+        assert!(working.is_file(), "the just-saved copy must not be deleted");
+        assert_eq!(std::fs::read(&working).unwrap(), b"v2 saved");
+        assert_eq!(app.external_edits.len(), 1);
+        assert!(app.external_edits[0].unsaved);
+        assert!(app.status.contains(&working.display().to_string()));
+        assert!(app.status.contains("was not uploaded"));
+
+        // A later orphan sweep (e.g. another tab closing) keeps it too.
+        app.close_orphaned_external_edits();
+        assert_eq!(app.external_edits.len(), 1);
+        assert!(working.is_file());
+
+        app.external_edits.clear();
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn exit_right_after_a_save_leaks_the_external_edit_copy() {
+        let mut app = session_click_app();
+        let session = app.profiles[0].clone();
+        let (_, working, root) = push_test_external_edit(&mut app, &session, b"v1");
+        let (_, _, clean_root) = push_test_external_edit(&mut app, &session, b"clean");
+        std::fs::write(&working, b"v2 saved").unwrap();
+
+        // No tabs: Exit closes external edits immediately, no tick first.
+        assert!(app.tabs.is_empty());
+        let _ = app.update(Message::Exit);
+        assert!(app.external_edits.is_empty());
+        assert!(working.is_file(), "the just-saved copy must survive exit");
+        assert_eq!(std::fs::read(&working).unwrap(), b"v2 saved");
+        assert!(
+            !clean_root.exists(),
+            "a synced copy is still removed on exit"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn closing_last_tab_removes_an_unmodified_external_edit_copy() {
+        let mut app = session_click_app();
+        app.open(0);
+        let session = app.tabs[0].profile.clone();
+        let (_, working, root) = push_test_external_edit(&mut app, &session, b"v1");
+        assert!(working.is_file());
+
+        let _ = app.update(Message::ConfirmClose(0));
+        assert!(app.tabs.is_empty());
+        assert!(app.external_edits.is_empty());
+        assert!(!root.exists(), "a synced copy is cleaned up");
+    }
+
+    #[test]
+    fn save_during_in_flight_upload_survives_close_and_exit() {
+        let mut app = session_click_app();
+        app.open(0);
+        let session = app.tabs[0].profile.clone();
+        let (id, working, root) = push_test_external_edit(&mut app, &session, b"v1");
+        // An upload of the first save is running when the tab closes.
+        app.external_edits[0].uploading = true;
+        let _ = app.update(Message::ConfirmClose(0));
+        assert!(app.tabs.is_empty());
+        assert_eq!(app.external_edits.len(), 1, "kept while uploading");
+
+        // Saved again meanwhile: the disk now differs from what the upload
+        // sent (the test edit's synced bytes stay "v1").
+        std::fs::write(&working, b"v3 saved during upload").unwrap();
+        let _ = app.update(Message::ExternalEditUploaded {
+            id,
+            result: Ok(external_edit::UploadOutcome::Uploaded),
+        });
+        assert_eq!(app.external_edits.len(), 1, "newer save must be kept");
+        assert!(app.external_edits[0].unsaved);
+        assert!(working.is_file());
+        assert!(app.status.contains(&working.display().to_string()));
+
+        let _ = app.update(Message::Exit);
+        assert!(app.external_edits.is_empty());
+        assert!(working.is_file(), "exit leaks the kept copy");
+        assert_eq!(std::fs::read(&working).unwrap(), b"v3 saved during upload");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     fn remote_context_labels(is_dir: bool) -> Vec<&'static str> {
         file_context_entries(&FileContextMenu {
             side: FileContextSide::Remote,

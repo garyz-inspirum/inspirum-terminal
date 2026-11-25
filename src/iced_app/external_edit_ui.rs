@@ -232,9 +232,13 @@ impl App {
         self.close_orphaned_external_edits();
     }
 
-    /// Close edits whose profile has no open tab left, except ones that are
-    /// uploading or hold a change that failed to upload (those are kept so
-    /// the user's work is not deleted; the status line says where).
+    /// Close edits whose profile has no open tab left. An edit is deleted
+    /// only when its working copy is established as byte-equal to the last
+    /// upload (`ExternalEditState::is_established_synced`). Anything else
+    /// (uploading, a failed upload, a save the two-poll debounce has not
+    /// picked up yet, a missing or unreadable copy) stays in
+    /// `external_edits` with `unsaved` set: later calls keep it for the same
+    /// reason, the poller can still upload it, and exit leaks its directory.
     pub(super) fn close_orphaned_external_edits(&mut self) {
         let open_keys: Vec<String> = self
             .tabs
@@ -242,15 +246,12 @@ impl App {
             .map(|tab| session_profile_key(&tab.profile))
             .collect();
         let mut kept = Vec::new();
-        for edit in std::mem::take(&mut self.external_edits) {
+        for mut edit in std::mem::take(&mut self.external_edits) {
             if open_keys.contains(&edit.session_key) || edit.uploading {
                 kept.push(edit);
-            } else if edit.unsaved {
-                self.status = format!(
-                    "{} was not uploaded; the local copy is kept at {}.",
-                    edit.remote,
-                    edit.working_path.display()
-                );
+            } else if !edit.is_established_synced() {
+                edit.unsaved = true;
+                self.status = kept_copy_status(&edit);
                 kept.push(edit);
             }
             // Otherwise dropping the state drops the last handle, which
@@ -259,11 +260,13 @@ impl App {
         self.external_edits = kept;
     }
 
-    /// On exit: clean copies are removed; a copy whose change was not
-    /// uploaded is deliberately leaked so its directory survives the process.
+    /// On exit: copies established as synced are removed; every other copy
+    /// is deliberately leaked so its directory survives the process. The
+    /// status line is gone by then, so each kept path goes to stderr.
     pub(super) fn close_external_edits_for_exit(&mut self) {
         for edit in std::mem::take(&mut self.external_edits) {
-            if edit.unsaved || edit.uploading {
+            if !edit.is_established_synced() {
+                eprintln!("{}", kept_copy_status(&edit));
                 std::mem::forget(edit.handle);
             } else if let Ok(mutex) = Arc::try_unwrap(edit.handle.0)
                 && let Ok(inner) = mutex.into_inner()
@@ -272,6 +275,30 @@ impl App {
             }
         }
     }
+}
+
+impl ExternalEditState {
+    /// True only when deleting the working copy cannot lose work: no upload
+    /// running or failed, and the file on disk byte-equals the last synced
+    /// content. A lock that cannot be taken counts as not established. This
+    /// reads the local working copy only; no network I/O.
+    fn is_established_synced(&self) -> bool {
+        !self.unsaved
+            && !self.uploading
+            && self
+                .handle
+                .0
+                .try_lock()
+                .is_ok_and(|inner| inner.working_copy_is_synced())
+    }
+}
+
+fn kept_copy_status(edit: &ExternalEditState) -> String {
+    format!(
+        "{} was not uploaded; the local copy is kept at {}.",
+        edit.remote,
+        edit.working_path.display()
+    )
 }
 
 fn opened_status(remote: &str) -> String {

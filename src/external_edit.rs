@@ -417,6 +417,22 @@ impl ExternalEdit {
         self.reported = None;
     }
 
+    /// True only when the working copy can be read (within the size cap) and
+    /// its bytes equal the content last known to be on the server. A missing
+    /// file, read error or oversized copy is not established as synced, so
+    /// callers must keep the copy rather than delete it.
+    pub fn working_copy_is_synced(&self) -> bool {
+        read_capped(&self.working_path).is_ok_and(|bytes| bytes == self.synced)
+    }
+
+    /// Test-only: a working copy holding `content`, adopted as if downloaded.
+    #[cfg(test)]
+    pub(crate) fn for_test(remote: &str, content: &[u8]) -> Result<Self> {
+        let (dir, working_path) = prepare_working_dir(remote)?;
+        fs::write(&working_path, content).context("write test working copy")?;
+        Self::from_working_copy(remote, dir, working_path)
+    }
+
     /// Remove the private edit directory now (also happens on drop).
     pub fn close(self) -> Result<()> {
         self.dir
@@ -675,6 +691,33 @@ mod tests {
         edit.mark_synced(b"v2".to_vec(), at);
         assert_eq!(edit.poll_changed().unwrap(), None);
         assert_eq!(edit.poll_changed().unwrap(), None);
+    }
+
+    #[test]
+    fn working_copy_is_synced_compares_bytes() {
+        let edit = edit_with(b"same");
+        assert!(edit.working_copy_is_synced(), "unmodified copy is synced");
+
+        // Modified on disk but not uploaded: not synced, even with the old stamp.
+        set_mtime(edit.working_path(), 1);
+        let before = stamp(edit.working_path()).unwrap();
+        fs::write(edit.working_path(), b"diff").unwrap();
+        set_mtime(edit.working_path(), 1);
+        assert_eq!(
+            stamp(edit.working_path()).unwrap(),
+            before,
+            "same len and mtime"
+        );
+        assert!(
+            !edit.working_copy_is_synced(),
+            "modified copy is not synced"
+        );
+
+        fs::write(edit.working_path(), b"same").unwrap();
+        assert!(edit.working_copy_is_synced(), "byte-equal again is synced");
+
+        fs::remove_file(edit.working_path()).unwrap();
+        assert!(!edit.working_copy_is_synced(), "missing copy is not synced");
     }
 
     #[test]
