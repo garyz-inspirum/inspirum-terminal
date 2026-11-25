@@ -808,6 +808,24 @@ struct TerminalPane {
     error: Option<String>,
     exited: bool,
     refresh_pending: Arc<AtomicBool>,
+    /// True for panes of a 2nd+ tab of the same profile. Instance 1 owns the
+    /// profile's -L/-R/-D listeners; a second ssh binding the same ports would
+    /// die on ExitOnForwardFailure. `profile` keeps the saved forwards so
+    /// lookups and Save Workspace see the canonical profile.
+    suppress_forwards: bool,
+}
+
+impl TerminalPane {
+    /// The profile this pane's ssh/sftp connection is started with.
+    fn launch_profile(&self) -> Session {
+        let mut profile = self.profile.clone();
+        if self.suppress_forwards {
+            profile.ssh.local_forwards.clear();
+            profile.ssh.remote_forwards.clear();
+            profile.ssh.dynamic_forwards.clear();
+        }
+        profile
+    }
 }
 
 struct Workspace {
@@ -4442,6 +4460,17 @@ impl App {
     }
 
     fn new_terminal_pane_kind(&mut self, profile: Session, sftp: bool) -> TerminalPane {
+        self.new_terminal_pane_with(profile, sftp, false)
+    }
+
+    /// Build a pane and start it at once when the pty bridge exists, so
+    /// `suppress_forwards` is fixed before the connection is built.
+    fn new_terminal_pane_with(
+        &mut self,
+        profile: Session,
+        sftp: bool,
+        suppress_forwards: bool,
+    ) -> TerminalPane {
         let id = self.next_terminal_id;
         self.next_terminal_id = self.next_terminal_id.saturating_add(1);
 
@@ -4461,6 +4490,7 @@ impl App {
             error: None,
             exited: false,
             refresh_pending: Arc::new(AtomicBool::new(false)),
+            suppress_forwards,
         };
 
         // Iced subscriptions are initialized asynchronously. A fast click on a saved
@@ -4497,10 +4527,11 @@ impl App {
                 }
             });
 
+        let profile = pane.launch_profile();
         let connection = if pane.sftp {
-            terminal::connect_sftp_with_event_sink(pane.id, &pane.profile, config, event_sink)
+            terminal::connect_sftp_with_event_sink(pane.id, &profile, config, event_sink)
         } else {
-            terminal::connect_with_event_sink(pane.id, &pane.profile, config, event_sink)
+            terminal::connect_with_event_sink(pane.id, &profile, config, event_sink)
         };
         match connection {
             Ok(mut terminal) => {
@@ -4902,28 +4933,13 @@ impl App {
         (1..).find(|instance| !used.contains(instance)).unwrap_or(1)
     }
 
-    /// The profile a terminal pane of tab `instance` connects with.
-    ///
-    /// Instance 1 owns the profile's -L/-R/-D listeners. A second ssh binding
-    /// the same ports would die on ExitOnForwardFailure, so panes of a 2nd+
-    /// tab of the same profile are plain shells.
-    fn pane_profile_for_instance(profile: &Session, instance: u32) -> Session {
-        let mut pane_profile = profile.clone();
-        if instance > 1 {
-            pane_profile.ssh.local_forwards.clear();
-            pane_profile.ssh.remote_forwards.clear();
-            pane_profile.ssh.dynamic_forwards.clear();
-        }
-        pane_profile
-    }
-
     /// Every open creates a new, independent tab and SSH session, even when
     /// a tab for the same profile is already open.
     fn open(&mut self, index: usize) {
         if let Some(profile) = self.profiles.get(index).cloned() {
             let instance = self.next_tab_instance(&profile);
-            let pane_profile = Self::pane_profile_for_instance(&profile, instance);
-            let terminal = self.new_terminal_pane(pane_profile);
+            // Panes of a 2nd+ tab are plain shells; see `suppress_forwards`.
+            let terminal = self.new_terminal_pane_with(profile.clone(), false, instance > 1);
             let mut tab = Workspace::new(profile, terminal);
             tab.instance = instance;
             self.tabs.push(tab);
@@ -7306,10 +7322,18 @@ impl App {
                     .tabs
                     .get(self.active)
                     .and_then(|tab| tab.panes.get(pane_id))
-                    .map(|pane| (pane.profile.clone(), pane.sftp, pane.auxiliary_shell));
+                    .map(|pane| {
+                        (
+                            pane.profile.clone(),
+                            pane.sftp,
+                            pane.auxiliary_shell,
+                            pane.suppress_forwards,
+                        )
+                    });
 
-                if let Some((profile, sftp, auxiliary_shell)) = profile {
-                    let mut replacement = self.new_terminal_pane_kind(profile, sftp);
+                if let Some((profile, sftp, auxiliary_shell, suppress_forwards)) = profile {
+                    let mut replacement =
+                        self.new_terminal_pane_with(profile, sftp, suppress_forwards);
                     replacement.auxiliary_shell = auxiliary_shell;
                     if let Some(previous_id) = self
                         .tabs
@@ -7351,13 +7375,13 @@ impl App {
                 }
                 self.tools.sync.set_armed(false);
                 self.dialog = None;
-                if let Some((profile, sftp)) = self
+                if let Some((profile, sftp, suppress_forwards)) = self
                     .tabs
                     .get(self.active)
                     .and_then(|tab| tab.panes.get(tab.focus))
-                    .map(|p| (p.profile.clone(), p.sftp))
+                    .map(|p| (p.profile.clone(), p.sftp, p.suppress_forwards))
                 {
-                    let terminal = self.new_terminal_pane_kind(profile, sftp);
+                    let terminal = self.new_terminal_pane_with(profile, sftp, suppress_forwards);
                     if let Some(tab) = self.tabs.get_mut(self.active) {
                         tab.split(axis, terminal);
                     }
@@ -7393,8 +7417,10 @@ impl App {
                 // Open an independent authenticated PTY for the same profile.
                 // Never reuse the original pane's terminal backend or input.
                 let profile = tab.profile.clone();
+                // A duplicate tab's shell must not bind the listeners either.
+                let suppress_forwards = tab.instance > 1;
                 self.tools.sync.set_armed(false);
-                let mut shell = self.new_terminal_pane_kind(profile, false);
+                let mut shell = self.new_terminal_pane_with(profile, false, suppress_forwards);
                 shell.auxiliary_shell = true;
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.split(pane_grid::Axis::Vertical, shell);
@@ -14974,12 +15000,136 @@ mod tests {
         let forwards = |tab: &Workspace| {
             tab.panes
                 .get(tab.focus)
-                .map(|pane| pane.profile.ssh.local_forwards.len())
+                .map(|pane| pane.launch_profile().ssh.local_forwards.len())
         };
         assert_eq!(forwards(&app.tabs[0]), Some(1));
         assert_eq!(forwards(&app.tabs[1]), Some(0));
         // Tab state still carries the saved profile.
         assert_eq!(app.tabs[1].profile.ssh.local_forwards.len(), 1);
+    }
+
+    fn forwards_profile_app() -> App {
+        let mut app = session_click_app();
+        app.profiles[0].ssh.local_forwards = vec!["8080:localhost:80".into()];
+        app.profiles[0].ssh.remote_forwards = vec!["9090:localhost:90".into()];
+        app.profiles[0].ssh.dynamic_forwards = vec!["1080".into()];
+        app
+    }
+
+    fn has_forwards(profile: &Session) -> bool {
+        !profile.ssh.local_forwards.is_empty()
+            && !profile.ssh.remote_forwards.is_empty()
+            && !profile.ssh.dynamic_forwards.is_empty()
+    }
+
+    fn has_no_forwards(profile: &Session) -> bool {
+        profile.ssh.local_forwards.is_empty()
+            && profile.ssh.remote_forwards.is_empty()
+            && profile.ssh.dynamic_forwards.is_empty()
+    }
+
+    #[test]
+    fn duplicate_tab_pane_keeps_canonical_profile_and_strips_only_launch() {
+        let mut app = forwards_profile_app();
+        app.open(0);
+        app.open(0);
+        let first = app.tabs[0].panes.get(app.tabs[0].focus).unwrap();
+        assert!(!first.suppress_forwards);
+        assert!(has_forwards(&first.profile));
+        assert!(has_forwards(&first.launch_profile()));
+        let second = app.tabs[1].panes.get(app.tabs[1].focus).unwrap();
+        assert!(second.suppress_forwards);
+        assert!(has_forwards(&second.profile));
+        assert_eq!(second.profile, app.profiles[0]);
+        assert!(has_no_forwards(&second.launch_profile()));
+        // Only the forwards differ from the saved profile.
+        let mut expected = app.profiles[0].clone();
+        expected.ssh.local_forwards.clear();
+        expected.ssh.remote_forwards.clear();
+        expected.ssh.dynamic_forwards.clear();
+        assert_eq!(second.launch_profile(), expected);
+    }
+
+    #[test]
+    fn duplicate_tab_saved_workspace_restores_forwards_as_first_tab() {
+        let mut app = forwards_profile_app();
+        app.open(0);
+        app.open(0);
+        assert_eq!(app.tabs[1].instance, 2);
+        let layout = app.workspace_layout_of(&app.tabs[1]);
+        assert_eq!(layout.panes.len(), 1);
+        assert!(layout.panes.iter().all(has_forwards));
+        let json = serde_json::to_string(&layout).unwrap();
+        assert!(json.contains("8080:localhost:80"));
+        assert!(json.contains("9090:localhost:90"));
+
+        while !app.tabs.is_empty() {
+            let _ = app.update(Message::ConfirmClose(0));
+        }
+        let mut layout = layout;
+        layout.reconnect_on_restore = true;
+        app.tools.workspace = Some(layout);
+        let _ = app.update(Message::Tool(tools::Action::RestoreWorkspace));
+
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs[0].instance, 1);
+        assert!(has_forwards(&app.tabs[0].profile));
+        let pane = app.tabs[0].panes.get(app.tabs[0].focus).unwrap();
+        assert!(!pane.suppress_forwards);
+        assert!(has_forwards(&pane.profile));
+        assert!(has_forwards(&pane.launch_profile()));
+    }
+
+    #[test]
+    fn restoring_layout_beside_first_tab_suppresses_but_keeps_full_profile() {
+        let mut app = forwards_profile_app();
+        app.open(0);
+        let mut layout = app.workspace_layout_of(&app.tabs[0]);
+        layout.reconnect_on_restore = true;
+        app.tools.workspace = Some(layout);
+        let _ = app.update(Message::Tool(tools::Action::RestoreWorkspace));
+
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs[1].instance, 2);
+        assert!(has_forwards(&app.tabs[1].profile));
+        for (_, pane) in app.tabs[1].panes.iter() {
+            assert!(pane.suppress_forwards);
+            assert!(has_forwards(&pane.profile));
+            assert!(has_no_forwards(&pane.launch_profile()));
+        }
+        // Saving the restored duplicate again still persists the forwards.
+        let resaved = app.workspace_layout_of(&app.tabs[1]);
+        assert!(resaved.panes.iter().all(has_forwards));
+    }
+
+    #[test]
+    fn split_reconnect_and_shell_in_duplicate_tab_keep_forwards_suppressed() {
+        let mut app = forwards_profile_app();
+        app.open(0);
+        app.open(0);
+        assert_eq!(app.active, 1);
+        let _ = app.update(Message::Split(pane_grid::Axis::Vertical));
+        let _ = app.update(Message::ToggleAuxiliaryShell);
+        assert_eq!(app.tabs[1].panes.len(), 3);
+        let focus = app.tabs[1].focus;
+        let _ = app.update(Message::Reconnect(focus));
+        assert_eq!(app.tabs[1].panes.len(), 3);
+        for (_, pane) in app.tabs[1].panes.iter() {
+            assert!(pane.suppress_forwards);
+            assert!(has_forwards(&pane.profile));
+            assert!(has_no_forwards(&pane.launch_profile()));
+        }
+
+        // The first tab keeps today's behaviour: forwards on every new pane.
+        app.activate_tab(0);
+        let _ = app.update(Message::Split(pane_grid::Axis::Vertical));
+        let focus = app.tabs[0].focus;
+        let _ = app.update(Message::Reconnect(focus));
+        assert_eq!(app.tabs[0].panes.len(), 2);
+        for (_, pane) in app.tabs[0].panes.iter() {
+            assert!(!pane.suppress_forwards);
+            assert!(has_forwards(&pane.launch_profile()));
+        }
     }
 
     #[test]
