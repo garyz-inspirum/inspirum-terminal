@@ -84,12 +84,15 @@ impl RemoteEdit {
         config: Option<&Path>,
         force_remote_change: bool,
     ) -> Result<SaveOutcome> {
-        let current_path = self.temp_dir.path().join("conflict-check");
-        let _ = fs::remove_file(&current_path);
-        download_blocking(session, config, &self.remote, &current_path, None)?;
-        let current = fs::read(&current_path).context("read remote conflict-check copy")?;
-        let _ = fs::remove_file(&current_path);
-        if !force_remote_change && current != self.original {
+        if !force_remote_change
+            && !remote_matches(
+                session,
+                config,
+                &self.remote,
+                self.temp_dir.path(),
+                &self.original,
+            )?
+        {
             return Ok(SaveOutcome::Conflict);
         }
 
@@ -97,16 +100,47 @@ impl RemoteEdit {
             .context("write private remote edit working copy")?;
         secure_file(&self.working_path)?;
 
-        let staged_remote = staging_remote_name(&self.remote)?;
-        upload_blocking(session, config, &self.working_path, &staged_remote)?;
-        if let Err(error) = sftp::rename_remote(session, config, &staged_remote, &self.remote) {
-            let _ = sftp::delete_remote(session, config, &staged_remote, false);
-            return Err(error).context("replace remote file from staged edit");
-        }
+        replace_remote_from(session, config, &self.working_path, &self.remote)?;
 
         self.original = self.text.as_bytes().to_vec();
         Ok(SaveOutcome::Saved)
     }
+}
+
+/// Byte-exact check that the remote file still equals `expected`.
+///
+/// Downloads a fresh copy into `scratch_dir/conflict-check` (removed afterwards).
+/// Binary-safe: shared by the in-panel text editor and the external-editor path.
+pub(crate) fn remote_matches(
+    session: &Session,
+    config: Option<&Path>,
+    remote: &str,
+    scratch_dir: &Path,
+    expected: &[u8],
+) -> Result<bool> {
+    let current_path = scratch_dir.join("conflict-check");
+    let _ = fs::remove_file(&current_path);
+    download_blocking(session, config, remote, &current_path, None)?;
+    let current = fs::read(&current_path).context("read remote conflict-check copy");
+    let _ = fs::remove_file(&current_path);
+    Ok(current? == expected)
+}
+
+/// Upload `local` to a staged remote name, then rename it over `remote`.
+/// The staged file is deleted if the final rename fails.
+pub(crate) fn replace_remote_from(
+    session: &Session,
+    config: Option<&Path>,
+    local: &Path,
+    remote: &str,
+) -> Result<()> {
+    let staged_remote = staging_remote_name(remote)?;
+    upload_blocking(session, config, local, &staged_remote)?;
+    if let Err(error) = sftp::rename_remote(session, config, &staged_remote, remote) {
+        let _ = sftp::delete_remote(session, config, &staged_remote, false);
+        return Err(error).context("replace remote file from staged edit");
+    }
+    Ok(())
 }
 
 fn decode_text(bytes: &[u8]) -> Result<&str> {
@@ -119,7 +153,7 @@ fn decode_text(bytes: &[u8]) -> Result<&str> {
     std::str::from_utf8(bytes).context("remote file is not valid UTF-8 text")
 }
 
-fn private_temp_dir() -> Result<TempDir> {
+pub(crate) fn private_temp_dir() -> Result<TempDir> {
     let dir = tempfile::Builder::new()
         .prefix(".inspirum-remote-edit-")
         .tempdir()
@@ -133,7 +167,7 @@ fn private_temp_dir() -> Result<TempDir> {
     Ok(dir)
 }
 
-fn secure_file(path: &Path) -> Result<()> {
+pub(crate) fn secure_file(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -160,7 +194,7 @@ fn wait_transfer(mut transfer: sftp::Transfer) -> Result<()> {
     }
 }
 
-fn download_blocking(
+pub(crate) fn download_blocking(
     session: &Session,
     config: Option<&Path>,
     remote: &str,
