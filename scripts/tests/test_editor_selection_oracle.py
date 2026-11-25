@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+import subprocess
 import sys
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 try:
     import asyncssh  # noqa: F401
@@ -166,6 +168,146 @@ class EditorSelectionOnRealFrameTest(unittest.TestCase):
             module.require_editor_selection(
                 FIXTURE, 43231, 40369, self.form, row_region=self.row,
             )
+
+
+def _reset_ocr_state():
+    module._OCR_FAILURES.clear()
+    module._LOCATE_CUT_SHORT.clear()
+    module._PIXEL_CACHE.clear()
+
+
+class RequireLabelAbsentTest(unittest.TestCase):
+    """Absence needs a completed search; an OCR failure is not absence."""
+
+    def setUp(self):
+        _reset_ocr_state()
+
+    def test_clean_miss_is_absent(self):
+        self.assertIsNone(module.require_label_absent(
+            Path("x.png"), "41001", region=FORM, locate=fake_locator({})))
+
+    def test_found_label_raises_visible(self):
+        loc = fake_locator({"41001": (700, 200, 760, 215)})
+        with self.assertRaises(RuntimeError) as ctx:
+            module.require_label_absent(Path("x.png"), "41001", region=FORM, locate=loc)
+        self.assertNotIsInstance(ctx.exception, module.OcrInconclusive)
+        self.assertIn("(700, 200, 760, 215)", str(ctx.exception))
+
+    def test_failure_on_every_attempt_is_inconclusive(self):
+        calls = []
+
+        def locate(_path, label, *, region=None, budget=None):
+            calls.append(label)
+            module._OCR_FAILURES.append("tesseract timed out")
+            raise RuntimeError("miss")
+        with self.assertRaisesRegex(module.OcrInconclusive, "timed out"):
+            module.require_label_absent(Path("x.png"), "41001", region=FORM,
+                                        locate=locate, attempts=3)
+        self.assertEqual(len(calls), 3)
+
+    def test_failure_then_clean_miss_is_absent(self):
+        calls = []
+
+        def locate(_path, label, *, region=None, budget=None):
+            calls.append(label)
+            if len(calls) == 1:
+                module._OCR_FAILURES.append("tesseract exited 1")
+            raise RuntimeError("miss")
+        self.assertIsNone(module.require_label_absent(
+            Path("x.png"), "41001", region=FORM, locate=locate))
+        self.assertEqual(len(calls), 2)
+
+    def test_budget_cut_miss_is_inconclusive(self):
+        def locate(_path, label, *, region=None, budget=None):
+            module._LOCATE_CUT_SHORT.append("pixel rows stage skipped by budget")
+            raise RuntimeError("miss")
+        with self.assertRaisesRegex(module.OcrInconclusive, "budget"):
+            module.require_label_absent(Path("x.png"), "41001", region=FORM, locate=locate)
+
+
+def _fake_run(returncode=None, timeout=False):
+    def run(args, **kwargs):
+        if timeout:
+            raise subprocess.TimeoutExpired(args, kwargs.get("timeout", 1))
+        return subprocess.CompletedProcess(args, returncode, "", "fake tesseract failure")
+    return run
+
+
+@unittest.skipUnless(FIXTURE.is_file(), "editor fixture missing")
+class SiblingCheckOcrFailureOnRealFrameTest(unittest.TestCase):
+    """Reviewer's case: template reader reads 43231, OCR down, 40369 visible.
+
+    Real ``read_port_digits`` and real ``locate_visible_label``; only
+    tesseract discovery / ``subprocess.run`` are faked, so no tesseract is
+    needed and these run in CI.
+    """
+
+    def setUp(self):
+        _reset_ocr_state()
+        self.form = module.editor_form_region(1280, 800)
+        self.row = module.listen_port_row_region(HEADING, 1280)
+        self.assertEqual(module.read_port_digits(FIXTURE, self.row)[0], "43231")
+
+    def _require(self):
+        return module.require_editor_selection(
+            FIXTURE, 43231, 40369, self.form, row_region=self.row)
+
+    def test_tesseract_unavailable_is_inconclusive_not_pass(self):
+        with mock.patch.object(module.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(module.OcrInconclusive, "tesseract not found"):
+                self._require()
+
+    def test_tesseract_timeout_is_inconclusive_not_pass(self):
+        with mock.patch.object(module.shutil, "which", return_value="/fake/tesseract"), \
+                mock.patch.object(module.subprocess, "run", _fake_run(timeout=True)):
+            with self.assertRaisesRegex(module.OcrInconclusive, "timed out"):
+                self._require()
+
+    def test_tesseract_nonzero_exit_is_inconclusive_not_pass(self):
+        with mock.patch.object(module.shutil, "which", return_value="/fake/tesseract"), \
+                mock.patch.object(module.subprocess, "run", _fake_run(returncode=1)):
+            with self.assertRaisesRegex(module.OcrInconclusive, "exited 1"):
+                self._require()
+
+    def test_failed_reads_are_not_cached(self):
+        for run in (_fake_run(timeout=True), _fake_run(returncode=1)):
+            _reset_ocr_state()
+            with mock.patch.object(module.shutil, "which", return_value="/fake/tesseract"), \
+                    mock.patch.object(module.subprocess, "run", run):
+                with self.assertRaises(module.OcrInconclusive):
+                    self._require()
+            self.assertTrue(module._OCR_FAILURES)
+            self.assertEqual(module._PIXEL_CACHE, {})
+
+
+@unittest.skipUnless(shutil.which("tesseract"), "tesseract is not installed")
+@unittest.skipUnless(FIXTURE.is_file(), "editor fixture missing")
+class SiblingCheckHealthyOcrOnRealFrameTest(unittest.TestCase):
+    def setUp(self):
+        _reset_ocr_state()
+        self.form = module.editor_form_region(1280, 800)
+        self.row = module.listen_port_row_region(HEADING, 1280)
+
+    def test_visible_sibling_is_found_not_inconclusive(self):
+        with self.assertRaisesRegex(RuntimeError, "still shows sibling port 40369") as ctx:
+            module.require_editor_selection(
+                FIXTURE, 43231, 40369, self.form, row_region=self.row)
+        self.assertNotIsInstance(ctx.exception, module.OcrInconclusive)
+
+    def test_healthy_call_after_failed_read_still_finds_sibling(self):
+        with mock.patch.object(module.subprocess, "run", _fake_run(returncode=1)):
+            with self.assertRaises(module.OcrInconclusive):
+                module.require_editor_selection(
+                    FIXTURE, 43231, 40369, self.form, row_region=self.row)
+        with self.assertRaisesRegex(RuntimeError, "still shows sibling port 40369") as ctx:
+            module.require_editor_selection(
+                FIXTURE, 43231, 40369, self.form, row_region=self.row)
+        self.assertNotIsInstance(ctx.exception, module.OcrInconclusive)
+
+    def test_absent_sibling_passes(self):
+        box = module.require_editor_selection(
+            FIXTURE, 43231, 61234, self.form, row_region=self.row)
+        self.assertIsNotNone(module._bounds_inside(box, self.row))
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"

@@ -760,6 +760,22 @@ def _text_threshold(width, height, channels, rows) -> int:
     return max(90, min(160, (p90 + p99) // 2))
 
 
+class OcrInconclusive(RuntimeError):
+    """OCR could not answer: tesseract missing, timed out, failed, or cut short.
+
+    Distinct from a plain ``RuntimeError`` miss, which is a completed search
+    that found nothing. Never treat this as proof that a label is absent.
+    """
+
+
+# Append-only records read by ``require_label_absent`` (compare lengths
+# before/after a call). ``_ocr_tsv`` still returns "" on failure so the poll
+# loops that tolerate a slow tesseract behave as before.
+_OCR_FAILURES: list[str] = []
+# ``locate_visible_label`` stages skipped (or abandoned) by its time budget.
+_LOCATE_CUT_SHORT: list[str] = []
+
+
 def _ocr_tsv(tesseract: str, image: Path, psm: str) -> str:
     try:
         result = subprocess.run(
@@ -767,8 +783,13 @@ def _ocr_tsv(tesseract: str, image: Path, psm: str) -> str:
             capture_output=True, text=True, timeout=15 * TIME_SCALE,
         )
     except subprocess.TimeoutExpired:
+        _OCR_FAILURES.append(f"tesseract timed out after {15 * TIME_SCALE:.0f}s (psm {psm})")
         return ""
     if result.returncode != 0:
+        _OCR_FAILURES.append(
+            f"tesseract exited {result.returncode} (psm {psm}): "
+            f"{(result.stderr or '').strip()[:200]}"
+        )
         return ""
     return result.stdout
 
@@ -905,6 +926,7 @@ def visible_segment_rows(path: Path, tesseract: str, *, invert: bool = False):
     cached = _PIXEL_CACHE.get(key)
     if cached is not None:
         return cached
+    failures_before = len(_OCR_FAILURES)
     width, height, channels, rows = _read_png(path)
     thresh = _text_threshold(width, height, channels, rows)
     segments = []
@@ -928,7 +950,8 @@ def visible_segment_rows(path: Path, tesseract: str, *, invert: bool = False):
                 ))
     finally:
         temporary.unlink(missing_ok=True)
-    _PIXEL_CACHE[key] = segments
+    if len(_OCR_FAILURES) == failures_before:  # never cache a failed read
+        _PIXEL_CACHE[key] = segments
     return segments
 
 
@@ -945,6 +968,7 @@ def visible_pixel_rows(path: Path, tesseract: str, *, clusters: bool = False):
     cached = _PIXEL_CACHE.get(key)
     if cached is not None:
         return cached
+    failures_before = len(_OCR_FAILURES)
     width, height, channels, rows = _read_png(path)
     thresh = _text_threshold(width, height, channels, rows)
     words = []
@@ -979,7 +1003,8 @@ def visible_pixel_rows(path: Path, tesseract: str, *, clusters: bool = False):
                 ))
     finally:
         temporary.unlink(missing_ok=True)
-    _PIXEL_CACHE[key] = words
+    if len(_OCR_FAILURES) == failures_before:  # never cache a failed read
+        _PIXEL_CACHE[key] = words
     return words
 
 
@@ -1360,7 +1385,9 @@ def require_editor_selection(path, port: int, sibling_port: int, form_region, *,
     cannot be the oracle for a random port. The same row reading must not
     be the sibling's port, and ``sibling_port`` must also be absent
     anywhere in ``form_region`` (a no-op click leaves the previous
-    selection in the form). Without ``row_region`` the selected port is
+    selection in the form). Absence is proven by ``require_label_absent``:
+    when OCR is unavailable, times out, fails or is cut short by its budget
+    this raises ``OcrInconclusive`` instead of passing. Without ``row_region`` the selected port is
     located inside ``form_region`` -- never a list subtitle. Returns the
     port's bounds.
     """
@@ -1389,12 +1416,60 @@ def require_editor_selection(path, port: int, sibling_port: int, form_region, *,
     if _bounds_inside(box, where) is None:
         raise RuntimeError(f"listen port {port} box {box} outside editor row {where}")
     try:
-        stale = locate(path, str(sibling_port), region=form_region)
-    except RuntimeError:
-        return box
-    raise RuntimeError(
-        f"editor form still shows sibling port {sibling_port} at {stale}; "
-        f"selection click was a no-op"
+        require_label_absent(path, str(sibling_port), region=form_region, locate=locate)
+    except OcrInconclusive:
+        raise
+    except LabelVisible as exc:
+        raise RuntimeError(
+            f"editor form still shows sibling port {sibling_port} at {exc.bounds}; "
+            f"selection click was a no-op"
+        ) from exc
+    return box
+
+
+class LabelVisible(RuntimeError):
+    """``require_label_absent`` found the label; ``bounds`` is where."""
+
+    def __init__(self, message, bounds):
+        super().__init__(message)
+        self.bounds = bounds
+
+
+def require_label_absent(path, label, *, region, locate=None, attempts=2):
+    """Prove ``label`` is NOT rendered in ``region``; return None.
+
+    A locator miss only counts as absence when the search completed: no OCR
+    failure was recorded (tesseract missing, timeout, nonzero exit) and
+    ``locate_visible_label`` did not skip a stage on its time budget. Such
+    an inconclusive miss is retried (failed reads are not cached) up to
+    ``attempts`` calls in total, then ``OcrInconclusive`` is raised. A hit
+    raises ``LabelVisible`` (a ``RuntimeError``) with the bounds. An
+    injected ``locate`` that raises ``RuntimeError`` without recording
+    anything is a clean miss.
+    """
+    locate = locate or locate_visible_label
+    reasons = []
+    for attempt in range(1, max(1, attempts) + 1):
+        failures_before = len(_OCR_FAILURES)
+        cut_before = len(_LOCATE_CUT_SHORT)
+        try:
+            bounds = locate(path, label, region=region)
+        except OcrInconclusive as exc:
+            reasons.append(f"attempt {attempt}: {exc}")
+            continue
+        except RuntimeError as exc:
+            failed = _OCR_FAILURES[failures_before:]
+            cut = _LOCATE_CUT_SHORT[cut_before:]
+            if not failed and not cut:
+                return None
+            detail = sorted(set(failed + cut))
+            reasons.append(f"attempt {attempt}: miss not conclusive ({'; '.join(detail)}): {exc}")
+            continue
+        raise LabelVisible(
+            f"{label!r} is visible in {region} at {bounds} of {path}", bounds,
+        )
+    raise OcrInconclusive(
+        f"could not prove {label!r} absent from {region} of {path}: " + " | ".join(reasons)
     )
 
 
@@ -2044,6 +2119,7 @@ def _inverted_segment_search(path: Path, tesseract: str, label: str, region, dea
                 if x2 < rx1 or x1 > rx2:
                     continue
                 if time.monotonic() >= deadline:
+                    _LOCATE_CUT_SHORT.append("inverted segment search hit its deadline")
                     return None, segments
                 box = (
                     min(width - 1, x1 + 3),
@@ -2137,6 +2213,7 @@ def locate_visible_label(
     """
     tesseract = shutil.which("tesseract")
     if tesseract is None:
+        _OCR_FAILURES.append("tesseract not found")
         raise RuntimeError("visible label targeting requires tesseract")
     started = time.monotonic()
     deadline = started + budget
@@ -2164,16 +2241,22 @@ def locate_visible_label(
     else:
         first_words = ocr_rows(path, tesseract, None)
         bounds = match_visible_label(first_words, label)
+    if bounds is None and time.monotonic() >= deadline:
+        _LOCATE_CUT_SHORT.append("pixel rows stage skipped by budget")
     if bounds is None and time.monotonic() < deadline:
         pixel_rows = visible_pixel_rows(path, tesseract, clusters=False)
         if region is not None:
             pixel_rows = [row for row in pixel_rows if _word_inside(row, region)]
         bounds = _bounds_inside(match_visible_label(pixel_rows, label), region)
+    if bounds is None and time.monotonic() >= deadline:
+        _LOCATE_CUT_SHORT.append("clustered rows stage skipped by budget")
     if bounds is None and time.monotonic() < deadline:
         clustered = visible_pixel_rows(path, tesseract, clusters=True)
         if region is not None:
             clustered = [row for row in clustered if _word_inside(row, region)]
         bounds = _bounds_inside(match_visible_label(clustered, label), region)
+    if bounds is None and time.monotonic() >= deadline:
+        _LOCATE_CUT_SHORT.append("segment rows stage skipped by budget")
     if bounds is None and time.monotonic() < deadline:
         segments = visible_segment_rows(path, tesseract)
         if region is not None:
