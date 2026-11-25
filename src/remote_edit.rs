@@ -110,16 +110,20 @@ impl RemoteEdit {
 
 /// Byte-exact check that the remote file still equals `expected`.
 ///
+/// No separate size query or listing is made first: the only remote
+/// operation is one monitored download, so a hung lookup cannot bypass the
+/// transfer deadline and a large directory listing is never buffered.
 /// Bounded so server-side growth cannot exhaust memory or disk:
-/// 1. the remote size is queried first and any length mismatch is a conflict
-///    (`Ok(false)`) without downloading;
-/// 2. the download into `scratch_dir/conflict-check` is aborted (and its
-///    staging file removed) as soon as it exceeds `expected.len()` bytes;
+/// 1. the download into `scratch_dir/conflict-check` is aborted (and its
+///    staging file removed) as soon as it exceeds `expected.len()` bytes,
+///    which is a conflict (`Ok(false)`);
+/// 2. it must finish within `TRANSFER_TIMEOUT`, otherwise it is an `Err`;
 /// 3. the downloaded copy is compared in fixed-size chunks, never loaded whole.
 ///
-/// Errors (missing remote, failed transfer, timeout) stay errors; they are
-/// never reported as a match. Binary-safe: shared by the in-panel text editor
-/// and the external-editor path.
+/// Errors (missing remote, a remote that is no longer a regular file, failed
+/// transfer, timeout) stay errors; they are never reported as a match, so
+/// callers neither upload nor discard the local edit. Binary-safe: shared by
+/// the in-panel text editor and the external-editor path.
 pub(crate) fn remote_matches(
     session: &Session,
     config: Option<&Path>,
@@ -128,9 +132,6 @@ pub(crate) fn remote_matches(
     expected: &[u8],
 ) -> Result<bool> {
     let expected_len = expected.len() as u64;
-    if sftp::remote_size(session, config, remote)? != expected_len {
-        return Ok(false);
-    }
     let current_path = scratch_dir.join("conflict-check");
     let _ = fs::remove_file(&current_path);
     let result = sftp::start_download(session, config, remote, &current_path, true, None)

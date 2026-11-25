@@ -377,6 +377,24 @@ impl ExternalEdit {
         config: Option<&Path>,
         force: bool,
     ) -> Result<UploadOutcome> {
+        self.upload_with(
+            force,
+            |remote, scratch_dir, expected| {
+                remote_edit::remote_matches(session, config, remote, scratch_dir, expected)
+            },
+            |local, remote| remote_edit::replace_remote_from(session, config, local, remote),
+        )
+    }
+
+    /// `upload` with the remote operations injected (test seam). Any `Err`
+    /// from the conflict check propagates before anything is written or
+    /// replaced, and leaves the working copy and sync state untouched.
+    fn upload_with(
+        &mut self,
+        force: bool,
+        remote_matches: impl FnOnce(&str, &Path, &[u8]) -> Result<bool>,
+        replace_remote: impl FnOnce(&Path, &str) -> Result<()>,
+    ) -> Result<UploadOutcome> {
         let before = match stamp(&self.working_path) {
             Ok(before) => before,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -389,21 +407,13 @@ impl ExternalEdit {
             self.synced_stamp = Some(before);
             return Ok(UploadOutcome::Unchanged);
         }
-        if !force
-            && !remote_edit::remote_matches(
-                session,
-                config,
-                &self.remote,
-                self.dir.path(),
-                &self.synced,
-            )?
-        {
+        if !force && !remote_matches(&self.remote, self.dir.path(), &self.synced)? {
             return Ok(UploadOutcome::RemoteChangedConflict);
         }
         let snapshot = self.dir.path().join("upload-snapshot");
         fs::write(&snapshot, &bytes).context("write external edit upload snapshot")?;
         remote_edit::secure_file(&snapshot)?;
-        let result = remote_edit::replace_remote_from(session, config, &snapshot, &self.remote);
+        let result = replace_remote(&snapshot, &self.remote);
         let _ = fs::remove_file(&snapshot);
         result?;
         self.mark_synced(bytes, before);
@@ -475,6 +485,7 @@ fn read_capped(path: &Path) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -589,6 +600,104 @@ mod tests {
         let file = fs::OpenOptions::new().write(true).open(path).unwrap();
         file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000 + offset_secs))
             .unwrap();
+    }
+
+    fn edited_copy() -> ExternalEdit {
+        let mut edit = edit_with(b"original");
+        set_mtime(edit.working_path(), 0);
+        fs::write(edit.working_path(), b"local edit").unwrap();
+        set_mtime(edit.working_path(), 5);
+        // Seen once by the debounce; the next identical poll reports it.
+        assert_eq!(edit.poll_changed().unwrap(), None);
+        edit
+    }
+
+    fn assert_edit_kept(edit: &mut ExternalEdit) {
+        assert_eq!(fs::read(edit.working_path()).unwrap(), b"local edit");
+        assert!(
+            !edit.working_copy_is_synced(),
+            "edit must not be marked synced"
+        );
+        assert!(
+            edit.poll_changed().unwrap().is_some(),
+            "change still pending"
+        );
+    }
+
+    fn refused_on_check_error(message: &'static str) {
+        let mut edit = edited_copy();
+        let checked = Cell::new(0_u32);
+        let replaced = Cell::new(0_u32);
+        let result = edit.upload_with(
+            false,
+            |remote, _, expected| {
+                checked.set(checked.get() + 1);
+                assert_eq!(remote, "/srv/app/config file.txt");
+                assert_eq!(expected, b"original");
+                Err(anyhow::anyhow!(message))
+            },
+            |_, _| {
+                replaced.set(replaced.get() + 1);
+                Ok(())
+            },
+        );
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains(message));
+        assert_eq!(checked.get(), 1);
+        assert_eq!(replaced.get(), 0, "must not upload after a failed check");
+        assert!(!edit.dir.path().join("upload-snapshot").exists());
+        assert_edit_kept(&mut edit);
+    }
+
+    #[test]
+    fn upload_is_refused_when_conflict_check_errors_like_a_directory() {
+        refused_on_check_error("remote path is not a regular file");
+    }
+
+    #[test]
+    fn upload_is_refused_when_conflict_check_times_out() {
+        refused_on_check_error("SFTP edit transfer timed out");
+    }
+
+    #[test]
+    fn upload_reports_conflict_without_replacing_when_remote_differs() {
+        let mut edit = edited_copy();
+        let replaced = Cell::new(0_u32);
+        let outcome = edit
+            .upload_with(
+                false,
+                |_, _, _| Ok(false),
+                |_, _| {
+                    replaced.set(replaced.get() + 1);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome, UploadOutcome::RemoteChangedConflict);
+        assert_eq!(replaced.get(), 0);
+        assert_edit_kept(&mut edit);
+    }
+
+    #[test]
+    fn upload_replaces_only_after_a_matching_conflict_check() {
+        let mut edit = edited_copy();
+        let replaced = Cell::new(0_u32);
+        let outcome = edit
+            .upload_with(
+                false,
+                |_, _, _| Ok(true),
+                |local, remote| {
+                    replaced.set(replaced.get() + 1);
+                    assert_eq!(remote, "/srv/app/config file.txt");
+                    assert_eq!(fs::read(local).unwrap(), b"local edit");
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome, UploadOutcome::Uploaded);
+        assert_eq!(replaced.get(), 1);
+        assert!(edit.working_copy_is_synced());
+        assert_eq!(edit.poll_changed().unwrap(), None);
     }
 
     #[test]
