@@ -3416,9 +3416,12 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
             if state.pointer_hidden && self.appearance.hide_pointer_while_typing {
                 mouse::Interaction::Hidden
             } else if state.selecting {
-                mouse::Interaction::Grabbing
+                // Keep the I-beam while a press-and-hold selects text; a
+                // grabbing hand reads as "drag the pane".
+                mouse::Interaction::Text
             } else if self.remote_mouse_enabled(state.modifiers) {
-                mouse::Interaction::Pointer
+                // The remote app owns the mouse: plain arrow, never a hand.
+                mouse::Interaction::default()
             } else {
                 mouse::Interaction::Text
             }
@@ -12549,6 +12552,54 @@ mod tests {
         );
         let inside = mouse::Cursor::Available(iced::Point::new(150.0, 150.0));
         assert!(canvas.update(&mut state, &event, bounds, inside).is_some());
+    }
+
+    #[test]
+    fn terminal_canvas_never_shows_a_hand_cursor() {
+        use iced::widget::canvas::Program;
+        let snapshot = terminal_core::DisplaySnapshot {
+            rows: 24,
+            columns: 80,
+            background: [0, 0, 0],
+            row_ranges: vec![(0, 0); 24],
+            cells: Vec::new(),
+        };
+        let (_panes, pane) = pane_grid::State::new(0_u8);
+        let plain = TerminalCanvas {
+            focused: true,
+            remote_key_mode: false,
+            pane,
+            id: 7,
+            generation: 0,
+            terminal_mode: terminal_core::TerminalMode::empty(),
+            snapshot: &snapshot,
+            appearance: crate::appearance::TerminalAppearance::default(),
+        };
+        let bounds = iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(200.0, 200.0));
+        let inside = mouse::Cursor::Available(iced::Point::new(50.0, 50.0));
+        let idle = TerminalCanvasState::default();
+        assert_eq!(
+            plain.mouse_interaction(&idle, bounds, inside),
+            mouse::Interaction::Text
+        );
+        let selecting = TerminalCanvasState {
+            selecting: true,
+            ..TerminalCanvasState::default()
+        };
+        assert_eq!(
+            plain.mouse_interaction(&selecting, bounds, inside),
+            mouse::Interaction::Text
+        );
+        let remote = TerminalCanvas {
+            terminal_mode: terminal_core::TerminalMode::MOUSE_MODE,
+            ..plain
+        };
+        let shown = remote.mouse_interaction(&idle, bounds, inside);
+        assert_eq!(shown, mouse::Interaction::default());
+        assert!(!matches!(
+            shown,
+            mouse::Interaction::Pointer | mouse::Interaction::Grabbing | mouse::Interaction::Grab
+        ));
     }
 
     #[test]
