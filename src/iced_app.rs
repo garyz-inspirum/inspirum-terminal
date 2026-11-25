@@ -5,6 +5,7 @@
 //! host-key, argv, paste, process-lifecycle, or transfer safeguards.
 mod dock;
 mod dock_view;
+mod external_edit_ui;
 use dock_view::available_panels;
 mod icons;
 mod menu;
@@ -18,7 +19,7 @@ mod ui_state;
 use crate::{
     ProxyAuth, ProxyKind, Session, SessionImportMode,
     command_palette::{self, PaletteItem, Snippet, SnippetLibrary},
-    import_sessions, load_sessions,
+    external_edit, import_sessions, load_sessions,
     remote_edit::{self, SaveOutcome},
     save_session_edit, save_sessions, session_matches_query, session_profile_key,
     session_requires_forward_risk_ack, sftp, terminal,
@@ -877,6 +878,32 @@ struct PendingTransfer {
 struct PreparedTransfer {
     pending: PendingTransfer,
     conflict: bool,
+}
+
+/// Shared so the blocking upload task can borrow the edit while the App
+/// keeps owning it. The UI thread only ever `try_lock`s it.
+#[derive(Clone)]
+struct ExternalEditHandle(Arc<Mutex<external_edit::ExternalEdit>>);
+
+impl std::fmt::Debug for ExternalEditHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_tuple("ExternalEditHandle").finish()
+    }
+}
+
+/// One remote file open in a desktop editor.
+struct ExternalEditState {
+    id: u64,
+    session: Session,
+    session_key: String,
+    remote: String,
+    working_path: PathBuf,
+    handle: ExternalEditHandle,
+    /// An upload task for this edit is running; never start a second one.
+    uploading: bool,
+    /// A detected save failed to upload (conflict or error). The working
+    /// copy is kept until a later save uploads.
+    unsaved: bool,
 }
 
 #[derive(Clone)]
@@ -1925,6 +1952,7 @@ enum FileContextAction {
     Rename,
     Delete,
     Refresh,
+    OpenExternal,
 }
 
 /// One right-click menu. File rows and session rows share this state so the
@@ -2012,6 +2040,7 @@ fn file_context_entries(menu: &FileContextMenu) -> Vec<(&'static str, FileContex
             if !menu.is_dir {
                 items.push(("Download", FileContextAction::Download));
                 items.push(("Edit", FileContextAction::Edit));
+                items.push(("Open in External Editor", FileContextAction::OpenExternal));
             }
         }
         FileContextSide::Local => {
@@ -2065,6 +2094,9 @@ fn file_context_action_message(
             Some(Message::FilesRequestDeleteLocal)
         }
         (_, FileContextAction::Refresh) => Some(Message::FilesRefresh),
+        (FileContextSide::Remote, FileContextAction::OpenExternal) if !menu.is_dir => {
+            Some(Message::FilesRequestEditExternal)
+        }
         // Cross-side items (local Download, remote Upload) and Edit on a
         // directory or a local row are not offered. Drop a stale message.
         _ => None,
@@ -2944,6 +2976,18 @@ enum Message {
     FindClose,
     FindFocusProbe,
     FindFocusSynced(bool),
+    FilesRequestEditExternal,
+    ExternalEditOpened {
+        session: Session,
+        session_key: String,
+        remote: String,
+        result: Result<ExternalEditHandle, String>,
+    },
+    ExternalEditTick,
+    ExternalEditUploaded {
+        id: u64,
+        result: Result<external_edit::UploadOutcome, String>,
+    },
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -4148,6 +4192,13 @@ struct App {
     /// True while the Find input owns keyboard input. Cleared when the strip
     /// closes, on Escape, and when a terminal pane is focused.
     find_focused: bool,
+    /// Remote files open in a desktop editor; saves upload on the tick.
+    external_edits: Vec<ExternalEditState>,
+    next_external_edit_id: u64,
+    /// One sleep task is in flight; only scheduled while edits exist.
+    external_edit_tick_scheduled: bool,
+    /// Editor command setting; empty means the OS default application.
+    external_editor: String,
 }
 
 const FILES_PANELS: [dock::Panel; 3] = [
@@ -4299,6 +4350,10 @@ impl App {
             context_menu: None,
             find_open: false,
             find_focused: false,
+            external_edits: Vec::new(),
+            next_external_edit_id: 1,
+            external_edit_tick_scheduled: false,
+            external_editor: String::new(),
         }
     }
 
@@ -6262,6 +6317,7 @@ impl App {
                         self.remote_editor = None;
                     }
                     self.tabs.remove(index);
+                    self.close_orphaned_external_edits();
                     self.close_find_strip();
                     self.prune_tool_panes();
                     self.prune_free_type();
@@ -7781,6 +7837,7 @@ impl App {
                 self.dock_menu = None;
                 self.context_menu = None;
                 if self.tabs.is_empty() {
+                    self.close_external_edits_for_exit();
                     return iced::exit();
                 }
                 self.dialog = Some(Dialog::Exit);
@@ -7789,6 +7846,7 @@ impl App {
                 if !matches!(self.dialog, Some(Dialog::Exit)) {
                     return Task::none();
                 }
+                self.close_external_edits_for_exit();
                 return iced::exit();
             }
             Message::SelectSession(index) => {
@@ -7950,6 +8008,17 @@ impl App {
                 if self.find_focused {
                     self.sender_focused = false;
                 }
+            }
+            Message::FilesRequestEditExternal => return self.request_external_edit(),
+            Message::ExternalEditOpened {
+                session,
+                session_key,
+                remote,
+                result,
+            } => return self.external_edit_opened(session, session_key, remote, result),
+            Message::ExternalEditTick => return self.external_edit_tick(),
+            Message::ExternalEditUploaded { id, result } => {
+                self.external_edit_uploaded(id, result);
             }
         }
         Task::none()
@@ -14819,6 +14888,49 @@ mod tests {
         assert_eq!(app.tabs[1].profile.ssh.local_forwards.len(), 1);
     }
 
+    #[test]
+    fn external_editor_menu_item_is_offered_for_remote_files_only() {
+        assert!(remote_context_labels(false).contains(&"Open in External Editor"));
+        assert!(!remote_context_labels(true).contains(&"Open in External Editor"));
+        let file_menu = FileContextMenu {
+            side: FileContextSide::Remote,
+            is_dir: false,
+            open_path: "/srv/item".into(),
+            local_path: None,
+            anchor: iced::Point::ORIGIN,
+        };
+        assert!(matches!(
+            file_context_action_message(&file_menu, FileContextAction::OpenExternal),
+            Some(Message::FilesRequestEditExternal)
+        ));
+        let dir_menu = FileContextMenu {
+            is_dir: true,
+            ..file_menu
+        };
+        assert!(file_context_action_message(&dir_menu, FileContextAction::OpenExternal).is_none());
+    }
+
+    #[test]
+    fn stale_external_edit_open_result_for_a_closed_tab_is_dropped() {
+        let mut app = session_click_app();
+        let closed = Session {
+            name: "closed".into(),
+            host: "closed.example.invalid".into(),
+            ..Session::default()
+        };
+        let _ = app.update(Message::ExternalEditOpened {
+            session_key: session_profile_key(&closed),
+            session: closed,
+            remote: "/srv/notes.txt".into(),
+            result: Err("never reached".into()),
+        });
+        assert!(app.external_edits.is_empty());
+        assert!(app.status.contains("its SSH session was closed"));
+        // A tick with nothing open must not reschedule itself.
+        let _ = app.update(Message::ExternalEditTick);
+        assert!(!app.external_edit_tick_scheduled);
+    }
+
     fn remote_context_labels(is_dir: bool) -> Vec<&'static str> {
         file_context_entries(&FileContextMenu {
             side: FileContextSide::Remote,
@@ -14860,6 +14972,7 @@ mod tests {
             vec![
                 "Download",
                 "Edit",
+                "Open in External Editor",
                 "New Folder",
                 "Rename",
                 "Delete",
@@ -15194,6 +15307,7 @@ mod tests {
             vec![
                 "Download",
                 "Edit",
+                "Open in External Editor",
                 "New Folder",
                 "Rename",
                 "Delete",
