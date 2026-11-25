@@ -56,7 +56,69 @@ LOGGED_ECHO_LINES = (
     "echo:AFTER_EXIT_CANCEL",
     "echo:AFTER_TUNNEL_SETTINGS",
     "echo:AFTER_TUNNEL_TOGGLES",
+    "echo:AFTER_EXTERNAL_EDIT",
 )
+
+# Opt-in "Open in External Editor" acceptance step (default OFF so the CI
+# invocation is unchanged until the step has passed once).
+EXTEDIT = os.environ.get("INSPIRUM_GUI_EXTEDIT") == "1"
+EXTEDIT_MARKER = b"INSPIRUM_FAKE_EDITOR_MARKER\n"
+EXTEDIT_MENU_LABEL = "Open in External Editor"
+# The remote-file popup lists Download, Edit, Open in External Editor,
+# Rename, Delete, Refresh, New Folder: 7 rows of 24 px plus borders.
+EXTEDIT_MENU_ROWS = 7
+EXTEDIT_ROW_HEIGHT = 24
+
+
+def fake_editor_script(python: str, argv_log: Path, marker: bytes) -> str:
+    """Source of the fake external editor.
+
+    It records its argv (JSON, one line) to ``argv_log`` and appends
+    ``marker`` to its LAST argument, after a 2 s pause so the app has
+    certainly recorded the working copy's baseline stamp before the save.
+    """
+    return (
+        f"#!{python}\n"
+        "import json, sys, time\n"
+        f"with open({str(argv_log)!r}, 'a', encoding='utf-8') as log:\n"
+        "    log.write(json.dumps(sys.argv) + '\\n')\n"
+        "time.sleep(2)\n"
+        "with open(sys.argv[-1], 'ab') as target:\n"
+        f"    target.write({marker!r})\n"
+    )
+
+
+def external_editor_ui_state(editor: Path) -> dict:
+    """Partial ui-state.json: UiState is ``#[serde(default)]``, so theme
+    (forced by INSPIRUM_THEME anyway) and docks keep their defaults. The
+    path is double-quoted because the setting is whitespace-tokenized; no
+    ``{file}`` placeholder, so the working copy is the last argument."""
+    return {"external_editor": f'"{editor}"'}
+
+
+def extedit_menu_region(click_x: int, click_y: int, width: int, height: int):
+    """Search box for the widened 7-row remote-file popup around the click.
+
+    The popup may open below the pointer or be clamped upward, and it is
+    being widened (do not assume 200 px), so allow 7 rows plus slack on
+    both sides vertically and up to 460 px to the right.
+    """
+    reach = EXTEDIT_MENU_ROWS * EXTEDIT_ROW_HEIGHT + 60
+    return (
+        max(0, click_x - 10),
+        max(0, click_y - reach),
+        min(width, click_x + 460),
+        min(height, click_y + reach),
+    )
+
+
+def extedit_bytes_verdict(original: bytes, current: bytes, marker: bytes) -> str | None:
+    """None when ``current`` is exactly ``original + marker``, else why not."""
+    if current == original + marker:
+        return None
+    if not current.endswith(marker):
+        return f"remote file does not end with the marker ({len(current)} bytes)"
+    return "remote file ends with the marker but its other bytes changed"
 
 
 class MonitoredSession(fixture.NativeSession):
@@ -2957,6 +3019,18 @@ async def main() -> int:
         profiles.write_text(
             json.dumps(fixture_profiles(forward_ports, echo_port)), encoding="utf-8",
         )
+        extedit_editor = root / "fake-editor.py"
+        extedit_argv_log = root / "fake-editor-argv.log"
+        if EXTEDIT:
+            # The app reads ui-state.json BESIDE the profiles file.
+            extedit_editor.write_text(
+                fake_editor_script(sys.executable, extedit_argv_log, EXTEDIT_MARKER),
+                encoding="utf-8",
+            )
+            extedit_editor.chmod(0o755)
+            (root / "ui-state.json").write_text(
+                json.dumps(external_editor_ui_state(extedit_editor)), encoding="utf-8",
+            )
 
         runtime = root / "xdg-runtime"
         runtime.mkdir(mode=0o700)
@@ -4775,6 +4849,115 @@ async def main() -> int:
                 )
                 await asyncio.sleep(.4)
                 screenshot(window, destination / "connected-files-redocked-selected.png", env)
+
+                if EXTEDIT:
+                    # Filer "Open in External Editor" on the remote 444 row.
+                    # Every assertion on 444's remote bytes (download verify,
+                    # Transfer queue row, name-order oracle) has already run;
+                    # the dock closes right after this step, so the appended
+                    # marker cannot reach a later check.
+                    extedit_remote = remote_root / download_name
+                    extedit_original = extedit_remote.read_bytes()
+                    if extedit_original != download_bytes:
+                        raise RuntimeError(
+                            f"remote {download_name} changed before the external-edit step"
+                        )
+                    extedit_row_shot = destination / "connected-extedit-row.png"
+                    extedit_row = await locate_rendered_label(
+                        window, extedit_row_shot, download_name, env=env,
+                        region=dock_body_region(width, height), timeout=20,
+                    )
+                    ex_x, ex_y = center(extedit_row)
+                    ex_region = extedit_menu_region(ex_x, ex_y, width, height)
+                    # Same no-pause gesture as the context-menu step: move and
+                    # right-press in one xdotool command.
+                    command(
+                        "xdotool", "mousemove", "--window", window,
+                        str(ex_x), str(ex_y), "click", "3", env=env,
+                    )
+                    ex_menu_shot = destination / "connected-extedit-menu.png"
+                    paint_deadline = time.monotonic() + 8 * TIME_SCALE
+                    while True:
+                        await asyncio.to_thread(screenshot, window, ex_menu_shot, env)
+                        painted = await asyncio.to_thread(diff, extedit_row_shot, ex_menu_shot, env)
+                        if painted >= 50:
+                            break
+                        if time.monotonic() >= paint_deadline:
+                            raise RuntimeError(
+                                f"right-click on {download_name} at ({ex_x}, {ex_y}) did not "
+                                f"repaint for the external-edit menu ({painted} pixels)"
+                            )
+                        await asyncio.sleep(.3)
+                    try:
+                        ex_item = await locate_rendered_label(
+                            window, ex_menu_shot, EXTEDIT_MENU_LABEL, env=env,
+                            region=ex_region, timeout=20,
+                        )
+                    except RuntimeError as exc:
+                        raise RuntimeError(
+                            f"Filer context menu did not render '{EXTEDIT_MENU_LABEL}' "
+                            f"inside {ex_region} (click ({ex_x}, {ex_y}); see {ex_menu_shot.name})"
+                        ) from exc
+                    if _bounds_inside(ex_item, ex_region) is None:
+                        raise RuntimeError(
+                            f"'{EXTEDIT_MENU_LABEL}' bounds {ex_item} not inside {ex_region}"
+                        )
+                    command(
+                        "xdotool", "mousemove", "--window", window,
+                        *map(str, center(ex_item)), "click", "1", env=env,
+                    )
+                    ex_after_shot = destination / "connected-extedit-after.png"
+                    try:
+                        await wait_for(
+                            extedit_argv_log.exists,
+                            "fake external editor argv log (editor never launched)",
+                            timeout=20 * TIME_SCALE,
+                        )
+                        await wait_for(
+                            lambda: extedit_remote.read_bytes().endswith(EXTEDIT_MARKER),
+                            f"remote {download_name} to end with the fake editor marker "
+                            "(working copy never uploaded)",
+                            timeout=30 * TIME_SCALE,
+                        )
+                    except RuntimeError:
+                        await asyncio.to_thread(screenshot, window, ex_after_shot, env)
+                        raise
+                    await asyncio.to_thread(screenshot, window, ex_after_shot, env)
+                    ex_argv = [
+                        json.loads(line)
+                        for line in extedit_argv_log.read_text(encoding="utf-8").splitlines()
+                        if line.strip()
+                    ]
+                    if len(ex_argv) != 1:
+                        raise RuntimeError(f"fake editor launched {len(ex_argv)} times: {ex_argv}")
+                    if Path(ex_argv[0][-1]).name != download_name:
+                        raise RuntimeError(
+                            f"fake editor last argument {ex_argv[0][-1]!r} is not a "
+                            f"working copy named {download_name}"
+                        )
+                    verdict = extedit_bytes_verdict(
+                        extedit_original, extedit_remote.read_bytes(), EXTEDIT_MARKER,
+                    )
+                    if verdict is not None:
+                        raise RuntimeError(f"external-edit upload: {verdict}")
+                    print(
+                        f"PASS external edit: editor argv {ex_argv[0]}, remote "
+                        f"{download_name} == original + marker", flush=True,
+                    )
+                    command(
+                        "xdotool", "windowfocus", window, "mousemove", "--window", window,
+                        "640", "280", "click", "1", env=env,
+                    )
+                    await asyncio.sleep(.3)
+                    command(
+                        "xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        "echo:AFTER_EXTERNAL_EDIT", env=env,
+                    )
+                    command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                    await wait_for(
+                        lambda: "NATIVE_ECHO:AFTER_EXTERNAL_EDIT" in events.path.read_text(encoding="utf-8").splitlines(),
+                        "shell echo after Open in External Editor",
+                    )
 
                 # The file browser has completed the real SFTP handshake.
                 # End that UI task before testing the independent local-editor
