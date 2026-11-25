@@ -6,8 +6,6 @@
 //! them back with the same byte-exact remote-changed conflict check as the
 //! in-panel editor (`remote_edit`). UI-free: the GUI drives it from
 //! `Task::perform` plus a periodic tick.
-// removed by the stage that wires this into the Filer
-#![allow(dead_code)]
 
 use crate::{Session, remote_edit};
 use anyhow::{Context, Result, bail, ensure};
