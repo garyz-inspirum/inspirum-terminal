@@ -6,7 +6,9 @@
 mod dock;
 mod dock_view;
 mod external_edit_ui;
+mod external_editor_setting;
 use dock_view::available_panels;
+use external_editor_setting::{EXTERNAL_EDITOR_HELP, EXTERNAL_EDITOR_INPUT_ID};
 mod icons;
 mod menu;
 mod terminal_ime;
@@ -2690,6 +2692,12 @@ enum Dialog {
     ImportProfiles,
     About,
     Exit,
+    /// External editor command setting; `input` is the unsaved text and
+    /// `error` the last rejected Save.
+    ExternalEditor {
+        input: String,
+        error: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2988,6 +2996,8 @@ enum Message {
         id: u64,
         result: Result<external_edit::UploadOutcome, String>,
     },
+    ExternalEditorInput(String),
+    ExternalEditorSave,
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -5844,7 +5854,7 @@ impl App {
             Message::MenuCommand(command) => {
                 // The menu is not shown under the privacy curtain or a modal.
                 // A queued Exit must not close the window or replace that modal.
-                if matches!(command, menu::Command::Exit)
+                if matches!(command, menu::Command::Exit | menu::Command::ExternalEditor)
                     && (self.privacy_locked || self.dialog.is_some())
                 {
                     return Task::none();
@@ -5926,6 +5936,7 @@ impl App {
                     C::Tool(panel) => Message::Tool(tools::Action::Open(panel)),
                     C::About => Message::About,
                     C::Exit => Message::Exit,
+                    C::ExternalEditor => return self.open_external_editor_dialog(),
                 };
                 return self.update(message);
             }
@@ -8021,6 +8032,8 @@ impl App {
             Message::ExternalEditUploaded { id, result } => {
                 self.external_edit_uploaded(id, result);
             }
+            Message::ExternalEditorInput(value) => self.external_editor_input(value),
+            Message::ExternalEditorSave => return self.save_external_editor_setting(),
         }
         Task::none()
     }
@@ -10125,6 +10138,7 @@ impl App {
             Dialog::Tunnels => TUNNEL_SETTINGS_TITLE,
             Dialog::About => "Inspirum Terminal · Iced",
             Dialog::Exit => "Exit",
+            Dialog::ExternalEditor { .. } => "External Editor",
         };
         let body: Element<'_, Message> = match dialog {
             Dialog::Tools => self.tools_view(),
@@ -10796,6 +10810,32 @@ impl App {
             ]
             .spacing(8)
             .into(),
+            Dialog::ExternalEditor { input, error } => {
+                let mut form = column![
+                    text("Editor command used by Open in External Editor.").color(fg()),
+                    text_input("System default", input)
+                        .style(flat_input)
+                        .id(EXTERNAL_EDITOR_INPUT_ID)
+                        .on_input(Message::ExternalEditorInput)
+                        .on_submit(Message::ExternalEditorSave)
+                        .size(13)
+                        .padding([3, 6]),
+                    text(EXTERNAL_EDITOR_HELP).size(12).color(muted()),
+                ]
+                .spacing(8);
+                if let Some(error) = error {
+                    form = form.push(text(error).size(12).color(fg()));
+                }
+                form.push(
+                    row![
+                        space::horizontal(),
+                        action("Cancel", Message::CloseDialog),
+                        action("Save", Message::ExternalEditorSave).style(primary)
+                    ]
+                    .spacing(8),
+                )
+                .into()
+            }
         };
 
         // Keep form controls inside the scroll rail, not underneath it. The
