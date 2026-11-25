@@ -1350,22 +1350,42 @@ def light_popup_row(path: Path, name: str, port: int, sibling_port: int, *,
 
 
 def require_editor_selection(path, port: int, sibling_port: int, form_region, *,
-                             row_region=None, locate=None):
+                             row_region=None, locate=None, read_digits=None):
     """Prove the editor form shows ``port`` and NOT ``sibling_port``.
 
-    A no-op click leaves the previous selection's port in the form, so the
-    sibling must be absent anywhere in ``form_region``. The selected port
-    must be inside ``row_region`` (the Listen Port input) when given, else
-    inside ``form_region`` -- never a list subtitle. Returns its bounds.
+    With ``row_region`` (the Listen Port input) the row is read by the
+    digits-only ``read_port_digits`` and its digit string must EQUAL
+    ``str(port)``: no substring, no confusion table. The general locator
+    read the focused input's ``0`` as ``@`` on the Ubuntu runner, so it
+    cannot be the oracle for a random port. The same row reading must not
+    be the sibling's port, and ``sibling_port`` must also be absent
+    anywhere in ``form_region`` (a no-op click leaves the previous
+    selection in the form). Without ``row_region`` the selected port is
+    located inside ``form_region`` -- never a list subtitle. Returns the
+    port's bounds.
     """
     locate = locate or locate_visible_label
-    where = row_region or form_region
-    try:
-        box = locate(path, str(port), region=where)
-    except RuntimeError as exc:
-        raise RuntimeError(
-            f"editor form {where} does not show selected listen port {port}"
-        ) from exc
+    if row_region is not None:
+        read_digits = read_digits or read_port_digits
+        digits, box = read_digits(path, row_region)
+        if digits != str(port):
+            raise RuntimeError(
+                f"editor form {row_region} does not show selected listen port {port}; "
+                f"Listen Port row reads {digits!r}"
+            )
+        if digits == str(sibling_port):
+            raise RuntimeError(
+                f"Listen Port row {row_region} shows sibling port {sibling_port}"
+            )
+        where = row_region
+    else:
+        where = form_region
+        try:
+            box = locate(path, str(port), region=where)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"editor form {where} does not show selected listen port {port}"
+            ) from exc
     if _bounds_inside(box, where) is None:
         raise RuntimeError(f"listen port {port} box {box} outside editor row {where}")
     try:
@@ -1376,6 +1396,75 @@ def require_editor_selection(path, port: int, sibling_port: int, form_region, *,
         f"editor form still shows sibling port {sibling_port} at {stale}; "
         f"selection click was a no-op"
     )
+
+
+# Listen Port digits are 9-10 px tall; the input's vertical edges are 23 px
+# and the focused caret is an 18 px 1-px column (measured on CI frames).
+_PORT_VERT_RULE = 13
+
+
+def read_port_digits(path, row_region):
+    """Read the Listen Port row as a digit string. Returns ``(digits, bounds)``.
+
+    Same recipe as ``read_strip_words`` (greyscale, invert when dark, erase
+    ink runs longer than a glyph so the input border and the focused caret
+    are not strokes, LANCZOS x4, ``--psm 7``), plus a digits-only whitelist.
+    ``digits`` joins every word left to right; ``""`` with ``bounds=None``
+    when nothing is read. Bounds are in source pixels.
+    """
+    tesseract = shutil.which("tesseract")
+    if tesseract is None:
+        raise RuntimeError("listen port OCR requires tesseract")
+    try:
+        from PIL import Image, ImageOps
+    except ImportError as exc:
+        raise RuntimeError(
+            "listen port OCR requires Pillow (pip install Pillow==13.0.0; see scripts/local-gui/Dockerfile)"
+        ) from exc
+    image = Image.open(path).convert("RGB")
+    width, height = image.size
+    x1, y1, x2, y2 = (int(edge) for edge in row_region)
+    x1 = max(0, min(width - 1, x1))
+    y1 = max(0, min(height - 1, y1))
+    x2 = max(x1 + 1, min(width, x2))
+    y2 = max(y1 + 1, min(height, y2))
+    clamped = (x1, y1, x2, y2)
+    median, grey, dark_background = _strip_luma(image.crop(clamped))
+    cleaned = _erase_strip_rules(grey, median, dark_background, vert_rule=_PORT_VERT_RULE)
+    if dark_background:
+        cleaned = ImageOps.invert(cleaned)
+    lanczos = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+    scaled = cleaned.resize((cleaned.width * _STRIP_SCALE, cleaned.height * _STRIP_SCALE), lanczos)
+    scaled = ImageOps.autocontrast(scaled, cutoff=1)
+    prepared = ImageOps.expand(scaled, border=_STRIP_PAD, fill=255)
+    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    try:
+        prepared.save(temporary)
+        try:
+            result = subprocess.run(
+                [tesseract, str(temporary), "stdout", "--psm", "7",
+                 "-c", "tessedit_char_whitelist=0123456789", "tsv"],
+                capture_output=True, text=True, timeout=15 * TIME_SCALE,
+            )
+            tsv = result.stdout if result.returncode == 0 else ""
+        except subprocess.TimeoutExpired:
+            tsv = ""
+    finally:
+        temporary.unlink(missing_ok=True)
+    mapped = []
+    for word in parse_visible_words(tsv):
+        bounds = _map_strip_box(word, (x1, y1), clamped)
+        if bounds is not None:
+            mapped.append((word[0], bounds))
+    mapped.sort(key=lambda item: item[1][0])
+    if not mapped:
+        return "", None
+    digits = "".join(text for text, _bounds in mapped)
+    bounds = (
+        min(b[0] for _t, b in mapped), min(b[1] for _t, b in mapped),
+        max(b[2] for _t, b in mapped), max(b[3] for _t, b in mapped),
+    )
+    return digits, bounds
 
 
 def _bounds_inside(bounds, region):
@@ -1720,7 +1809,7 @@ def _strip_luma(image):
     return median, grey, median < 128
 
 
-def _erase_strip_rules(grey, median, dark_background):
+def _erase_strip_rules(grey, median, dark_background, *, vert_rule=_STRIP_VERT_RULE):
     """Paint out ink runs longer than a glyph so 1px borders are not strokes.
 
     Measured on the dark Find strip: the input's blue edge and a button
@@ -1746,7 +1835,7 @@ def _erase_strip_rules(grey, median, dark_background):
             end = y + 1
             while end < height and ink(pixels[x, end]):
                 end += 1
-            if end - y >= _STRIP_VERT_RULE:
+            if end - y >= vert_rule:
                 for row in range(y, end):
                     pixels[x, row] = median
             y = end

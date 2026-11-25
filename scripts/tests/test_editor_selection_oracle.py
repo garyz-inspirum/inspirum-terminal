@@ -41,6 +41,12 @@ def fake_locator(visible: dict[str, tuple[int, int, int, int]]):
     return locate
 
 
+def fake_reader(digits: str, box=(725, 295, 759, 304)):
+    def read(_path, _row):
+        return digits, (box if digits else None)
+    return read
+
+
 class EditorSelectionOracleTest(unittest.TestCase):
     def test_selected_port_in_form_passes(self):
         loc = fake_locator({"41001": (700, 200, 760, 215)})
@@ -98,6 +104,32 @@ class EditorSelectionOracleTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             module.require_editor_selection(
                 Path("x.png"), 41002, 41001, FORM, row_region=row, locate=loc,
+                read_digits=fake_reader(""),
+            )
+
+    def test_row_digits_must_equal_port_exactly(self):
+        row = module.listen_port_row_region((249, 151, 367, 159), 1280)
+        loc = fake_locator({})
+        box = module.require_editor_selection(
+            Path("x.png"), 47031, 40001, FORM, row_region=row, locate=loc,
+            read_digits=fake_reader("47031"),
+        )
+        self.assertEqual(box, (725, 295, 759, 304))
+        # Superstring, prefix and one-digit-off readings are all misses.
+        for reading in ("470310", "4703", "47032", "147031", ""):
+            with self.assertRaises(RuntimeError, msg=reading):
+                module.require_editor_selection(
+                    Path("x.png"), 47031, 40001, FORM, row_region=row, locate=loc,
+                    read_digits=fake_reader(reading),
+                )
+
+    def test_row_ok_but_sibling_elsewhere_in_form_fails(self):
+        row = module.listen_port_row_region((249, 151, 367, 159), 1280)
+        loc = fake_locator({"40001": (729, 362, 760, 372)})
+        with self.assertRaises(RuntimeError):
+            module.require_editor_selection(
+                Path("x.png"), 47031, 40001, FORM, row_region=row, locate=loc,
+                read_digits=fake_reader("47031"),
             )
 
 
@@ -134,6 +166,87 @@ class EditorSelectionOnRealFrameTest(unittest.TestCase):
             module.require_editor_selection(
                 FIXTURE, 43231, 40369, self.form, row_region=self.row,
             )
+
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+# GitHub ubuntu-latest frames of PR #148's failing step (1280x800, dark):
+# the focused Listen Port input holds the typed draft port; the general
+# locator read 0 as @ ("47@31"). Heading OCR top y=152 (row 691,276..322).
+# Ports are what each frame SHOWS (zoomed visual read, agreeing with the
+# digit reader). The frames were saved as draft-45257 / draft-50835 /
+# selected-alpha-40001, but their inputs show 58881 / 35649 / 38569, so
+# those names did not match the pixels.
+CI_HEADING = (249, 152, 367, 160)
+CI_FRAMES = {
+    "connected-tunnels-edit-alpha-draft-47031-ci.png": 47031,
+    "connected-tunnels-edit-alpha-draft-58881-ci.png": 58881,
+    "connected-tunnels-edit-alpha-draft-35649-ci.png": 35649,
+    # Unfocused row (no caret, grey border).
+    "connected-tunnels-edit-alpha-selected-38569-ci.png": 38569,
+}
+# Input boxes are 35 px apart: Listen 287..310, Destination Host 322..345,
+# Destination Port 357..380.
+ROW_PITCH = 35
+
+
+@unittest.skipUnless(shutil.which("tesseract"), "tesseract is not installed")
+class ListenPortDigitsOnCiFramesTest(unittest.TestCase):
+    def setUp(self):
+        self.row = module.listen_port_row_region(CI_HEADING, 1280)
+        self.form = module.editor_form_region(1280, 800)
+
+    def frame(self, name):
+        path = FIXTURES / name
+        if not path.is_file():
+            self.skipTest(f"{name} missing")
+        return path
+
+    def test_each_frame_reads_exactly_its_port(self):
+        for name, port in CI_FRAMES.items():
+            with self.subTest(name=name):
+                digits, box = module.read_port_digits(self.frame(name), self.row)
+                print(f"read_port_digits {name}: {digits!r} {box}", flush=True)
+                self.assertEqual(digits, str(port))
+                self.assertIsNotNone(module._bounds_inside(box, self.row))
+
+    def test_draft_frames_pass_require_editor_selection(self):
+        # The exact CI call: draft port expected, pre-edit port as sibling.
+        for name, port in CI_FRAMES.items():
+            if "draft" not in name:
+                continue
+            with self.subTest(name=name):
+                box = module.require_editor_selection(
+                    self.frame(name), port, 40001, self.form, row_region=self.row,
+                )
+                self.assertIsNotNone(module._bounds_inside(box, self.row))
+
+    def test_wrong_port_by_one_digit_fails(self):
+        with self.assertRaises(RuntimeError):
+            module.require_editor_selection(
+                self.frame("connected-tunnels-edit-alpha-draft-47031-ci.png"),
+                47032, 40001, self.form, row_region=self.row,
+            )
+
+    def test_pre_edit_port_fails_on_draft_frame(self):
+        with self.assertRaises(RuntimeError):
+            module.require_editor_selection(
+                self.frame("connected-tunnels-edit-alpha-draft-47031-ci.png"),
+                40001, 47031, self.form, row_region=self.row,
+            )
+
+    def test_destination_rows_do_not_satisfy_listen_port(self):
+        path = self.frame("connected-tunnels-edit-alpha-draft-47031-ci.png")
+        x1, y1, x2, y2 = self.row
+        for shift in (ROW_PITCH, 2 * ROW_PITCH):
+            shifted = (x1, y1 + shift, x2, y2 + shift)
+            with self.subTest(shift=shift):
+                digits, _box = module.read_port_digits(path, shifted)
+                print(f"read_port_digits shifted +{shift}: {digits!r}", flush=True)
+                self.assertNotEqual(digits, "47031")
+                with self.assertRaises(RuntimeError):
+                    module.require_editor_selection(
+                        path, 47031, 40001, self.form, row_region=shifted,
+                    )
 
 
 if __name__ == "__main__":
