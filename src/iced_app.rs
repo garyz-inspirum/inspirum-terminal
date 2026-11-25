@@ -4783,20 +4783,27 @@ impl App {
         (1..).find(|instance| !used.contains(instance)).unwrap_or(1)
     }
 
+    /// The profile a terminal pane of tab `instance` connects with.
+    ///
+    /// Instance 1 owns the profile's -L/-R/-D listeners. A second ssh binding
+    /// the same ports would die on ExitOnForwardFailure, so panes of a 2nd+
+    /// tab of the same profile are plain shells.
+    fn pane_profile_for_instance(profile: &Session, instance: u32) -> Session {
+        let mut pane_profile = profile.clone();
+        if instance > 1 {
+            pane_profile.ssh.local_forwards.clear();
+            pane_profile.ssh.remote_forwards.clear();
+            pane_profile.ssh.dynamic_forwards.clear();
+        }
+        pane_profile
+    }
+
     /// Every open creates a new, independent tab and SSH session, even when
     /// a tab for the same profile is already open.
     fn open(&mut self, index: usize) {
         if let Some(profile) = self.profiles.get(index).cloned() {
             let instance = self.next_tab_instance(&profile);
-            let mut pane_profile = profile.clone();
-            if instance > 1 {
-                // Instance 1 owns the profile's -L/-R/-D listeners. A second
-                // ssh binding the same ports would die on
-                // ExitOnForwardFailure, so duplicates are plain shells.
-                pane_profile.ssh.local_forwards.clear();
-                pane_profile.ssh.remote_forwards.clear();
-                pane_profile.ssh.dynamic_forwards.clear();
-            }
+            let pane_profile = Self::pane_profile_for_instance(&profile, instance);
             let terminal = self.new_terminal_pane(pane_profile);
             let mut tab = Workspace::new(profile, terminal);
             tab.instance = instance;

@@ -738,10 +738,20 @@ impl App {
                         return Task::none();
                     }
                     let profile = layout.panes[0].clone();
+                    // Same numbering and forward rule as opening a profile.
+                    let instance = self.next_tab_instance(&profile);
+                    let key = session_profile_key(&profile);
                     let panes: Vec<_> = layout
                         .panes
                         .into_iter()
-                        .map(|p| Some(self.new_terminal_pane(p)))
+                        .map(|p| {
+                            let p = if session_profile_key(&p) == key {
+                                Self::pane_profile_for_instance(&p, instance)
+                            } else {
+                                p
+                            };
+                            Some(self.new_terminal_pane(p))
+                        })
                         .collect();
                     let id = panes[0].as_ref().expect("validated workspace").id;
                     let tree = layout
@@ -757,6 +767,7 @@ impl App {
                         profile,
                         panes,
                         focus,
+                        instance,
                     });
                     self.active = self.tabs.len() - 1;
                     self.dialog = None;
