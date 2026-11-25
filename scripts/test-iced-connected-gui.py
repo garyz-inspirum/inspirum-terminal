@@ -1354,7 +1354,7 @@ def require_editor_selection(path, port: int, sibling_port: int, form_region, *,
     """Prove the editor form shows ``port`` and NOT ``sibling_port``.
 
     With ``row_region`` (the Listen Port input) the row is read by the
-    digits-only ``read_port_digits`` and its digit string must EQUAL
+    template reader ``read_port_digits`` and its digit string must EQUAL
     ``str(port)``: no substring, no confusion table. The general locator
     read the focused input's ``0`` as ``@`` on the Ubuntu runner, so it
     cannot be the oracle for a random port. The same row reading must not
@@ -1403,67 +1403,476 @@ def require_editor_selection(path, port: int, sibling_port: int, form_region, *,
 _PORT_VERT_RULE = 13
 
 
-def read_port_digits(path, row_region):
-    """Read the Listen Port row as a digit string. Returns ``(digits, bounds)``.
+# Glyph patch matched per digit. The font is monospace with a fractional
+# advance (measured ~8 px: integer gaps 7..9 px), so glyphs are rendered at
+# different sub-pixel phases; patches are greyscale ink sampled around the
+# glyph's ink centroid with linear interpolation, which aligns phases.
+_PORT_PATCH_W = 10
+_PORT_PATCH_H = 11
+_PORT_HORIZ_RULE = 12
+_PORT_MAX_GLYPH_W = 7
 
-    Same recipe as ``read_strip_words`` (greyscale, invert when dark, erase
-    ink runs longer than a glyph so the input border and the focused caret
-    are not strokes, LANCZOS x4, ``--psm 7``), plus a digits-only whitelist.
-    ``digits`` joins every word left to right; ``""`` with ``bounds=None``
-    when nothing is read. Bounds are in source pixels.
+
+def _port_ink_mask(path, row_region):
+    """Greyscale ink (0..1) of ``row_region`` with input edges and caret erased.
+
+    Pure Python over ``_read_png`` (no Pillow, ImageMagick or tesseract).
+    Ink is luma scaled between the row's median (background) and its
+    brightest pixel. Pixels above half ink in vertical runs >=
+    ``_PORT_VERT_RULE`` (input side edges, focused caret) or horizontal runs
+    >= ``_PORT_HORIZ_RULE`` (top/bottom edges) are not glyph strokes and are
+    cleared, with their 1 px neighbours across the run. Returns
+    ``(ink, (x1, y1))``; ink is all 0 for an empty row. A light background
+    raises: the digit templates are dark-theme renderings only.
     """
-    tesseract = shutil.which("tesseract")
-    if tesseract is None:
-        raise RuntimeError("listen port OCR requires tesseract")
-    try:
-        from PIL import Image, ImageOps
-    except ImportError as exc:
-        raise RuntimeError(
-            "listen port OCR requires Pillow (pip install Pillow==13.0.0; see scripts/local-gui/Dockerfile)"
-        ) from exc
-    image = Image.open(path).convert("RGB")
-    width, height = image.size
+    width, height, channels, rows = _read_png(Path(path))
     x1, y1, x2, y2 = (int(edge) for edge in row_region)
     x1 = max(0, min(width - 1, x1))
     y1 = max(0, min(height - 1, y1))
     x2 = max(x1 + 1, min(width, x2))
     y2 = max(y1 + 1, min(height, y2))
-    clamped = (x1, y1, x2, y2)
-    median, grey, dark_background = _strip_luma(image.crop(clamped))
-    cleaned = _erase_strip_rules(grey, median, dark_background, vert_rule=_PORT_VERT_RULE)
-    if dark_background:
-        cleaned = ImageOps.invert(cleaned)
-    lanczos = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
-    scaled = cleaned.resize((cleaned.width * _STRIP_SCALE, cleaned.height * _STRIP_SCALE), lanczos)
-    scaled = ImageOps.autocontrast(scaled, cutoff=1)
-    prepared = ImageOps.expand(scaled, border=_STRIP_PAD, fill=255)
-    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
-    try:
-        prepared.save(temporary)
-        try:
-            result = subprocess.run(
-                [tesseract, str(temporary), "stdout", "--psm", "7",
-                 "-c", "tessedit_char_whitelist=0123456789", "tsv"],
-                capture_output=True, text=True, timeout=15 * TIME_SCALE,
+    luma = []
+    for y in range(y1, y2):
+        row = rows[y]
+        luma.append([
+            (row[x * channels] * 299 + row[x * channels + 1] * 587
+             + row[x * channels + 2] * 114) // 1000
+            for x in range(x1, x2)
+        ])
+    flat = sorted(v for line in luma for v in line)
+    background = flat[len(flat) // 2]
+    if background > 128:
+        raise RuntimeError(
+            f"no listen-port digit templates for light theme (row {row_region} "
+            f"background luma {background}); templates are dark-theme only"
+        )
+    peak = flat[-1]
+    h, w = len(luma), len(luma[0])
+    if peak - background < 60:
+        return [[0.0] * w for _ in range(h)], (x1, y1)
+    span = float(peak - background)
+    ink = [[min(1.0, max(0.0, (v - background) / span)) for v in line] for line in luma]
+    hard = [[v > 0.5 for v in line] for line in ink]
+    erase = set()
+    for x in range(w):
+        y = 0
+        while y < h:
+            if hard[y][x]:
+                end = y
+                while end < h and hard[end][x]:
+                    end += 1
+                if end - y >= _PORT_VERT_RULE:
+                    erase.update((yy, xx) for yy in range(y, end) for xx in (x - 1, x, x + 1))
+                y = end
+            else:
+                y += 1
+    for y in range(h):
+        x = 0
+        while x < w:
+            if hard[y][x]:
+                end = x
+                while end < w and hard[y][end]:
+                    end += 1
+                if end - x >= _PORT_HORIZ_RULE:
+                    erase.update((yy, xx) for xx in range(x, end) for yy in (y - 1, y, y + 1))
+                x = end
+            else:
+                x += 1
+    for yy, xx in erase:
+        if 0 <= yy < h and 0 <= xx < w:
+            ink[yy][xx] = 0.0
+    return ink, (x1, y1)
+
+
+def _port_patch(ink, centre, top, cols):
+    """``_PORT_PATCH_H`` x ``_PORT_PATCH_W`` ink patch centred on ``centre``
+    (sub-pixel x), first row ``top``. Only columns in the half-open range
+    ``cols`` contribute, so a neighbouring glyph cannot leak in."""
+    lo, hi = cols
+    patch = []
+    for y in range(top, top + _PORT_PATCH_H):
+        line = []
+        for u in range(_PORT_PATCH_W):
+            x = centre + u - (_PORT_PATCH_W - 1) / 2
+            x0 = int(x // 1)
+            frac = x - x0
+            value = 0.0
+            for xx, weight in ((x0, 1 - frac), (x0 + 1, frac)):
+                if lo <= xx < hi and 0 <= y < len(ink):
+                    value += ink[y][xx] * weight
+            line.append(round(value, 3))
+        patch.append(tuple(line))
+    return tuple(patch)
+
+
+def _port_glyph_cells(path, row_region):
+    """Segment the Listen Port row into glyph cells.
+
+    Returns ``[(left, top, patch), ...]`` left to right in source pixels;
+    ``patch`` is the greyscale ink ``_PORT_PATCH_W`` x ``_PORT_PATCH_H``
+    window centred on the glyph's ink centroid, starting 1 px above the
+    row's ink. A glyph is a run of ink columns; one wider than a digit or
+    ink taller than a digit is rejected (not a port digit).
+    """
+    ink, (ox, oy) = _port_ink_mask(path, row_region)
+    h, w = len(ink), len(ink[0])
+    cols = [any(ink[y][x] > 0.5 for y in range(h)) for x in range(w)]
+    groups = []
+    x = 0
+    while x < w:
+        if cols[x]:
+            end = x
+            while end < w and cols[end]:
+                end += 1
+            groups.append((x, end))
+            x = end
+        else:
+            x += 1
+    if not groups:
+        return []
+    ink_rows = [y for y in range(h) if any(ink[y][gx] > 0.5 for a, b in groups for gx in range(a, b))]
+    top, bottom = ink_rows[0], ink_rows[-1]
+    if bottom - top + 1 > _PORT_PATCH_H - 1:
+        raise RuntimeError(
+            f"Listen Port row {row_region} ink is {bottom - top + 1} px tall "
+            f"(y {oy + top}..{oy + bottom}); digits are 9 px: not a port"
+        )
+    cells = []
+    for index, (a, b) in enumerate(groups):
+        if b - a > _PORT_MAX_GLYPH_W:
+            raise RuntimeError(
+                f"Listen Port row {row_region} glyph at x {ox + a}..{ox + b - 1} is "
+                f"{b - a} px wide; digits are at most {_PORT_MAX_GLYPH_W} px: not a port"
             )
-            tsv = result.stdout if result.returncode == 0 else ""
-        except subprocess.TimeoutExpired:
-            tsv = ""
-    finally:
-        temporary.unlink(missing_ok=True)
-    mapped = []
-    for word in parse_visible_words(tsv):
-        bounds = _map_strip_box(word, (x1, y1), clamped)
-        if bounds is not None:
-            mapped.append((word[0], bounds))
-    mapped.sort(key=lambda item: item[1][0])
-    if not mapped:
+        lo = a - 1 if index == 0 else max(a - 1, groups[index - 1][1] + 1)
+        hi = b + 1 if index == len(groups) - 1 else min(b + 1, groups[index + 1][0] - 1)
+        hi = max(hi, b)
+        mass = sum(ink[y][xx] for y in range(h) for xx in range(lo, hi))
+        centre = sum(xx * ink[y][xx] for y in range(h) for xx in range(lo, hi)) / mass
+        cells.append((ox + a, oy + top, _port_patch(ink, centre, top - 1, (lo, hi))))
+    return cells
+
+
+# Reference digit patches (``_port_glyph_cells`` output, ink quantised to
+# 0..9), one per digit and rendering: "gh" = GitHub ubuntu runner frames,
+# "host" = gsb-dev GUI container frames. Same-digit patches differ by up to
+# 8.35 between the two renderings, so both sets are kept and matched.
+# Source frame (scripts/tests/fixtures/<name>#<glyph index>) is recorded per
+# entry; regenerate with ``build_port_templates``.
+_PORT_TEMPLATE_TABLE = (
+    ('0', 'gh', 'connected-tunnels-edit-bravo-draft-50835-ci.png#1', (
+        '0000000000',
+        '0015885200',
+        '0056227410',
+        '0163047620',
+        '0253265520',
+        '0353542530',
+        '0256522530',
+        '0168303520',
+        '0056226410',
+        '0015885200',
+        '0000000000',
+    )),
+    ('1', 'gh', 'connected-tunnels-edit-alpha-draft-47031-ci.png#4', (
+        '0000000000',
+        '0013771000',
+        '0047571000',
+        '0001271000',
+        '0000371000',
+        '0000371000',
+        '0000371000',
+        '0000371000',
+        '0000371000',
+        '0028898600',
+        '0000000000',
+    )),
+    ('1', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#4', (
+        '0000000000',
+        '0169973000',
+        '0001473000',
+        '0001473000',
+        '0001473000',
+        '0001473000',
+        '0001473000',
+        '0001473000',
+        '0001473000',
+        '0049999600',
+        '0000000000',
+    )),
+    ('2', 'gh', 'connected-tunnels-edit-bravo-draft-45257-ci.png#2', (
+        '0000000000',
+        '0037884100',
+        '0143136300',
+        '0000016400',
+        '0000026300',
+        '0000156200',
+        '0001562000',
+        '0015620000',
+        '0156200000',
+        '0389999720',
+        '0000000000',
+    )),
+    ('2', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#2', (
+        '0000000000',
+        '0048986100',
+        '0364258510',
+        '0000007610',
+        '0000038510',
+        '0000167200',
+        '0001672000',
+        '0016720000',
+        '0167200000',
+        '0389999720',
+        '0000000000',
+    )),
+    ('3', 'gh', 'connected-tunnels-edit-bravo-draft-50835-ci.png#3', (
+        '0000000000',
+        '0158973100',
+        '0142047200',
+        '0000028200',
+        '0000156100',
+        '0017972000',
+        '0000138200',
+        '0000007400',
+        '0221038200',
+        '0378973100',
+        '0000000000',
+    )),
+    ('3', 'host', 'connected-tunnels-editor-selected-alpha.png#1', (
+        '0000000000',
+        '0058985000',
+        '0274159300',
+        '0000009500',
+        '0000169300',
+        '0008995000',
+        '0000159400',
+        '0000008700',
+        '0563159500',
+        '0168986000',
+        '0000000000',
+    )),
+    ('4', 'gh', 'connected-tunnels-edit-bravo-draft-45257-ci.png#0', (
+        '0000000000',
+        '0000176000',
+        '0001576000',
+        '0003746000',
+        '0016346000',
+        '0146146000',
+        '0271146000',
+        '0499999810',
+        '0000146000',
+        '0000146000',
+        '0000000000',
+    )),
+    ('4', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#0', (
+        '0000000000',
+        '0000189100',
+        '0000689100',
+        '0003858100',
+        '0018458100',
+        '0067158100',
+        '0382058100',
+        '0599999910',
+        '0000058100',
+        '0000058100',
+        '0000000000',
+    )),
+    ('5', 'gh', 'connected-tunnels-edit-bravo-draft-45257-ci.png#1', (
+        '0000000000',
+        '0048998300',
+        '0054100000',
+        '0054100000',
+        '0068984100',
+        '0011137410',
+        '0000005510',
+        '0000005510',
+        '0121027400',
+        '0158874100',
+        '0000000000',
+    )),
+    ('5', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#1', (
+        '0000000000',
+        '0069999300',
+        '0066200000',
+        '0066200000',
+        '0069986200',
+        '0000158510',
+        '0000006720',
+        '0000006720',
+        '0364258510',
+        '0158986200',
+        '0000000000',
+    )),
+    ('6', 'gh', 'connected-tunnels-edit-alpha-draft-35649-ci.png#2', (
+        '0000000000',
+        '0001688500',
+        '0017510000',
+        '0146000000',
+        '0156787300',
+        '0167213820',
+        '0164001640',
+        '0155001630',
+        '0038213710',
+        '0013887200',
+        '0000000000',
+    )),
+    ('7', 'gh', 'connected-tunnels-edit-bravo-draft-45257-ci.png#4', (
+        '0000000000',
+        '0389999600',
+        '0000014600',
+        '0000025300',
+        '0000036100',
+        '0000254000',
+        '0000362000',
+        '0001550000',
+        '0003630000',
+        '0014600000',
+        '0000000000',
+    )),
+    ('7', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#3', (
+        '0000000000',
+        '0599999610',
+        '0000048300',
+        '0000067200',
+        '0000285100',
+        '0000572000',
+        '0001761000',
+        '0004830000',
+        '0006720000',
+        '0038510000',
+        '0000000000',
+    )),
+    ('8', 'gh', 'connected-tunnels-edit-bravo-draft-50835-ci.png#2', (
+        '0000000000',
+        '0025885200',
+        '0156126500',
+        '0155014600',
+        '0036436300',
+        '0015875100',
+        '0155125510',
+        '0253003620',
+        '0255115610',
+        '0026886200',
+        '0000000000',
+    )),
+    ('9', 'gh', 'connected-tunnels-edit-alpha-draft-35649-ci.png#4', (
+        '0000000000',
+        '0026885100',
+        '0165126500',
+        '0262003700',
+        '0272002600',
+        '0165126700',
+        '0026875700',
+        '0000014600',
+        '0000147200',
+        '0039862000',
+        '0000000000',
+    )),
+)
+# A cell's nearest template must be at most this far (sum of absolute ink
+# differences over the 10x11 patch, best of a +-1 px vertical shift) and
+# the nearest template of any OTHER digit at least _PORT_MIN_GAP further.
+# Measured, leave-one-frame-out over the 8 fixture frames (40 glyphs):
+# worst nearest same-digit 7.23, smallest gap to another digit 5.12;
+# closest two different digits (0 vs 8) 10.07 apart.
+_PORT_MAX_DISTANCE = 9.0
+_PORT_MIN_GAP = 3.0
+
+
+def _port_templates_from_table(table=_PORT_TEMPLATE_TABLE):
+    return [(digit, f"{env}:{source}", tuple(tuple(int(c) / 9 for c in row) for row in rows))
+            for digit, env, source, rows in table]
+
+
+def build_port_templates(frames):
+    """Templates from labelled frames: ``[(path, row_region, digits), ...]``.
+
+    Every glyph instance becomes a template ``(digit, source, patch)``.
+    Used by the tests for leave-one-frame-out checks."""
+    templates = []
+    for path, row_region, digits in frames:
+        cells = _port_glyph_cells(path, row_region)
+        if len(cells) != len(digits):
+            raise RuntimeError(f"{path}: {len(cells)} glyphs for label {digits!r}")
+        for index, (cell, digit) in enumerate(zip(cells, digits)):
+            templates.append((digit, f"{Path(path).name}#{index}", cell[2]))
+    return templates
+
+
+def _port_patch_distance(patch, template):
+    best = None
+    for dy in (-1, 0, 1):
+        total = 0.0
+        for y, line in enumerate(patch):
+            yy = y + dy
+            other = template[yy] if 0 <= yy < len(template) else None
+            for x, value in enumerate(line):
+                total += abs(value - (other[x] if other is not None else 0.0))
+        best = total if best is None else min(best, total)
+    return best
+
+
+def classify_port_cells(cells, templates):
+    """Nearest-template digit per cell. Returns ``(digits, report)``;
+    raises when any cell's best distance exceeds ``_PORT_MAX_DISTANCE`` or
+    beats the nearest other digit by less than ``_PORT_MIN_GAP``."""
+    report = []
+    rejected = False
+    digits = ""
+    for left, _top, patch in cells:
+        per_digit = {}
+        for digit, _source, template in templates:
+            d = _port_patch_distance(patch, template)
+            if d < per_digit.get(digit, float("inf")):
+                per_digit[digit] = d
+        ranked = sorted(per_digit.items(), key=lambda item: item[1])
+        best_digit, best = ranked[0]
+        second = ranked[1][1] if len(ranked) > 1 else float("inf")
+        ok = best <= _PORT_MAX_DISTANCE and second - best >= _PORT_MIN_GAP
+        rejected |= not ok
+        digits += best_digit
+        report.append(f"x{left}:{best_digit}@{best:.2f}/{ranked[1][0] if len(ranked) > 1 else '-'}"
+                      f"@{second:.2f}{'' if ok else '!'}")
+    return digits, report, rejected
+
+
+def located_row_digits(locate, port):
+    """``read_digits`` seam for rows without digit templates (light theme):
+    the row shows ``port`` when ``locate`` finds its text inside the row.
+    This is the general locator's match, weaker than the template reader."""
+    def read(path, row_region):
+        try:
+            return str(port), locate(path, str(port), region=row_region)
+        except RuntimeError:
+            return "", None
+    return read
+
+
+def read_port_digits(path, row_region, templates=None):
+    """Read the Listen Port row as a digit string. Returns ``(digits, bounds)``.
+
+    Deterministic, no OCR engine: the row is segmented into glyphs
+    (``_port_glyph_cells``) and each glyph is assigned its nearest
+    reference digit (``_PORT_TEMPLATE_TABLE``, dark theme, two renderings).
+    A glyph that is not clearly one digit (best distance above
+    ``_PORT_MAX_DISTANCE`` or less than ``_PORT_MIN_GAP`` ahead of another
+    digit) raises with the per-cell distances. ``("", None)`` for an empty
+    row. A light-theme row raises (no templates). Bounds are source pixels.
+    """
+    if templates is None:
+        templates = _port_templates_from_table()
+    cells = _port_glyph_cells(path, row_region)
+    if not cells:
         return "", None
-    digits = "".join(text for text, _bounds in mapped)
-    bounds = (
-        min(b[0] for _t, b in mapped), min(b[1] for _t, b in mapped),
-        max(b[2] for _t, b in mapped), max(b[3] for _t, b in mapped),
-    )
+    digits, report, rejected = classify_port_cells(cells, templates)
+    if rejected:
+        raise RuntimeError(
+            f"Listen Port row {row_region} of {Path(path).name} is not a clear digit "
+            f"string (best {digits!r}; per cell digit@distance/second@distance, "
+            f"! = rejected, max {_PORT_MAX_DISTANCE}, min gap {_PORT_MIN_GAP}): "
+            + " ".join(report)
+        )
+    bounds = (cells[0][0], cells[0][1], cells[-1][0] + _PORT_MAX_GLYPH_W, cells[0][1] + 9)
     return digits, bounds
 
 
@@ -2830,6 +3239,9 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
                     editor_form_region(min_w, min_h),
                     row_region=listen_port_row_region(heading, min_w),
                     locate=light_locate,
+                    # No light-theme digit templates exist (read_port_digits
+                    # raises on a light row): keep the light locator here.
+                    read_digits=located_row_digits(light_locate, forward_ports[0]),
                 )
                 print(f"tour: {tag} Alpha listen port {forward_ports[0]} at {port_box}",
                       flush=True)

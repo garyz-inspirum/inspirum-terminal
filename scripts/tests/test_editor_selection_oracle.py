@@ -169,84 +169,146 @@ class EditorSelectionOnRealFrameTest(unittest.TestCase):
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-# GitHub ubuntu-latest frames of PR #148's failing step (1280x800, dark):
-# the focused Listen Port input holds the typed draft port; the general
-# locator read 0 as @ ("47@31"). Heading OCR top y=152 (row 691,276..322).
-# Ports are what each frame SHOWS (zoomed visual read, agreeing with the
-# digit reader). The frames were saved as draft-45257 / draft-50835 /
-# selected-alpha-40001, but their inputs show 58881 / 35649 / 38569, so
-# those names did not match the pixels.
+# 1280x800 dark frames of the Tunnel Settings editor; the Listen Port input
+# shows the port in the name (zoomed visual read). "-ci" = GitHub ubuntu
+# runner, "-host" = gsb-dev GUI container. Heading OCR top y=152 on CI
+# frames (row 691,276..322) and y=151 on host frames (row 691,275..321).
+# The host 45271 frame was saved as gsbdev-52045.png, but its input shows
+# 45271 (the 32045 misread frame itself is not available).
 CI_HEADING = (249, 152, 367, 160)
-CI_FRAMES = {
-    "connected-tunnels-edit-alpha-draft-47031-ci.png": 47031,
-    "connected-tunnels-edit-alpha-draft-58881-ci.png": 58881,
-    "connected-tunnels-edit-alpha-draft-35649-ci.png": 35649,
+HOST_HEADING = (249, 151, 367, 159)
+TEMPLATE_FRAMES = {
+    "connected-tunnels-edit-alpha-draft-47031-ci.png": (CI_HEADING, "47031"),
+    "connected-tunnels-edit-alpha-draft-58881-ci.png": (CI_HEADING, "58881"),
+    "connected-tunnels-edit-alpha-draft-35649-ci.png": (CI_HEADING, "35649"),
     # Unfocused row (no caret, grey border).
-    "connected-tunnels-edit-alpha-selected-38569-ci.png": 38569,
+    "connected-tunnels-edit-alpha-selected-38569-ci.png": (CI_HEADING, "38569"),
+    "connected-tunnels-edit-bravo-draft-45257-ci.png": (CI_HEADING, "45257"),
+    "connected-tunnels-edit-bravo-draft-50835-ci.png": (CI_HEADING, "50835"),
+    "connected-tunnels-edit-alpha-draft-45271-host.png": (HOST_HEADING, "45271"),
+    "connected-tunnels-editor-selected-alpha.png": (HOST_HEADING, "43231"),
 }
 # Input boxes are 35 px apart: Listen 287..310, Destination Host 322..345,
 # Destination Port 357..380.
 ROW_PITCH = 35
+W47031 = "connected-tunnels-edit-alpha-draft-47031-ci.png"
 
 
-@unittest.skipUnless(shutil.which("tesseract"), "tesseract is not installed")
-class ListenPortDigitsOnCiFramesTest(unittest.TestCase):
-    def setUp(self):
-        self.row = module.listen_port_row_region(CI_HEADING, 1280)
-        self.form = module.editor_form_region(1280, 800)
+def _absent(_path, label, *, region=None, budget=None):
+    raise RuntimeError(f"{label} not visible")
 
-    def frame(self, name):
-        path = FIXTURES / name
-        if not path.is_file():
-            self.skipTest(f"{name} missing")
-        return path
+
+def _row(name):
+    return module.listen_port_row_region(TEMPLATE_FRAMES[name][0], 1280)
+
+
+class ListenPortTemplateReaderTest(unittest.TestCase):
+    """Template reader on real frames. Pure Python: no tesseract/Pillow."""
+
+    form = module.editor_form_region(1280, 800)
 
     def test_each_frame_reads_exactly_its_port(self):
-        for name, port in CI_FRAMES.items():
+        for name, (_heading, port) in TEMPLATE_FRAMES.items():
             with self.subTest(name=name):
-                digits, box = module.read_port_digits(self.frame(name), self.row)
+                digits, box = module.read_port_digits(FIXTURES / name, _row(name))
                 print(f"read_port_digits {name}: {digits!r} {box}", flush=True)
-                self.assertEqual(digits, str(port))
-                self.assertIsNotNone(module._bounds_inside(box, self.row))
+                self.assertEqual(digits, port)
+                self.assertIsNotNone(module._bounds_inside(box, _row(name)))
+
+    def test_leave_one_frame_out_still_reads_frame(self):
+        worst, gap = 0.0, float("inf")
+        for held, (_heading, port) in TEMPLATE_FRAMES.items():
+            others = [(FIXTURES / n, _row(n), d) for n, (_h, d) in TEMPLATE_FRAMES.items() if n != held]
+            templates = module.build_port_templates(others)
+            with self.subTest(held=held):
+                digits, _box = module.read_port_digits(FIXTURES / held, _row(held), templates=templates)
+                self.assertEqual(digits, port)
+            cells = module._port_glyph_cells(FIXTURES / held, _row(held))
+            for (_l, _t, patch), digit in zip(cells, port):
+                d = {}
+                for t_digit, _src, tpl in templates:
+                    d[t_digit] = min(d.get(t_digit, 1e9), module._port_patch_distance(patch, tpl))
+                own = d[digit]
+                other = min(v for k, v in d.items() if k != digit)
+                worst, gap = max(worst, own), min(gap, other - own)
+        print(f"leave-one-out worst best distance {worst:.2f}, smallest gap {gap:.2f}", flush=True)
+        self.assertLessEqual(worst, module._PORT_MAX_DISTANCE)
+        self.assertGreaterEqual(gap, module._PORT_MIN_GAP)
 
     def test_draft_frames_pass_require_editor_selection(self):
-        # The exact CI call: draft port expected, pre-edit port as sibling.
-        for name, port in CI_FRAMES.items():
-            if "draft" not in name:
-                continue
+        for name, (_heading, port) in TEMPLATE_FRAMES.items():
             with self.subTest(name=name):
                 box = module.require_editor_selection(
-                    self.frame(name), port, 40001, self.form, row_region=self.row,
+                    FIXTURES / name, int(port), 40001, self.form, row_region=_row(name),
+                    locate=_absent,
                 )
-                self.assertIsNotNone(module._bounds_inside(box, self.row))
+                self.assertIsNotNone(module._bounds_inside(box, _row(name)))
 
     def test_wrong_port_by_one_digit_fails(self):
-        with self.assertRaises(RuntimeError):
+        with self.assertRaisesRegex(RuntimeError, "reads '47031'"):
             module.require_editor_selection(
-                self.frame("connected-tunnels-edit-alpha-draft-47031-ci.png"),
-                47032, 40001, self.form, row_region=self.row,
+                FIXTURES / W47031, 47032, 40001, self.form, row_region=_row(W47031),
+                locate=_absent,
             )
 
-    def test_pre_edit_port_fails_on_draft_frame(self):
+    def test_pre_edit_sibling_port_fails_on_draft_frame(self):
         with self.assertRaises(RuntimeError):
             module.require_editor_selection(
-                self.frame("connected-tunnels-edit-alpha-draft-47031-ci.png"),
-                40001, 47031, self.form, row_region=self.row,
+                FIXTURES / W47031, 40001, 47031, self.form, row_region=_row(W47031),
+                locate=_absent,
             )
 
     def test_destination_rows_do_not_satisfy_listen_port(self):
-        path = self.frame("connected-tunnels-edit-alpha-draft-47031-ci.png")
-        x1, y1, x2, y2 = self.row
-        for shift in (ROW_PITCH, 2 * ROW_PITCH):
-            shifted = (x1, y1 + shift, x2, y2 + shift)
-            with self.subTest(shift=shift):
-                digits, _box = module.read_port_digits(path, shifted)
-                print(f"read_port_digits shifted +{shift}: {digits!r}", flush=True)
-                self.assertNotEqual(digits, "47031")
-                with self.assertRaises(RuntimeError):
-                    module.require_editor_selection(
-                        path, 47031, 40001, self.form, row_region=shifted,
-                    )
+        x1, y1, x2, y2 = _row(W47031)
+        host = (x1, y1 + ROW_PITCH, x2, y2 + ROW_PITCH)
+        with self.assertRaisesRegex(RuntimeError, "not a clear digit string|not a port"):
+            module.read_port_digits(FIXTURES / W47031, host)
+        dest = (x1, y1 + 2 * ROW_PITCH, x2, y2 + 2 * ROW_PITCH)
+        digits, _box = module.read_port_digits(FIXTURES / W47031, dest)
+        self.assertEqual(digits, "41451")
+        for region in (host, dest):
+            with self.subTest(region=region), self.assertRaises(RuntimeError):
+                module.require_editor_selection(
+                    FIXTURES / W47031, 47031, 40001, self.form, row_region=region,
+                    locate=_absent,
+                )
+
+    def test_empty_row_reads_nothing(self):
+        # The Listen Port input to the right of the digits and caret: input
+        # fill and border only.
+        _x1, y1, x2, y2 = _row(W47031)
+        empty = (775, y1, x2, y2)
+        self.assertEqual(module.read_port_digits(FIXTURES / W47031, empty), ("", None))
+        with self.assertRaisesRegex(RuntimeError, "reads ''"):
+            module.require_editor_selection(
+                FIXTURES / W47031, 47031, 40001, self.form, row_region=empty, locate=_absent,
+            )
+
+    def test_non_digit_glyph_is_rejected(self):
+        # Replace the 0 (third glyph) with a synthetic "-" bar: ink, but no digit.
+        cells = module._port_glyph_cells(FIXTURES / W47031, _row(W47031))
+        bar = tuple(tuple(1.0 if y == 5 and 2 <= x <= 7 else 0.0 for x in range(10))
+                    for y in range(11))
+        cells[2] = (cells[2][0], cells[2][1], bar)
+        digits, report, rejected = module.classify_port_cells(
+            cells, module._port_templates_from_table())
+        print("non-digit cell report:", " ".join(report), flush=True)
+        self.assertTrue(rejected)
+        self.assertIn("!", report[2])
+
+    def test_light_row_has_no_templates(self):
+        light = FIXTURES / "tour-tunnel-manager-light-empty.png"
+        with self.assertRaisesRegex(RuntimeError, "no listen-port digit templates for light theme"):
+            module.read_port_digits(light, (300, 200, 600, 240))
+
+    def test_embedded_table_matches_fixture_patches(self):
+        # Every embedded template is within quantisation error of the
+        # fixture glyph it names, so the table is traceable to the frames.
+        for digit, source, tpl in module._port_templates_from_table():
+            name, index = source.split(":", 1)[1].rsplit("#", 1)
+            cells = module._port_glyph_cells(FIXTURES / name, _row(name))
+            self.assertEqual(TEMPLATE_FRAMES[name][1][int(index)], digit)
+            self.assertLess(module._port_patch_distance(cells[int(index)][2], tpl), 3.0, source)
 
 
 if __name__ == "__main__":
