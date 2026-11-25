@@ -4215,6 +4215,7 @@ impl App {
         let state = ui_state::UiState {
             theme: theme::current().as_str().to_string(),
             docks: Some(self.docks.clone()),
+            external_editor: self.external_editor.clone(),
         };
         if let Err(error) = ui_state::save(path, &state) {
             self.status = format!("Could not save UI layout: {error}");
@@ -4353,7 +4354,7 @@ impl App {
             external_edits: Vec::new(),
             next_external_edit_id: 1,
             external_edit_tick_scheduled: false,
-            external_editor: String::new(),
+            external_editor: std::mem::take(&mut saved_ui.external_editor),
         }
     }
 

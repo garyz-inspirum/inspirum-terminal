@@ -689,6 +689,7 @@ mod tests {
             &UiState {
                 theme: String::new(),
                 docks: Some(layout),
+                external_editor: String::new(),
             },
         )
         .unwrap();
