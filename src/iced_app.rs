@@ -2234,8 +2234,10 @@ const TUNNEL_MOVE_TARGET_RUNNING: &str =
     "Stop the target session's tunnel process before moving a forward into it.";
 const TUNNEL_MOVE_DUPLICATE: &str = "The target session already has this forward.";
 const TUNNEL_SESSION_PLACEHOLDER: &str = "Type to search sessions";
-/// Popup height of the session picker; it scrolls beyond this.
+/// Popup height cap of the session picker; it scrolls beyond this.
 const TUNNEL_SESSION_MENU_HEIGHT: f32 = 240.0;
+/// Text size of the session picker input and of its popup rows.
+const TUNNEL_SESSION_TEXT_SIZE: f32 = 13.0;
 /// Dropdown chevron drawn over the right end of the session picker input.
 const TUNNEL_SESSION_CHEVRON_SIZE: f32 = 12.0;
 /// Gap between the chevron and the field's right border.
@@ -2254,6 +2256,48 @@ const _: () = assert!(
     TUNNEL_SESSION_INPUT_PADDING.right
         >= TUNNEL_SESSION_CHEVRON_SIZE + TUNNEL_SESSION_CHEVRON_INSET
 );
+
+/// Height of one popup row, computed as iced 0.14's `overlay::menu::List`
+/// does (layout, hit-testing and draw all use `text_line_height
+/// .to_absolute(text_size) + padding.y()`). The combo box passes its own
+/// `size` and `padding` to the menu and leaves the menu's line height at
+/// `LineHeight::default()`.
+fn tunnel_session_menu_row_height() -> f32 {
+    let line = iced::widget::text::LineHeight::default()
+        .to_absolute(iced::Pixels(TUNNEL_SESSION_TEXT_SIZE));
+    f32::from(line) + TUNNEL_SESSION_INPUT_PADDING.y()
+}
+
+/// Popup height for `matches` visible options: the list's own height (the
+/// menu adds no layout padding; its border is drawn inside the bounds), capped
+/// so longer lists scroll. With no match iced opens no popup at all.
+fn tunnel_session_menu_height(matches: usize) -> f32 {
+    (matches as f32 * tunnel_session_menu_row_height()).min(TUNNEL_SESSION_MENU_HEIGHT)
+}
+
+/// The same lowercase alphanumeric matcher iced's combo box builds per option.
+fn tunnel_session_matcher(label: &str) -> String {
+    label
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// Options iced's combo box shows for `query`: every non-alphanumeric run
+/// splits the lowercase query into parts, and each part must occur in the
+/// option's matcher (an empty query matches everything).
+fn tunnel_session_match_count(options: &[TunnelSessionOption], query: &str) -> usize {
+    let query = query.to_lowercase();
+    let parts: Vec<&str> = query.split(|c: char| !c.is_ascii_alphanumeric()).collect();
+    options
+        .iter()
+        .filter(|option| {
+            let matcher = tunnel_session_matcher(&option.label);
+            parts.iter().all(|part| matcher.contains(part))
+        })
+        .count()
+}
 
 /// Characters of the selected session shown in a `field` px value column:
 /// the chevron's reserve is taken from the text budget.
@@ -3186,6 +3230,7 @@ enum Message {
     ExternalEditorInput(String),
     ExternalEditorSave,
     TunnelDraftSession(TunnelSessionOption),
+    TunnelSessionSearch(String),
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -4427,6 +4472,11 @@ struct App {
     /// Searchable `Session / profile` picker in Tunnel Settings; rebuilt with
     /// the profile list and whenever the dialog opens.
     tunnel_session_picker: combo_box::State<TunnelSessionOption>,
+    /// The picker's search text, mirrored from its `on_input` so the popup
+    /// can be sized to the options iced shows. iced keeps the text across
+    /// focus changes and clears it on a selection or a state rebuild; so
+    /// does this.
+    tunnel_session_search: String,
 }
 
 const FILES_PANELS: [dock::Panel; 2] = [dock::Panel::Filer, dock::Panel::Transfer];
@@ -4583,6 +4633,7 @@ impl App {
             external_edit_tick_scheduled: false,
             external_editor: std::mem::take(&mut saved_ui.external_editor),
             tunnel_session_picker: combo_box::State::new(Vec::new()),
+            tunnel_session_search: String::new(),
         }
         .with_tunnel_session_picker()
     }
@@ -4594,6 +4645,7 @@ impl App {
 
     fn rebuild_tunnel_session_picker(&mut self) {
         self.tunnel_session_picker = combo_box::State::new(tunnel_session_options(&self.profiles));
+        self.tunnel_session_search.clear();
     }
 
     fn refresh_profile_matches(&mut self) {
@@ -8344,7 +8396,10 @@ impl App {
             }
             Message::ExternalEditorInput(value) => self.external_editor_input(value),
             Message::ExternalEditorSave => return self.save_external_editor_setting(),
+            Message::TunnelSessionSearch(value) => self.tunnel_session_search = value,
             Message::TunnelDraftSession(option) => {
+                // iced clears its search text on every selection.
+                self.tunnel_session_search.clear();
                 if !self
                     .profiles
                     .iter()
@@ -10165,10 +10220,14 @@ impl App {
         )
         .input_style(flat_input)
         .menu_style(tunnel_session_menu_style)
-        .size(13)
+        .on_input(Message::TunnelSessionSearch)
+        .size(TUNNEL_SESSION_TEXT_SIZE)
         .padding(TUNNEL_SESSION_INPUT_PADDING)
         .width(Fill)
-        .menu_height(TUNNEL_SESSION_MENU_HEIGHT);
+        .menu_height(tunnel_session_menu_height(tunnel_session_match_count(
+            self.tunnel_session_picker.options(),
+            &self.tunnel_session_search,
+        )));
         // Dropdown affordance inside the field's right padding. The icon
         // canvas neither captures events nor reports a mouse interaction, so
         // the stack passes clicks on it to the input below: clicking the
@@ -17314,6 +17373,34 @@ mod tunnel_layout_tests {
         for value in ["CI tunnel fixture", "Alpha forward", "127.0.0.1", "Running"] {
             assert!(value.chars().count() <= chars_fitting(field - 12.0, 13.0));
         }
+    }
+
+    #[test]
+    fn session_picker_popup_shrinks_to_matching_options() {
+        // 13 px text at iced's default 1.3 line height plus 3 + 3 padding.
+        let row = tunnel_session_menu_row_height();
+        assert!((row - 22.9).abs() < 1e-4, "{row}");
+        let option = |label: &str| TunnelSessionOption {
+            label: label.into(),
+            key: label.into(),
+        };
+        let options: Vec<_> = ["CI tunnel fixture", "Prod / DB / pg-primary", "Prod / web"]
+            .into_iter()
+            .map(option)
+            .collect();
+        assert_eq!(tunnel_session_match_count(&options, ""), 3);
+        assert_eq!(tunnel_session_match_count(&options, "tunnel"), 1);
+        assert_eq!(tunnel_session_match_count(&options, "PROD db"), 1);
+        assert_eq!(tunnel_session_match_count(&options, "prod"), 2);
+        assert_eq!(tunnel_session_match_count(&options, "zzz"), 0);
+        assert!((tunnel_session_menu_height(1) - row).abs() < 1e-4);
+        assert!((tunnel_session_menu_height(3) - 3.0 * row).abs() < 1e-4);
+        // Eleven rows (251.9 px) hit the cap; the list scrolls from there.
+        assert!(tunnel_session_menu_height(10) < TUNNEL_SESSION_MENU_HEIGHT);
+        assert_eq!(tunnel_session_menu_height(11), TUNNEL_SESSION_MENU_HEIGHT);
+        assert_eq!(tunnel_session_menu_height(500), TUNNEL_SESSION_MENU_HEIGHT);
+        // No match: iced opens no popup, and no height is reserved.
+        assert_eq!(tunnel_session_menu_height(0), 0.0);
     }
 
     #[test]

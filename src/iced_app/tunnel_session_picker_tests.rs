@@ -217,3 +217,29 @@ fn the_per_session_button_list_is_gone() {
     assert!(TUNNEL_CREATE_HINT.contains("press +"));
     assert!(!TUNNEL_CREATE_HINT.contains("below the list"));
 }
+
+#[test]
+fn picker_search_text_tracks_iced_and_clears_on_selection_and_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = boot_with(
+        dir.path(),
+        &[session("CI", "tunnel-fixture"), session("Prod", "web")],
+    );
+    let ci = key_of(&app, "CI", "tunnel-fixture");
+    let _ = app.update(Message::TunnelAdd(ci.clone()));
+    let _ = app.update(Message::TunnelSessionSearch("tunnel".into()));
+    let options = app.tunnel_session_picker.options();
+    let matches = tunnel_session_match_count(options, &app.tunnel_session_search);
+    assert_eq!(matches, 1, "popup sized for the one matching option");
+    let _ = app.update(Message::TunnelDraftSession(option_for(&app, &ci)));
+    assert!(
+        app.tunnel_session_search.is_empty(),
+        "iced clears on selection"
+    );
+    let _ = app.update(Message::TunnelSessionSearch("prod".into()));
+    let _ = app.update(Message::Tunnels);
+    assert!(
+        app.tunnel_session_search.is_empty(),
+        "reopening rebuilds the state"
+    );
+}
