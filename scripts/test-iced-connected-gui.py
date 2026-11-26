@@ -3085,7 +3085,7 @@ def window_size(window: str, env: dict[str, str]) -> tuple[int, int]:
 
 
 def dock_strip_region(width: int, height: int):
-    """Bottom dock tab strip (Session/Transfer/Filer/Explorer) search box.
+    """Bottom dock tab strip (Sender/Session/Transfer/Filer) search box.
 
     The bottom dock occupies roughly the lower 30% of the window; its strip
     sits at y~538..567 for an 800px window. Search a generous band so OCR of
@@ -3094,7 +3094,52 @@ def dock_strip_region(width: int, height: int):
     return (0, int(height * .62), width, int(height * .76))
 
 
-SIDE_FILE_DOCK_WIDTH = 420
+# src/iced_app/dock.rs: a side dock receiving the Filer is widened to
+# FILE_PANEL_MIN_WIDTH (760), clamped to window width - other side dock -
+# MIN_CENTRE_WIDTH (320). The BottomTabs preset has no other side dock, so
+# at 1280 px the right dock is min(760, 1280 - 320) = 760 px.
+FILE_PANEL_MIN_WIDTH = 760
+MIN_CENTRE_WIDTH = 320
+
+
+def side_file_dock_width(width: int, other_side: int = 0) -> int:
+    """Expected width of a side dock that just received the Filer."""
+    return min(FILE_PANEL_MIN_WIDTH, width - other_side - MIN_CENTRE_WIDTH)
+
+
+SIDE_FILE_DOCK_WIDTH = side_file_dock_width(1280)
+# Max distance between the Filer divider (Remote heading left edge - 6) and
+# the midpoint of the dock body it splits.
+FILER_DIVIDER_TOLERANCE = 24
+
+
+def filer_halves(shot: Path, area):
+    """Split a Filer dock body into (local_box, remote_box, divider_x, remote_heading).
+
+    The merged Filer shows Local on the left and Remote on the right of one
+    panel with a 1px divider. Measured at 1280x800 (bottom dock): heading
+    'Remote' at (646,570,691,584), divider x 640. The heading is searched in
+    the top third of ``area`` only, so the action row's 'New remote folder'
+    / 'Rename remote' cannot match. Raises when the divider is not within
+    FILER_DIVIDER_TOLERANCE of the area's midpoint: a stacked or one-sided
+    layout must fail here rather than produce a meaningless half.
+    """
+    left, top, right, bottom = area
+    heading_band = (left, top, right, top + (bottom - top) // 3)
+    heading = locate_visible_label(shot, "Remote", region=heading_band)
+    divider = heading[0] - 6
+    midpoint = (left + right) // 2
+    if abs(divider - midpoint) > FILER_DIVIDER_TOLERANCE:
+        raise RuntimeError(
+            f"Filer divider x={divider} (Remote heading {heading}) is not within "
+            f"{FILER_DIVIDER_TOLERANCE} px of the dock midpoint {midpoint} of {area}"
+        )
+    local_heading = locate_visible_label(shot, "Local", region=(left, top, divider, heading_band[3]))
+    if abs(local_heading[1] - heading[1]) > 6:
+        raise RuntimeError(
+            f"Local heading {local_heading} and Remote heading {heading} are not on one row"
+        )
+    return (left, top, divider, bottom), (divider + 1, top, right, bottom), divider, heading
 
 
 def dock_body_region(
@@ -3103,14 +3148,14 @@ def dock_body_region(
     """Dock body (file rows, Upload/Download, Transfer queue rows).
 
     Bottom dock: full width, lower third above the status bar. Right dock:
-    a file panel moved into a side dock widens it to 420px, so search
-    x = width - 420 - 4 .. width, from below the 32px menu bar down to the
+    a Filer moved into a side dock widens it to SIDE_FILE_DOCK_WIDTH (760 at
+    1280 px), so search x = width - 760 - 4 .. width, from below the 32px menu bar down to the
     top of the bottom dock (``bottom_top``, from the OCR-located bottom
     strip when available, else 0.66 * height).
     """
     if right:
         lower = bottom_top if bottom_top is not None else int(height * .66)
-        return (width - SIDE_FILE_DOCK_WIDTH - 4, 32, width, lower)
+        return (width - side_file_dock_width(width) - 4, 32, width, lower)
     return (0, int(height * .66), width, height - 22)
 
 
@@ -3154,14 +3199,16 @@ async def click_filer_refresh(
 ) -> None:
     """Click the Filer path bar's text-less refresh icon until ``completed``.
 
-    Switching between the Explorer and Filer dock tabs does NOT reload the
-    remote listing (panels only re-list when going hidden -> visible), so the
-    refresh icon must be clicked. Measured at 1280x800 with a bottom dock:
-    tab labels y~552, path bar y=567..598; at its right end 'Up' ~(1185,584),
-    refresh icon (1222,584) with a ~22x22 hit box, 'Go' (1256,584) spanning
-    x 1238..1274. So the icon is at x = width - 58, y = tab-label y + 32. The
-    path bar's right end stays at the window's right edge for a right dock
-    (strip y~46, so path bar y~78). Retry at x-8 then x+8 before raising.
+    Panels only re-list when going hidden -> visible; re-clicking the
+    already-active Filer tab does not reload either half (asserted by the
+    caller), so the refresh icon must be clicked. Measured at 1280x800 with a
+    bottom dock: tab labels y~553, 'Remote' heading y 570..584, remote path
+    bar y 590..619; at its right end Up/refresh/Go span x 1167..1274, 'Go'
+    ending at 1274, refresh icon ~(1222, 604) with a ~22x22 hit box. So the
+    icon is at x = width - 58 and the caller passes the path bar y derived
+    from the located Remote heading (heading centre + 27). The remote half's
+    path bar ends at the window's right edge for a right dock too. Retry at
+    x-8 then x+8 before raising.
     """
     width, _ = window_size(window, env)
     base_x = width - 58
@@ -4732,24 +4779,52 @@ async def main() -> int:
                 strip = dock_strip_region(width, height)
                 body = dock_body_region(width, height)
 
-                # Toggling Files activates the Filer (REMOTE) tab of the bottom
-                # dock. The remote fixture row must be visibly targetable.
+                # Toggling Files activates the merged Filer tab of the bottom
+                # dock: Local on the left half, Remote on the right half of one
+                # panel, both listed on show. Split the dock body at the
+                # divider located from the 'Remote' heading (asserted to sit at
+                # the body's midpoint) and search every label that can exist
+                # on both sides (rows, Name, Go, Up, '1 item') in its half only.
                 bottom = destination / "connected-files-bottom-dock.png"
-                remote_row = await asyncio.to_thread(locate_visible_label, bottom, download_name, region=body,
+                local_body, remote_body, filer_divider, remote_heading = await asyncio.to_thread(
+                    filer_halves, bottom, body,
+                )
+                print(
+                    f"Filer halves: divider x={filer_divider} local={local_body} "
+                    f"remote={remote_body} Remote heading {remote_heading}",
+                    flush=True,
+                )
+                filer_tab_active = await asyncio.to_thread(
+                    locate_visible_label, bottom, "Filer", region=strip,
+                )
+                for gone_tab in ("Explorer",):
+                    try:
+                        stale = await asyncio.to_thread(
+                            locate_visible_label, bottom, gone_tab, region=strip, budget=4,
+                        )
+                    except RuntimeError:
+                        continue
+                    raise RuntimeError(
+                        f"bottom dock strip still shows the removed {gone_tab!r} tab at {stale} "
+                        f"(Filer tab {filer_tab_active})"
+                    )
+                # The remote fixture row must be visibly targetable in the
+                # remote half.
+                remote_row = await asyncio.to_thread(
+                    locate_visible_label, bottom, download_name, region=remote_body,
                 )
                 if remote_row[3] <= remote_row[1]:
                     raise RuntimeError("bottom-dock remote file row is not visibly targetable")
 
-                # Explorer tab = LOCAL listing with the 'Upload ->' action.
+                # Local half = LOCAL listing with the 'Upload ->' action. No tab
+                # switch: the same Filer frame carries both listings.
                 explorer_shot = destination / "connected-files-explorer.png"
-                await click_label(window, explorer_shot, "Explorer", env, region=strip, settle=.8)
                 local_row = await locate_rendered_label(
                     window, explorer_shot, upload_name, env=env,
-                    region=body, timeout=40,
+                    region=local_body, timeout=40,
                 )
                 upload_action = await asyncio.to_thread(
-                    locate_visible_label, explorer_shot, "Upload",
-                    region=(0, int(height * .62), width, height - 22),
+                    locate_visible_label, explorer_shot, "Upload", region=local_body,
                 )
                 if local_row[3] <= local_row[1]:
                     raise RuntimeError("bottom-dock local file row is not visibly targetable")
@@ -4771,19 +4846,18 @@ async def main() -> int:
                 await asyncio.sleep(.7)
                 screenshot(window, destination / "connected-files-uploaded.png", env)
 
-                # Back to the Filer tab (REMOTE). The remote fixture name sorts
-                # first, so the first row is deterministic even after the
-                # upload refresh. Activate '<- Download' and verify the exact
-                # binary payload landed in the Explorer's local directory.
+                # Remote half. The remote fixture name sorts first, so the
+                # first row is deterministic even after the upload refresh.
+                # Activate '<- Download' and verify the exact binary payload
+                # landed in the local half's directory.
                 filer_shot = destination / "connected-files-filer.png"
-                await click_label(window, filer_shot, "Filer", env, region=strip, settle=.8)
+                screenshot(window, filer_shot, env)
                 remote_row = await locate_rendered_label(
                     window, filer_shot, download_name, env=env,
-                    region=body, timeout=40,
+                    region=remote_body, timeout=40,
                 )
                 download_action = await asyncio.to_thread(
-                    locate_visible_label, filer_shot, "Download",
-                    region=(0, int(height * .62), width, height - 22),
+                    locate_visible_label, filer_shot, "Download", region=remote_body,
                 )
                 downloaded = local_root / download_name
                 if downloaded.exists():
@@ -4809,13 +4883,23 @@ async def main() -> int:
                     raise RuntimeError("click-driven GUI upload failed exact-byte integrity")
                 if downloaded.read_bytes() != download_bytes:
                     raise RuntimeError("click-driven GUI download failed exact-byte integrity")
+                # The download must also show up in the LOCAL half (the panel
+                # re-lists its local side after a completed download), never
+                # only on the remote side where 444 already was.
+                await locate_rendered_label(
+                    window, destination / "connected-files-downloaded-local.png",
+                    download_name, env=env, region=local_body, timeout=20,
+                )
 
                 # Two completed transfers must not consume the listings. Select
                 # another visibly rendered, distinct remote file through the
                 # production row control; its selection styling is the oracle.
-                # The text 'Refresh' button is gone (icon only) and switching
-                # Explorer <-> Filer tabs does not reload the listing; activate
-                # Filer, then click its path-bar refresh icon (see helper).
+                # The text 'Refresh' button is gone (icon only). With one merged
+                # Filer panel the old Explorer<->Filer switch is gone; the
+                # remaining no-reload claim is that re-clicking the already
+                # active Filer tab starts no SFTP listing (this can fail: a tab
+                # click that re-lists would raise here), then the path-bar
+                # refresh icon must start exactly the reload that shows 111.
                 # Prefixes 111 < 444 < 999 are distinct and OCR-safe (no 0/O);
                 # the third file sorts first, so it stays visible at 960x640.
                 third_name = "111_GUI_THIRD_FIXTURE.bin"
@@ -4826,9 +4910,17 @@ async def main() -> int:
                     window, destination / "connected-files-refresh-back.png",
                     "Filer", env, region=strip, settle=.3,
                 )
+                await asyncio.sleep(1.5 * TIME_SCALE)
+                listings_after_tab = events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY")
+                if listings_after_tab != listings_before:
+                    raise RuntimeError(
+                        "re-clicking the active Filer tab started an SFTP listing: "
+                        f"SFTP_LIST_READY {listings_before} -> {listings_after_tab} "
+                        f"(tab {filer_tab})"
+                    )
                 await click_filer_refresh(
                     window, env, destination / "connected-files-refresh-clicked.png",
-                    path_bar_y=center(filer_tab)[1] + 32,
+                    path_bar_y=center(remote_heading)[1] + 27,
                     completed=lambda: events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY") > listings_before,
                     label="remote listing refresh after creating distinct fixture",
                 )
@@ -4837,7 +4929,7 @@ async def main() -> int:
                 # until the distinct filename is actually visible.
                 third_row = await locate_rendered_label(
                     window, destination / "connected-files-third-visible.png",
-                    third_name, env=env, region=body, timeout=40,
+                    third_name, env=env, region=remote_body, timeout=40,
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
@@ -4858,12 +4950,20 @@ async def main() -> int:
                 # first. Header clicks must not start another SFTP listing.
                 row_111 = await locate_rendered_label(
                     window, destination / "connected-files-sort-before.png",
-                    third_name, env=env, region=body, timeout=20,
+                    third_name, env=env, region=remote_body, timeout=20,
                 )
                 # Name-column data rows, fixed to the first file row. Reordering
                 # does not move the band, and the transfer status line is outside
                 # it, so a later read of 444 cannot land on "Download 444 …".
-                rows_region = name_rows_region(row_111, 3)
+                # Clamped to the remote half: the band's icon inset must not
+                # reach across the divider into the local half's clipped Size
+                # column. Name 641..932 is the only remote column read here;
+                # Size/Permissions/Owner/Group are off-screen to the right.
+                rows_region = name_rows_region(row_111, 3, name_right=remote_body[2])
+                rows_region = (
+                    max(rows_region[0], remote_body[0]), rows_region[1],
+                    min(rows_region[2], row_111[0] + 270), rows_region[3],
+                )
                 default_order = await asyncio.to_thread(
                     name_order_tops,
                     destination / "connected-files-sort-before.png",
@@ -4888,7 +4988,7 @@ async def main() -> int:
                 # include the path bar or the filename. It stays put when the
                 # rows reorder, so both clicks use this same band.
                 name_header = (
-                    max(0, row_111[0] - 36),
+                    max(remote_body[0], row_111[0] - 36),
                     max(0, row_111[1] - 36),
                     row_111[0] + 48,
                     row_111[1] - 2,
