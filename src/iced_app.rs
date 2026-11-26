@@ -13154,28 +13154,78 @@ mod tests {
     }
 
     #[test]
-    fn plain_click_or_drag_inside_one_cell_selects_nothing() {
+    fn plain_click_selects_nothing_and_small_horizontal_drag_selects_one_cell() {
         let size = drag_test_size();
         let line = drag_line_with_word(23, "highlight");
-        for (press, release) in [(0.1f32, 0.1f32), (0.1, 0.9), (0.9, 0.1), (0.6, 0.95)] {
-            let probe = terminal_core::probe_drag_selection(
-                &size,
-                &[&line],
-                drag_xy(23, press, 0),
-                &[drag_xy(23, release, 0)],
-            );
-            assert_eq!(probe.text, "", "press {press} release {release}");
-            assert!(probe.selected.is_empty(), "press {press} release {release}");
+        // Column 23 spans x 193.2..201.6; `h` is the pressed character. Every
+        // x below is exact in f32 and stays inside column 23.
+        let row_y = 0.5 * DRAG_CELL_H;
+        let probe = |press_x: f32, moves: &[(f32, f32)]| {
+            terminal_core::probe_drag_selection(&size, &[&line], (press_x, row_y), moves)
+        };
+        // Jitter below 3 px, either way, and pure vertical movement inside
+        // the cell: nothing selected, nothing copied.
+        for offset in [0.0f32, 1.0, -1.0, 2.9, -2.9] {
+            let jitter = probe(197.0, &[(197.0 + offset, row_y)]);
+            assert_eq!(jitter.text, "", "jitter {offset}");
+            assert!(jitter.selected.is_empty(), "jitter {offset}");
         }
-        // Leaving the cell and coming back clears the highlight again.
-        let back = terminal_core::probe_drag_selection(
-            &size,
-            &[&line],
-            drag_xy(23, 0.4, 0),
-            &[drag_xy(26, 0.5, 0), drag_xy(23, 0.8, 0)],
+        let vertical = probe(
+            197.0,
+            &[(197.0, 0.1 * DRAG_CELL_H), (197.0, 0.9 * DRAG_CELL_H)],
         );
+        assert_eq!(vertical.text, "");
+        assert!(vertical.selected.is_empty());
+        // 3 px or more, right or left, still inside the cell: exactly the
+        // pressed character.
+        for (press_x, end_x) in [
+            (197.0f32, 200.0f32),
+            (197.0, 194.0),
+            (194.0, 200.0),
+            (200.5, 194.5),
+        ] {
+            let one = probe(press_x, &[(end_x, row_y)]);
+            assert_eq!(one.text, "h", "press {press_x} -> {end_x}");
+            assert_eq!(one.selected, vec![(0, 23)], "press {press_x} -> {end_x}");
+        }
+        // Coming back within 2 px of the press x clears it again.
+        for back_x in [197.0f32, 198.5, 195.5] {
+            let cleared = probe(197.0, &[(200.5, row_y), (back_x, row_y)]);
+            assert_eq!(cleared.text, "", "back to {back_x}");
+            assert!(cleared.selected.is_empty(), "back to {back_x}");
+        }
+        // Leaving the cell and coming back near the press x clears the
+        // highlight; coming back 3 px or more away keeps the one cell.
+        let back = probe(197.0, &[(drag_xy(26, 0.5, 0).0, row_y), (197.5, row_y)]);
         assert_eq!(back.text, "");
         assert!(back.selected.is_empty());
+        let back_far = probe(197.0, &[(drag_xy(26, 0.5, 0).0, row_y), (200.5, row_y)]);
+        assert_eq!(back_far.text, "h");
+        assert_eq!(back_far.selected, vec![(0, 23)]);
+        // A wide glyph: `日` covers columns 2-3 (x 16.8..33.6), pressed on
+        // either half, selects the whole glyph and copies it.
+        let wide = "ab日本cd";
+        for (press_x, end_x) in [(20.0f32, 23.0f32), (23.0, 20.0), (30.0, 26.0), (20.0, 30.0)] {
+            let none = terminal_core::probe_drag_selection(
+                &size,
+                &[wide],
+                (press_x, row_y),
+                &[(press_x + 1.0, row_y)],
+            );
+            assert_eq!(none.text, "", "wide jitter at {press_x}");
+            let glyph = terminal_core::probe_drag_selection(
+                &size,
+                &[wide],
+                (press_x, row_y),
+                &[(end_x, row_y)],
+            );
+            assert_eq!(glyph.text, "日", "wide press {press_x} -> {end_x}");
+            assert_eq!(
+                glyph.selected,
+                vec![(0, 2)],
+                "wide press {press_x} -> {end_x}"
+            );
+        }
     }
 
     #[test]

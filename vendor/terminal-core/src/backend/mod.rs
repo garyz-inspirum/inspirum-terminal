@@ -227,9 +227,9 @@ pub struct TerminalBackend {
     size: TerminalSize,
     notifier: Notifier,
     last_content: RenderableContent,
-    /// Grid cell a Simple drag selection was pressed on (see
+    /// Where a Simple drag selection was pressed (see
     /// `start_drag_selection`); `None` for other selection types.
-    selection_anchor: Option<Point>,
+    selection_anchor: Option<DragAnchor>,
     subscription_shutdown: Arc<AtomicBool>,
     subscription_thread: Option<JoinHandle<()>>,
 }
@@ -934,18 +934,44 @@ fn glyph_cells<T>(terminal: &Term<T>, point: Point) -> (Point, Point) {
     }
 }
 
+/// Horizontal distance (logical px, text-area coordinates) the pointer must
+/// move from the press x, while still on the pressed glyph, before that one
+/// glyph is selected. Below it a click with ordinary hand jitter selects and
+/// copies nothing; at or above it a small drag selects a single character.
+/// Vertical movement inside the cell does not count.
+const SINGLE_GLYPH_DRAG_THRESHOLD_PX: f32 = 3.0;
+
+/// Press position of a Simple drag selection: the grid cell and the
+/// text-area x it was pressed at.
+#[derive(Debug, Clone, Copy)]
+struct DragAnchor {
+    point: Point,
+    x: f32,
+}
+
 /// Simple drag selection from the glyph under `anchor` to the glyph under
 /// `current`, both included whatever half of the cell the pointer is in.
-/// While the pointer is still on the pressed glyph the selection is empty, so
-/// a plain click highlights and copies nothing.
-fn inclusive_drag_selection<T>(terminal: &Term<T>, anchor: Point, current: Point) -> Selection {
+/// While the pointer is still on the pressed glyph the selection holds that
+/// one glyph only when `select_pressed_glyph` is set (the pointer has moved
+/// far enough horizontally); otherwise it is empty, so a plain click
+/// highlights and copies nothing.
+fn inclusive_drag_selection<T>(
+    terminal: &Term<T>,
+    anchor: Point,
+    current: Point,
+    select_pressed_glyph: bool,
+) -> Selection {
     let (anchor_first, anchor_last) = glyph_cells(terminal, anchor);
     let (current_first, current_last) = glyph_cells(terminal, current);
     // Alacritty's Simple range drops a start cell anchored on its Right side
     // and an end cell anchored on its Left side, so anchoring the earlier
     // glyph on Left and the later glyph on Right keeps both.
     let (start, start_side, end, end_side) = if current_first == anchor_first {
-        (anchor_first, Side::Left, anchor_first, Side::Left)
+        if select_pressed_glyph {
+            (anchor_first, Side::Left, anchor_last, Side::Right)
+        } else {
+            (anchor_first, Side::Left, anchor_first, Side::Left)
+        }
     } else if current_first > anchor_first {
         (anchor_first, Side::Left, current_last, Side::Right)
     } else {
@@ -958,7 +984,7 @@ fn inclusive_drag_selection<T>(terminal: &Term<T>, anchor: Point, current: Point
 
 fn start_drag_selection<T>(
     terminal: &mut Term<T>,
-    anchor: &mut Option<Point>,
+    anchor: &mut Option<DragAnchor>,
     size: &TerminalSize,
     selection_type: SelectionType,
     x: f32,
@@ -966,8 +992,10 @@ fn start_drag_selection<T>(
 ) {
     let location = TerminalBackend::selection_point(x, y, size, terminal.grid().display_offset());
     if selection_type == SelectionType::Simple {
-        *anchor = Some(location);
-        terminal.selection = Some(inclusive_drag_selection(terminal, location, location));
+        *anchor = Some(DragAnchor { point: location, x });
+        terminal.selection = Some(inclusive_drag_selection(
+            terminal, location, location, false,
+        ));
     } else {
         *anchor = None;
         terminal.selection = Some(Selection::new(
@@ -980,7 +1008,7 @@ fn start_drag_selection<T>(
 
 fn update_drag_selection<T>(
     terminal: &mut Term<T>,
-    anchor: Option<Point>,
+    anchor: Option<DragAnchor>,
     size: &TerminalSize,
     x: f32,
     y: f32,
@@ -995,7 +1023,13 @@ fn update_drag_selection<T>(
         Some(anchor) if simple => {
             // Rebuilt from the pressed cell on every move: an existing
             // selection's anchor side cannot change once the drag reverses.
-            terminal.selection = Some(inclusive_drag_selection(terminal, anchor, location));
+            let moved = (x - anchor.x).abs() >= SINGLE_GLYPH_DRAG_THRESHOLD_PX;
+            terminal.selection = Some(inclusive_drag_selection(
+                terminal,
+                anchor.point,
+                location,
+                moved,
+            ));
         }
         _ => {
             if let Some(ref mut selection) = terminal.selection {
