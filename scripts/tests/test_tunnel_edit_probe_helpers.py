@@ -1,8 +1,8 @@
 """Geometry/fill helpers behind the running-forward edit/delete GUI probe.
 
 The probe clicks Save by its primary fill and the list's remove button by
-dialog geometry, then requires the footer notice and the persisted profile
-file. These tests pin each helper on the real populated 1280x800 frame and
+its outlined box (pixels under the list), then requires the footer notice
+and the persisted profile file. These tests pin each helper on the real populated 1280x800 frame and
 show it finds nothing on a frame without the Tunnel Manager.
 """
 from __future__ import annotations
@@ -35,6 +35,13 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 EDITOR = FIXTURES / "connected-tunnels-editor-selected-alpha.png"
 CLOSED = FIXTURES / "connected-tunnels-closed.png"
 HEADING = (249, 151, 367, 159)
+# Same step after the Session / profile row became a combo box (rows below
+# it 44 px lower, no "Add to session" list under +/-). OCR boxes from the
+# GUI image; button and Save boxes measured with _read_png.
+NEW_EDITOR = FIXTURES / "connected-tunnels-editor-selected-alpha-52241-host.png"
+NEW_HEADING = (249, 188, 367, 196)
+OLD_LISTEN_LABEL = (574, 292, 644, 296)
+NEW_LISTEN_LABEL = (574, 336, 644, 340)
 
 
 @unittest.skipUnless(EDITOR.is_file() and CLOSED.is_file(), "tunnel fixtures missing")
@@ -54,19 +61,42 @@ class TunnelFrameHelpersTest(unittest.TestCase):
         self.assertGreater(box[1], HEADING[1] + 97)
 
     def test_remove_centre_hits_the_minus_glyph(self):
-        x, y = module.tunnel_remove_centre(HEADING, 1280)
-        self.assertEqual((x, y), (299, 556))
-        width, _h, channels, rows = module._read_png(EDITOR)
-        glyph = [
-            (gx, gy) for gy in range(y - 4, y + 5) for gx in range(x - 6, x + 7)
-            if rows[gy][gx * channels] > 100
-        ]
-        self.assertTrue(glyph, "no light minus glyph near the remove target")
-        self.assertLess(x, 545, "remove target must be inside the list card")
+        # Outlined "+" x 253..280 and "−" x 285..312 (_read_png), y 544..566
+        # on the old layout, 581..603 on the new one.
+        for frame, heading, top in ((EDITOR, HEADING, 544), (NEW_EDITOR, NEW_HEADING, 581)):
+            with self.subTest(frame=frame.name):
+                plus, minus = module.tunnel_list_buttons(frame, heading, 1280)
+                print(f"list buttons {frame.name}: + {plus} - {minus}", flush=True)
+                self.assertEqual((plus[1], plus[3]), (top, top + 23))
+                self.assertEqual(minus[1:], (top, 313, top + 23))
+                x, y = module.tunnel_remove_centre(frame, heading, 1280)
+                self.assertTrue(minus[0] < x < minus[2] and minus[1] < y < minus[3])
+                width, _h, channels, rows = module._read_png(frame)
+                glyph = [
+                    (gx, gy) for gy in range(y - 4, y + 5) for gx in range(x - 6, x + 7)
+                    if rows[gy][gx * channels] > 100
+                ]
+                self.assertTrue(glyph, "no light minus glyph near the remove target")
+                self.assertLess(x, 545, "remove target must be inside the list card")
+                ax, ay = module.tunnel_add_centre(frame, heading, 1280)
+                self.assertEqual(ay, y)
+                self.assertTrue(plus[0] < ax < plus[2] and ax < x - 20, (ax, x))
+
+    def test_list_buttons_absent_without_manager(self):
+        self.assertIsNone(module.tunnel_list_buttons(CLOSED, HEADING, 1280))
+        with self.assertRaisesRegex(RuntimeError, "no \\+/- buttons"):
+            module.tunnel_remove_centre(CLOSED, HEADING, 1280)
 
     def test_listen_input_centre_inside_input(self):
-        x, y = module.listen_input_centre(HEADING, 1280)
-        self.assertTrue(719 <= x <= 1023 and 287 <= y <= 310, (x, y))
+        for label, (y1, y2) in ((OLD_LISTEN_LABEL, (287, 310)), (NEW_LISTEN_LABEL, (332, 355))):
+            x, y = module.listen_input_centre(label, 1280)
+            self.assertTrue(719 <= x <= 1023 and y1 + 4 <= y <= y2 - 4, (x, y))
+
+    def test_save_fill_found_on_new_layout_frame(self):
+        (x, y), box = module.tunnel_save_button(NEW_EDITOR, NEW_HEADING, 1280)
+        # Measured Save button 984..1035 x 624..647.
+        self.assertEqual(box, (984, 624, 1035, 647))
+        self.assertEqual((x, y), (1009, 635))
 
     def test_notice_region_left_of_cancel(self):
         _xy, box = module.tunnel_save_button(EDITOR, HEADING, 1280)
@@ -105,8 +135,11 @@ class LightLocateTest(unittest.TestCase):
     def test_minimum_window_geometry(self):
         left, dialog = module.tunnel_dialog_left(960)
         self.assertEqual((left, dialog), (60, 840))
-        row = module.listen_port_row_region((89, 40, 207, 48), 960)
-        self.assertTrue(row[0] > left + 325 and row[2] <= 960, row)
+        # Label column at the narrowest dialog: x 409..537, label OCR ~414.
+        row = module.listen_port_row_region((414, 200, 484, 204), 960)
+        self.assertTrue(left + 325 < row[0] < left + 337 + 12 + 128 and row[2] <= 960, row)
+        region = module.tunnel_editor_label_region((89, 40, 207, 48), 960, 640)
+        self.assertEqual(region, (391, 40, 557, 640))
 
 
 class SavedForwardsTest(unittest.TestCase):
