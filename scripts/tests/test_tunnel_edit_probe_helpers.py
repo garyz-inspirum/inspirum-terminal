@@ -42,6 +42,10 @@ NEW_EDITOR = FIXTURES / "connected-tunnels-editor-selected-alpha-52241-host.png"
 NEW_HEADING = (249, 188, 367, 196)
 OLD_LISTEN_LABEL = (574, 292, 644, 296)
 NEW_LISTEN_LABEL = (574, 336, 644, 340)
+# Session-dropdown step, nothing selected: "−" (and Save) disabled, each
+# 4 px taller, the centred dialog 8 px taller (top 124 vs 128).
+DROPDOWN_PLUS = FIXTURES / "connected-tunnels-dropdown-plus.png"
+DROPDOWN_HEADING = (249, 184, 367, 192)
 
 
 @unittest.skipUnless(EDITOR.is_file() and CLOSED.is_file(), "tunnel fixtures missing")
@@ -81,6 +85,56 @@ class TunnelFrameHelpersTest(unittest.TestCase):
                 ax, ay = module.tunnel_add_centre(frame, heading, 1280)
                 self.assertEqual(ay, y)
                 self.assertTrue(plus[0] < ax < plus[2] and ax < x - 20, (ax, x))
+
+    def test_both_enabled_on_selected_frame(self):
+        # A forward is selected: "+" and "−" both enabled 28x23, fill 30.
+        (plus, plus_on), (minus, minus_on) = module.tunnel_list_button_states(
+            NEW_EDITOR, NEW_HEADING, 1280)
+        self.assertEqual((plus, minus), ((254, 581, 281, 604), (286, 581, 313, 604)))
+        self.assertTrue(plus_on and minus_on)
+        self.assertEqual(module.tunnel_add_centre(NEW_EDITOR, NEW_HEADING, 1280), (267, 592))
+        self.assertEqual(module.tunnel_remove_centre(NEW_EDITOR, NEW_HEADING, 1280), (299, 592))
+
+    @unittest.skipUnless(DROPDOWN_PLUS.is_file(), "dropdown fixture missing")
+    def test_add_found_beside_disabled_remove(self):
+        # Nothing selected: "+" enabled 28x23 (fill 30), "−" disabled 28x27
+        # (same border luma 68, fill = card 25); bottoms differ by 4 px.
+        (plus, plus_on), (minus, minus_on) = module.tunnel_list_button_states(
+            DROPDOWN_PLUS, DROPDOWN_HEADING, 1280)
+        self.assertEqual(plus, (254, 577, 281, 600))
+        self.assertEqual(minus, (286, 577, 313, 604))
+        self.assertTrue(plus_on)
+        self.assertFalse(minus_on)
+        x, y = module.tunnel_add_centre(DROPDOWN_PLUS, DROPDOWN_HEADING, 1280)
+        self.assertEqual((x, y), (267, 588))
+        self.assertTrue(plus[0] < x < plus[2] and plus[1] < y < plus[3])
+        _w, _h, channels, rows = module._read_png(DROPDOWN_PLUS)
+        self.assertGreater(rows[y][x * channels], 150, "add target is not on the + glyph")
+
+    @unittest.skipUnless(DROPDOWN_PLUS.is_file(), "dropdown fixture missing")
+    def test_remove_refuses_disabled_minus(self):
+        # Found, but disabled: a click would be a silent no-op, so this is a
+        # different error from "no buttons".
+        with self.assertRaisesRegex(RuntimeError, "remove .* is disabled"):
+            module.tunnel_remove_centre(DROPDOWN_PLUS, DROPDOWN_HEADING, 1280)
+
+    def test_fill_rule_rejects_neither_rendering(self):
+        # 6x6-px boxes on a synthetic card: interior +5 = enabled, +0 =
+        # disabled, +2 = neither (raises rather than guessing).
+        def image(fill):
+            rows = []
+            for y in range(20):
+                row = bytearray()
+                for x in range(20):
+                    v = fill if 8 <= x < 18 and 4 <= y < 16 else 25
+                    row += bytes((v, v, v))
+                rows.append(row)
+            return 20, 20, 3, rows
+        box = (8, 4, 18, 16)
+        self.assertTrue(module.tunnel_list_button_enabled(image(30), box))
+        self.assertFalse(module.tunnel_list_button_enabled(image(25), box))
+        with self.assertRaisesRegex(RuntimeError, "neither enabled nor disabled"):
+            module.tunnel_list_button_enabled(image(27), box)
 
     def test_list_buttons_absent_without_manager(self):
         self.assertIsNone(module.tunnel_list_buttons(CLOSED, HEADING, 1280))

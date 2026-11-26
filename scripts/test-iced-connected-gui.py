@@ -1415,14 +1415,29 @@ def listen_input_centre(listen_label_bounds, width: int) -> tuple[int, int]:
     return ((x1 + x2) // 2, cy + TUNNEL_INPUT_CENTRE_DY)
 
 
-# The "+" / "−" pair under the tunnel list: two outlined 28x23 buttons 4 px
-# apart (border luma 68 on card 25, fill 30). Measured with _read_png:
-# "+" x 253..280, "−" x 285..312; y 544..566 (old layout) and 581..603 (new
-# layout), i.e. 358 px below the list top in both.
+# The "+" / "−" pair under the tunnel list: two outlined boxes 4 px apart,
+# tops aligned (iced row, top-aligned), border luma 68 on the card's 25.
+# Measured with _read_png at 1280x800 (dark):
+#   enabled  (src/iced_app.rs `action`: size 13, padding [3, 10], quiet
+#            Active): 28x23, fill luma 30 (p.list), glyph luma 191.
+#            "+" x 253..280, "−" x 285..312; y 544..566 (old layout),
+#            581..603 (new layout).
+#   disabled (`button(text("−"))` without on_press: default size/padding,
+#            quiet Disabled): 28x27, SAME border luma 68, fill = card luma
+#            25 (p.dock), glyph luma 170 (p.muted). Nothing selected:
+#            "+" 253..280 x 577..599 (enabled), "−" 285..312 x 577..603.
+# The disabled box is 4 px taller, so the two boxes' bottoms differ; each
+# box closes on its own bottom run. Enabled vs disabled is read from the
+# fill: enabled is lighter than the card, disabled equals it.
 TUNNEL_LIST_BUTTON_BORDER = (50, 100)
 TUNNEL_LIST_BUTTON_W = (18, 40)
 TUNNEL_LIST_BUTTON_H = (18, 28)
 TUNNEL_LIST_BUTTON_GAP = (1, 10)
+# Interior-minus-card luma: >= this is an enabled (p.list) fill, within
+# TUNNEL_LIST_BUTTON_FLAT of 0 the disabled (p.dock = card) fill; anything
+# else is neither rendering and raises.
+TUNNEL_LIST_BUTTON_ENABLED_DELTA = 3
+TUNNEL_LIST_BUTTON_FLAT = 1
 
 
 def _border_runs(row, channels, x1, x2):
@@ -1442,13 +1457,40 @@ def _border_runs(row, channels, x1, x2):
     return runs
 
 
-def tunnel_list_buttons(path: Path, heading_bounds, width: int, *, image=None):
-    """``(plus_box, minus_box)`` of the "+" / "−" pair under the tunnel
-    list, found from pixels inside the list card below the located heading,
-    or ``None``. A pair is two outlined boxes side by side whose top and
-    bottom border runs match. More than one pair raises: the target would
-    be a guess."""
-    img_w, img_h, channels, rows = image or _read_png(path)
+def _luma_at(rows, channels, x, y):
+    row = rows[y]
+    return (row[x * channels] * 299 + row[x * channels + 1] * 587 + row[x * channels + 2] * 114) // 1000
+
+
+def tunnel_list_button_enabled(image, box) -> bool:
+    """Whether the outlined list button ``box`` is drawn enabled (quiet
+    Active: fill lighter than the card) or disabled (quiet Disabled: fill
+    equal to the card). Interior median vs the card just left of the box;
+    raises when the fill is neither (hovered, pressed, another widget)."""
+    _w, _h, channels, rows = image
+    x1, y1, x2, y2 = box
+    ys = range(y1 + 3, y2 - 3)
+    inside = sorted(_luma_at(rows, channels, x, y) for y in ys for x in range(x1 + 3, x2 - 3))
+    card = sorted(_luma_at(rows, channels, x, y) for y in ys for x in range(max(0, x1 - 3), x1 - 1))
+    if not inside or not card:
+        raise RuntimeError(f"list button {box} too small to read its fill")
+    delta = inside[len(inside) // 2] - card[len(card) // 2]
+    if delta >= TUNNEL_LIST_BUTTON_ENABLED_DELTA:
+        return True
+    if abs(delta) <= TUNNEL_LIST_BUTTON_FLAT:
+        return False
+    raise RuntimeError(f"list button {box}: fill luma {delta:+d} vs card is neither enabled nor disabled")
+
+
+def tunnel_list_button_states(path: Path, heading_bounds, width: int, *, image=None):
+    """``((plus_box, plus_enabled), (minus_box, minus_enabled))`` for the
+    "+" / "−" pair under the tunnel list, found from pixels inside the list
+    card below the located heading, or ``None``. A pair is two outlined
+    boxes side by side, tops on the same row, 1..10 px apart, each closed by
+    a bottom border run of its own width 18..28 px lower (enabled 23,
+    disabled 27). More than one pair raises: the target would be a guess."""
+    image = image or _read_png(path)
+    img_w, img_h, channels, rows = image
     left, _dialog = tunnel_dialog_left(width)
     x1 = max(0, left + 12)
     x2 = min(img_w, left + TUNNEL_EDITOR_CARD_DX - 6)
@@ -1460,38 +1502,63 @@ def tunnel_list_buttons(path: Path, heading_bounds, width: int, *, image=None):
             runs_at[y] = _border_runs(rows[y], channels, x1, x2)
         return runs_at[y]
 
+    def bottom_of(run, y):
+        for y2 in range(y + TUNNEL_LIST_BUTTON_H[0], min(img_h, y + TUNNEL_LIST_BUTTON_H[1] + 1)):
+            if any(abs(c[0] - run[0]) <= 1 and abs(c[1] - run[1]) <= 1 for c in runs(y2)):
+                return y2
+        return None
+
     for y in range(max(0, heading_bounds[3]), min(img_h, heading_bounds[1] + 560)):
         top = runs(y)
         for a, b in zip(top, top[1:]):
             if not TUNNEL_LIST_BUTTON_GAP[0] <= b[0] - a[1] <= TUNNEL_LIST_BUTTON_GAP[1]:
                 continue
-            for y2 in range(y + TUNNEL_LIST_BUTTON_H[0], min(img_h, y + TUNNEL_LIST_BUTTON_H[1] + 1)):
-                bottom = runs(y2)
-                if any(abs(c[0] - a[0]) <= 1 and abs(c[1] - a[1]) <= 1 for c in bottom) and \
-                        any(abs(c[0] - b[0]) <= 1 and abs(c[1] - b[1]) <= 1 for c in bottom):
-                    pairs.append(((a[0], y, a[1] + 1, y2 + 1), (b[0], y, b[1] + 1, y2 + 1)))
-                    break
+            ya, yb = bottom_of(a, y), bottom_of(b, y)
+            if ya is not None and yb is not None:
+                pairs.append(((a[0], y, a[1] + 1, ya + 1), (b[0], y, b[1] + 1, yb + 1)))
     if not pairs:
         return None
     if len(pairs) > 1:
         raise RuntimeError(f"several +/- button pairs under the tunnel list in {path}: {pairs}")
-    return pairs[0]
+    plus, minus = pairs[0]
+    return ((plus, tunnel_list_button_enabled(image, plus)),
+            (minus, tunnel_list_button_enabled(image, minus)))
+
+
+def tunnel_list_buttons(path: Path, heading_bounds, width: int, *, image=None):
+    """``(plus_box, minus_box)`` of the "+" / "−" pair (either may be the
+    disabled rendering), or ``None``; see ``tunnel_list_button_states``."""
+    found = tunnel_list_button_states(path, heading_bounds, width, image=image)
+    return None if found is None else (found[0][0], found[1][0])
 
 
 def tunnel_remove_centre(path: Path, heading_bounds, width: int) -> tuple[int, int]:
-    """Centre of the "−" (remove) box found by ``tunnel_list_buttons``."""
-    found = tunnel_list_buttons(path, heading_bounds, width)
+    """Centre of the "−" (remove) box. Requires it ENABLED: the product
+    builds it without on_press when no saved forward is selected, and a
+    click on that is a silent no-op."""
+    found = tunnel_list_button_states(path, heading_bounds, width)
     if found is None:
         raise RuntimeError(f"no +/- buttons under the tunnel list in {path}")
-    return center(found[1])
+    (_plus, _plus_on), (minus, minus_on) = found
+    if not minus_on:
+        raise RuntimeError(
+            f"remove (−) button {minus} is disabled (no saved forward selected) in {path}; "
+            f"clicking it would do nothing"
+        )
+    return center(minus)
 
 
 def tunnel_add_centre(path: Path, heading_bounds, width: int) -> tuple[int, int]:
-    """Centre of the "+" (add) box found by ``tunnel_list_buttons``."""
-    found = tunnel_list_buttons(path, heading_bounds, width)
+    """Centre of the "+" (add) box. "+" must be enabled; the "−" beside it
+    (which proves this is the list's +/- pair) may be either rendering:
+    with nothing selected it is disabled."""
+    found = tunnel_list_button_states(path, heading_bounds, width)
     if found is None:
         raise RuntimeError(f"no +/- buttons under the tunnel list in {path}")
-    return center(found[0])
+    (plus, plus_on), _minus = found
+    if not plus_on:
+        raise RuntimeError(f"add (+) button {plus} is disabled (no saved profile?) in {path}")
+    return center(plus)
 
 
 def primary_fill_run(path: Path, y: int, x1: int, x2: int, *, min_width: int = 30,
@@ -6962,6 +7029,12 @@ async def main() -> int:
                         command("xdotool", "mousemove", "--window", window,
                                 *map(str, center(footer)), "click", "1", env=env)
                         await asyncio.sleep(.6)
+                        # A new opening may lay the dialog out a few px
+                        # differently (disabled "−"/Save are 4 px taller
+                        # than enabled ones; the dialog is centred), and
+                        # its heading box may still equal an earlier
+                        # opening's: never reuse a label located in another.
+                        listen_labels.clear()
                         return await locate_rendered_label(
                             window, destination / f"connected-tunnels-{tag}-manager.png",
                             "Tunnel Manager", env=env, timeout=15,
