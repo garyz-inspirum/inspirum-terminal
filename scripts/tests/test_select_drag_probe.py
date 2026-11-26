@@ -36,13 +36,14 @@ def logged_echo_lines() -> tuple:
 class ProbeDesignTest(unittest.TestCase):
     def test_reply_and_target_column(self):
         reply = gui.select_probe_reply()
-        self.assertEqual(reply, "NATIVE_ECHO:SELROW DRAGPROBE PAD TO COL42 echo:SEL_OK")
+        self.assertEqual(reply, "NATIVE_ECHO:SELROW DRAGPROBE PAD TO COL42 echo:SEL_OK=G")
         col = gui.reply_column(reply, gui.SELECT_PROBE_TARGET)
         self.assertEqual(col, 42)
-        self.assertGreaterEqual(col, 40)
-        # Target ends the line: last cell is column 52, the final column.
-        self.assertEqual(col + len(gui.SELECT_PROBE_TARGET) - 1, len(reply) - 1)
-        self.assertEqual(len(reply), 53)
+        self.assertEqual(col + len(gui.SELECT_PROBE_TARGET) - 1, 52)
+        # Printable non-space guard right after the target (columns 53..54).
+        self.assertEqual(reply[53:], "=G")
+        self.assertTrue(reply[53].isprintable() and not reply[53].isspace())
+        self.assertEqual(len(reply), 55)
 
     def test_anchor_is_one_word_at_column_19(self):
         reply = gui.select_probe_reply()
@@ -53,6 +54,7 @@ class ProbeDesignTest(unittest.TestCase):
         lines = logged_echo_lines()
         self.assertIn(gui.SELECT_PROBE_LINE, lines)
         self.assertIn(gui.SELECT_PROBE_TARGET, lines)
+        self.assertIn(gui.SELECT_CLICK_SENTINEL, lines)
         self.assertEqual(gui.LOGGED_ECHO_LINES, lines)
 
     def test_reply_column_rejects_repeats(self):
@@ -93,23 +95,93 @@ class CellGeometryTest(unittest.TestCase):
             gui.drag_select_points(0, 0, cell_w=1.0)
 
 
-class MismatchTest(unittest.TestCase):
-    def test_exact_and_probe_lines_are_not_misses(self):
-        self.assertIsNone(gui.selection_paste_mismatch("echo:SEL_OK"))
-        self.assertIsNone(gui.selection_paste_mismatch(gui.SELECT_PROBE_LINE))
-        self.assertIsNone(gui.selection_paste_mismatch("echo:TERMINAL_OWNED"))
+class SeedClipboardTest(unittest.TestCase):
+    def test_missing_xclip_raises_fixed_message(self):
+        from unittest import mock
+        with mock.patch.object(gui.shutil, "which", return_value=None):
+            with self.assertRaises(RuntimeError) as ctx:
+                gui.seed_clipboard("hunter2 secret", {})
+        self.assertNotIn("hunter2", str(ctx.exception))
 
-    def test_near_misses_are_named(self):
-        for line in ("cho:SEL_OK", "ho:SEL_OK", "echo:SEL_O", " echo:SEL_OK",
-                     "2 echo:SEL_OK"):
-            self.assertEqual(
-                gui.selection_paste_mismatch(line),
-                f"SELECTION_PASTE_MISMATCH {line!r}",
-            )
+    def test_readback_mismatch_names_lengths_only(self):
+        from unittest import mock
+        ok = mock.Mock(returncode=0, stdout=b"other clipboard text")
+        with mock.patch.object(gui.shutil, "which", return_value="/usr/bin/xclip"), \
+                mock.patch.object(gui.subprocess, "run", return_value=ok):
+            with self.assertRaises(RuntimeError) as ctx:
+                gui.seed_clipboard("echo:CLICK_SENTINEL", {})
+        msg = str(ctx.exception)
+        self.assertNotIn("other clipboard", msg)
+        self.assertNotIn("CLICK_SENTINEL", msg)
+        self.assertIn("20 bytes", msg)
 
-    def test_paste_lines_parse(self):
-        log = "SESSION_OPEN\nSELECTION_PASTE_LINE 'echo:SEL_OK'\nX\nSELECTION_PASTE_LINE 'S'\n"
-        self.assertEqual(gui.selection_paste_lines(log), ["'echo:SEL_OK'", "'S'"])
+    def test_seed_uses_devnull_and_stdin(self):
+        from unittest import mock
+        calls = []
+
+        def fake_run(args, **kw):
+            calls.append((args, kw))
+            return mock.Mock(returncode=0, stdout=b"echo:CLICK_SENTINEL")
+        with mock.patch.object(gui.shutil, "which", return_value="/usr/bin/xclip"), \
+                mock.patch.object(gui.subprocess, "run", side_effect=fake_run):
+            gui.seed_clipboard("echo:CLICK_SENTINEL", {"DISPLAY": ":99"})
+        args, kw = calls[0]
+        self.assertEqual(args, ["xclip", "-selection", "clipboard", "-in"])
+        self.assertEqual(kw["input"], b"echo:CLICK_SENTINEL")
+        self.assertIs(kw["stdout"], gui.subprocess.DEVNULL)
+        self.assertIs(kw["stderr"], gui.subprocess.DEVNULL)
+        self.assertIn("timeout", kw)
+        self.assertEqual(calls[1][0], ["xclip", "-selection", "clipboard", "-o"])
+
+
+class ClassifyPasteTest(unittest.TestCase):
+    def test_target_and_sentinel(self):
+        self.assertEqual(gui.classify_selection_paste("echo:SEL_OK"), "SELECTION_PASTE_OK")
+        self.assertEqual(gui.classify_selection_paste("echo:CLICK_SENTINEL"),
+                         "SELECTION_PASTE_SENTINEL")
+
+    def test_empty(self):
+        self.assertEqual(gui.classify_selection_paste(""), "SELECTION_PASTE_EMPTY")
+
+    def test_near_misses_name_columns(self):
+        cases = {
+            "cho:SEL_O": "SELECTION_PASTE_MISMATCH cols 43..51",  # old 8 px bug
+            "echo:SEL_O": "SELECTION_PASTE_MISMATCH cols 42..51",
+            " echo:SEL_OK": "SELECTION_PASTE_MISMATCH cols 41..52",
+            "2 echo:SEL_OK": "SELECTION_PASTE_MISMATCH cols 40..52",
+            # One-cell overrun now picks up the guard.
+            "echo:SEL_OK=": "SELECTION_PASTE_MISMATCH cols 42..53",
+            "cho:SEL_OK=": "SELECTION_PASTE_MISMATCH cols 43..53",
+        }
+        for line, marker in cases.items():
+            self.assertEqual(gui.classify_selection_paste(line), marker, line)
+
+    def test_unknown_never_contains_input(self):
+        self.assertEqual(gui.classify_selection_paste("hunter2 secret"),
+                         "SELECTION_PASTE_UNKNOWN len=14")
+        for line in ("hunter2 secret", "echo:TERMINAL_OWNED", "zz echo:SEL_OK"):
+            marker = gui.classify_selection_paste(line)
+            self.assertTrue(marker.startswith("SELECTION_PASTE_UNKNOWN len="), line)
+            self.assertNotIn(line, marker)
+
+    def test_repeated_substring_is_unknown(self):
+        # "E" occurs several times in the reply row: no unique columns.
+        self.assertEqual(gui.classify_selection_paste("E"), "SELECTION_PASTE_UNKNOWN len=1")
+
+    def test_markers_parse_in_order(self):
+        log = ("SESSION_OPEN\nSELECTION_PASTE_OK\nNATIVE_ECHO:SEL_OK\n"
+               "SELECTION_PASTE_MISMATCH cols 43..51\nSELECTION_PASTE_UNKNOWN len=3\n"
+               "SELECTION_PASTE_SENTINEL\nSELECTION_PASTE_EMPTY\n")
+        self.assertEqual(gui.selection_paste_markers(log), [
+            "SELECTION_PASTE_OK", "SELECTION_PASTE_MISMATCH cols 43..51",
+            "SELECTION_PASTE_UNKNOWN len=3", "SELECTION_PASTE_SENTINEL",
+            "SELECTION_PASTE_EMPTY",
+        ])
+
+    def test_fixture_never_logs_received_text(self):
+        text = SOURCE.read_text(encoding="utf-8")
+        self.assertNotIn("SELECTION_PASTE_" + "LINE", text)
+        self.assertNotIn("selection_paste_" + "mismatch(", text)
 
 
 if __name__ == "__main__":
