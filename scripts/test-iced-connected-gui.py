@@ -65,6 +65,7 @@ LOGGED_ECHO_LINES = (
     # the trailing "=G" is a guard that makes a one-cell overrun visible).
     "echo:SELROW DRAGPROBE PAD TO COL42 echo:SEL_OK=G",
     "echo:SEL_OK",
+    "echo:CLICK_SENTINEL",
 )
 
 # Opt-in duplicate-tab step: double-clicking an already-open saved session
@@ -507,6 +508,40 @@ def selection_paste_markers(log_text: str) -> list[str]:
     """Ordered classify_selection_paste markers in the event log."""
     return [line for line in log_text.splitlines()
             if line.split(" ", 1)[0] in SELECTION_PASTE_MARKERS]
+
+
+def seed_clipboard(text: str, env: dict[str, str]) -> None:
+    """Own the X CLIPBOARD with ``text`` via xclip, independently of the app.
+
+    xclip forks a selection owner that stays alive; its stdout/stderr go to
+    DEVNULL so it holds no pipe of ours and this call returns. Verified by
+    reading the clipboard back; errors name lengths only, never contents.
+    """
+    if shutil.which("xclip") is None:
+        raise RuntimeError("seed_clipboard: xclip not installed")
+    try:
+        result = subprocess.run(
+            ["xclip", "-selection", "clipboard", "-in"], input=text.encode("utf-8"),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("seed_clipboard: xclip -in timed out") from None
+    if result.returncode != 0:
+        raise RuntimeError(f"seed_clipboard: xclip -in exited {result.returncode}")
+    try:
+        readback = subprocess.run(
+            ["xclip", "-selection", "clipboard", "-o"], stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, env=env, timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("seed_clipboard: xclip -o timed out") from None
+    if readback.returncode != 0:
+        raise RuntimeError(f"seed_clipboard: xclip -o exited {readback.returncode}")
+    if readback.stdout != text.encode("utf-8"):
+        raise RuntimeError(
+            f"seed_clipboard: clipboard read back {len(readback.stdout)} bytes that do not "
+            f"match the {len(text.encode('utf-8'))}-byte seed"
+        )
 
 
 def latest_pty_sizes(log_text: str) -> dict[int, tuple[int, int, int]]:
@@ -4262,22 +4297,22 @@ async def main() -> int:
                     finally:
                         probe_state["select_capture"] = None
 
-                async def wait_select_done(expected: int, tag: str) -> None:
+                async def wait_select_done(token: str, expected: int, tag: str) -> None:
                     deadline = time.monotonic() + 10 * TIME_SCALE
-                    while select_log().splitlines().count(select_done) < expected:
+                    while select_log().splitlines().count(token) < expected:
                         if time.monotonic() >= deadline:
                             shot = destination / "connected-select-timeout.png"
                             await asyncio.to_thread(screenshot, window, shot, env)
                             raise RuntimeError(
-                                f"selection probe ({tag}): {select_done} not logged "
+                                f"selection probe ({tag}): {token} not logged "
                                 f"{expected} time(s); {select_where}; screenshot {shot.name}"
                             )
                         await asyncio.sleep(.2)
                     await asyncio.sleep(.3 * TIME_SCALE)
-                    got = select_log().splitlines().count(select_done)
+                    got = select_log().splitlines().count(token)
                     if got != expected:
                         raise RuntimeError(
-                            f"selection probe ({tag}): {select_done} logged {got} times, "
+                            f"selection probe ({tag}): {token} logged {got} times, "
                             f"expected {expected}; {select_where}"
                         )
 
@@ -4293,20 +4328,27 @@ async def main() -> int:
                         f"selection probe (drag): shell received {received}, expected "
                         f"SELECTION_PASTE_OK ({SELECT_PROBE_TARGET!r}); {select_where}"
                     )
-                await wait_select_done(1, "drag")
+                await wait_select_done(select_done, 1, "drag")
                 print(
                     f"PASS drag selection: shell received {received} ({select_where})",
                     flush=True,
                 )
 
                 # Negative control: a plain click (no motion) on the same row
-                # must select nothing. Ctrl+Shift+C with no selection leaves
-                # the clipboard untouched (CopySelection only writes when
-                # selected_terminal_text is Some), so the paste must resend
-                # exactly echo:SEL_OK. A click that selected any cell would
-                # replace the clipboard with that cell's text and the shell
-                # would receive something else. Limit: a click that kept the
-                # previous drag selection would also resend echo:SEL_OK.
+                # must clear the selection and select nothing. Make a fresh
+                # selection of echo:SEL_OK without copying it, then seed the
+                # CLIPBOARD independently of the app with a sentinel (xclip).
+                # After the click, Ctrl+Shift+C must not write (CopySelection
+                # only writes when selected_terminal_text is Some), so the
+                # paste must deliver the sentinel. SELECTION_PASTE_OK means
+                # the click left the fresh selection in place and copy
+                # rewrote the clipboard with it; a MISMATCH marker means the
+                # click itself selected cells.
+                await drag_horizontal(window, env, press_x, release_x, select_y)
+                await asyncio.to_thread(
+                    screenshot, window, destination / "connected-select-fresh.png", env,
+                )
+                await asyncio.to_thread(seed_clipboard, SELECT_CLICK_SENTINEL, env)
                 click_col = select_col + 3
                 click_x = round(cell_x(click_col, .5))
                 command("xdotool", "mousemove", "--window", window,
@@ -4316,16 +4358,29 @@ async def main() -> int:
                     screenshot, window, destination / "connected-select-click.png", env,
                 )
                 received = await select_paste_round("plain click")
-                if received != "SELECTION_PASTE_OK":
+                click_where = (f"plain click at ({click_x}, {select_y}), column {click_col}, "
+                               f"after a fresh drag over {select_where}")
+                if received == "SELECTION_PASTE_OK":
                     raise RuntimeError(
-                        f"selection probe (plain click at ({click_x}, {select_y}), column "
-                        f"{click_col}): clipboard changed, shell received {received} instead "
-                        f"of SELECTION_PASTE_OK, so the click selected text"
+                        f"selection probe ({click_where}): shell received {received}, so the "
+                        f"click left the previous selection in place and Ctrl+Shift+C rewrote "
+                        f"the seeded clipboard with it"
                     )
-                await wait_select_done(2, "plain click")
+                if received.startswith("SELECTION_PASTE_MISMATCH"):
+                    raise RuntimeError(
+                        f"selection probe ({click_where}): shell received {received}, so the "
+                        f"click selected cells and Ctrl+Shift+C copied them"
+                    )
+                if received != "SELECTION_PASTE_SENTINEL":
+                    raise RuntimeError(
+                        f"selection probe ({click_where}): shell received {received}, expected "
+                        f"SELECTION_PASTE_SENTINEL (the xclip-seeded clipboard)"
+                    )
+                await wait_select_done("NATIVE_ECHO:CLICK_SENTINEL", 1, "plain click")
+                await wait_select_done(select_done, 1, "plain click")
                 print(
-                    f"PASS plain click selects nothing: clipboard still {received} after a "
-                    f"click at ({click_x}, {select_y})",
+                    f"PASS plain click clears the selection: seeded sentinel survived "
+                    f"Ctrl+Shift+C after a click at ({click_x}, {select_y})",
                     flush=True,
                 )
 

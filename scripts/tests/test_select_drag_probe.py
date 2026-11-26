@@ -54,6 +54,7 @@ class ProbeDesignTest(unittest.TestCase):
         lines = logged_echo_lines()
         self.assertIn(gui.SELECT_PROBE_LINE, lines)
         self.assertIn(gui.SELECT_PROBE_TARGET, lines)
+        self.assertIn(gui.SELECT_CLICK_SENTINEL, lines)
         self.assertEqual(gui.LOGGED_ECHO_LINES, lines)
 
     def test_reply_column_rejects_repeats(self):
@@ -92,6 +93,45 @@ class CellGeometryTest(unittest.TestCase):
     def test_points_raise_when_rounding_leaves_cell(self):
         with self.assertRaises(ValueError):
             gui.drag_select_points(0, 0, cell_w=1.0)
+
+
+class SeedClipboardTest(unittest.TestCase):
+    def test_missing_xclip_raises_fixed_message(self):
+        from unittest import mock
+        with mock.patch.object(gui.shutil, "which", return_value=None):
+            with self.assertRaises(RuntimeError) as ctx:
+                gui.seed_clipboard("hunter2 secret", {})
+        self.assertNotIn("hunter2", str(ctx.exception))
+
+    def test_readback_mismatch_names_lengths_only(self):
+        from unittest import mock
+        ok = mock.Mock(returncode=0, stdout=b"other clipboard text")
+        with mock.patch.object(gui.shutil, "which", return_value="/usr/bin/xclip"), \
+                mock.patch.object(gui.subprocess, "run", return_value=ok):
+            with self.assertRaises(RuntimeError) as ctx:
+                gui.seed_clipboard("echo:CLICK_SENTINEL", {})
+        msg = str(ctx.exception)
+        self.assertNotIn("other clipboard", msg)
+        self.assertNotIn("CLICK_SENTINEL", msg)
+        self.assertIn("20 bytes", msg)
+
+    def test_seed_uses_devnull_and_stdin(self):
+        from unittest import mock
+        calls = []
+
+        def fake_run(args, **kw):
+            calls.append((args, kw))
+            return mock.Mock(returncode=0, stdout=b"echo:CLICK_SENTINEL")
+        with mock.patch.object(gui.shutil, "which", return_value="/usr/bin/xclip"), \
+                mock.patch.object(gui.subprocess, "run", side_effect=fake_run):
+            gui.seed_clipboard("echo:CLICK_SENTINEL", {"DISPLAY": ":99"})
+        args, kw = calls[0]
+        self.assertEqual(args, ["xclip", "-selection", "clipboard", "-in"])
+        self.assertEqual(kw["input"], b"echo:CLICK_SENTINEL")
+        self.assertIs(kw["stdout"], gui.subprocess.DEVNULL)
+        self.assertIs(kw["stderr"], gui.subprocess.DEVNULL)
+        self.assertIn("timeout", kw)
+        self.assertEqual(calls[1][0], ["xclip", "-selection", "clipboard", "-o"])
 
 
 class ClassifyPasteTest(unittest.TestCase):
