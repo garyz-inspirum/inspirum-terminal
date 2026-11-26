@@ -2236,6 +2236,33 @@ const TUNNEL_MOVE_DUPLICATE: &str = "The target session already has this forward
 const TUNNEL_SESSION_PLACEHOLDER: &str = "Type to search sessions";
 /// Popup height of the session picker; it scrolls beyond this.
 const TUNNEL_SESSION_MENU_HEIGHT: f32 = 240.0;
+/// Dropdown chevron drawn over the right end of the session picker input.
+const TUNNEL_SESSION_CHEVRON_SIZE: f32 = 12.0;
+/// Gap between the chevron and the field's right border.
+const TUNNEL_SESSION_CHEVRON_INSET: f32 = 5.0;
+/// Input padding: text keeps clear of the chevron; the vertical padding (and
+/// so the 23 px row height) matches the plain text inputs.
+const TUNNEL_SESSION_INPUT_PADDING: iced::Padding = iced::Padding {
+    top: 3.0,
+    right: 6.0 + TUNNEL_SESSION_CHEVRON_SIZE + TUNNEL_SESSION_CHEVRON_INSET,
+    bottom: 3.0,
+    left: 6.0,
+};
+
+// The chevron sits inside the input's right padding, clear of the text.
+const _: () = assert!(
+    TUNNEL_SESSION_INPUT_PADDING.right
+        >= TUNNEL_SESSION_CHEVRON_SIZE + TUNNEL_SESSION_CHEVRON_INSET
+);
+
+/// Characters of the selected session shown in a `field` px value column:
+/// the chevron's reserve is taken from the text budget.
+fn tunnel_session_field_chars(field: f32) -> usize {
+    chars_fitting(
+        field - TUNNEL_SESSION_CHEVRON_SIZE - TUNNEL_SESSION_CHEVRON_INSET,
+        12.0,
+    )
+}
 
 /// Separator between folder segments and the session name in the picker.
 const TUNNEL_SESSION_PATH_SEPARATOR: &str = " / ";
@@ -10130,7 +10157,7 @@ impl App {
                 label: truncate(&option.label, field_chars),
                 key: option.key.clone(),
             });
-        combo_box(
+        let picker = combo_box(
             &self.tunnel_session_picker,
             TUNNEL_SESSION_PLACEHOLDER,
             selected.as_ref(),
@@ -10139,10 +10166,27 @@ impl App {
         .input_style(flat_input)
         .menu_style(tunnel_session_menu_style)
         .size(13)
-        .padding([3, 6])
+        .padding(TUNNEL_SESSION_INPUT_PADDING)
         .width(Fill)
-        .menu_height(TUNNEL_SESSION_MENU_HEIGHT)
-        .into()
+        .menu_height(TUNNEL_SESSION_MENU_HEIGHT);
+        // Dropdown affordance inside the field's right padding. The icon
+        // canvas neither captures events nor reports a mouse interaction, so
+        // the stack passes clicks on it to the input below: clicking the
+        // chevron focuses the input, which opens the list.
+        let chevron = container(icons::icon(
+            icons::Icon::ChevronDown,
+            TUNNEL_SESSION_CHEVRON_SIZE,
+            theme::palette().text,
+        ))
+        .padding(iced::Padding {
+            right: TUNNEL_SESSION_CHEVRON_INSET,
+            ..iced::Padding::ZERO
+        })
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::alignment::Horizontal::Right)
+        .align_y(iced::Center);
+        stack![picker, chevron].width(Fill).into()
     }
 
     fn tunnels_view(&self) -> Element<'_, Message> {
@@ -10297,10 +10341,9 @@ impl App {
             let label_width = tunnel_editor_label_width(tunnel_editor_panel_width(
                 tunnel_settings_dialog_width(self.window_size.width),
             ));
-            let field_chars = chars_fitting(
+            let field_chars = tunnel_session_field_chars(
                 tunnel_editor_panel_width(tunnel_settings_dialog_width(self.window_size.width))
                     - label_width,
-                12.0,
             );
             let grid = column![
                 row![
@@ -17270,6 +17313,26 @@ mod tunnel_layout_tests {
         assert!(field > 250.0, "value col {field}px");
         for value in ["CI tunnel fixture", "Alpha forward", "127.0.0.1", "Running"] {
             assert!(value.chars().count() <= chars_fitting(field - 12.0, 13.0));
+        }
+    }
+
+    #[test]
+    fn session_picker_chevron_keeps_row_height_and_value_budget() {
+        // Same vertical padding as the plain text inputs: row height unchanged.
+        assert_eq!(TUNNEL_SESSION_INPUT_PADDING.top, 3.0);
+        assert_eq!(TUNNEL_SESSION_INPUT_PADDING.bottom, 3.0);
+        assert_eq!(TUNNEL_SESSION_INPUT_PADDING.left, 6.0);
+        for window in [960.0, 1280.0] {
+            let panel = tunnel_editor_panel_width(tunnel_settings_dialog_width(window));
+            let field = panel - tunnel_editor_label_width(panel);
+            let chars = tunnel_session_field_chars(field);
+            assert!(chars < chars_fitting(field, 12.0), "chevron reserve taken");
+            let name = "CI tunnel fixture";
+            assert_eq!(truncate(name, chars), name, "{field}px field");
+            // Text area left of the chevron still clears the minimum field.
+            let text_area =
+                field - TUNNEL_SESSION_INPUT_PADDING.left - TUNNEL_SESSION_INPUT_PADDING.right;
+            assert!(text_area >= TUNNEL_EDITOR_MIN_FIELD - 40.0, "{text_area}px");
         }
     }
 
