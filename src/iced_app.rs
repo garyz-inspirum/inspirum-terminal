@@ -4499,6 +4499,9 @@ impl App {
                 docks.sanitize();
                 docks.retain_available(&available_panels());
                 docks.add_missing(&available_panels());
+                // Older builds could leave Filer in a 214/420 px side dock;
+                // widen it for the initial 1280 px window (`window_size`).
+                docks.fit_file_panel(1280.0);
                 docks
             },
             ui_state_path,
@@ -8039,6 +8042,7 @@ impl App {
                 let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.toggle(panel);
+                self.docks.fit_file_panel(self.window_size.width);
                 if !self.docks.is_visible(dock::Panel::Sender) {
                     self.sender_focused = false;
                 }
@@ -8097,6 +8101,7 @@ impl App {
                 });
                 self.docks.retain_available(&available_panels());
                 self.docks.add_missing(&available_panels());
+                self.docks.fit_file_panel(self.window_size.width);
                 if !self.docks.is_visible(dock::Panel::Sender) {
                     self.sender_focused = false;
                 }
@@ -12365,6 +12370,30 @@ mod tests {
         );
         assert!(file_listing_summary(0, 0).starts_with("0 items "));
         assert!(file_listing_summary(3, 10).starts_with("3 items "));
+    }
+
+    #[test]
+    fn windterm_preset_docks_filer_at_bottom_beside_transfer() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-dock-preset-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.ui_state_path = None;
+        let _ = app.update(Message::DockPreset(true));
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Filer),
+            Some(dock::Area::Bottom)
+        );
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Transfer),
+            Some(dock::Area::Bottom)
+        );
+        assert!(app.docks.left.panels.is_empty());
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Session),
+            Some(dock::Area::Right)
+        );
     }
 
     #[test]

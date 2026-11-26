@@ -159,8 +159,9 @@ is hidden. Persisted with the workspace.
     this order: Sender, Session, Outline, Transfer, Filer, Explorer, Shell.
     No side docks. Active tab is Session when no session is open, Filer after
     connecting only if the user had opened it.
-  - **WindTerm default**: Left = Filer (+Explorer as second tab); Right =
-    Session above Outline; Bottom = Sender, Transfer, Shell.
+  - **WindTerm default**: Left = empty (hidden); Right = Session above
+    Outline; Bottom = Sender, Transfer, Filer, Shell. Filer shows local and
+    remote side by side and is unusable in a 214 px side dock.
 - Dock splitters are 1 px lines with a 5 px invisible grab zone.
 
 Current build: the dock panels are Sender, Session, Transfer and Filer.
@@ -168,10 +169,12 @@ There is no Explorer panel: local files are the Local half of the Filer (see
 5.2). Outline and Shell are not available as dock panels (the auxiliary
 shell opens as a split pane) and Tunnels remains a dialog. The presets are
 `Window > Layout: Bottom tabs` (bottom tabs Sender, Session, Transfer, Filer)
-and `Window > Layout: WindTerm default` (Left = Filer; Right = Session;
-Bottom = Sender, Transfer); the missing panels are skipped. Moving the Filer
-into the Left or Right dock with the gear menu widens that dock to 760 px,
-clamped so the centre workspace keeps 320 px. Layout and theme are saved in `ui-state.json`
+and `Window > Layout: WindTerm default` (Left = empty; Right = Session;
+Bottom = Sender, Transfer, Filer); the missing panels are skipped. Moving the
+Filer into the Left or Right dock with the gear menu (or reopening it there)
+widens that dock to 760 px, clamped so the centre workspace keeps 320 px; a
+saved layout with Filer in a narrower side dock is widened the same way on
+load. Layout and theme are saved in `ui-state.json`
 next to the profiles file.
 
 ### 5.1 Session panel
