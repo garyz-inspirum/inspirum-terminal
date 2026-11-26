@@ -804,6 +804,9 @@ struct TerminalPane {
     terminal_grid_size: Option<(u16, u16)>,
     cell_size: (f32, f32),
     canvas_size: Option<iced::Size>,
+    /// Last snapshot-vs-GUI grid mismatch already corrected, so a backend
+    /// that keeps disagreeing gets one corrective resize, not one per frame.
+    grid_mismatch_corrected: Option<GridMismatch>,
     terminal_title: Option<String>,
     error: Option<String>,
     exited: bool,
@@ -3820,6 +3823,30 @@ fn terminal_grid_size(size: iced::Size, cell: (f32, f32)) -> (u16, u16) {
     (columns, lines)
 }
 
+/// A backend grid (snapshot columns x rows) that disagrees with the grid the
+/// GUI computed for the current canvas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GridMismatch {
+    backend: (usize, usize),
+    expected: (u16, u16),
+}
+
+/// The mismatch to correct with one resend, or `None` when the grids agree,
+/// no canvas size is known yet, or this exact mismatch was already resent
+/// (a backend that ignores the resend must not cause a resize loop).
+fn grid_mismatch_to_correct(
+    backend: (usize, usize),
+    expected: Option<(u16, u16)>,
+    already_corrected: Option<GridMismatch>,
+) -> Option<GridMismatch> {
+    let expected = expected?;
+    if backend == (expected.0 as usize, expected.1 as usize) {
+        return None;
+    }
+    let mismatch = GridMismatch { backend, expected };
+    (already_corrected != Some(mismatch)).then_some(mismatch)
+}
+
 fn terminal_cell_size(appearance: &crate::appearance::TerminalAppearance) -> (f32, f32) {
     (
         appearance.font_size * 0.6,
@@ -4486,6 +4513,7 @@ impl App {
             terminal_grid_size: None,
             cell_size: (TERMINAL_CELL_WIDTH, TERMINAL_CELL_HEIGHT),
             canvas_size: None,
+            grid_mismatch_corrected: None,
             terminal_title: None,
             error: None,
             exited: false,
@@ -4858,6 +4886,32 @@ impl App {
                         .effective_for(&session_profile_key(&pane.profile));
                     let snapshot =
                         terminal.display_snapshot(&crate::appearance::terminal_theme(&appearance));
+                    if let Some(mismatch) = grid_mismatch_to_correct(
+                        (snapshot.columns, snapshot.rows),
+                        pane.terminal_grid_size,
+                        pane.grid_mismatch_corrected,
+                    ) {
+                        // The draw loop skips cells past the right inset, so a
+                        // wider backend grid silently loses text at every wrap.
+                        eprintln!(
+                            "terminal {}: backend grid {}x{} differs from canvas grid {}x{}; resending size",
+                            pane.id,
+                            mismatch.backend.0,
+                            mismatch.backend.1,
+                            mismatch.expected.0,
+                            mismatch.expected.1
+                        );
+                        pane.grid_mismatch_corrected = Some(mismatch);
+                        let (columns, lines) = mismatch.expected;
+                        let cell = pane.cell_size;
+                        terminal.process_command(terminal_core::BackendCommand::Resize(
+                            terminal_core::Size::new(
+                                columns as f32 * cell.0,
+                                lines as f32 * cell.1,
+                            ),
+                            terminal_core::Size::new(cell.0, cell.1),
+                        ));
+                    }
                     if pane.display.as_ref() != Some(&snapshot) {
                         pane.display = Some(snapshot);
                         pane.display_generation = pane.display_generation.wrapping_add(1);
@@ -12938,6 +12992,30 @@ mod tests {
             wrong.len(),
             &wrong[..wrong.len().min(4)]
         );
+    }
+
+    #[test]
+    fn grid_mismatch_is_corrected_once_per_distinct_disagreement() {
+        assert_eq!(
+            grid_mismatch_to_correct((153, 25), Some((153, 25)), None),
+            None
+        );
+        assert_eq!(grid_mismatch_to_correct((160, 25), None, None), None);
+        let first = grid_mismatch_to_correct((160, 25), Some((153, 25)), None);
+        assert_eq!(
+            first,
+            Some(GridMismatch {
+                backend: (160, 25),
+                expected: (153, 25)
+            })
+        );
+        // Same disagreement on the next frame: no second resend (no loop).
+        assert_eq!(
+            grid_mismatch_to_correct((160, 25), Some((153, 25)), first),
+            None
+        );
+        // The canvas changed since: the new disagreement is corrected again.
+        assert!(grid_mismatch_to_correct((160, 25), Some((120, 25)), first).is_some());
     }
 
     /// A pointer over drawn column 100 selects column 100 in the backend.

@@ -112,6 +112,11 @@ pub struct TerminalSize {
     num_cols: u16,
     num_lines: u16,
     layout_size: Size,
+    /// Exact cell size in pixels. `cell_width`/`cell_height` are the
+    /// truncated values the PTY window-size report needs; grid counts and
+    /// pointer mapping must use these, or a fractional cell (8.4 px) is
+    /// treated as 8 px and the grid ends up ~5% wider than the canvas.
+    cell_size: Size,
 }
 
 impl Default for TerminalSize {
@@ -122,6 +127,7 @@ impl Default for TerminalSize {
             num_cols: 80,
             num_lines: 50,
             layout_size: Size::default(),
+            cell_size: Size::new(1.0, 1.0),
         }
     }
 }
@@ -130,10 +136,19 @@ impl TerminalSize {
     /// Grid for a layout of `layout_size` pixels split into cells of
     /// `font_size` pixels; `None` when not even one cell fits.
     pub fn for_layout(layout_size: Size, font_size: Size) -> Option<Self> {
-        let lines = (layout_size.height / font_size.height.floor()) as u16;
-        let cols = (layout_size.width / font_size.width.floor()) as u16;
+        if !(font_size.width > 0.0 && font_size.height > 0.0) {
+            return None;
+        }
+        // Callers send `count * cell`; the epsilon absorbs the float
+        // round-trip (153 * 8.4 / 8.4 = 152.99998) so it cannot lose a cell.
+        let fit = |extent: f32, cell: f32| {
+            (extent / cell + 1e-3).floor().clamp(0.0, u16::MAX as f32) as u16
+        };
+        let lines = fit(layout_size.height, font_size.height);
+        let cols = fit(layout_size.width, font_size.width);
         (lines > 0 && cols > 0).then_some(Self {
             layout_size,
+            cell_size: font_size,
             cell_height: font_size.height as u16,
             cell_width: font_size.width as u16,
             num_lines: lines,
@@ -410,10 +425,10 @@ impl TerminalBackend {
         terminal_size: &TerminalSize,
         display_offset: usize,
     ) -> Point {
-        let col = (x as usize) / (terminal_size.cell_width as usize);
+        let col = (x.max(0.0) / terminal_size.cell_size.width) as usize;
         let col = min(Column(col), Column(terminal_size.num_cols as usize - 1));
 
-        let line = (y as usize) / (terminal_size.cell_height as usize);
+        let line = (y.max(0.0) / terminal_size.cell_size.height) as usize;
         let line = min(line, terminal_size.num_lines as usize - 1);
 
         viewport_to_point(display_offset, Point::new(line, col))
@@ -734,10 +749,9 @@ impl TerminalBackend {
     }
 
     fn selection_side(&self, x: f32) -> Side {
-        let cell_x = x as usize % self.size.cell_width as usize;
-        let half_cell_width = (self.size.cell_width as f32 / 2.0) as usize;
+        let cell_x = x.max(0.0) % self.size.cell_size.width;
 
-        if cell_x > half_cell_width {
+        if cell_x > self.size.cell_size.width / 2.0 {
             Side::Right
         } else {
             Side::Left
@@ -745,10 +759,7 @@ impl TerminalBackend {
     }
 
     fn resize(&mut self, terminal: &mut Term<EventProxy>, layout_size: Size, font_size: Size) {
-        if layout_size == self.size.layout_size
-            && font_size.width as u16 == self.size.cell_width
-            && font_size.height as u16 == self.size.cell_height
-        {
+        if layout_size == self.size.layout_size && font_size == self.size.cell_size {
             return;
         }
 
