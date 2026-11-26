@@ -1415,6 +1415,32 @@ def listen_input_centre(listen_label_bounds, width: int) -> tuple[int, int]:
     return ((x1 + x2) // 2, cy + TUNNEL_INPUT_CENTRE_DY)
 
 
+# Session / profile combo box, relative to the located label's centre:
+# input cy-7..cy+15 (run-4 1280x800 draft frame: label OCR box y 299..306,
+# cy 302, input 295..317). iced_widget 0.14.2 overlay/menu.rs puts the
+# open list directly under the input (more room below than above), so
+# the menu's 1 px top border is at cy+16; each option row is
+# 13 * 1.3 + padding 3 + 3 = 22.9 px with the text centred like the
+# field's (`f` ascender at row top + 4), so the first option's ink starts
+# at ~cy+20. The field's own text (the search query while focused) ends
+# at cy+7. The list region starts below the border, 3 px above the ink.
+TUNNEL_SESSION_MENU_TOP_DY = 17
+# src/iced_app.rs TUNNEL_SESSION_MENU_HEIGHT (+ 1 px borders, slack).
+TUNNEL_SESSION_MENU_SPAN = 250
+
+
+def session_menu_region(session_label_bounds, width: int, height: int):
+    """Box for the OPEN session list: value column, from just below the
+    input down one menu height. Excludes the field's own text (the search
+    query while focused) and the menu's top border; includes the first
+    option's ascenders with 3 px to spare (the old ``row bottom - 4`` top,
+    cy+19, left 1 px)."""
+    x1, _y1, x2, _y2 = editor_value_row_region(session_label_bounds, width)
+    cy = (session_label_bounds[1] + session_label_bounds[3]) // 2
+    top = cy + TUNNEL_SESSION_MENU_TOP_DY
+    return (x1, top, x2, min(height, top + TUNNEL_SESSION_MENU_SPAN))
+
+
 # The "+" / "−" pair under the tunnel list: two outlined boxes 4 px apart,
 # tops aligned (iced row, top-aligned), border luma 68 on the card's 25.
 # Measured with _read_png at 1280x800 (dark):
@@ -2500,6 +2526,78 @@ def read_port_digits(path, row_region, templates=None):
         )
     bounds = (cells[0][0], cells[0][1], cells[-1][0] + _PORT_MAX_GLYPH_W, cells[0][1] + 9)
     return digits, bounds
+
+
+# An EMPTY Iced text_input draws its placeholder (iced_widget 0.14.2
+# text_input.rs draw: placeholder paragraph whenever the value is empty,
+# focused or not; the focused caret is an extra 1 px quad in the value
+# colour, erased by ``_port_ink_mask`` as a vertical rule). Dark palette,
+# src/iced_app/theme.rs: placeholder = field_help, value = field_label.
+# Measured run-4 host frame, 1280x800: placeholder fully covered pixels
+# luma 170 (rgb 170,170,170) in Listen Port / Destination Host /
+# Destination Port; typed values luma 191 (Session text, Bind 127.0.0.1,
+# listen digits 52241 on the selected-alpha frame).
+_PLACEHOLDER_LUMA = (150, 181)
+# Placeholder text width per glyph (13 px UI font): "Port" ink 726..754
+# (29 px), "Destination host" 726..848 (123 px) => ~7.7 px per char.
+_PLACEHOLDER_ADVANCE = 7.7
+_PLACEHOLDER_WIDTH_SLACK = 5
+
+
+def require_empty_port_field(path, row_region, *, placeholder="Port", read_digits=None):
+    """Prove a dark-theme input row is EMPTY: it shows ``placeholder`` and no
+    value. Passes only when
+
+    * the strict digit reader ``read_port_digits`` refuses the row (any
+      clear digit string fails, naming the digits);
+    * the remaining glyph ink is placeholder-coloured (peak luma within
+      ``_PLACEHOLDER_LUMA``; typed text of any kind peaks at 191); and
+    * the ink spans the placeholder's width (``len(placeholder)`` glyphs).
+
+    A completely blank row also fails: Iced never hides the placeholder of
+    an empty input, so no ink means no input there (wrong row, covered by
+    an overlay, not rendered). Returns the placeholder's ink bounds.
+    """
+    read_digits = read_digits or read_port_digits
+    name = Path(path).name
+    try:
+        digits, _box = read_digits(path, row_region)
+    except RuntimeError as exc:
+        refused = str(exc)
+    else:
+        if digits:
+            raise RuntimeError(f"row {row_region} of {name} is not empty: it holds digits {digits!r}")
+        raise RuntimeError(
+            f"row {row_region} of {name} is blank: no {placeholder!r} placeholder "
+            f"(an empty Iced input always draws it), so no empty input is there"
+        )
+    ink, (ox, oy) = _port_ink_mask(path, row_region)
+    _w, _h, channels, rows = _read_png(Path(path))
+    points = [(x, y) for y, line in enumerate(ink) for x, value in enumerate(line) if value > 0.5]
+    if not points:
+        raise RuntimeError(f"row {row_region} of {name}: digit reader refused but no glyph ink ({refused})")
+    peak = 0
+    for x, y in points:
+        px = rows[oy + y][(ox + x) * channels:(ox + x) * channels + 3]
+        peak = max(peak, (px[0] * 299 + px[1] * 587 + px[2] * 114) // 1000)
+    xs = [ox + x for x, _y in points]
+    ys = [oy + y for _x, y in points]
+    bounds = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
+    lo, hi = _PLACEHOLDER_LUMA
+    if not lo <= peak <= hi:
+        raise RuntimeError(
+            f"row {row_region} of {name} holds value-coloured text, not the {placeholder!r} "
+            f"placeholder: glyph peak luma {peak} outside {lo}..{hi} at {bounds} "
+            f"(digit reader: {refused})"
+        )
+    expected = len(placeholder) * _PLACEHOLDER_ADVANCE
+    width = bounds[2] - bounds[0]
+    if abs(width - expected) > _PLACEHOLDER_WIDTH_SLACK:
+        raise RuntimeError(
+            f"row {row_region} of {name}: placeholder-coloured ink {bounds} is {width} px "
+            f"wide, {placeholder!r} is ~{expected:.0f} px"
+        )
+    return bounds
 
 
 def _bounds_inside(bounds, region):
@@ -7521,8 +7619,11 @@ async def main() -> int:
                                 str(x), str(y), "click", "1", env=env)
                         await asyncio.sleep(.8)
 
-                        # New empty draft: Session field holds the default,
-                        # Listen Port is empty.
+                        # New empty draft: the CLOSED Session field shows
+                        # the default (combo_box draws the selection only
+                        # while unfocused, so read it before the click);
+                        # Listen Port is empty, i.e. shows its "Port"
+                        # placeholder and no digits.
                         session_label = await locate_editor_label(
                             window, destination / "connected-tunnels-dropdown-draft.png",
                             "Session / profile", heading, env=env,
@@ -7534,13 +7635,14 @@ async def main() -> int:
                         )
                         listen_label = await listen_label_for(heading, "dropdown")
                         listen_row = listen_port_row_region(listen_label, w)
-                        digits, _box = await asyncio.to_thread(read_port_digits, draft_shot, listen_row)
-                        if digits != "":
-                            raise RuntimeError(
-                                f"+ did not open an empty draft: Listen Port reads {digits!r} in {draft_shot}"
+                        try:
+                            placeholder = await asyncio.to_thread(
+                                require_empty_port_field, draft_shot, listen_row,
                             )
-                        print(f"tunnel dropdown: + draft defaults to {default!r}; Session row {session_row}",
-                              flush=True)
+                        except RuntimeError as exc:
+                            raise RuntimeError(f"+ did not open an empty draft: {exc}") from exc
+                        print(f"tunnel dropdown: + draft defaults to {default!r}; Session row {session_row}; "
+                              f"Listen Port empty (placeholder at {placeholder})", flush=True)
 
                         # Arm the PTY guard from the first click into the
                         # combo box until after Save.
@@ -7553,10 +7655,11 @@ async def main() -> int:
                         command("xdotool", "type", "--clearmodifiers", "--delay", "40",
                                 fragment, env=env)
                         await asyncio.sleep(.8)
-                        # The open list hangs below the field (menu height
-                        # 240 px, src/iced_app.rs TUNNEL_SESSION_MENU_HEIGHT).
-                        menu = (session_row[0], session_row[3] - 4, session_row[2],
-                                min(h, session_row[3] + 250))
+                        # The open list hangs directly below the field
+                        # (iced menu.rs: more room below than above), one
+                        # 22.9 px row per match, at most
+                        # TUNNEL_SESSION_MENU_HEIGHT (240 px).
+                        menu = session_menu_region(session_label, w, h)
                         menu_shot = destination / "connected-tunnels-session-dropdown.png"
                         option = await locate_rendered_label(
                             window, menu_shot, chosen, env=env, region=menu, timeout=15,
@@ -7587,19 +7690,40 @@ async def main() -> int:
                                 f"after Return the Session field still shows {default!r} at "
                                 f"{exc.bounds} in {picked_shot}"
                             ) from exc
+                        # combo_box unfocuses on a selection, which closes
+                        # the list: the option row must be gone too.
+                        try:
+                            await asyncio.to_thread(
+                                require_label_absent, picked_shot, chosen, region=menu,
+                            )
+                        except LabelVisible as exc:
+                            raise RuntimeError(
+                                f"after Return the session list is still open ({chosen!r} at "
+                                f"{exc.bounds} below the field in {picked_shot})"
+                            ) from exc
 
                         # Fill the draft like the Bravo add: free loopback
                         # listen port -> the fixture echo service.
                         new_port = free_loopback_port({echo_port, port_a, port_b})
                         await type_listen_port(heading, new_port)
-                        for label_text, value in (("Destination Host", "127.0.0.1"),
-                                                  ("Destination Port", str(echo_port))):
+                        for label_text, value, empty_text in (
+                                ("Destination Host", "127.0.0.1", "Destination host"),
+                                ("Destination Port", str(echo_port), "Port")):
+                            label_shot = (destination
+                                          / f"connected-tunnels-dropdown-{label_text.split()[1].lower()}-label.png")
                             field = await locate_editor_label(
-                                window,
-                                destination / f"connected-tunnels-dropdown-{label_text.split()[1].lower()}-label.png",
-                                label_text, heading, env=env,
+                                window, label_shot, label_text, heading, env=env,
                             )
                             row = editor_value_row_region(field, w)
+                            # A new draft leaves both destination fields
+                            # empty (placeholder shown), so typing below
+                            # is what fills them; ctrl+a is then a no-op.
+                            try:
+                                await asyncio.to_thread(
+                                    require_empty_port_field, label_shot, row, placeholder=empty_text,
+                                )
+                            except RuntimeError as exc:
+                                raise RuntimeError(f"new draft {label_text} is not empty: {exc}") from exc
                             fy = (field[1] + field[3]) // 2 + TUNNEL_INPUT_CENTRE_DY
                             command("xdotool", "mousemove", "--window", window,
                                     str((row[0] + row[2]) // 2), str(fy), "click", "1", env=env)
