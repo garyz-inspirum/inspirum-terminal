@@ -61,6 +61,9 @@ LOGGED_ECHO_LINES = (
     "echo:AFTER_EXTERNAL_EDIT",
     "echo:IN_DUPLICATE_TAB",
     "echo:AFTER_DUPLICATE_TAB",
+    # Drag-selection probe (SELECT_PROBE_LINE / SELECT_PROBE_TARGET below).
+    "echo:SELROW DRAGPROBE PAD TO COL42 echo:SEL_OK",
+    "echo:SEL_OK",
 )
 
 # Opt-in duplicate-tab step: double-clicking an already-open saved session
@@ -144,6 +147,9 @@ class MonitoredSession(fixture.NativeSession):
     """Never log remote input: report only a fixed synthetic test marker."""
 
     def handle_line(self, line: str) -> None:
+        mismatch = selection_paste_mismatch(line)
+        if mismatch is not None:
+            self.events.write(mismatch)
         if line in LOGGED_ECHO_LINES:
             self.events.write(f"NATIVE_ECHO:{line[5:]}")
         if line == "echo:FREE_TYPE_PROBE":
@@ -403,6 +409,87 @@ def pty_columns_fit(cols: int, pane_width: float, cell_w: float = TERMINAL_CELL_
     return fits and cols >= max_cols - 1, max_cols
 
 
+# Drag-selection probe. The fixture prints ``NATIVE_ECHO:`` + the text after
+# ``echo:`` + CRLF and never echoes typed characters, so the reply row reads
+# exactly select_probe_reply() from column 0 and the typed command line is
+# not on screen. Its tail ``echo:SEL_OK`` starts at column
+# len("NATIVE_ECHO:") + SELECT_PROBE_LINE[5:].index("echo:SEL_OK") = 12 + 30
+# = 42 (old 8 px cell drift there: 42 * 0.4 / 8.4 = 2 cells) and ends the
+# line at column 52. Dragging exactly over it and pasting it back sends an
+# allowlisted command; any off-by-one sends a near miss that is logged as
+# SELECTION_PASTE_MISMATCH instead.
+SELECT_PROBE_LINE = "echo:SELROW DRAGPROBE PAD TO COL42 echo:SEL_OK"
+SELECT_PROBE_TARGET = "echo:SEL_OK"
+SELECT_PROBE_ANCHOR = "DRAGPROBE"
+NATIVE_ECHO_PREFIX = "NATIVE_ECHO:"
+# Cell width of the bug this probe guards (selection columns used 8 px).
+OLD_TERMINAL_CELL_W = 8.0
+
+
+def select_probe_reply(line: str = SELECT_PROBE_LINE) -> str:
+    """The row the fixture prints for ``line`` (CRLF not included)."""
+    if not line.startswith("echo:"):
+        raise ValueError(f"not an echo probe: {line!r}")
+    return NATIVE_ECHO_PREFIX + line[5:]
+
+
+def reply_column(reply: str, text: str) -> int:
+    """0-based column where the single occurrence of ``text`` starts."""
+    if reply.count(text) != 1:
+        raise ValueError(f"{text!r} occurs {reply.count(text)} times in {reply!r}")
+    return reply.index(text)
+
+
+def cell_x(col: int, frac: float, pane_left: float = 0,
+           inset: float = TERMINAL_TEXT_INSET_X, cell_w: float = TERMINAL_CELL_W) -> float:
+    """Window x at fraction ``frac`` (0..1) across cell ``col``. Column c
+    spans [pane_left + inset + cell_w*c, pane_left + inset + cell_w*(c+1))."""
+    return pane_left + inset + cell_w * (col + frac)
+
+
+def x_to_col(x: float, pane_left: float = 0, inset: float = TERMINAL_TEXT_INSET_X,
+             cell_w: float = TERMINAL_CELL_W) -> int:
+    """Column containing window x (floor rule)."""
+    return math.floor((x - pane_left - inset) / cell_w + 1e-9)
+
+
+def drag_select_points(start_col: int, end_col: int, pane_left: float = 0,
+                       inset: float = TERMINAL_TEXT_INSET_X,
+                       cell_w: float = TERMINAL_CELL_W) -> tuple[int, int]:
+    """Integer (press_x, release_x) for a drag over cells start..end inclusive.
+
+    Press lands at 0.6 of the first cell (right half: a half-cell rounding
+    rule would start one cell late) and release at 0.4 of the last cell
+    (left half: that rule would stop one cell early). Raises if rounding to
+    whole pixels leaves either point outside its cell.
+    """
+    press = round(cell_x(start_col, .6, pane_left, inset, cell_w))
+    release = round(cell_x(end_col, .4, pane_left, inset, cell_w))
+    for name, x, col in (("press", press, start_col), ("release", release, end_col)):
+        got = x_to_col(x, pane_left, inset, cell_w)
+        if got != col:
+            raise ValueError(f"{name} x={x} falls in column {got}, not {col}")
+    return press, release
+
+
+def selection_paste_mismatch(line: str) -> str | None:
+    """Event-log line for a near miss of the drag-selection paste, else None.
+
+    The probe command itself and the exact target are not misses; any other
+    received line containing ``SEL_O`` (``cho:SEL_OK``, ``echo:SEL_O``,
+    `` echo:SEL_OK``) is reported by repr so a red run names the selection.
+    """
+    if line in (SELECT_PROBE_LINE, SELECT_PROBE_TARGET) or "SEL_O" not in line:
+        return None
+    return f"SELECTION_PASTE_MISMATCH {line[:120]!r}"
+
+
+def selection_paste_lines(log_text: str) -> list[str]:
+    """Reprs logged as SELECTION_PASTE_LINE while select capture was armed."""
+    prefix = "SELECTION_PASTE_LINE "
+    return [line[len(prefix):] for line in log_text.splitlines() if line.startswith(prefix)]
+
+
 def latest_pty_sizes(log_text: str) -> dict[int, tuple[int, int, int]]:
     """Session serial -> (cols, rows, log line index) of its newest PTY_SIZE."""
     latest: dict[int, tuple[int, int, int]] = {}
@@ -475,6 +562,10 @@ async def monitored_shell(
             # UNEXPECTED_<PHASE>_PTY_INPUT, so FIND is
             # UNEXPECTED_FIND_PTY_INPUT.
             observe_pty_chunk(events, probe_state, chunk)
+            # Drag-selection probe: count pasted chunks so the script can
+            # press Return only after the paste bytes arrived.
+            if probe_state.get("select_capture"):
+                probe_state["select_chunks"] = str(int(probe_state.get("select_chunks") or 0) + 1)
             buffer += chunk.replace("\r\n", "\n").replace("\r", "\n")
             # Cursor-key escape sequences are unbuffered PTY input, not
             # newline-terminated shell commands. Detect them as bytes arrive;
@@ -487,6 +578,12 @@ async def monitored_shell(
                     stdout.write("NATIVE_REMOTE_CURSOR_LEFT\r\n")
             while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
+                mismatch = selection_paste_mismatch(line)
+                if mismatch is not None:
+                    events.write(mismatch)
+                if probe_state.get("select_capture"):
+                    # Only the script's own pasted probe text arrives here.
+                    events.write(f"SELECTION_PASTE_LINE {line[:120]!r}")
                 if line == "echo:FREE_TYPE_PROBE":
                     events.write("UNEXPECTED_FREE_TYPE_PTY_INPUT")
                 elif line == "echo:LOCK_PROBE":
@@ -4042,6 +4139,183 @@ async def main() -> int:
                 print(
                     f"PASS pty size: {pty_cols}x{pty_rows} fits {pty_window_w} px pane "
                     f"(max {pty_columns_fit(pty_cols, pty_window_w)[1]} columns)",
+                    flush=True,
+                )
+
+                # REQUIRED: a drag selects exactly the dragged cells, start
+                # and end inclusive. Single full-width pane (pane_left = 0),
+                # before any split or dock change. The fixture does not echo
+                # typed characters, so only the reply row is on screen; the
+                # selected text is copied (Ctrl+Shift+C) and pasted back
+                # (Ctrl+Shift+V) and must be exactly the allowlisted command
+                # echo:SEL_OK. Both chords are handled in the KeyPressed arm
+                # of Message::Event (non-macOS: control+shift); select_to_copy
+                # and right/middle-click paste default off. A one-line paste
+                # is PasteDecision::Send under the default ConfirmMultiline
+                # policy, so no confirmation dialog opens.
+                select_reply = select_probe_reply()
+                select_col = reply_column(select_reply, SELECT_PROBE_TARGET)
+                select_end_col = select_col + len(SELECT_PROBE_TARGET) - 1
+                if select_col < 40 or select_end_col != len(select_reply) - 1:
+                    raise RuntimeError(
+                        f"selection probe design broken: target columns {select_col}..{select_end_col} "
+                        f"in {len(select_reply)}-column reply"
+                    )
+                if select_end_col >= pty_cols:
+                    raise RuntimeError(
+                        f"selection probe reply needs {len(select_reply)} columns, PTY has {pty_cols}"
+                    )
+                select_echo = NATIVE_ECHO_PREFIX + SELECT_PROBE_LINE[5:]
+                select_done = NATIVE_ECHO_PREFIX + SELECT_PROBE_TARGET[5:]
+
+                def select_log() -> str:
+                    return events.path.read_text(encoding="utf-8")
+
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        SELECT_PROBE_LINE, env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: select_echo in select_log().splitlines(),
+                    "shell echo of the drag-selection probe row",
+                )
+                select_row_shot = destination / "connected-select-row.png"
+                anchor = await locate_rendered_label(
+                    window, select_row_shot, SELECT_PROBE_ANCHOR, env=env,
+                )
+                anchor_col = reply_column(select_reply, SELECT_PROBE_ANCHOR)
+                anchor_expected_x = cell_x(anchor_col, 0)
+                if abs(anchor[0] - anchor_expected_x) > TERMINAL_CELL_W:
+                    raise RuntimeError(
+                        f"{SELECT_PROBE_ANCHOR!r} left edge at x={anchor[0]}, expected "
+                        f"{anchor_expected_x:.1f} (column {anchor_col}, pane_left 0, inset "
+                        f"{TERMINAL_TEXT_INSET_X}, cell {TERMINAL_CELL_W}); bounds {anchor} "
+                        f"in {select_row_shot.name}"
+                    )
+                select_y = (anchor[1] + anchor[3]) // 2
+                press_x, release_x = drag_select_points(select_col, select_end_col)
+                select_where = (
+                    f"columns {select_col}..{select_end_col} of {select_reply!r}; press "
+                    f"({press_x}, {select_y}) release ({release_x}, {select_y}); anchor "
+                    f"{SELECT_PROBE_ANCHOR!r} bounds {anchor}"
+                )
+                print(f"selection probe: {select_where}", flush=True)
+
+                async def select_paste_round(tag: str) -> str:
+                    """Copy, paste and Return; return the repr of the line the
+                    shell received. Raises on a near-miss or a timeout."""
+                    lines_before = len(selection_paste_lines(select_log()))
+                    mismatches_before = select_log().count("SELECTION_PASTE_MISMATCH")
+                    command("xdotool", "key", "--clearmodifiers", "ctrl+shift+c", env=env)
+                    await asyncio.sleep(.4 * TIME_SCALE)
+                    probe_state["select_chunks"] = None
+                    probe_state["select_capture"] = "1"
+                    try:
+                        command("xdotool", "key", "--clearmodifiers", "ctrl+shift+v", env=env)
+                        deadline = time.monotonic() + 10 * TIME_SCALE
+                        while not probe_state.get("select_chunks"):
+                            if time.monotonic() >= deadline:
+                                shot = destination / "connected-select-timeout.png"
+                                await asyncio.to_thread(screenshot, window, shot, env)
+                                raise RuntimeError(
+                                    f"selection probe ({tag}): Ctrl+Shift+V delivered no bytes to "
+                                    f"the shell (copy or paste failed); {select_where}; "
+                                    f"screenshot {shot.name}"
+                                )
+                            await asyncio.sleep(.1)
+                        # Return only after the pasted bytes arrived: the
+                        # clipboard read is asynchronous.
+                        command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                        deadline = time.monotonic() + 10 * TIME_SCALE
+                        while True:
+                            text = select_log()
+                            if text.count("SELECTION_PASTE_MISMATCH") > mismatches_before:
+                                found = [line for line in text.splitlines()
+                                         if line.startswith("SELECTION_PASTE_MISMATCH")]
+                                shot = destination / "connected-select-timeout.png"
+                                await asyncio.to_thread(screenshot, window, shot, env)
+                                raise RuntimeError(
+                                    f"selection probe ({tag}): shell received a near miss "
+                                    f"{found[-1]}; {select_where}; screenshot {shot.name}"
+                                )
+                            received = selection_paste_lines(text)
+                            if len(received) > lines_before:
+                                return received[lines_before]
+                            if time.monotonic() >= deadline:
+                                shot = destination / "connected-select-timeout.png"
+                                await asyncio.to_thread(screenshot, window, shot, env)
+                                raise RuntimeError(
+                                    f"selection probe ({tag}): no pasted line reached the shell "
+                                    f"within {10 * TIME_SCALE:.0f} s; {select_where}; "
+                                    f"screenshot {shot.name}"
+                                )
+                            await asyncio.sleep(.2)
+                    finally:
+                        probe_state["select_capture"] = None
+
+                async def wait_select_done(expected: int, tag: str) -> None:
+                    deadline = time.monotonic() + 10 * TIME_SCALE
+                    while select_log().splitlines().count(select_done) < expected:
+                        if time.monotonic() >= deadline:
+                            shot = destination / "connected-select-timeout.png"
+                            await asyncio.to_thread(screenshot, window, shot, env)
+                            raise RuntimeError(
+                                f"selection probe ({tag}): {select_done} not logged "
+                                f"{expected} time(s); {select_where}; screenshot {shot.name}"
+                            )
+                        await asyncio.sleep(.2)
+                    await asyncio.sleep(.3 * TIME_SCALE)
+                    got = select_log().splitlines().count(select_done)
+                    if got != expected:
+                        raise RuntimeError(
+                            f"selection probe ({tag}): {select_done} logged {got} times, "
+                            f"expected {expected}; {select_where}"
+                        )
+
+                if select_log().splitlines().count(select_done):
+                    raise RuntimeError(f"{select_done} logged before the selection probe ran")
+                await drag_horizontal(window, env, press_x, release_x, select_y)
+                await asyncio.to_thread(
+                    screenshot, window, destination / "connected-select-drag.png", env,
+                )
+                received = await select_paste_round("drag")
+                if received != repr(SELECT_PROBE_TARGET):
+                    raise RuntimeError(
+                        f"selection probe (drag): shell received {received}, expected "
+                        f"{SELECT_PROBE_TARGET!r}; {select_where}"
+                    )
+                await wait_select_done(1, "drag")
+                print(
+                    f"PASS drag selection: shell received {received} ({select_where})",
+                    flush=True,
+                )
+
+                # Negative control: a plain click (no motion) on the same row
+                # must select nothing. Ctrl+Shift+C with no selection leaves
+                # the clipboard untouched (CopySelection only writes when
+                # selected_terminal_text is Some), so the paste must resend
+                # exactly echo:SEL_OK. A click that selected any cell would
+                # replace the clipboard with that cell's text and the shell
+                # would receive something else. Limit: a click that kept the
+                # previous drag selection would also resend echo:SEL_OK.
+                click_col = select_col + 3
+                click_x = round(cell_x(click_col, .5))
+                command("xdotool", "mousemove", "--window", window,
+                        str(click_x), str(select_y), "click", "1", env=env)
+                await asyncio.sleep(.6 * TIME_SCALE)
+                await asyncio.to_thread(
+                    screenshot, window, destination / "connected-select-click.png", env,
+                )
+                received = await select_paste_round("plain click")
+                if received != repr(SELECT_PROBE_TARGET):
+                    raise RuntimeError(
+                        f"selection probe (plain click at ({click_x}, {select_y}), column "
+                        f"{click_col}): clipboard changed, shell received {received} instead "
+                        f"of the unchanged {SELECT_PROBE_TARGET!r}, so the click selected text"
+                    )
+                await wait_select_done(2, "plain click")
+                print(
+                    f"PASS plain click selects nothing: clipboard still {received} after a "
+                    f"click at ({click_x}, {select_y})",
                     flush=True,
                 )
 
