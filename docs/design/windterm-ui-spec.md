@@ -85,6 +85,7 @@ Default = **Light chrome + dark terminal** (what the owner runs).
 Panel marker colours (11x11 px square before each dock title, both themes):
 Sender `#A16BE8`, Session `#009FFF`, Outline `#91DDF2`, Transfer `#00CCCC`,
 Filer `#555BA9`, Explorer `#7CB342`, Shell `#FF0099`, Tunnels `#F6A623`.
+(Explorer's colour is WindTerm's; this app no longer has an Explorer panel, see 5.2.)
 
 ## 3. Typography and metrics
 
@@ -137,6 +138,11 @@ Panels: **Session**, **Filer** (remote files of the active session),
 command list exists; otherwise omit the panel entirely), **Tunnels** (optional;
 may stay a dialog).
 
+Deviation (owner request, 2026-11-26): this app has no separate Explorer
+panel; local files are the Local half of the Filer. The Explorer mentions in
+this section's panel list and presets describe WindTerm; see 5.2 and the
+Current build notes for this app.
+
 Three dock areas: Left, Right, Bottom. Each panel lives in exactly one area or
 is hidden. Persisted with the workspace.
 
@@ -157,11 +163,15 @@ is hidden. Persisted with the workspace.
     Session above Outline; Bottom = Sender, Transfer, Shell.
 - Dock splitters are 1 px lines with a 5 px invisible grab zone.
 
-Current build: the dock panels are Sender, Session, Transfer, Filer and
-Explorer. Outline and Shell are not available as dock panels (the auxiliary
+Current build: the dock panels are Sender, Session, Transfer and Filer.
+There is no Explorer panel: local files are the Local half of the Filer (see
+5.2). Outline and Shell are not available as dock panels (the auxiliary
 shell opens as a split pane) and Tunnels remains a dialog. The presets are
-`Window > Layout: Bottom tabs` and `Window > Layout: WindTerm default`; the
-missing panels are skipped. Layout and theme are saved in `ui-state.json`
+`Window > Layout: Bottom tabs` (bottom tabs Sender, Session, Transfer, Filer)
+and `Window > Layout: WindTerm default` (Left = Filer; Right = Session;
+Bottom = Sender, Transfer); the missing panels are skipped. Moving the Filer
+into the Left or Right dock with the gear menu widens that dock to 760 px,
+clamped so the centre workspace keeps 320 px. Layout and theme are saved in `ui-state.json`
 next to the profiles file.
 
 ### 5.1 Session panel
@@ -201,8 +211,23 @@ Explorer the local file system.
   other side's current directory), Edit (remote), New Folder, Rename, Delete,
   Refresh. Destructive actions keep their confirmation dialogs.
 
-Current build: the Up control shows an arrow plus the word `Up`. Context
-(right-click) menus are not implemented.
+Current build (owner-requested deviation from WindTerm, 2026-11-26): WindTerm
+has separate Explorer and Filer panes; this app merges them into one **Filer**
+panel. There is no Explorer tab and no Explorer entry in the View menu. The
+Filer shows a `Local` half on the left (path bar, table, `Upload ->`,
+`New local folder`, `Rename local`, `Delete local`) and a `Remote` half on the
+right (path bar, table, `<- Download`, `New remote folder`, `Rename remote`,
+`Edit remote`, `Delete remote`), split by a 1 px divider. Each half's table
+scrolls horizontally when narrow. The inline remote editor sits below both
+halves at full width. A saved layout that names Explorer loads with Explorer
+removed; the Filer takes its slot when Explorer was the tab on show or the
+layout had no Filer.
+
+The path bar has `Up` (an arrow plus the word), Refresh and `Go`; there are
+no clear-path, history or three-dot controls. Right-clicking a
+row opens a context menu with Open (directories), Download, Edit and Open in
+External Editor (remote files), Upload (local files), New Folder, Rename,
+Delete and Refresh.
 
 ### 5.3 Transfer panel
 
@@ -307,6 +332,16 @@ The supplied WindTerm screenshots distinguish **daily operation** from **editing
   needed to identify an input target 3:1. Preserve equally readable dark
   theme. Error/status text is not styled as an ordinary explanation.
 
+Current build: the editor's session row is labelled `Session / profile` and
+is a searchable dropdown (placeholder `Type to search sessions`). It lists
+every saved session as `Folder / Subfolder / Name`, sorted by that path.
+There is no per-session `Add to session` button list. `+` starts a new
+tunnel owned by the selected tunnel's session (or the first saved session);
+the dropdown then chooses the owning session. For a saved tunnel, choosing
+another session moves it there on **Save**, keeping its name. The move is
+refused while that forward runs, while the target session's whole-profile
+tunnel process runs, or when the target already has the same forward.
+
 Acceptance: from the menu, toggle one of two saved forwards in the same
 profile and prove only its listener opens/closes while the other stays up;
 open settings, select/add/edit/delete a tunnel, save/reopen and verify the
@@ -343,9 +378,9 @@ current menu locations use the note at the top of this document and
 | 2. Themes | Implemented | Light (default) and Dark, View > Theme, `INSPIRUM_THEME` override; persisted in `ui-state.json`. |
 | 3. Typography and metrics | Partly | Not measured against every value in the table. |
 | 4. Menu bar | Implemented | Session, Edit, View, Mode, Window, Help with drop-downs (items in `src/iced_app/menu.rs`). |
-| 5. Dock system | Partly | Left/Right/Bottom areas, tab strips, gear menu (Move to Left/Right/Bottom, Close), both presets, drag-resizable splitters, persistence. No drag-and-drop docking. |
+| 5. Dock system | Partly | Panels: Sender, Session, Transfer, Filer (no Explorer, see 5.2). Left/Right/Bottom areas, tab strips, gear menu (Move to Left/Right/Bottom, Close), both presets, drag-resizable splitters, persistence. No drag-and-drop docking. |
 | 5.1 Session panel | Partly | Single click opens; no collapsible groups, no context menu. |
-| 5.2 Filer and Explorer | Partly | WindTerm columns (Name, Date Modified, Type, Size, Permissions, Owner, Group). No context menus. |
+| 5.2 Filer and Explorer | Changed after snapshot | Owner-requested deviation (2026-11-26): one Filer panel, Local left and Remote right; no Explorer panel. WindTerm columns (Name, Date Modified, Type, Size, Permissions, Owner, Group). Row context menus; no three-dot menu. |
 | 5.3 Transfer panel | Implemented | Transfer queue as a dock panel. |
 | 5.4 Shell, Sender, Outline | Partly | Sender is a dock panel. Shell opens as a split pane, not a dock panel. Outline not implemented. |
 | 6.1 Session tab strip | Partly | Tab strip present; no per-session tab colours. |
