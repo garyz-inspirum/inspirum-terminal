@@ -9667,7 +9667,7 @@ impl App {
         let divider = container(space::horizontal())
             .width(1)
             .height(Fill)
-            .style(border_fill);
+            .style(split_divider_fill);
         column![
             row![local_half, divider, remote_half]
                 .width(Fill)
@@ -11735,6 +11735,10 @@ fn border_fill(_: &Theme) -> container::Style {
     fill_style(theme::palette().border)
 }
 
+fn split_divider_fill(_: &Theme) -> container::Style {
+    fill_style(theme::palette().split_divider())
+}
+
 fn accent_fill(_: &Theme) -> container::Style {
     fill_style(theme::palette().accent)
 }
@@ -12045,7 +12049,7 @@ fn files_side_heading(label: &'static str) -> Element<'static, Message> {
     container(
         text(label)
             .size(12)
-            .color(theme::palette().accent)
+            .color(theme::palette().section_heading())
             .wrapping(text::Wrapping::None),
     )
     .padding([2, 6])
@@ -12193,6 +12197,14 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn filer_split_divider_uses_strong_token_not_border() {
+        let style = split_divider_fill(&Theme::Light);
+        let expected = theme::palette().split_divider();
+        assert_eq!(style.background, Some(iced::Background::Color(expected)));
+        assert_ne!(expected, theme::palette().border);
+    }
 
     #[test]
     fn flat_input_uses_control_outline_not_divider_in_both_themes() {
