@@ -147,9 +147,6 @@ class MonitoredSession(fixture.NativeSession):
     """Never log remote input: report only a fixed synthetic test marker."""
 
     def handle_line(self, line: str) -> None:
-        mismatch = selection_paste_mismatch(line)
-        if mismatch is not None:
-            self.events.write(mismatch)
         if line in LOGGED_ECHO_LINES:
             self.events.write(f"NATIVE_ECHO:{line[5:]}")
         if line == "echo:FREE_TYPE_PROBE":
@@ -417,7 +414,7 @@ def pty_columns_fit(cols: int, pane_width: float, cell_w: float = TERMINAL_CELL_
 # = 42 (old 8 px cell drift there: 42 * 0.4 / 8.4 = 2 cells) and ends the
 # line at column 52. Dragging exactly over it and pasting it back sends an
 # allowlisted command; any off-by-one sends a near miss that is logged as
-# SELECTION_PASTE_MISMATCH instead.
+# SELECTION_PASTE_MISMATCH cols <a>..<b> (classify_selection_paste) instead.
 SELECT_PROBE_LINE = "echo:SELROW DRAGPROBE PAD TO COL42 echo:SEL_OK"
 SELECT_PROBE_TARGET = "echo:SEL_OK"
 SELECT_PROBE_ANCHOR = "DRAGPROBE"
@@ -472,22 +469,41 @@ def drag_select_points(start_col: int, end_col: int, pane_left: float = 0,
     return press, release
 
 
-def selection_paste_mismatch(line: str) -> str | None:
-    """Event-log line for a near miss of the drag-selection paste, else None.
+SELECT_CLICK_SENTINEL = "echo:CLICK_SENTINEL"
+SELECTION_PASTE_MARKERS = (
+    "SELECTION_PASTE_OK",
+    "SELECTION_PASTE_SENTINEL",
+    "SELECTION_PASTE_MISMATCH",
+    "SELECTION_PASTE_EMPTY",
+    "SELECTION_PASTE_UNKNOWN",
+)
 
-    The probe command itself and the exact target are not misses; any other
-    received line containing ``SEL_O`` (``cho:SEL_OK``, ``echo:SEL_O``,
-    `` echo:SEL_OK``) is reported by repr so a red run names the selection.
+
+def classify_selection_paste(line: str) -> str:
+    """Fixed event-log marker for a line received while select capture is armed.
+
+    Never contains ``line`` itself: pasted text may be unrelated clipboard
+    content when copy fails. A substring of the script's own synthetic
+    reply row is named by its 0-based inclusive columns in that row, so a
+    red run still says which cells were selected.
     """
-    if line in (SELECT_PROBE_LINE, SELECT_PROBE_TARGET) or "SEL_O" not in line:
-        return None
-    return f"SELECTION_PASTE_MISMATCH {line[:120]!r}"
+    if line == SELECT_PROBE_TARGET:
+        return "SELECTION_PASTE_OK"
+    if line == SELECT_CLICK_SENTINEL:
+        return "SELECTION_PASTE_SENTINEL"
+    if not line:
+        return "SELECTION_PASTE_EMPTY"
+    reply = select_probe_reply()
+    if reply.count(line) == 1:
+        start = reply.index(line)
+        return f"SELECTION_PASTE_MISMATCH cols {start}..{start + len(line) - 1}"
+    return f"SELECTION_PASTE_UNKNOWN len={len(line)}"
 
 
-def selection_paste_lines(log_text: str) -> list[str]:
-    """Reprs logged as SELECTION_PASTE_LINE while select capture was armed."""
-    prefix = "SELECTION_PASTE_LINE "
-    return [line[len(prefix):] for line in log_text.splitlines() if line.startswith(prefix)]
+def selection_paste_markers(log_text: str) -> list[str]:
+    """Ordered classify_selection_paste markers in the event log."""
+    return [line for line in log_text.splitlines()
+            if line.split(" ", 1)[0] in SELECTION_PASTE_MARKERS]
 
 
 def latest_pty_sizes(log_text: str) -> dict[int, tuple[int, int, int]]:
@@ -578,12 +594,10 @@ async def monitored_shell(
                     stdout.write("NATIVE_REMOTE_CURSOR_LEFT\r\n")
             while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
-                mismatch = selection_paste_mismatch(line)
-                if mismatch is not None:
-                    events.write(mismatch)
                 if probe_state.get("select_capture"):
-                    # Only the script's own pasted probe text arrives here.
-                    events.write(f"SELECTION_PASTE_LINE {line[:120]!r}")
+                    # Log a fixed marker only, never the pasted text: if copy
+                    # failed the clipboard may hold unrelated content.
+                    events.write(classify_selection_paste(line))
                 if line == "echo:FREE_TYPE_PROBE":
                     events.write("UNEXPECTED_FREE_TYPE_PTY_INPUT")
                 elif line == "echo:LOCK_PROBE":
@@ -4201,10 +4215,10 @@ async def main() -> int:
                 print(f"selection probe: {select_where}", flush=True)
 
                 async def select_paste_round(tag: str) -> str:
-                    """Copy, paste and Return; return the repr of the line the
-                    shell received. Raises on a near-miss or a timeout."""
-                    lines_before = len(selection_paste_lines(select_log()))
-                    mismatches_before = select_log().count("SELECTION_PASTE_MISMATCH")
+                    """Copy, paste and Return; return the classify_selection_paste
+                    marker of the line the shell received. Raises on a timeout.
+                    Neither this nor its errors ever carry the pasted text."""
+                    markers_before = len(selection_paste_markers(select_log()))
                     command("xdotool", "key", "--clearmodifiers", "ctrl+shift+c", env=env)
                     await asyncio.sleep(.4 * TIME_SCALE)
                     probe_state["select_chunks"] = None
@@ -4227,19 +4241,9 @@ async def main() -> int:
                         command("xdotool", "key", "--clearmodifiers", "Return", env=env)
                         deadline = time.monotonic() + 10 * TIME_SCALE
                         while True:
-                            text = select_log()
-                            if text.count("SELECTION_PASTE_MISMATCH") > mismatches_before:
-                                found = [line for line in text.splitlines()
-                                         if line.startswith("SELECTION_PASTE_MISMATCH")]
-                                shot = destination / "connected-select-timeout.png"
-                                await asyncio.to_thread(screenshot, window, shot, env)
-                                raise RuntimeError(
-                                    f"selection probe ({tag}): shell received a near miss "
-                                    f"{found[-1]}; {select_where}; screenshot {shot.name}"
-                                )
-                            received = selection_paste_lines(text)
-                            if len(received) > lines_before:
-                                return received[lines_before]
+                            markers = selection_paste_markers(select_log())
+                            if len(markers) > markers_before:
+                                return markers[markers_before]
                             if time.monotonic() >= deadline:
                                 shot = destination / "connected-select-timeout.png"
                                 await asyncio.to_thread(screenshot, window, shot, env)
@@ -4278,10 +4282,10 @@ async def main() -> int:
                     screenshot, window, destination / "connected-select-drag.png", env,
                 )
                 received = await select_paste_round("drag")
-                if received != repr(SELECT_PROBE_TARGET):
+                if received != "SELECTION_PASTE_OK":
                     raise RuntimeError(
                         f"selection probe (drag): shell received {received}, expected "
-                        f"{SELECT_PROBE_TARGET!r}; {select_where}"
+                        f"SELECTION_PASTE_OK ({SELECT_PROBE_TARGET!r}); {select_where}"
                     )
                 await wait_select_done(1, "drag")
                 print(
@@ -4306,11 +4310,11 @@ async def main() -> int:
                     screenshot, window, destination / "connected-select-click.png", env,
                 )
                 received = await select_paste_round("plain click")
-                if received != repr(SELECT_PROBE_TARGET):
+                if received != "SELECTION_PASTE_OK":
                     raise RuntimeError(
                         f"selection probe (plain click at ({click_x}, {select_y}), column "
                         f"{click_col}): clipboard changed, shell received {received} instead "
-                        f"of the unchanged {SELECT_PROBE_TARGET!r}, so the click selected text"
+                        f"of SELECTION_PASTE_OK, so the click selected text"
                     )
                 await wait_select_done(2, "plain click")
                 print(
