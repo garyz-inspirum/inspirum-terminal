@@ -61,6 +61,11 @@ LOGGED_ECHO_LINES = (
     "echo:AFTER_EXTERNAL_EDIT",
     "echo:IN_DUPLICATE_TAB",
     "echo:AFTER_DUPLICATE_TAB",
+    # Drag-selection probe (SELECT_PROBE_LINE / SELECT_PROBE_TARGET below;
+    # the trailing "=G" is a guard that makes a one-cell overrun visible).
+    "echo:SELROW DRAGPROBE PAD TO COL42 echo:SEL_OK=G",
+    "echo:SEL_OK",
+    "echo:CLICK_SENTINEL",
 )
 
 # Opt-in duplicate-tab step: double-clicking an already-open saved session
@@ -403,6 +408,142 @@ def pty_columns_fit(cols: int, pane_width: float, cell_w: float = TERMINAL_CELL_
     return fits and cols >= max_cols - 1, max_cols
 
 
+# Drag-selection probe. The fixture prints ``NATIVE_ECHO:`` + the text after
+# ``echo:`` + CRLF and never echoes typed characters, so the reply row reads
+# exactly select_probe_reply() from column 0 and the typed command line is
+# not on screen. Its target ``echo:SEL_OK`` starts at column
+# len("NATIVE_ECHO:") + SELECT_PROBE_LINE[5:].index("echo:SEL_OK") = 12 + 30
+# = 42 (old 8 px cell drift there: 42 * 0.4 / 8.4 = 2 cells) and ends at
+# column 52. A printable guard ``=G`` follows at columns 53..54 so a
+# one-cell overrun is observable (``echo:SEL_OK=``). Dragging exactly over
+# the target and pasting it back sends an allowlisted command; any
+# off-by-one sends a near miss that is logged as
+# SELECTION_PASTE_MISMATCH cols <a>..<b> (classify_selection_paste) instead.
+SELECT_PROBE_LINE = "echo:SELROW DRAGPROBE PAD TO COL42 echo:SEL_OK=G"
+SELECT_PROBE_TARGET = "echo:SEL_OK"
+SELECT_PROBE_ANCHOR = "DRAGPROBE"
+NATIVE_ECHO_PREFIX = "NATIVE_ECHO:"
+# Cell width of the bug this probe guards (selection columns used 8 px).
+OLD_TERMINAL_CELL_W = 8.0
+
+
+def select_probe_reply(line: str = SELECT_PROBE_LINE) -> str:
+    """The row the fixture prints for ``line`` (CRLF not included)."""
+    if not line.startswith("echo:"):
+        raise ValueError(f"not an echo probe: {line!r}")
+    return NATIVE_ECHO_PREFIX + line[5:]
+
+
+def reply_column(reply: str, text: str) -> int:
+    """0-based column where the single occurrence of ``text`` starts."""
+    if reply.count(text) != 1:
+        raise ValueError(f"{text!r} occurs {reply.count(text)} times in {reply!r}")
+    return reply.index(text)
+
+
+def cell_x(col: int, frac: float, pane_left: float = 0,
+           inset: float = TERMINAL_TEXT_INSET_X, cell_w: float = TERMINAL_CELL_W) -> float:
+    """Window x at fraction ``frac`` (0..1) across cell ``col``. Column c
+    spans [pane_left + inset + cell_w*c, pane_left + inset + cell_w*(c+1))."""
+    return pane_left + inset + cell_w * (col + frac)
+
+
+def x_to_col(x: float, pane_left: float = 0, inset: float = TERMINAL_TEXT_INSET_X,
+             cell_w: float = TERMINAL_CELL_W) -> int:
+    """Column containing window x (floor rule)."""
+    return math.floor((x - pane_left - inset) / cell_w + 1e-9)
+
+
+def drag_select_points(start_col: int, end_col: int, pane_left: float = 0,
+                       inset: float = TERMINAL_TEXT_INSET_X,
+                       cell_w: float = TERMINAL_CELL_W) -> tuple[int, int]:
+    """Integer (press_x, release_x) for a drag over cells start..end inclusive.
+
+    Press lands at 0.6 of the first cell (right half: a half-cell rounding
+    rule would start one cell late) and release at 0.4 of the last cell
+    (left half: that rule would stop one cell early). Raises if rounding to
+    whole pixels leaves either point outside its cell.
+    """
+    press = round(cell_x(start_col, .6, pane_left, inset, cell_w))
+    release = round(cell_x(end_col, .4, pane_left, inset, cell_w))
+    for name, x, col in (("press", press, start_col), ("release", release, end_col)):
+        got = x_to_col(x, pane_left, inset, cell_w)
+        if got != col:
+            raise ValueError(f"{name} x={x} falls in column {got}, not {col}")
+    return press, release
+
+
+SELECT_CLICK_SENTINEL = "echo:CLICK_SENTINEL"
+SELECTION_PASTE_MARKERS = (
+    "SELECTION_PASTE_OK",
+    "SELECTION_PASTE_SENTINEL",
+    "SELECTION_PASTE_MISMATCH",
+    "SELECTION_PASTE_EMPTY",
+    "SELECTION_PASTE_UNKNOWN",
+)
+
+
+def classify_selection_paste(line: str) -> str:
+    """Fixed event-log marker for a line received while select capture is armed.
+
+    Never contains ``line`` itself: pasted text may be unrelated clipboard
+    content when copy fails. A substring of the script's own synthetic
+    reply row is named by its 0-based inclusive columns in that row, so a
+    red run still says which cells were selected.
+    """
+    if line == SELECT_PROBE_TARGET:
+        return "SELECTION_PASTE_OK"
+    if line == SELECT_CLICK_SENTINEL:
+        return "SELECTION_PASTE_SENTINEL"
+    if not line:
+        return "SELECTION_PASTE_EMPTY"
+    reply = select_probe_reply()
+    if reply.count(line) == 1:
+        start = reply.index(line)
+        return f"SELECTION_PASTE_MISMATCH cols {start}..{start + len(line) - 1}"
+    return f"SELECTION_PASTE_UNKNOWN len={len(line)}"
+
+
+def selection_paste_markers(log_text: str) -> list[str]:
+    """Ordered classify_selection_paste markers in the event log."""
+    return [line for line in log_text.splitlines()
+            if line.split(" ", 1)[0] in SELECTION_PASTE_MARKERS]
+
+
+def seed_clipboard(text: str, env: dict[str, str]) -> None:
+    """Own the X CLIPBOARD with ``text`` via xclip, independently of the app.
+
+    xclip forks a selection owner that stays alive; its stdout/stderr go to
+    DEVNULL so it holds no pipe of ours and this call returns. Verified by
+    reading the clipboard back; errors name lengths only, never contents.
+    """
+    if shutil.which("xclip") is None:
+        raise RuntimeError("seed_clipboard: xclip not installed")
+    try:
+        result = subprocess.run(
+            ["xclip", "-selection", "clipboard", "-in"], input=text.encode("utf-8"),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("seed_clipboard: xclip -in timed out") from None
+    if result.returncode != 0:
+        raise RuntimeError(f"seed_clipboard: xclip -in exited {result.returncode}")
+    try:
+        readback = subprocess.run(
+            ["xclip", "-selection", "clipboard", "-o"], stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, env=env, timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("seed_clipboard: xclip -o timed out") from None
+    if readback.returncode != 0:
+        raise RuntimeError(f"seed_clipboard: xclip -o exited {readback.returncode}")
+    if readback.stdout != text.encode("utf-8"):
+        raise RuntimeError(
+            f"seed_clipboard: clipboard read back {len(readback.stdout)} bytes that do not "
+            f"match the {len(text.encode('utf-8'))}-byte seed"
+        )
+
+
 def latest_pty_sizes(log_text: str) -> dict[int, tuple[int, int, int]]:
     """Session serial -> (cols, rows, log line index) of its newest PTY_SIZE."""
     latest: dict[int, tuple[int, int, int]] = {}
@@ -475,6 +616,10 @@ async def monitored_shell(
             # UNEXPECTED_<PHASE>_PTY_INPUT, so FIND is
             # UNEXPECTED_FIND_PTY_INPUT.
             observe_pty_chunk(events, probe_state, chunk)
+            # Drag-selection probe: count pasted chunks so the script can
+            # press Return only after the paste bytes arrived.
+            if probe_state.get("select_capture"):
+                probe_state["select_chunks"] = str(int(probe_state.get("select_chunks") or 0) + 1)
             buffer += chunk.replace("\r\n", "\n").replace("\r", "\n")
             # Cursor-key escape sequences are unbuffered PTY input, not
             # newline-terminated shell commands. Detect them as bytes arrive;
@@ -487,6 +632,10 @@ async def monitored_shell(
                     stdout.write("NATIVE_REMOTE_CURSOR_LEFT\r\n")
             while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
+                if probe_state.get("select_capture"):
+                    # Log a fixed marker only, never the pasted text: if copy
+                    # failed the clipboard may hold unrelated content.
+                    events.write(classify_selection_paste(line))
                 if line == "echo:FREE_TYPE_PROBE":
                     events.write("UNEXPECTED_FREE_TYPE_PTY_INPUT")
                 elif line == "echo:LOCK_PROBE":
@@ -1171,6 +1320,28 @@ def editor_form_region(width: int, height: int):
     which forward the form is editing. Used for "sibling port absent"."""
     left, dialog = tunnel_dialog_left(width)
     return (left + TUNNEL_EDITOR_CARD_DX - 6, 42, min(width, left + dialog), height)
+
+
+# Slack left of the located "Tunnel Manager" heading for the list search.
+TUNNEL_LIST_REGION_MARGIN = 12
+
+
+def tunnel_list_region(heading_bounds, width: int, height: int):
+    """Search box for Tunnel Settings list-row labels, starting at the dialog.
+
+    ``heading_bounds`` is the located "Tunnel Manager" heading (x0, y0, x1,
+    y1), left-aligned with the list inside the dialog. Starting at window
+    x=0 lets the terminal behind the dialog join the search: on the CI
+    renderer its NATIVE_ECHO:* lines sat on the same rows as "Alpha forward"
+    and the locator missed the label (the same frame hit from x=230)."""
+    left = max(0, heading_bounds[0] - TUNNEL_LIST_REGION_MARGIN)
+    right = width // 2
+    if left >= right - 100:
+        raise RuntimeError(
+            f"Tunnel Manager heading at x={heading_bounds[0]} leaves no list "
+            f"region: left {left} >= {right} - 100 (window {width}x{height})"
+        )
+    return (left, 42, right, height)
 
 
 def listen_port_row_region(heading_bounds, width: int):
@@ -4045,6 +4216,196 @@ async def main() -> int:
                     flush=True,
                 )
 
+                # REQUIRED: a drag selects exactly the dragged cells, start
+                # and end inclusive. Single full-width pane (pane_left = 0),
+                # before any split or dock change. The fixture does not echo
+                # typed characters, so only the reply row is on screen; the
+                # selected text is copied (Ctrl+Shift+C) and pasted back
+                # (Ctrl+Shift+V) and must be exactly the allowlisted command
+                # echo:SEL_OK. Both chords are handled in the KeyPressed arm
+                # of Message::Event (non-macOS: control+shift); select_to_copy
+                # and right/middle-click paste default off. A one-line paste
+                # is PasteDecision::Send under the default ConfirmMultiline
+                # policy, so no confirmation dialog opens.
+                select_reply = select_probe_reply()
+                select_col = reply_column(select_reply, SELECT_PROBE_TARGET)
+                select_end_col = select_col + len(SELECT_PROBE_TARGET) - 1
+                select_guard = select_reply[select_end_col + 1:select_end_col + 2]
+                if ((select_col, select_end_col) != (42, 52) or not select_guard.isprintable()
+                        or select_guard.isspace() or not select_guard):
+                    raise RuntimeError(
+                        f"selection probe design broken: target columns {select_col}..{select_end_col} "
+                        f"(need 42..52) with guard {select_guard!r} at column {select_end_col + 1} "
+                        f"in {len(select_reply)}-column reply"
+                    )
+                if len(select_reply) > pty_cols:
+                    raise RuntimeError(
+                        f"selection probe reply needs {len(select_reply)} columns, PTY has {pty_cols}"
+                    )
+                select_echo = NATIVE_ECHO_PREFIX + SELECT_PROBE_LINE[5:]
+                select_done = NATIVE_ECHO_PREFIX + SELECT_PROBE_TARGET[5:]
+
+                def select_log() -> str:
+                    return events.path.read_text(encoding="utf-8")
+
+                command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                        SELECT_PROBE_LINE, env=env)
+                command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                await wait_for(
+                    lambda: select_echo in select_log().splitlines(),
+                    "shell echo of the drag-selection probe row",
+                )
+                select_row_shot = destination / "connected-select-row.png"
+                anchor = await locate_rendered_label(
+                    window, select_row_shot, SELECT_PROBE_ANCHOR, env=env,
+                )
+                anchor_col = reply_column(select_reply, SELECT_PROBE_ANCHOR)
+                anchor_expected_x = cell_x(anchor_col, 0)
+                if abs(anchor[0] - anchor_expected_x) > TERMINAL_CELL_W:
+                    raise RuntimeError(
+                        f"{SELECT_PROBE_ANCHOR!r} left edge at x={anchor[0]}, expected "
+                        f"{anchor_expected_x:.1f} (column {anchor_col}, pane_left 0, inset "
+                        f"{TERMINAL_TEXT_INSET_X}, cell {TERMINAL_CELL_W}); bounds {anchor} "
+                        f"in {select_row_shot.name}"
+                    )
+                select_y = (anchor[1] + anchor[3]) // 2
+                press_x, release_x = drag_select_points(select_col, select_end_col)
+                select_where = (
+                    f"columns {select_col}..{select_end_col} of {select_reply!r}; press "
+                    f"({press_x}, {select_y}) release ({release_x}, {select_y}); anchor "
+                    f"{SELECT_PROBE_ANCHOR!r} bounds {anchor}"
+                )
+                print(f"selection probe: {select_where}", flush=True)
+
+                async def select_paste_round(tag: str) -> str:
+                    """Copy, paste and Return; return the classify_selection_paste
+                    marker of the line the shell received. Raises on a timeout.
+                    Neither this nor its errors ever carry the pasted text."""
+                    markers_before = len(selection_paste_markers(select_log()))
+                    command("xdotool", "key", "--clearmodifiers", "ctrl+shift+c", env=env)
+                    await asyncio.sleep(.4 * TIME_SCALE)
+                    probe_state["select_chunks"] = None
+                    probe_state["select_capture"] = "1"
+                    try:
+                        command("xdotool", "key", "--clearmodifiers", "ctrl+shift+v", env=env)
+                        deadline = time.monotonic() + 10 * TIME_SCALE
+                        while not probe_state.get("select_chunks"):
+                            if time.monotonic() >= deadline:
+                                shot = destination / "connected-select-timeout.png"
+                                await asyncio.to_thread(screenshot, window, shot, env)
+                                raise RuntimeError(
+                                    f"selection probe ({tag}): Ctrl+Shift+V delivered no bytes to "
+                                    f"the shell (copy or paste failed); {select_where}; "
+                                    f"screenshot {shot.name}"
+                                )
+                            await asyncio.sleep(.1)
+                        # Return only after the pasted bytes arrived: the
+                        # clipboard read is asynchronous.
+                        command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                        deadline = time.monotonic() + 10 * TIME_SCALE
+                        while True:
+                            markers = selection_paste_markers(select_log())
+                            if len(markers) > markers_before:
+                                return markers[markers_before]
+                            if time.monotonic() >= deadline:
+                                shot = destination / "connected-select-timeout.png"
+                                await asyncio.to_thread(screenshot, window, shot, env)
+                                raise RuntimeError(
+                                    f"selection probe ({tag}): no pasted line reached the shell "
+                                    f"within {10 * TIME_SCALE:.0f} s; {select_where}; "
+                                    f"screenshot {shot.name}"
+                                )
+                            await asyncio.sleep(.2)
+                    finally:
+                        probe_state["select_capture"] = None
+
+                async def wait_select_done(token: str, expected: int, tag: str) -> None:
+                    deadline = time.monotonic() + 10 * TIME_SCALE
+                    while select_log().splitlines().count(token) < expected:
+                        if time.monotonic() >= deadline:
+                            shot = destination / "connected-select-timeout.png"
+                            await asyncio.to_thread(screenshot, window, shot, env)
+                            raise RuntimeError(
+                                f"selection probe ({tag}): {token} not logged "
+                                f"{expected} time(s); {select_where}; screenshot {shot.name}"
+                            )
+                        await asyncio.sleep(.2)
+                    await asyncio.sleep(.3 * TIME_SCALE)
+                    got = select_log().splitlines().count(token)
+                    if got != expected:
+                        raise RuntimeError(
+                            f"selection probe ({tag}): {token} logged {got} times, "
+                            f"expected {expected}; {select_where}"
+                        )
+
+                if select_log().splitlines().count(select_done):
+                    raise RuntimeError(f"{select_done} logged before the selection probe ran")
+                await drag_horizontal(window, env, press_x, release_x, select_y)
+                await asyncio.to_thread(
+                    screenshot, window, destination / "connected-select-drag.png", env,
+                )
+                received = await select_paste_round("drag")
+                if received != "SELECTION_PASTE_OK":
+                    raise RuntimeError(
+                        f"selection probe (drag): shell received {received}, expected "
+                        f"SELECTION_PASTE_OK ({SELECT_PROBE_TARGET!r}); {select_where}"
+                    )
+                await wait_select_done(select_done, 1, "drag")
+                print(
+                    f"PASS drag selection: shell received {received} ({select_where})",
+                    flush=True,
+                )
+
+                # Negative control: a plain click (no motion) on the same row
+                # must clear the selection and select nothing. Make a fresh
+                # selection of echo:SEL_OK without copying it, then seed the
+                # CLIPBOARD independently of the app with a sentinel (xclip).
+                # After the click, Ctrl+Shift+C must not write (CopySelection
+                # only writes when selected_terminal_text is Some), so the
+                # paste must deliver the sentinel. SELECTION_PASTE_OK means
+                # the click left the fresh selection in place and copy
+                # rewrote the clipboard with it; a MISMATCH marker means the
+                # click itself selected cells.
+                await drag_horizontal(window, env, press_x, release_x, select_y)
+                await asyncio.to_thread(
+                    screenshot, window, destination / "connected-select-fresh.png", env,
+                )
+                await asyncio.to_thread(seed_clipboard, SELECT_CLICK_SENTINEL, env)
+                click_col = select_col + 3
+                click_x = round(cell_x(click_col, .5))
+                command("xdotool", "mousemove", "--window", window,
+                        str(click_x), str(select_y), "click", "1", env=env)
+                await asyncio.sleep(.6 * TIME_SCALE)
+                await asyncio.to_thread(
+                    screenshot, window, destination / "connected-select-click.png", env,
+                )
+                received = await select_paste_round("plain click")
+                click_where = (f"plain click at ({click_x}, {select_y}), column {click_col}, "
+                               f"after a fresh drag over {select_where}")
+                if received == "SELECTION_PASTE_OK":
+                    raise RuntimeError(
+                        f"selection probe ({click_where}): shell received {received}, so the "
+                        f"click left the previous selection in place and Ctrl+Shift+C rewrote "
+                        f"the seeded clipboard with it"
+                    )
+                if received.startswith("SELECTION_PASTE_MISMATCH"):
+                    raise RuntimeError(
+                        f"selection probe ({click_where}): shell received {received}, so the "
+                        f"click selected cells and Ctrl+Shift+C copied them"
+                    )
+                if received != "SELECTION_PASTE_SENTINEL":
+                    raise RuntimeError(
+                        f"selection probe ({click_where}): shell received {received}, expected "
+                        f"SELECTION_PASTE_SENTINEL (the xclip-seeded clipboard)"
+                    )
+                await wait_select_done("NATIVE_ECHO:CLICK_SENTINEL", 1, "plain click")
+                await wait_select_done(select_done, 1, "plain click")
+                print(
+                    f"PASS plain click clears the selection: seeded sentinel survived "
+                    f"Ctrl+Shift+C after a click at ({click_x}, {select_y})",
+                    flush=True,
+                )
+
                 # Session menu, Sender editor and bottom-dock gear must own
                 # keyboard input locally. Arm the PTY watch only after the
                 # opening click settles: that click can resize the PTY, and
@@ -6211,7 +6572,7 @@ async def main() -> int:
                     ed_w, ed_h = window_size(window, env)
                     form_region = editor_form_region(ed_w, ed_h)
                     listen_row = listen_port_row_region(heading_bounds, ed_w)
-                    list_region = (0, 42, ed_w // 2, ed_h)
+                    list_region = tunnel_list_region(heading_bounds, ed_w, ed_h)
                     for idx, (label, name) in enumerate(
                         zip(POPULATED_LABELS, ("alpha", "bravo"))
                     ):
@@ -6330,7 +6691,8 @@ async def main() -> int:
                         w, h = window_size(window, env)
                         await click_label(
                             window, destination / f"connected-tunnels-{tag}-pre.png",
-                            label, env, region=(0, 42, w // 2, h), timeout=15, settle=.8,
+                            label, env, region=tunnel_list_region(heading, w, h),
+                            timeout=15, settle=.8,
                         )
                         return await require_form(port, sibling, heading, tag)
 

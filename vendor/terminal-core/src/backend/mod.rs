@@ -227,6 +227,9 @@ pub struct TerminalBackend {
     size: TerminalSize,
     notifier: Notifier,
     last_content: RenderableContent,
+    /// Where a Simple drag selection was pressed (see
+    /// `start_drag_selection`); `None` for other selection types.
+    selection_anchor: Option<DragAnchor>,
     subscription_shutdown: Arc<AtomicBool>,
     subscription_thread: Option<JoinHandle<()>>,
 }
@@ -377,6 +380,7 @@ impl TerminalBackend {
             size: terminal_size,
             notifier,
             last_content: initial_content,
+            selection_anchor: None,
             subscription_shutdown,
             subscription_thread: Some(subscription_thread),
         })
@@ -732,30 +736,18 @@ impl TerminalBackend {
         x: f32,
         y: f32,
     ) {
-        let location = Self::selection_point(x, y, &self.size, terminal.grid().display_offset());
-        terminal.selection = Some(Selection::new(
+        start_drag_selection(
+            terminal,
+            &mut self.selection_anchor,
+            &self.size,
             selection_type,
-            location,
-            self.selection_side(x),
-        ));
+            x,
+            y,
+        );
     }
 
     fn update_selection(&mut self, terminal: &mut Term<EventProxy>, x: f32, y: f32) {
-        let display_offset = terminal.grid().display_offset();
-        if let Some(ref mut selection) = terminal.selection {
-            let location = Self::selection_point(x, y, &self.size, display_offset);
-            selection.update(location, self.selection_side(x));
-        }
-    }
-
-    fn selection_side(&self, x: f32) -> Side {
-        let cell_x = x.max(0.0) % self.size.cell_size.width;
-
-        if cell_x > self.size.cell_size.width / 2.0 {
-            Side::Right
-        } else {
-            Side::Left
-        }
+        update_drag_selection(terminal, &mut self.selection_anchor, &self.size, x, y);
     }
 
     fn resize(&mut self, terminal: &mut Term<EventProxy>, layout_size: Size, font_size: Size) {
@@ -914,6 +906,278 @@ pub struct EventProxy(mpsc::Sender<Event>);
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         let _ = self.0.send(event.clone());
+    }
+}
+
+/// Side of the cell under `x` (text-area pixels): the half the pointer is in.
+fn selection_side(size: &TerminalSize, x: f32) -> Side {
+    let cell_x = x.max(0.0) % size.cell_size.width;
+
+    if cell_x > size.cell_size.width / 2.0 {
+        Side::Right
+    } else {
+        Side::Left
+    }
+}
+
+/// First and last grid cell of the glyph at `point`: both halves of a wide
+/// character, otherwise the cell itself.
+fn glyph_cells<T>(terminal: &Term<T>, point: Point) -> (Point, Point) {
+    let flags = terminal.grid()[point].flags;
+    let last_column = terminal.columns().saturating_sub(1);
+    if flags.contains(term::cell::Flags::WIDE_CHAR_SPACER) && point.column.0 > 0 {
+        (Point::new(point.line, point.column - 1), point)
+    } else if flags.contains(term::cell::Flags::WIDE_CHAR) && point.column.0 < last_column {
+        (point, Point::new(point.line, point.column + 1))
+    } else {
+        (point, point)
+    }
+}
+
+/// Horizontal distance (logical px, text-area coordinates) the pointer must
+/// move from the press x, while still on the pressed glyph, before that one
+/// glyph is selected. Below it a click with ordinary hand jitter selects and
+/// copies nothing; at or above it a small drag selects a single character.
+/// Vertical movement inside the cell does not count.
+const SINGLE_GLYPH_DRAG_THRESHOLD_PX: f32 = 3.0;
+
+/// Press position of a Simple drag selection: the text-area x it was pressed
+/// at and which end of the live selection's range holds the pressed glyph.
+/// The pressed grid cell itself is not stored: PTY output that scrolls the
+/// grid makes Alacritty rotate `Term::selection`, so the cell is recovered
+/// from the live selection on every move.
+#[derive(Debug, Clone, Copy)]
+struct DragAnchor {
+    x: f32,
+    /// The pressed glyph is the range end (the last build dragged backward).
+    anchor_is_end: bool,
+}
+
+/// Pressed cell of the live Simple drag `selection`, as Alacritty has
+/// rotated it with the content. The selection's own anchor is the pressed
+/// glyph's first cell (`anchor_is_end` false) or last cell (true); a clone is
+/// stretched to the far corner of the grid so the range is never empty.
+fn live_drag_anchor<T>(
+    terminal: &Term<T>,
+    selection: &Selection,
+    anchor_is_end: bool,
+) -> Option<Point> {
+    let mut probe = selection.clone();
+    if anchor_is_end {
+        probe.update(Point::new(terminal.topmost_line(), Column(0)), Side::Left);
+        probe.to_range(terminal).map(|range| range.end)
+    } else {
+        let corner = Point::new(terminal.bottommost_line(), terminal.last_column());
+        probe.update(corner, Side::Right);
+        probe.to_range(terminal).map(|range| range.start)
+    }
+}
+
+/// Simple drag selection from the glyph under `anchor` to the glyph under
+/// `current`, both included whatever half of the cell the pointer is in.
+/// While the pointer is still on the pressed glyph the selection holds that
+/// one glyph only when `select_pressed_glyph` is set (the pointer has moved
+/// far enough horizontally); otherwise it is empty, so a plain click
+/// highlights and copies nothing.
+fn inclusive_drag_selection<T>(
+    terminal: &Term<T>,
+    anchor: Point,
+    current: Point,
+    select_pressed_glyph: bool,
+) -> Selection {
+    let (anchor_first, anchor_last) = glyph_cells(terminal, anchor);
+    let (current_first, current_last) = glyph_cells(terminal, current);
+    // Alacritty's Simple range drops a start cell anchored on its Right side
+    // and an end cell anchored on its Left side, so anchoring the earlier
+    // glyph on Left and the later glyph on Right keeps both.
+    let (start, start_side, end, end_side) = if current_first == anchor_first {
+        if select_pressed_glyph {
+            (anchor_first, Side::Left, anchor_last, Side::Right)
+        } else {
+            (anchor_first, Side::Left, anchor_first, Side::Left)
+        }
+    } else if current_first > anchor_first {
+        (anchor_first, Side::Left, current_last, Side::Right)
+    } else {
+        (anchor_last, Side::Right, current_first, Side::Left)
+    };
+    let mut selection = Selection::new(SelectionType::Simple, start, start_side);
+    selection.update(end, end_side);
+    selection
+}
+
+fn start_drag_selection<T>(
+    terminal: &mut Term<T>,
+    anchor: &mut Option<DragAnchor>,
+    size: &TerminalSize,
+    selection_type: SelectionType,
+    x: f32,
+    y: f32,
+) {
+    let location = TerminalBackend::selection_point(x, y, size, terminal.grid().display_offset());
+    if selection_type == SelectionType::Simple {
+        *anchor = Some(DragAnchor {
+            x,
+            anchor_is_end: false,
+        });
+        terminal.selection = Some(inclusive_drag_selection(
+            terminal, location, location, false,
+        ));
+    } else {
+        *anchor = None;
+        terminal.selection = Some(Selection::new(
+            selection_type,
+            location,
+            selection_side(size, x),
+        ));
+    }
+}
+
+fn update_drag_selection<T>(
+    terminal: &mut Term<T>,
+    anchor: &mut Option<DragAnchor>,
+    size: &TerminalSize,
+    x: f32,
+    y: f32,
+) {
+    let display_offset = terminal.grid().display_offset();
+    let location = TerminalBackend::selection_point(x, y, size, display_offset);
+    let simple = terminal
+        .selection
+        .as_ref()
+        .is_some_and(|selection| selection.ty == SelectionType::Simple);
+    match *anchor {
+        Some(drag) if simple => {
+            let pressed = terminal
+                .selection
+                .as_ref()
+                .and_then(|selection| live_drag_anchor(terminal, selection, drag.anchor_is_end));
+            let Some(pressed) = pressed else {
+                *anchor = None;
+                terminal.selection = None;
+                return;
+            };
+            // Rebuilt from the pressed cell on every move: an existing
+            // selection's anchor side cannot change once the drag reverses.
+            let moved = (x - drag.x).abs() >= SINGLE_GLYPH_DRAG_THRESHOLD_PX;
+            let anchor_first = glyph_cells(terminal, pressed).0;
+            let current_first = glyph_cells(terminal, location).0;
+            *anchor = Some(DragAnchor {
+                x: drag.x,
+                anchor_is_end: current_first < anchor_first,
+            });
+            terminal.selection = Some(inclusive_drag_selection(terminal, pressed, location, moved));
+        }
+        Some(_) if terminal.selection.is_none() => {
+            // Alacritty dropped the selection (cleared, or scrolled out of
+            // the history): do not resurrect it from a stale press cell.
+            *anchor = None;
+        }
+        _ => {
+            if let Some(ref mut selection) = terminal.selection {
+                selection.update(location, selection_side(size, x));
+            }
+        }
+    }
+}
+
+/// What a mouse drag selected: the copied text and the visible cells drawn
+/// as selected, as `(row, column)` of each drawn glyph.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DragSelectionProbe {
+    pub text: String,
+    pub selected: Vec<(usize, usize)>,
+}
+
+/// Test seam: feed `lines` into a PTY-less `Term` of `size`, press at
+/// `press` and move through `drags` (text-area pixels, i.e. after the GUI
+/// inset) with a Simple selection, using the same selection code as
+/// `BackendCommand::SelectStart`/`SelectUpdate`. The drawn cells use the same
+/// `selectable_range` containment test as `display_snapshot`.
+#[doc(hidden)]
+pub fn probe_drag_selection(
+    size: &TerminalSize,
+    lines: &[&str],
+    press: (f32, f32),
+    drags: &[(f32, f32)],
+) -> DragSelectionProbe {
+    let steps: Vec<DragProbeStep<'_>> = drags
+        .iter()
+        .map(|&(x, y)| DragProbeStep::Move(x, y))
+        .collect();
+    probe_drag_selection_steps(size, lines, press, &steps)
+}
+
+/// One step of `probe_drag_selection_steps` while the button is held.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DragProbeStep<'a> {
+    /// Pointer move to text-area pixels (x, y) with the button held.
+    Move(f32, f32),
+    /// Bytes the PTY writes while the button is held.
+    Feed(&'a str),
+}
+
+/// Test seam: like `probe_drag_selection`, but PTY output can be fed
+/// between pointer moves while the button is held.
+#[doc(hidden)]
+pub fn probe_drag_selection_steps(
+    size: &TerminalSize,
+    lines: &[&str],
+    press: (f32, f32),
+    steps: &[DragProbeStep<'_>],
+) -> DragSelectionProbe {
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+
+    let dimensions = TermSize::new(size.num_cols as usize, size.num_lines as usize);
+    let mut terminal = Term::new(term::Config::default(), &dimensions, VoidListener);
+    let mut parser: Processor<StdSyncHandler> = Processor::new();
+    parser.advance(&mut terminal, lines.join("\r\n").as_bytes());
+
+    let mut anchor = None;
+    start_drag_selection(
+        &mut terminal,
+        &mut anchor,
+        size,
+        SelectionType::Simple,
+        press.0,
+        press.1,
+    );
+    for step in steps {
+        match *step {
+            DragProbeStep::Move(x, y) => {
+                update_drag_selection(&mut terminal, &mut anchor, size, x, y);
+            }
+            DragProbeStep::Feed(bytes) => parser.advance(&mut terminal, bytes.as_bytes()),
+        }
+    }
+
+    let range = terminal
+        .selection
+        .as_ref()
+        .and_then(|selection| selection.to_range(&terminal));
+    let grid = terminal.grid();
+    let selected = grid
+        .display_iter()
+        .filter(|indexed| {
+            !indexed
+                .cell
+                .flags
+                .contains(term::cell::Flags::WIDE_CHAR_SPACER)
+        })
+        .filter(|indexed| range.is_some_and(|range| range.contains(indexed.point)))
+        .map(|indexed| {
+            (
+                (indexed.point.line.0 + grid.display_offset() as i32) as usize,
+                indexed.point.column.0,
+            )
+        })
+        .collect();
+    DragSelectionProbe {
+        text: terminal.selection_to_string().unwrap_or_default(),
+        selected,
     }
 }
 

@@ -13031,6 +13031,341 @@ mod tests {
         assert_eq!((point.line.0, point.column.0), (2, 100));
     }
 
+    const DRAG_CELL_W: f32 = 8.4;
+    const DRAG_CELL_H: f32 = 18.0;
+
+    fn drag_test_size() -> terminal_core::TerminalSize {
+        terminal_core::TerminalSize::for_layout(
+            terminal_core::Size::new(160.0 * DRAG_CELL_W, 4.0 * DRAG_CELL_H),
+            terminal_core::Size::new(DRAG_CELL_W, DRAG_CELL_H),
+        )
+        .expect("grid")
+    }
+
+    /// Text-area x of `fraction` of the way into `column` with the default
+    /// 8.4 px cell, and y in the middle of `row`.
+    fn drag_xy(column: usize, fraction: f32, row: usize) -> (f32, f32) {
+        (
+            (column as f32 + fraction) * DRAG_CELL_W,
+            (row as f32 + 0.5) * DRAG_CELL_H,
+        )
+    }
+
+    fn drag_line_with_word(column: usize, word: &str) -> String {
+        format!("{}{word} tail", "x".repeat(column))
+    }
+
+    #[test]
+    fn drag_selection_starts_at_the_pressed_cell_for_every_press_offset() {
+        let size = drag_test_size();
+        let mut failures = Vec::new();
+        for column in [0usize, 23, 61, 140] {
+            let line = drag_line_with_word(column, "highlight");
+            for press_fraction in [0.1f32, 0.5, 0.6, 0.95] {
+                for (end_offset, end_fraction, expected) in [
+                    (8usize, 0.3f32, "highlight"),
+                    (8, 0.9, "highlight"),
+                    (3, 0.2, "high"),
+                    (1, 0.05, "hi"),
+                ] {
+                    let probe = terminal_core::probe_drag_selection(
+                        &size,
+                        &[&line],
+                        drag_xy(column, press_fraction, 0),
+                        &[drag_xy(column + end_offset, end_fraction, 0)],
+                    );
+                    let first = probe.selected.first().copied();
+                    let last = probe.selected.last().copied();
+                    if probe.text != expected
+                        || first != Some((0, column))
+                        || last != Some((0, column + end_offset))
+                    {
+                        failures.push(format!(
+                            "col {column} press {press_fraction} -> +{end_offset}@{end_fraction}: \
+                             text {:?} cells {first:?}..{last:?}",
+                            probe.text
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} cases:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn drag_selection_right_to_left_includes_press_and_pointer_cells() {
+        let size = drag_test_size();
+        let mut failures = Vec::new();
+        for column in [0usize, 23, 61, 140] {
+            let line = drag_line_with_word(column, "highlight");
+            for press_fraction in [0.1f32, 0.5, 0.6, 0.95] {
+                for end_fraction in [0.05f32, 0.6, 0.95] {
+                    let probe = terminal_core::probe_drag_selection(
+                        &size,
+                        &[&line],
+                        drag_xy(column + 8, press_fraction, 0),
+                        &[drag_xy(column, end_fraction, 0)],
+                    );
+                    if probe.text != "highlight"
+                        || probe.selected.first() != Some(&(0, column))
+                        || probe.selected.last() != Some(&(0, column + 8))
+                    {
+                        failures.push(format!(
+                            "col {column} press {press_fraction} end {end_fraction}: text {:?}",
+                            probe.text
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} cases:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn drag_selection_across_lines_includes_both_end_cells() {
+        let size = drag_test_size();
+        let lines = ["xxhighlight", "abcdef"];
+        let probe = terminal_core::probe_drag_selection(
+            &size,
+            &lines,
+            drag_xy(2, 0.9, 0),
+            &[drag_xy(3, 0.1, 1)],
+        );
+        assert_eq!(probe.text, "highlight\nabcd");
+        assert_eq!(probe.selected.first(), Some(&(0, 2)));
+        assert_eq!(probe.selected.last(), Some(&(1, 3)));
+        let back = terminal_core::probe_drag_selection(
+            &size,
+            &lines,
+            drag_xy(3, 0.1, 1),
+            &[drag_xy(2, 0.9, 0)],
+        );
+        assert_eq!(back.text, "highlight\nabcd");
+    }
+
+    fn drag_test_size_3_rows() -> terminal_core::TerminalSize {
+        terminal_core::TerminalSize::for_layout(
+            terminal_core::Size::new(160.0 * DRAG_CELL_W, 3.0 * DRAG_CELL_H),
+            terminal_core::Size::new(DRAG_CELL_W, DRAG_CELL_H),
+        )
+        .expect("grid")
+    }
+
+    const SCROLL_LINES: [&str; 3] = ["aaaa", "bbbb", "cccc"];
+
+    #[test]
+    fn drag_selection_follows_text_scrolled_by_output() {
+        use terminal_core::DragProbeStep::{Feed, Move};
+        let size = drag_test_size_3_rows();
+        let (x1, y1) = drag_xy(1, 0.5, 1);
+        let (x2, y2) = drag_xy(2, 0.5, 0);
+        // `\r\ndddd` scrolls the content up one row: the `b`s move to row 0.
+        let probe = terminal_core::probe_drag_selection_steps(
+            &size,
+            &SCROLL_LINES,
+            drag_xy(0, 0.5, 1),
+            &[Move(x1, y1), Feed("\r\ndddd"), Move(x2, y2)],
+        );
+        assert_eq!(probe.text, "bbb");
+        assert_eq!(probe.selected, vec![(0, 0), (0, 1), (0, 2)]);
+    }
+
+    #[test]
+    fn backward_drag_selection_follows_text_scrolled_by_output() {
+        use terminal_core::DragProbeStep::{Feed, Move};
+        let size = drag_test_size_3_rows();
+        let (x1, y1) = drag_xy(1, 0.5, 1);
+        let (x0, y0) = drag_xy(0, 0.5, 0);
+        let probe = terminal_core::probe_drag_selection_steps(
+            &size,
+            &SCROLL_LINES,
+            drag_xy(2, 0.5, 1),
+            &[Move(x1, y1), Feed("\r\ndddd"), Move(x0, y0)],
+        );
+        assert_eq!(probe.text, "bbb");
+        assert_eq!(probe.selected, vec![(0, 0), (0, 1), (0, 2)]);
+    }
+
+    #[test]
+    fn unmoved_press_anchor_follows_text_scrolled_by_output() {
+        use terminal_core::DragProbeStep::{Feed, Move};
+        let size = drag_test_size_3_rows();
+        let (x3, y3) = drag_xy(3, 0.5, 0);
+        let probe = terminal_core::probe_drag_selection_steps(
+            &size,
+            &SCROLL_LINES,
+            drag_xy(1, 0.5, 1),
+            &[Feed("\r\ndddd"), Move(x3, y3)],
+        );
+        assert_eq!(probe.text, "bbb");
+        assert_eq!(probe.selected, vec![(0, 1), (0, 2), (0, 3)]);
+    }
+
+    #[test]
+    fn drag_selection_dropped_by_alternate_screen_output_stays_empty() {
+        use terminal_core::DragProbeStep::{Feed, Move};
+        let size = drag_test_size_3_rows();
+        let (x1, y1) = drag_xy(1, 0.5, 1);
+        let (x3, y3) = drag_xy(3, 0.5, 0);
+        // The alternate screen has no history to scroll the pressed line
+        // into, and Alacritty drops the selection on the switch; the drag
+        // must not resurrect it from the stale press cell.
+        let probe = terminal_core::probe_drag_selection_steps(
+            &size,
+            &SCROLL_LINES,
+            drag_xy(0, 0.5, 1),
+            &[
+                Move(x1, y1),
+                Feed("\x1b[?1049hdddd\r\neeee\r\nffff\r\ngggg"),
+                Move(x3, y3),
+            ],
+        );
+        assert_eq!(probe.text, "");
+        assert!(probe.selected.is_empty());
+    }
+
+    #[test]
+    fn plain_click_selects_nothing_and_small_horizontal_drag_selects_one_cell() {
+        let size = drag_test_size();
+        let line = drag_line_with_word(23, "highlight");
+        // Column 23 spans x 193.2..201.6; `h` is the pressed character. Every
+        // x below is exact in f32 and stays inside column 23.
+        let row_y = 0.5 * DRAG_CELL_H;
+        let probe = |press_x: f32, moves: &[(f32, f32)]| {
+            terminal_core::probe_drag_selection(&size, &[&line], (press_x, row_y), moves)
+        };
+        // Jitter below 3 px, either way, and pure vertical movement inside
+        // the cell: nothing selected, nothing copied.
+        for offset in [0.0f32, 1.0, -1.0, 2.9, -2.9] {
+            let jitter = probe(197.0, &[(197.0 + offset, row_y)]);
+            assert_eq!(jitter.text, "", "jitter {offset}");
+            assert!(jitter.selected.is_empty(), "jitter {offset}");
+        }
+        let vertical = probe(
+            197.0,
+            &[(197.0, 0.1 * DRAG_CELL_H), (197.0, 0.9 * DRAG_CELL_H)],
+        );
+        assert_eq!(vertical.text, "");
+        assert!(vertical.selected.is_empty());
+        // 3 px or more, right or left, still inside the cell: exactly the
+        // pressed character.
+        for (press_x, end_x) in [
+            (197.0f32, 200.0f32),
+            (197.0, 194.0),
+            (194.0, 200.0),
+            (200.5, 194.5),
+        ] {
+            let one = probe(press_x, &[(end_x, row_y)]);
+            assert_eq!(one.text, "h", "press {press_x} -> {end_x}");
+            assert_eq!(one.selected, vec![(0, 23)], "press {press_x} -> {end_x}");
+        }
+        // Coming back within 2 px of the press x clears it again.
+        for back_x in [197.0f32, 198.5, 195.5] {
+            let cleared = probe(197.0, &[(200.5, row_y), (back_x, row_y)]);
+            assert_eq!(cleared.text, "", "back to {back_x}");
+            assert!(cleared.selected.is_empty(), "back to {back_x}");
+        }
+        // Leaving the cell and coming back near the press x clears the
+        // highlight; coming back 3 px or more away keeps the one cell.
+        let back = probe(197.0, &[(drag_xy(26, 0.5, 0).0, row_y), (197.5, row_y)]);
+        assert_eq!(back.text, "");
+        assert!(back.selected.is_empty());
+        let back_far = probe(197.0, &[(drag_xy(26, 0.5, 0).0, row_y), (200.5, row_y)]);
+        assert_eq!(back_far.text, "h");
+        assert_eq!(back_far.selected, vec![(0, 23)]);
+        // A wide glyph: `日` covers columns 2-3 (x 16.8..33.6), pressed on
+        // either half, selects the whole glyph and copies it.
+        let wide = "ab日本cd";
+        for (press_x, end_x) in [(20.0f32, 23.0f32), (23.0, 20.0), (30.0, 26.0), (20.0, 30.0)] {
+            let none = terminal_core::probe_drag_selection(
+                &size,
+                &[wide],
+                (press_x, row_y),
+                &[(press_x + 1.0, row_y)],
+            );
+            assert_eq!(none.text, "", "wide jitter at {press_x}");
+            let glyph = terminal_core::probe_drag_selection(
+                &size,
+                &[wide],
+                (press_x, row_y),
+                &[(end_x, row_y)],
+            );
+            assert_eq!(glyph.text, "日", "wide press {press_x} -> {end_x}");
+            assert_eq!(
+                glyph.selected,
+                vec![(0, 2)],
+                "wide press {press_x} -> {end_x}"
+            );
+        }
+    }
+
+    #[test]
+    fn drag_selection_includes_whole_wide_glyphs() {
+        let size = drag_test_size();
+        // `日` covers columns 2-3 and `本` 4-5; `c` is column 6.
+        let line = "ab日本cd";
+        for press_column in [2usize, 3] {
+            let probe = terminal_core::probe_drag_selection(
+                &size,
+                &[line],
+                drag_xy(press_column, 0.7, 0),
+                &[drag_xy(6, 0.1, 0)],
+            );
+            assert_eq!(probe.text, "日本c", "press column {press_column}");
+            assert_eq!(probe.selected, vec![(0, 2), (0, 4), (0, 6)]);
+        }
+        for end_column in [4usize, 5] {
+            let probe = terminal_core::probe_drag_selection(
+                &size,
+                &[line],
+                drag_xy(1, 0.9, 0),
+                &[drag_xy(end_column, 0.1, 0)],
+            );
+            assert_eq!(probe.text, "b日本", "end column {end_column}");
+            assert_eq!(probe.selected, vec![(0, 1), (0, 2), (0, 4)]);
+        }
+        let back = terminal_core::probe_drag_selection(
+            &size,
+            &[line],
+            drag_xy(6, 0.2, 0),
+            &[drag_xy(5, 0.9, 0)],
+        );
+        assert_eq!(back.text, "本c");
+        assert_eq!(back.selected, vec![(0, 4), (0, 6)]);
+    }
+
+    #[test]
+    fn drag_selection_press_at_text_inset_is_column_zero() {
+        let size = drag_test_size();
+        let line = "highlight tail";
+        let row_y = TERMINAL_TEXT_INSET.y + 0.5 * DRAG_CELL_H;
+        let end = terminal_text_point(iced::Point::new(
+            TERMINAL_TEXT_INSET.x + 3.2 * DRAG_CELL_W,
+            row_y,
+        ));
+        for press_x in [TERMINAL_TEXT_INSET.x, TERMINAL_TEXT_INSET.x + 0.5, 3.0, 0.0] {
+            let press = terminal_text_point(iced::Point::new(press_x, row_y));
+            let probe = terminal_core::probe_drag_selection(
+                &size,
+                &[line],
+                (press.x, press.y),
+                &[(end.x, end.y)],
+            );
+            assert_eq!(probe.text, "high", "canvas press x {press_x}");
+            assert_eq!(probe.selected.first(), Some(&(0, 0)));
+        }
+    }
+
     #[test]
     fn unix_mode_strings_match_ls() {
         assert_eq!(unix_mode_string('-', 0o644), "-rw-r--r--");
