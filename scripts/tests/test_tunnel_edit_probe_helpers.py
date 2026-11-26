@@ -7,6 +7,7 @@ show it finds nothing on a frame without the Tunnel Manager.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import shutil
@@ -239,8 +240,13 @@ class PopulatedMinimumWindowTest(unittest.TestCase):
 
     def test_tour_requests_and_gates_supported_minimum(self):
         src = SOURCE.read_text()
-        start = src.index("async def s05_tunnels_min")
-        body = src[start:src.index("if POPULATED:", start)]
+        # Exactly s05_tunnels_min's own source (via ast), not whatever text
+        # follows it up to the next marker.
+        fns = [node for node in ast.walk(ast.parse(src))
+               if isinstance(node, ast.AsyncFunctionDef) and node.name == "s05_tunnels_min"]
+        self.assertEqual(len(fns), 1)
+        body = ast.get_source_segment(src, fns[0])
+        self.assertTrue(body.startswith("async def s05_tunnels_min("))
         self.assertNotRegex(body, r"resize_tour\(\s*640\s*,\s*480\s*\)")
         self.assertIn("resize_tour(*MIN_WINDOW)", body)
         self.assertIn("require_min_window((min_w, min_h))", body)
