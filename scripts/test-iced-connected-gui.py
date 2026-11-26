@@ -1506,6 +1506,20 @@ def session_menu_region(session_label_bounds, width: int, height: int):
 # The disabled box is 4 px taller, so the two boxes' bottoms differ; each
 # box closes on its own bottom run. Enabled vs disabled is read from the
 # fill: enabled is lighter than the card, disabled equals it.
+# GitHub Ubuntu runner (same layout, half-pixel offset): every outline is
+# anti-aliased over 2 px. "−" left side x 284,285 = luma 36,61 (34,60
+# when disabled), right side x 311,312 = 46,52 (43,51); "+" right side
+# x 279,280 = 38,60; the card between the boxes is
+# x 281..283 only. Top/bottom runs read 57..66 with ends 61/51 and 59/46,
+# corners 58/38 and 53/45; the rows just inside them 32/33 (enabled) or
+# 27/28 (disabled). The detected box therefore starts one column INSIDE
+# the side border (x1 = 286, first column of the top run >= 50) and the
+# old card sample x1-3..x1-2 = 283,284 read 25,36: median 36, so the
+# enabled fill (30) came out -6 and the disabled one (25) -9.
+# The card reference is now the strip x1-5..x1-3 (281..283 on both
+# renderings), required to be flat; the fill is the interior median, which
+# must also be the value of most interior pixels (glyph strokes ~180 and
+# the 32/33 inner rows cannot move it).
 TUNNEL_LIST_BUTTON_BORDER = (50, 100)
 TUNNEL_LIST_BUTTON_W = (18, 40)
 TUNNEL_LIST_BUTTON_H = (18, 28)
@@ -1515,6 +1529,13 @@ TUNNEL_LIST_BUTTON_GAP = (1, 10)
 # else is neither rendering and raises.
 TUNNEL_LIST_BUTTON_ENABLED_DELTA = 3
 TUNNEL_LIST_BUTTON_FLAT = 1
+# Card reference columns, as offsets left of the box's x1: outside a
+# 2 px anti-aliased side border (x1-2, x1-1) with one column to spare, and
+# right of the "+" box's 2 px right border (x1-6, x1-7 for the "−").
+TUNNEL_LIST_BUTTON_CARD_DX = (5, 3)
+# Share of interior pixels that must lie within TUNNEL_LIST_BUTTON_FLAT of
+# the interior median for it to be the fill (not a glyph, gradient, hover).
+TUNNEL_LIST_BUTTON_FILL_SHARE = 0.6
 
 
 def _border_runs(row, channels, x1, x2):
@@ -1542,16 +1563,33 @@ def _luma_at(rows, channels, x, y):
 def tunnel_list_button_enabled(image, box) -> bool:
     """Whether the outlined list button ``box`` is drawn enabled (quiet
     Active: fill lighter than the card) or disabled (quiet Disabled: fill
-    equal to the card). Interior median vs the card just left of the box;
-    raises when the fill is neither (hovered, pressed, another widget)."""
+    equal to the card). Interior median vs a card strip left of the box,
+    clear of an anti-aliased (2 px) side border; raises when the strip is
+    not flat (it is not provably card), when the median is not the value of
+    most of the interior, or when the fill is neither (hovered, pressed,
+    another widget)."""
     _w, _h, channels, rows = image
     x1, y1, x2, y2 = box
     ys = range(y1 + 3, y2 - 3)
     inside = sorted(_luma_at(rows, channels, x, y) for y in ys for x in range(x1 + 3, x2 - 3))
-    card = sorted(_luma_at(rows, channels, x, y) for y in ys for x in range(max(0, x1 - 3), x1 - 1))
-    if not inside or not card:
+    far, near = TUNNEL_LIST_BUTTON_CARD_DX
+    card_xs = range(x1 - far, x1 - near + 1)
+    if not inside or card_xs.start < 0:
         raise RuntimeError(f"list button {box} too small to read its fill")
-    delta = inside[len(inside) // 2] - card[len(card) // 2]
+    card = sorted(_luma_at(rows, channels, x, y) for y in ys for x in card_xs)
+    if card[-1] - card[0] > TUNNEL_LIST_BUTTON_FLAT:
+        raise RuntimeError(
+            f"list button {box}: card reference x {card_xs.start}..{card_xs.stop - 1} "
+            f"spread {card[0]}..{card[-1]} is not flat; fill is neither enabled nor disabled"
+        )
+    fill = inside[len(inside) // 2]
+    share = sum(abs(v - fill) <= TUNNEL_LIST_BUTTON_FLAT for v in inside) / len(inside)
+    if share < TUNNEL_LIST_BUTTON_FILL_SHARE:
+        raise RuntimeError(
+            f"list button {box}: interior median {fill} covers only {share:.0%} of the "
+            f"interior; fill is neither enabled nor disabled"
+        )
+    delta = fill - card[len(card) // 2]
     if delta >= TUNNEL_LIST_BUTTON_ENABLED_DELTA:
         return True
     if abs(delta) <= TUNNEL_LIST_BUTTON_FLAT:

@@ -16,6 +16,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 try:
     import asyncssh  # noqa: F401
@@ -47,6 +48,14 @@ NEW_LISTEN_LABEL = (574, 336, 644, 340)
 # 4 px taller, the centred dialog 8 px taller (top 124 vs 128).
 DROPDOWN_PLUS = FIXTURES / "connected-tunnels-dropdown-plus.png"
 DROPDOWN_HEADING = (249, 184, 367, 192)
+# GitHub Ubuntu runner frames (run for head 4704a39): same layout, every
+# outline anti-aliased over 2 px. CI_REMOVE is the frame press_remove read
+# before failing with "fill luma -6"; GSBDEV_REMOVE the same step on the
+# build host (crisp 1 px borders); CI_PRE_ALPHA a runner frame with nothing
+# selected (disabled "−", which the old card sample read as -9).
+CI_REMOVE = FIXTURES / "ci-tunnels-delete-alpha-remove.png"
+GSBDEV_REMOVE = FIXTURES / "gsbdev-tunnels-delete-alpha-remove.png"
+CI_PRE_ALPHA = FIXTURES / "ci-tunnels-editor-pre-alpha.png"
 
 
 @unittest.skipUnless(EDITOR.is_file() and CLOSED.is_file(), "tunnel fixtures missing")
@@ -136,6 +145,107 @@ class TunnelFrameHelpersTest(unittest.TestCase):
         self.assertFalse(module.tunnel_list_button_enabled(image(25), box))
         with self.assertRaisesRegex(RuntimeError, "neither enabled nor disabled"):
             module.tunnel_list_button_enabled(image(27), box)
+
+    @unittest.skipUnless(CI_REMOVE.is_file(), "CI remove fixture missing")
+    def test_aa_border_ci_frame_reads_enabled_minus(self):
+        # The runner's 2 px left border of "−" is x 284,285 (36,61) and the
+        # detected box starts at 286; the old card sample x 283,284 read
+        # 25,36 (median 36): 30 - 36 = -6. The card itself is 281..283 = 25.
+        _w, _h, channels, rows = image = module._read_png(CI_REMOVE)
+        self.assertEqual([module._luma_at(rows, channels, x, 592) for x in range(279, 287)],
+                         [38, 60, 25, 25, 25, 36, 61, 30])
+        (plus, plus_on), (minus, minus_on) = module.tunnel_list_button_states(
+            CI_REMOVE, NEW_HEADING, 1280, image=image)
+        self.assertEqual((plus, minus), ((254, 581, 281, 604), (286, 581, 312, 604)))
+        self.assertTrue(plus_on and minus_on)
+        x, y = module.tunnel_remove_centre(CI_REMOVE, NEW_HEADING, 1280)
+        print(f"aa_border CI remove centre ({x},{y})", flush=True)
+        self.assertTrue(286 <= x <= 310 and 583 <= y <= 601, (x, y))
+        self.assertEqual((x, y), (299, 592))
+        self.assertGreater(rows[y][x * channels], 100, "remove target is not on the − glyph")
+        self.assertEqual(module.tunnel_add_centre(CI_REMOVE, NEW_HEADING, 1280), (267, 592))
+
+    @unittest.skipUnless(GSBDEV_REMOVE.is_file(), "gsb-dev remove fixture missing")
+    def test_aa_border_gsbdev_frame_unchanged(self):
+        # Recorded with the old card sample before the change.
+        (plus, plus_on), (minus, minus_on) = module.tunnel_list_button_states(
+            GSBDEV_REMOVE, NEW_HEADING, 1280)
+        self.assertEqual((plus, minus), ((254, 581, 281, 604), (286, 581, 313, 604)))
+        self.assertTrue(plus_on and minus_on)
+        self.assertEqual(module.tunnel_remove_centre(GSBDEV_REMOVE, NEW_HEADING, 1280), (299, 592))
+        self.assertEqual(module.tunnel_add_centre(GSBDEV_REMOVE, NEW_HEADING, 1280), (267, 592))
+
+    @unittest.skipUnless(DROPDOWN_PLUS.is_file() and CI_PRE_ALPHA.is_file(), "fixtures missing")
+    def test_aa_border_disabled_minus_still_refused(self):
+        # Host and runner renderings of a disabled "−" (fill = card 25).
+        for frame, minus_box in ((DROPDOWN_PLUS, (286, 577, 313, 604)),
+                                 (CI_PRE_ALPHA, (286, 577, 312, 604))):
+            with self.subTest(frame=frame.name):
+                (plus, plus_on), (minus, minus_on) = module.tunnel_list_button_states(
+                    frame, DROPDOWN_HEADING, 1280)
+                self.assertEqual(plus, (254, 577, 281, 600))
+                self.assertEqual(minus, minus_box)
+                self.assertTrue(plus_on)
+                self.assertFalse(minus_on)
+                with self.assertRaisesRegex(RuntimeError, "remove .* is disabled"):
+                    module.tunnel_remove_centre(frame, DROPDOWN_HEADING, 1280)
+                self.assertEqual(module.tunnel_add_centre(frame, DROPDOWN_HEADING, 1280), (267, 588))
+
+    def test_aa_border_ambiguous_fill_and_reference_rejected(self):
+        # 40x30 card (25) with a 10x12 box at (16, 8); the card reference
+        # strip is x 11..13. Optional overrides paint single columns.
+        def image(fill, columns=None, interior=None):
+            rows = []
+            for y in range(30):
+                row = bytearray()
+                for x in range(40):
+                    v = 25
+                    if 16 <= x < 26 and 8 <= y < 20:
+                        v = fill
+                        if interior is not None and interior(x, y):
+                            v = 180
+                    if columns and x in columns and 8 <= y < 20:
+                        v = columns[x]
+                    row += bytes((v, v, v))
+                rows.append(row)
+            return 40, 30, 3, rows
+        box = (16, 8, 26, 20)
+        self.assertTrue(module.tunnel_list_button_enabled(image(30), box))
+        self.assertFalse(module.tunnel_list_button_enabled(image(25), box))
+        for fill in (27, 19):  # +2 and -6 against a genuinely flat card
+            with self.subTest(fill=fill):
+                with self.assertRaisesRegex(RuntimeError, "neither enabled nor disabled"):
+                    module.tunnel_list_button_enabled(image(fill), box)
+        # An anti-aliased border pixel inside the reference strip: not card.
+        with self.assertRaisesRegex(RuntimeError, r"card reference x 11\.\.13 spread 25\.\.36 is not flat"):
+            module.tunnel_list_button_enabled(image(30, columns={13: 36}), box)
+        # The old sample (x1-3..x1-2) would have read this border; the new
+        # one does not, so the same enabled box still reads enabled.
+        self.assertTrue(module.tunnel_list_button_enabled(image(30, columns={14: 36, 15: 61}), box))
+        # Glyph strokes over most of the interior cannot pose as the fill.
+        with self.assertRaisesRegex(RuntimeError, "covers only"):
+            module.tunnel_list_button_enabled(image(30, interior=lambda x, y: (x + y) % 2 == 0), box)
+
+    @unittest.skipUnless(CI_REMOVE.is_file(), "CI remove fixture missing")
+    def test_aa_border_ci_frame_minus_repainted_to_card_is_disabled(self):
+        # The runner frame with the "−" fill and glyph (inside its 2 px
+        # borders, x 286..310 x 582..602) repainted to the card luma 25.
+        width, height, channels, rows = module._read_png(CI_REMOVE)
+        rows = [bytearray(r) for r in rows]
+        for y in range(582, 603):
+            for x in range(286, 311):
+                rows[y][x * channels:x * channels + 3] = bytes((25, 25, 25))
+        mutated = (width, height, channels, rows)
+        (plus, plus_on), (minus, minus_on) = module.tunnel_list_button_states(
+            CI_REMOVE, NEW_HEADING, 1280, image=mutated)
+        self.assertEqual(minus, (286, 581, 312, 604))
+        self.assertTrue(plus_on)
+        self.assertFalse(minus_on)
+        real = module._read_png
+        with mock.patch.object(module, "_read_png",
+                               lambda path: mutated if path == CI_REMOVE else real(path)):
+            with self.assertRaisesRegex(RuntimeError, "remove .* is disabled"):
+                module.tunnel_remove_centre(CI_REMOVE, NEW_HEADING, 1280)
 
     def test_list_buttons_absent_without_manager(self):
         self.assertIsNone(module.tunnel_list_buttons(CLOSED, HEADING, 1280))
