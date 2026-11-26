@@ -4309,11 +4309,7 @@ struct App {
     external_editor: String,
 }
 
-const FILES_PANELS: [dock::Panel; 3] = [
-    dock::Panel::Filer,
-    dock::Panel::Explorer,
-    dock::Panel::Transfer,
-];
+const FILES_PANELS: [dock::Panel; 2] = [dock::Panel::Filer, dock::Panel::Transfer];
 
 impl App {
     fn save_ui_state(&mut self) {
@@ -5056,11 +5052,7 @@ impl App {
             }
         } else if !self.tabs.is_empty() {
             // Filer last so it ends up the active panel of its area.
-            for panel in [
-                dock::Panel::Transfer,
-                dock::Panel::Explorer,
-                dock::Panel::Filer,
-            ] {
+            for panel in [dock::Panel::Transfer, dock::Panel::Filer] {
                 self.docks.show(panel);
             }
         }
@@ -7881,7 +7873,8 @@ impl App {
                 let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.move_to(panel, area);
-                self.docks.widen_for_file_panel(panel, area);
+                self.docks
+                    .widen_for_file_panel(panel, area, self.window_size.width);
                 if !self.docks.is_visible(dock::Panel::Sender) {
                     self.sender_focused = false;
                 }
@@ -9386,41 +9379,46 @@ impl App {
         .into()
     }
 
-    /// Filer dock panel (spec 5.2): remote path bar, table, actions, editor.
+    /// Filer dock panel (spec 5.2): local listing on the left, remote listing
+    /// on the right, each with its own heading and action row; the inline
+    /// remote editor spans the full width below while it is open.
     fn filer_panel(&self) -> Element<'_, Message> {
         if self.tabs.is_empty() {
             return self.files_unavailable();
         }
-        let (_, remote_panel) = self.file_listing_panels();
-        let actions = files_action_row(vec![
+        let (local_panel, remote_panel) = self.file_listing_panels();
+        let local_actions = files_action_row(vec![
+            action("Upload ->", Message::FilesRequestUpload).into(),
+            action("New local folder", Message::FilesRequestMkdirLocal).into(),
+            action("Rename local", Message::FilesRequestRenameLocal).into(),
+            action("Delete local", Message::FilesRequestDeleteLocal).into(),
+        ]);
+        let remote_actions = files_action_row(vec![
             action("<- Download", Message::FilesRequestDownload).into(),
             action("New remote folder", Message::FilesRequestMkdirRemote).into(),
             action("Rename remote", Message::FilesRequestRenameRemote).into(),
             action("Edit remote", Message::FilesRequestEditRemote).into(),
             action("Delete remote", Message::FilesRequestDeleteRemote).into(),
         ]);
-        column![remote_panel, actions, self.remote_editor_section()]
+        let local_half = column![files_side_heading("Local"), local_panel, local_actions]
+            .width(Length::FillPortion(1))
+            .height(Fill);
+        let remote_half = column![files_side_heading("Remote"), remote_panel, remote_actions]
+            .width(Length::FillPortion(1))
+            .height(Fill);
+        let divider = container(space::horizontal())
+            .width(1)
             .height(Fill)
-            .width(Fill)
-            .into()
-    }
-
-    /// Explorer dock panel: local path bar, table and local actions.
-    fn explorer_panel(&self) -> Element<'_, Message> {
-        if self.tabs.is_empty() {
-            return self.files_unavailable();
-        }
-        let (local_panel, _) = self.file_listing_panels();
-        let actions = files_action_row(vec![
-            action("Upload ->", Message::FilesRequestUpload).into(),
-            action("New local folder", Message::FilesRequestMkdirLocal).into(),
-            action("Rename local", Message::FilesRequestRenameLocal).into(),
-            action("Delete local", Message::FilesRequestDeleteLocal).into(),
-        ]);
-        column![local_panel, actions]
-            .height(Fill)
-            .width(Fill)
-            .into()
+            .style(border_fill);
+        column![
+            row![local_half, divider, remote_half]
+                .width(Fill)
+                .height(Fill),
+            self.remote_editor_section(),
+        ]
+        .height(Fill)
+        .width(Fill)
+        .into()
     }
 
     /// Transfer dock panel (spec 5.3): one block per job with a progress bar.
@@ -11716,6 +11714,19 @@ fn files_path_bar<'a>(
     .into()
 }
 
+/// Small `Local` / `Remote` heading above each half of the Filer panel.
+fn files_side_heading(label: &'static str) -> Element<'static, Message> {
+    container(
+        text(label)
+            .size(12)
+            .color(theme::palette().accent)
+            .wrapping(text::Wrapping::None),
+    )
+    .padding([2, 6])
+    .width(Fill)
+    .into()
+}
+
 fn files_action_row(buttons: Vec<Element<'_, Message>>) -> Element<'_, Message> {
     scrollable(
         row(buttons)
@@ -13755,7 +13766,6 @@ mod tests {
                 dock::Panel::Session,
                 dock::Panel::Transfer,
                 dock::Panel::Filer,
-                dock::Panel::Explorer,
             ]
         );
         assert!(app.docks.is_visible(dock::Panel::Session));
@@ -13850,7 +13860,7 @@ mod tests {
             app.docks.is_visible(dock::Panel::Filer),
             "Filer opens last, active"
         );
-        assert!(app.docks.area_of(dock::Panel::Explorer).is_some());
+        assert_eq!(app.docks.area_of(dock::Panel::Explorer), None);
         assert!(app.docks.area_of(dock::Panel::Transfer).is_some());
         app.docks.move_to(dock::Panel::Filer, dock::Area::Right);
         assert_eq!(
@@ -13868,6 +13878,48 @@ mod tests {
         for panel in FILES_PANELS {
             assert_eq!(app.docks.area_of(panel), None);
         }
+    }
+
+    #[test]
+    fn merged_filer_panel_body_and_files_open() {
+        use iced::advanced::widget::Tree;
+
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-merged-filer-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.ui_state_path = None;
+        assert!(!available_panels().contains(&dock::Panel::Explorer));
+        {
+            // No tab: the placeholder container (one child).
+            let body = app.dock_panel_body(dock::Panel::Filer);
+            assert_eq!(Tree::new(&body).children.len(), 1);
+        }
+        let profile = Session {
+            host: "example.invalid".into(),
+            name: "merged filer fixture".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        app.tabs.push(Workspace::new(profile, pane));
+        {
+            // Tab open: column [halves row, editor section]; the row holds
+            // local half, divider, remote half.
+            let body = app.dock_panel_body(dock::Panel::Filer);
+            let tree = Tree::new(&body);
+            assert_eq!(tree.children.len(), 2);
+            assert_eq!(tree.children[0].children.len(), 3);
+        }
+
+        // Only Filer visible (Transfer closed): files are open.
+        app.docks.close(dock::Panel::Transfer);
+        app.docks.activate(dock::Panel::Filer);
+        assert!(app.docks.is_visible(dock::Panel::Filer));
+        assert!(!app.docks.is_visible(dock::Panel::Transfer));
+        assert!(app.files_open());
+        let _ = app.update(Message::DockActivate(dock::Panel::Session));
+        assert!(!app.files_open());
     }
 
     #[test]
