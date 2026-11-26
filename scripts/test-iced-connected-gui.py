@@ -128,8 +128,11 @@ def extedit_menu_region(click_x: int, click_y: int, width: int, height: int):
     both sides vertically and up to 460 px to the right.
     """
     reach = EXTEDIT_MENU_ROWS * EXTEDIT_ROW_HEIGHT + 60
+    # Remote rows now sit in the Filer's right half (click x ~790 at 1280
+    # px), where a wide popup is clamped leftwards by the window edge: keep
+    # the box at least 470 px wide by pulling its left edge in from the right.
     return (
-        max(0, click_x - 10),
+        max(0, min(click_x - 10, width - 470)),
         max(0, click_y - reach),
         min(width, click_x + 460),
         min(height, click_y + reach),
@@ -3821,8 +3824,11 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
     await step("filer", s08)
 
     # Bottom dock tab centres (Sender 6-88, Session 92-182, Transfer 186-283,
-    # Filer ~287-361, Explorer ~365-463).
-    for x, name in ((414, "tour-09-explorer.png"), (234, "tour-10-transfer.png"),
+    # Filer 287-361; measured on the merged-Filer build at 1280x800). The
+    # Explorer tab was merged into Filer (its local half is already in
+    # tour-08-filer.png), so tour-09-explorer.png is retired; the other
+    # shot names stay stable and tour-09 is intentionally absent.
+    for x, name in ((234, "tour-10-transfer.png"),
                     (47, "tour-11-sender.png"), (137, "tour-12-session.png"),
                     (324, None)):
         async def tab(x=x, name=name):

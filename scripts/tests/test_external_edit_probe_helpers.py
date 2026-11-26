@@ -80,6 +80,15 @@ class VerdictAndRegionTest(unittest.TestCase):
         self.assertEqual((x1, y1), (0, 0))
         self.assertGreaterEqual(y2 - 5, 7 * 24 + 2)
 
+    def test_region_right_half_click_keeps_width_for_left_clamped_popup(self):
+        # Merged Filer: remote rows are in the right half (x > 640).
+        x1, _, x2, _ = gui.extedit_menu_region(1100, 655, 1280, 800)
+        self.assertEqual(x2, 1280)
+        self.assertGreaterEqual(x2 - x1, 470)
+        self.assertLessEqual(x1, 1100 - 10)
+        x1, _, x2, _ = gui.extedit_menu_region(790, 655, 1280, 800)
+        self.assertEqual((x1, x2), (780, 1250))
+
 
 class AllowlistTest(unittest.TestCase):
     def test_new_tokens_are_logged(self):
