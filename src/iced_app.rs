@@ -9852,7 +9852,7 @@ impl App {
     /// either side must be stopped, and the target must not already hold the
     /// same kind and spec.
     fn tunnel_move_allowed(
-        &self,
+        &mut self,
         edit: &TunnelEditState,
         old_kind: tunnels::ForwardKind,
         old_spec: &str,
