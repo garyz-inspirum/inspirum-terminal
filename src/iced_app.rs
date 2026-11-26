@@ -13153,6 +13153,87 @@ mod tests {
         assert_eq!(back.text, "highlight\nabcd");
     }
 
+    fn drag_test_size_3_rows() -> terminal_core::TerminalSize {
+        terminal_core::TerminalSize::for_layout(
+            terminal_core::Size::new(160.0 * DRAG_CELL_W, 3.0 * DRAG_CELL_H),
+            terminal_core::Size::new(DRAG_CELL_W, DRAG_CELL_H),
+        )
+        .expect("grid")
+    }
+
+    const SCROLL_LINES: [&str; 3] = ["aaaa", "bbbb", "cccc"];
+
+    #[test]
+    fn drag_selection_follows_text_scrolled_by_output() {
+        use terminal_core::DragProbeStep::{Feed, Move};
+        let size = drag_test_size_3_rows();
+        let (x1, y1) = drag_xy(1, 0.5, 1);
+        let (x2, y2) = drag_xy(2, 0.5, 0);
+        // `\r\ndddd` scrolls the content up one row: the `b`s move to row 0.
+        let probe = terminal_core::probe_drag_selection_steps(
+            &size,
+            &SCROLL_LINES,
+            drag_xy(0, 0.5, 1),
+            &[Move(x1, y1), Feed("\r\ndddd"), Move(x2, y2)],
+        );
+        assert_eq!(probe.text, "bbb");
+        assert_eq!(probe.selected, vec![(0, 0), (0, 1), (0, 2)]);
+    }
+
+    #[test]
+    fn backward_drag_selection_follows_text_scrolled_by_output() {
+        use terminal_core::DragProbeStep::{Feed, Move};
+        let size = drag_test_size_3_rows();
+        let (x1, y1) = drag_xy(1, 0.5, 1);
+        let (x0, y0) = drag_xy(0, 0.5, 0);
+        let probe = terminal_core::probe_drag_selection_steps(
+            &size,
+            &SCROLL_LINES,
+            drag_xy(2, 0.5, 1),
+            &[Move(x1, y1), Feed("\r\ndddd"), Move(x0, y0)],
+        );
+        assert_eq!(probe.text, "bbb");
+        assert_eq!(probe.selected, vec![(0, 0), (0, 1), (0, 2)]);
+    }
+
+    #[test]
+    fn unmoved_press_anchor_follows_text_scrolled_by_output() {
+        use terminal_core::DragProbeStep::{Feed, Move};
+        let size = drag_test_size_3_rows();
+        let (x3, y3) = drag_xy(3, 0.5, 0);
+        let probe = terminal_core::probe_drag_selection_steps(
+            &size,
+            &SCROLL_LINES,
+            drag_xy(1, 0.5, 1),
+            &[Feed("\r\ndddd"), Move(x3, y3)],
+        );
+        assert_eq!(probe.text, "bbb");
+        assert_eq!(probe.selected, vec![(0, 1), (0, 2), (0, 3)]);
+    }
+
+    #[test]
+    fn drag_selection_dropped_by_alternate_screen_output_stays_empty() {
+        use terminal_core::DragProbeStep::{Feed, Move};
+        let size = drag_test_size_3_rows();
+        let (x1, y1) = drag_xy(1, 0.5, 1);
+        let (x3, y3) = drag_xy(3, 0.5, 0);
+        // The alternate screen has no history to scroll the pressed line
+        // into, and Alacritty drops the selection on the switch; the drag
+        // must not resurrect it from the stale press cell.
+        let probe = terminal_core::probe_drag_selection_steps(
+            &size,
+            &SCROLL_LINES,
+            drag_xy(0, 0.5, 1),
+            &[
+                Move(x1, y1),
+                Feed("\x1b[?1049hdddd\r\neeee\r\nffff\r\ngggg"),
+                Move(x3, y3),
+            ],
+        );
+        assert_eq!(probe.text, "");
+        assert!(probe.selected.is_empty());
+    }
+
     #[test]
     fn plain_click_selects_nothing_and_small_horizontal_drag_selects_one_cell() {
         let size = drag_test_size();

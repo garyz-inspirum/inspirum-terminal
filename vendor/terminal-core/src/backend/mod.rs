@@ -1060,6 +1060,32 @@ pub fn probe_drag_selection(
     press: (f32, f32),
     drags: &[(f32, f32)],
 ) -> DragSelectionProbe {
+    let steps: Vec<DragProbeStep<'_>> = drags
+        .iter()
+        .map(|&(x, y)| DragProbeStep::Move(x, y))
+        .collect();
+    probe_drag_selection_steps(size, lines, press, &steps)
+}
+
+/// One step of `probe_drag_selection_steps` while the button is held.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DragProbeStep<'a> {
+    /// Pointer move to text-area pixels (x, y) with the button held.
+    Move(f32, f32),
+    /// Bytes the PTY writes while the button is held.
+    Feed(&'a str),
+}
+
+/// Test seam: like `probe_drag_selection`, but PTY output can be fed
+/// between pointer moves while the button is held.
+#[doc(hidden)]
+pub fn probe_drag_selection_steps(
+    size: &TerminalSize,
+    lines: &[&str],
+    press: (f32, f32),
+    steps: &[DragProbeStep<'_>],
+) -> DragSelectionProbe {
     use alacritty_terminal::event::VoidListener;
     use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 
@@ -1077,8 +1103,13 @@ pub fn probe_drag_selection(
         press.0,
         press.1,
     );
-    for &(x, y) in drags {
-        update_drag_selection(&mut terminal, anchor, size, x, y);
+    for step in steps {
+        match *step {
+            DragProbeStep::Move(x, y) => {
+                update_drag_selection(&mut terminal, anchor, size, x, y);
+            }
+            DragProbeStep::Feed(bytes) => parser.advance(&mut terminal, bytes.as_bytes()),
+        }
     }
 
     let range = terminal
