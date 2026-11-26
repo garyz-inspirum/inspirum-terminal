@@ -677,6 +677,51 @@ mod tests {
         assert_eq!(layout.left_width, 150.0);
     }
 
+    /// Layout saved by an older build: Filer alone in a 214 px left dock,
+    /// Session/Outline in a 214 px right dock (no `file_panel_fitted`).
+    const R153_DOCK_OLD_LAYOUT: &str = r#"{
+        "left": {"panels": ["filer"], "active": 0, "collapsed": false},
+        "right": {"panels": ["session", "outline"], "active": 0, "collapsed": false},
+        "bottom": {"panels": ["sender", "transfer", "shell"], "active": 0, "collapsed": false},
+        "hidden": [],
+        "left_width": 214.0,
+        "right_width": 214.0,
+        "bottom_ratio": 0.32
+    }"#;
+
+    /// Centre workspace width as `dock_view::dock_body` lays it out: every
+    /// rendered (non-empty) side dock takes its width plus its splitter.
+    fn r153_dock_centre(layout: &DockLayout, window_width: f32) -> f32 {
+        let mut centre = window_width;
+        if !layout.left.panels.is_empty() {
+            centre -= layout.left_width + SPLITTER_GRAB;
+        }
+        if !layout.right.panels.is_empty() {
+            centre -= layout.right_width + SPLITTER_GRAB;
+        }
+        centre
+    }
+
+    #[test]
+    fn r153_dock_load_fit_keeps_centre_at_minimum_window() {
+        let mut restored = DockLayout::from_json(R153_DOCK_OLD_LAYOUT);
+        restored.fit_file_panel(960.0);
+        assert_invariants(&restored);
+        assert_eq!(restored.area_of(Panel::Filer), Some(Area::Left));
+        let centre = r153_dock_centre(&restored, 960.0);
+        assert!(
+            centre >= MIN_CENTRE_WIDTH,
+            "centre {centre} (left {}, right {})",
+            restored.left_width,
+            restored.right_width
+        );
+        assert!(
+            restored.left_width > DEFAULT_SIDE_WIDTH,
+            "Filer still widened"
+        );
+        assert_eq!(restored.right_width, DEFAULT_SIDE_WIDTH);
+    }
+
     #[test]
     fn splitter_drag_clamps_to_keep_centre() {
         let mut layout = DockLayout::default();

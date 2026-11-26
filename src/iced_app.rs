@@ -12529,6 +12529,116 @@ mod tests {
         assert_eq!(app.dock_drag, None);
     }
 
+    /// Layout saved by an older build: Filer alone in a 214 px left dock,
+    /// Session/Outline in a 214 px right dock.
+    const R153_DOCK_OLD_LAYOUT: &str = r#"{
+        "left": {"panels": ["filer"], "active": 0, "collapsed": false},
+        "right": {"panels": ["session", "outline"], "active": 0, "collapsed": false},
+        "bottom": {"panels": ["sender", "transfer", "shell"], "active": 0, "collapsed": false},
+        "hidden": [],
+        "left_width": 214.0,
+        "right_width": 214.0,
+        "bottom_ratio": 0.32
+    }"#;
+
+    fn r153_dock_app(name: &str) -> App {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-r153-dock-{name}-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.ui_state_path = None;
+        app
+    }
+
+    /// Centre workspace width as `dock_body` lays it out: each rendered
+    /// (non-empty) side dock takes its width plus its splitter.
+    fn r153_dock_centre(docks: &dock::DockLayout, window_width: f32) -> f32 {
+        let mut centre = window_width;
+        if !docks.left.panels.is_empty() {
+            centre -= docks.left_width + dock::SPLITTER_GRAB;
+        }
+        if !docks.right.panels.is_empty() {
+            centre -= docks.right_width + dock::SPLITTER_GRAB;
+        }
+        centre
+    }
+
+    #[test]
+    fn r153_dock_restore_then_resize_keeps_centre() {
+        let mut app = r153_dock_app("resize");
+        // What start-up did with a restored layout: fit for a 1280 px window.
+        let mut docks = dock::DockLayout::from_json(R153_DOCK_OLD_LAYOUT);
+        docks.retain_available(&available_panels());
+        docks.add_missing(&available_panels());
+        docks.fit_file_panel(1280.0);
+        app.docks = docks;
+        let _ = app.update(Message::WindowResized(iced::Size::new(1280.0, 800.0)));
+        let centre = r153_dock_centre(&app.docks, 1280.0);
+        assert!(
+            centre >= dock::MIN_CENTRE_WIDTH,
+            "1280: centre {centre} (left {}, right {})",
+            app.docks.left_width,
+            app.docks.right_width
+        );
+        let _ = app.update(Message::WindowResized(iced::Size::new(960.0, 640.0)));
+        let centre = r153_dock_centre(&app.docks, 960.0);
+        assert!(
+            centre >= dock::MIN_CENTRE_WIDTH,
+            "960: centre {centre} (left {}, right {})",
+            app.docks.left_width,
+            app.docks.right_width
+        );
+        assert!(app.docks.left_width >= dock::MIN_SIDE_WIDTH);
+        assert!(app.docks.right_width >= dock::MIN_SIDE_WIDTH);
+    }
+
+    #[test]
+    fn r153_dock_transfer_toggle_keeps_manual_filer_width() {
+        let mut app = r153_dock_app("toggle");
+        let _ = app.update(Message::DockMove(dock::Panel::Filer, dock::Area::Left));
+        let _ = app.update(Message::DockDragStart(dock::Area::Left));
+        let _ = app.update(Message::DockDragMove(iced::Point::new(300.0, 300.0)));
+        let _ = app.update(Message::DockDragEnd);
+        assert!((app.docks.left_width - 300.0).abs() <= 1.0);
+        let _ = app.update(Message::DockToggle(dock::Panel::Transfer));
+        assert!(
+            (app.docks.left_width - 300.0).abs() <= 1.0,
+            "after first Transfer toggle: left {}",
+            app.docks.left_width
+        );
+        let _ = app.update(Message::DockToggle(dock::Panel::Transfer));
+        assert!(
+            (app.docks.left_width - 300.0).abs() <= 1.0,
+            "after second Transfer toggle: left {}",
+            app.docks.left_width
+        );
+    }
+
+    #[test]
+    fn r153_dock_showing_filer_in_side_dock_widens_it() {
+        let mut app = r153_dock_app("show");
+        let _ = app.update(Message::DockMove(dock::Panel::Filer, dock::Area::Left));
+        app.docks
+            .set_width(dock::Area::Left, dock::DEFAULT_SIDE_WIDTH);
+        let _ = app.update(Message::DockToggle(dock::Panel::Filer));
+        assert_eq!(app.docks.area_of(dock::Panel::Filer), None);
+        assert_eq!(app.docks.left_width, dock::DEFAULT_SIDE_WIDTH);
+        let _ = app.update(Message::DockToggle(dock::Panel::Filer));
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Filer),
+            Some(dock::Area::Left)
+        );
+        assert!(app.docks.is_visible(dock::Panel::Filer));
+        assert!(
+            app.docks.left_width >= dock::FILE_PANEL_MIN_WIDTH,
+            "left {}",
+            app.docks.left_width
+        );
+        let centre = r153_dock_centre(&app.docks, app.window_size.width);
+        assert!(centre >= dock::MIN_CENTRE_WIDTH, "centre {centre}");
+    }
+
     #[test]
     fn saved_session_sidebar_pages_reset_after_search_changes() {
         let path = std::env::temp_dir().join(format!(
