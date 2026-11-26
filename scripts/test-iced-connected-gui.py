@@ -3564,8 +3564,10 @@ async def wait_for(predicate, label: str, *, timeout: float = 22) -> None:
 async def click_filer_refresh(
     window: str, env: dict[str, str], shot_path: Path, *,
     path_bar_y: int, completed, label: str, attempt_timeout: float = 6,
-) -> None:
-    """Click the Filer path bar's text-less refresh icon until ``completed``.
+) -> int:
+    """Click the Filer path bar's text-less refresh icon until ``completed``;
+    return how many clicks were issued (1..3, see
+    ``require_refresh_listing_count``).
 
     Panels only re-list when going hidden -> visible; re-clicking the
     already-active Filer tab does not reload either half (asserted by the
@@ -3591,10 +3593,40 @@ async def click_filer_refresh(
         last = index == len(offsets) - 1
         try:
             await wait_for(completed, label, timeout=22 if last else attempt_timeout)
-            return
+            return index + 1
         except RuntimeError:
             if last:
                 raise
+    raise AssertionError("unreachable")
+
+
+def require_refresh_listing_count(before: int, after: int, clicks: int) -> None:
+    """Remote listings started by ``click_filer_refresh`` must match its clicks.
+
+    Counting rule (``SFTP_LIST_READY`` fires once per server-side scandir,
+    i.e. per remote directory listing): each issued click can start at most
+    one listing, and a retry click is only issued after the previous one
+    showed no completed listing within ``attempt_timeout``. So:
+
+    * one click -> exactly ``before + 1`` (a second listing is a product
+      double reload, never a test artefact);
+    * ``clicks`` > 1 -> ``before + 1 <= after <= before + clicks``: a click
+      that missed the icon starts none, while a slow first listing that
+      completes after a retry click that did hit the icon legitimately
+      yields two. Requiring exactly one there would flake.
+
+    Raises ``RuntimeError`` with both counts otherwise.
+    """
+    if clicks < 1:
+        raise RuntimeError(f"refresh issued no click (clicks={clicks})")
+    started = after - before
+    allowed = (1, 1) if clicks == 1 else (1, clicks)
+    if not allowed[0] <= started <= allowed[1]:
+        raise RuntimeError(
+            f"refresh started {started} remote listing(s) for {clicks} click(s): "
+            f"SFTP_LIST_READY {before} -> {after}, expected "
+            + (f"exactly {before + 1}" if clicks == 1 else f"{before + 1}..{before + clicks}")
+        )
 
 
 async def click_transfer(
@@ -5303,7 +5335,7 @@ async def main() -> int:
                         f"SFTP_LIST_READY {listings_before} -> {listings_after_tab} "
                         f"(tab {filer_tab})"
                     )
-                await click_filer_refresh(
+                refresh_clicks = await click_filer_refresh(
                     window, env, destination / "connected-files-refresh-clicked.png",
                     path_bar_y=center(remote_heading)[1] + 27,
                     completed=lambda: events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY") > listings_before,
@@ -5316,6 +5348,27 @@ async def main() -> int:
                     window, destination / "connected-files-third-visible.png",
                     third_name, env=env, region=remote_body, timeout=40,
                 )
+                # Refresh must start exactly the one remote listing (rule in
+                # require_refresh_listing_count). Let any listing still in
+                # flight land first, so a late one is charged here and not to
+                # the header-click check below: after a retry click, wait (up
+                # to 22 s, the last attempt's budget) for one listing per
+                # click; otherwise settle like the tab-click check.
+                if refresh_clicks > 1:
+                    try:
+                        await wait_for(
+                            lambda: events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY")
+                            >= listings_before + refresh_clicks,
+                            "one listing per refresh click", timeout=22 * TIME_SCALE,
+                        )
+                    except RuntimeError:
+                        pass  # a click that missed the icon starts none
+                else:
+                    await asyncio.sleep(1.5 * TIME_SCALE)
+                listings_after_refresh = events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY")
+                require_refresh_listing_count(listings_before, listings_after_refresh, refresh_clicks)
+                print(f"filer refresh: {refresh_clicks} click(s), SFTP_LIST_READY "
+                      f"{listings_before} -> {listings_after_refresh}", flush=True)
                 command(
                     "xdotool", "mousemove", "--window", window,
                     *map(str, center(third_row)), "click", "1", env=env,
@@ -5332,7 +5385,8 @@ async def main() -> int:
                 # Default is name ascending (directories first, then name; this
                 # fixture has no directories), so 111 is above 444. A second
                 # click must restore that order: the 960x640 step needs 111
-                # first. Header clicks must not start another SFTP listing.
+                # first. Header clicks must not start another SFTP listing
+                # (baseline read below, after the refresh count settled).
                 row_111 = await locate_rendered_label(
                     window, destination / "connected-files-sort-before.png",
                     third_name, env=env, region=remote_body, timeout=20,
