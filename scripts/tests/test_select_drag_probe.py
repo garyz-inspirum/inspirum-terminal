@@ -36,13 +36,14 @@ def logged_echo_lines() -> tuple:
 class ProbeDesignTest(unittest.TestCase):
     def test_reply_and_target_column(self):
         reply = gui.select_probe_reply()
-        self.assertEqual(reply, "NATIVE_ECHO:SELROW DRAGPROBE PAD TO COL42 echo:SEL_OK")
+        self.assertEqual(reply, "NATIVE_ECHO:SELROW DRAGPROBE PAD TO COL42 echo:SEL_OK=G")
         col = gui.reply_column(reply, gui.SELECT_PROBE_TARGET)
         self.assertEqual(col, 42)
-        self.assertGreaterEqual(col, 40)
-        # Target ends the line: last cell is column 52, the final column.
-        self.assertEqual(col + len(gui.SELECT_PROBE_TARGET) - 1, len(reply) - 1)
-        self.assertEqual(len(reply), 53)
+        self.assertEqual(col + len(gui.SELECT_PROBE_TARGET) - 1, 52)
+        # Printable non-space guard right after the target (columns 53..54).
+        self.assertEqual(reply[53:], "=G")
+        self.assertTrue(reply[53].isprintable() and not reply[53].isspace())
+        self.assertEqual(len(reply), 55)
 
     def test_anchor_is_one_word_at_column_19(self):
         reply = gui.select_probe_reply()
@@ -108,6 +109,9 @@ class ClassifyPasteTest(unittest.TestCase):
             "echo:SEL_O": "SELECTION_PASTE_MISMATCH cols 42..51",
             " echo:SEL_OK": "SELECTION_PASTE_MISMATCH cols 41..52",
             "2 echo:SEL_OK": "SELECTION_PASTE_MISMATCH cols 40..52",
+            # One-cell overrun now picks up the guard.
+            "echo:SEL_OK=": "SELECTION_PASTE_MISMATCH cols 42..53",
+            "cho:SEL_OK=": "SELECTION_PASTE_MISMATCH cols 43..53",
         }
         for line, marker in cases.items():
             self.assertEqual(gui.classify_selection_paste(line), marker, line)

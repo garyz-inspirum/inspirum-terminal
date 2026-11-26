@@ -61,8 +61,9 @@ LOGGED_ECHO_LINES = (
     "echo:AFTER_EXTERNAL_EDIT",
     "echo:IN_DUPLICATE_TAB",
     "echo:AFTER_DUPLICATE_TAB",
-    # Drag-selection probe (SELECT_PROBE_LINE / SELECT_PROBE_TARGET below).
-    "echo:SELROW DRAGPROBE PAD TO COL42 echo:SEL_OK",
+    # Drag-selection probe (SELECT_PROBE_LINE / SELECT_PROBE_TARGET below;
+    # the trailing "=G" is a guard that makes a one-cell overrun visible).
+    "echo:SELROW DRAGPROBE PAD TO COL42 echo:SEL_OK=G",
     "echo:SEL_OK",
 )
 
@@ -409,13 +410,15 @@ def pty_columns_fit(cols: int, pane_width: float, cell_w: float = TERMINAL_CELL_
 # Drag-selection probe. The fixture prints ``NATIVE_ECHO:`` + the text after
 # ``echo:`` + CRLF and never echoes typed characters, so the reply row reads
 # exactly select_probe_reply() from column 0 and the typed command line is
-# not on screen. Its tail ``echo:SEL_OK`` starts at column
+# not on screen. Its target ``echo:SEL_OK`` starts at column
 # len("NATIVE_ECHO:") + SELECT_PROBE_LINE[5:].index("echo:SEL_OK") = 12 + 30
-# = 42 (old 8 px cell drift there: 42 * 0.4 / 8.4 = 2 cells) and ends the
-# line at column 52. Dragging exactly over it and pasting it back sends an
-# allowlisted command; any off-by-one sends a near miss that is logged as
+# = 42 (old 8 px cell drift there: 42 * 0.4 / 8.4 = 2 cells) and ends at
+# column 52. A printable guard ``=G`` follows at columns 53..54 so a
+# one-cell overrun is observable (``echo:SEL_OK=``). Dragging exactly over
+# the target and pasting it back sends an allowlisted command; any
+# off-by-one sends a near miss that is logged as
 # SELECTION_PASTE_MISMATCH cols <a>..<b> (classify_selection_paste) instead.
-SELECT_PROBE_LINE = "echo:SELROW DRAGPROBE PAD TO COL42 echo:SEL_OK"
+SELECT_PROBE_LINE = "echo:SELROW DRAGPROBE PAD TO COL42 echo:SEL_OK=G"
 SELECT_PROBE_TARGET = "echo:SEL_OK"
 SELECT_PROBE_ANCHOR = "DRAGPROBE"
 NATIVE_ECHO_PREFIX = "NATIVE_ECHO:"
@@ -4170,12 +4173,15 @@ async def main() -> int:
                 select_reply = select_probe_reply()
                 select_col = reply_column(select_reply, SELECT_PROBE_TARGET)
                 select_end_col = select_col + len(SELECT_PROBE_TARGET) - 1
-                if select_col < 40 or select_end_col != len(select_reply) - 1:
+                select_guard = select_reply[select_end_col + 1:select_end_col + 2]
+                if ((select_col, select_end_col) != (42, 52) or not select_guard.isprintable()
+                        or select_guard.isspace() or not select_guard):
                     raise RuntimeError(
                         f"selection probe design broken: target columns {select_col}..{select_end_col} "
+                        f"(need 42..52) with guard {select_guard!r} at column {select_end_col + 1} "
                         f"in {len(select_reply)}-column reply"
                     )
-                if select_end_col >= pty_cols:
+                if len(select_reply) > pty_cols:
                     raise RuntimeError(
                         f"selection probe reply needs {len(select_reply)} columns, PTY has {pty_cols}"
                     )
