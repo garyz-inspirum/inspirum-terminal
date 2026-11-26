@@ -579,3 +579,46 @@ fn unrelated_tool_jobs_do_not_gate_tunnel_starts() {
     );
     app.tunnels.stop_all();
 }
+
+#[test]
+fn moving_a_running_forward_to_another_session_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut app, key, alpha) = app_with_alpha_running(dir.path());
+    let idle = add_idle_profile(&mut app);
+    let _ = app.update(Message::Tunnels);
+    let target = app
+        .tunnel_session_picker
+        .options()
+        .iter()
+        .find(|option| option.key == idle)
+        .cloned()
+        .unwrap();
+    let before = std::fs::read(&app.profiles_path).unwrap();
+    let _ = app.update(Message::TunnelEdit(key.clone(), LOCAL, ALPHA.into()));
+    let _ = app.update(Message::TunnelDraftSession(target));
+    assert_eq!(app.tunnel_edit.as_ref().unwrap().profile_key, key);
+    let _ = app.update(Message::TunnelSaveEdit);
+    assert_eq!(app.tunnel_notice, TUNNEL_MOVE_RUNNING);
+    assert!(app.tunnel_edit.is_some(), "the rejected move stays open");
+    assert_eq!(std::fs::read(&app.profiles_path).unwrap(), before);
+    assert!(tunnels::rows_for(&app.profiles[1]).is_empty());
+    assert_alpha_untouched(&mut app, &key, &alpha);
+
+    // Idle Bravo may still move; running Alpha keeps its owner and listener.
+    let target = app
+        .tunnel_session_picker
+        .options()
+        .iter()
+        .find(|option| option.key == idle)
+        .cloned()
+        .unwrap();
+    let _ = app.update(Message::TunnelEdit(key.clone(), LOCAL, BRAVO.into()));
+    let _ = app.update(Message::TunnelDraftSession(target));
+    let _ = app.update(Message::TunnelSaveEdit);
+    assert_eq!(app.tunnel_notice, "Tunnel moved to zz-idle.");
+    assert_eq!(saved_forwards(&app), vec![ALPHA.to_owned()]);
+    let saved = load_sessions(&app.profiles_path).unwrap();
+    assert_eq!(saved[1].ssh.local_forwards, vec![BRAVO.to_owned()]);
+    assert_eq!(app.tunnels.forward_status(&key, LOCAL, ALPHA), alpha);
+    app.tunnels.stop_all();
+}

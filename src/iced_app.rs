@@ -16,6 +16,8 @@ mod theme;
 mod tools;
 #[cfg(test)]
 mod tunnel_edit_lifecycle_tests;
+#[cfg(test)]
+mod tunnel_session_picker_tests;
 mod ui_state;
 
 use crate::{
