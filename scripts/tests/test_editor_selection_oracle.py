@@ -87,6 +87,13 @@ class EditorSelectionOracleTest(unittest.TestCase):
         # Minimum window: dialog still 840 wide, centred at x=60.
         self.assertEqual(module.editor_form_region(960, 640), (391, 42, 900, 640))
 
+    def test_tunnel_list_region_starts_at_the_dialog(self):
+        heading = (245, 147, 372, 158)
+        self.assertEqual(module.tunnel_list_region(heading, 1280, 800), (233, 42, 640, 800))
+        self.assertEqual(module.tunnel_list_region((5, 147, 130, 158), 1280, 800)[0], 0)
+        with self.assertRaises(RuntimeError):
+            module.tunnel_list_region((600, 147, 727, 158), 1280, 800)
+
     def test_listen_row_region_excludes_destination_port_row(self):
         heading = (249, 151, 367, 159)   # measured OCR box, 1280x800 frame
         row = module.listen_port_row_region(heading, 1280)

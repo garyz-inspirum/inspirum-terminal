@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import shutil
 import unittest
 
 
@@ -102,6 +103,33 @@ class VisibleLabelLocatorTest(unittest.TestCase):
             ["000_GUI_DOWNLOAD", "FIXTURE.bin"],
         )
 
+
+
+CI_TERMINAL_ROWS = (
+    Path(__file__).resolve().parent / "fixtures"
+    / "connected-tunnels-editor-pre-alpha-terminal-rows-ci.png"
+)
+
+
+@unittest.skipUnless(shutil.which("tesseract"), "tesseract is not installed")
+@unittest.skipUnless(CI_TERMINAL_ROWS.is_file(), "CI terminal-rows fixture missing")
+class TunnelListRegionCiFrameTest(unittest.TestCase):
+    """CI frame: NATIVE_ECHO:* terminal lines left of the dialog share the
+    Alpha row; region (0, 42, 640, 800) missed "Alpha forward" there."""
+
+    def test_list_rows_found_from_the_dialog_edge(self):
+        region = module.tunnel_list_region((245, 147, 372, 158), 1280, 800)
+        alpha = module.locate_visible_label(CI_TERMINAL_ROWS, "Alpha forward", region=region)
+        self.assertIsNotNone(alpha)
+        self.assertGreaterEqual(alpha[0], 280)
+        self.assertLessEqual(alpha[2], 400)
+        self.assertGreaterEqual(alpha[1], 185)
+        self.assertLessEqual(alpha[3], 205)
+        bravo = module.locate_visible_label(CI_TERMINAL_ROWS, "Bravo forward", region=region)
+        self.assertIsNotNone(bravo)
+        self.assertGreaterEqual(bravo[0], 280)
+        self.assertLessEqual(bravo[2], 400)
+        self.assertGreater(bravo[1], alpha[3])
 
 if __name__ == "__main__":
     unittest.main()

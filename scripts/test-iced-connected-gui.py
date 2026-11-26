@@ -1322,6 +1322,28 @@ def editor_form_region(width: int, height: int):
     return (left + TUNNEL_EDITOR_CARD_DX - 6, 42, min(width, left + dialog), height)
 
 
+# Slack left of the located "Tunnel Manager" heading for the list search.
+TUNNEL_LIST_REGION_MARGIN = 12
+
+
+def tunnel_list_region(heading_bounds, width: int, height: int):
+    """Search box for Tunnel Settings list-row labels, starting at the dialog.
+
+    ``heading_bounds`` is the located "Tunnel Manager" heading (x0, y0, x1,
+    y1), left-aligned with the list inside the dialog. Starting at window
+    x=0 lets the terminal behind the dialog join the search: on the CI
+    renderer its NATIVE_ECHO:* lines sat on the same rows as "Alpha forward"
+    and the locator missed the label (the same frame hit from x=230)."""
+    left = max(0, heading_bounds[0] - TUNNEL_LIST_REGION_MARGIN)
+    right = width // 2
+    if left >= right - 100:
+        raise RuntimeError(
+            f"Tunnel Manager heading at x={heading_bounds[0]} leaves no list "
+            f"region: left {left} >= {right} - 100 (window {width}x{height})"
+        )
+    return (left, 42, right, height)
+
+
 def listen_port_row_region(heading_bounds, width: int):
     """Tight box around the Listen Port input, anchored to the located
     "Tunnel Manager" heading. Only digits here prove the selected forward:
@@ -6550,7 +6572,7 @@ async def main() -> int:
                     ed_w, ed_h = window_size(window, env)
                     form_region = editor_form_region(ed_w, ed_h)
                     listen_row = listen_port_row_region(heading_bounds, ed_w)
-                    list_region = (0, 42, ed_w // 2, ed_h)
+                    list_region = tunnel_list_region(heading_bounds, ed_w, ed_h)
                     for idx, (label, name) in enumerate(
                         zip(POPULATED_LABELS, ("alpha", "bravo"))
                     ):
@@ -6669,7 +6691,8 @@ async def main() -> int:
                         w, h = window_size(window, env)
                         await click_label(
                             window, destination / f"connected-tunnels-{tag}-pre.png",
-                            label, env, region=(0, 42, w // 2, h), timeout=15, settle=.8,
+                            label, env, region=tunnel_list_region(heading, w, h),
+                            timeout=15, settle=.8,
                         )
                         return await require_form(port, sibling, heading, tag)
 
