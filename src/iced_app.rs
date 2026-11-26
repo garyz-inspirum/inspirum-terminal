@@ -333,7 +333,16 @@ fn local_navigation_scroll(key: &keyboard::Key, modifiers: keyboard::Modifiers) 
 pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result {
     theme::init_from_env();
     iced::application(
-        move || App::boot(profiles_path.clone(), ssh_config.clone()),
+        // `resize_events` only reports later resizes (the initial size comes
+        // as `window::Event::Opened`), so ask for the real size at start-up.
+        move || {
+            (
+                App::boot(profiles_path.clone(), ssh_config.clone()),
+                iced::window::latest()
+                    .and_then(iced::window::size)
+                    .map(Message::WindowResized),
+            )
+        },
         App::update,
         App::view,
     )
@@ -4477,6 +4486,9 @@ struct App {
     /// focus changes and clears it on a selection or a state rebuild; so
     /// does this.
     tunnel_session_search: String,
+    /// A restored layout still needs its one-time Filer side-dock widening;
+    /// done on the first real `WindowResized`, when the width is known.
+    pending_file_panel_fit: bool,
 }
 
 const FILES_PANELS: [dock::Panel; 2] = [dock::Panel::Filer, dock::Panel::Transfer];
@@ -4547,6 +4559,10 @@ impl App {
                 None => message.clone(),
             });
         }
+        // Older builds could leave Filer in a 214/420 px side dock; it is
+        // widened once the real window width arrives (`WindowResized`).
+        let (docks, pending_file_panel_fit) =
+            dock::DockLayout::restore(saved_ui.docks.take(), &available_panels());
         Self {
             tools,
             profiles_path,
@@ -4571,16 +4587,7 @@ impl App {
             open_menu: None,
             dock_drag: None,
             window_size: iced::Size::new(1280.0, 800.0),
-            docks: {
-                let mut docks = saved_ui.docks.take().unwrap_or_default();
-                docks.sanitize();
-                docks.retain_available(&available_panels());
-                docks.add_missing(&available_panels());
-                // Older builds could leave Filer in a 214/420 px side dock;
-                // widen it for the initial 1280 px window (`window_size`).
-                docks.fit_file_panel(1280.0);
-                docks
-            },
+            docks,
             ui_state_path,
             dock_menu: None,
             privacy_locked: false,
@@ -4634,6 +4641,7 @@ impl App {
             external_editor: std::mem::take(&mut saved_ui.external_editor),
             tunnel_session_picker: combo_box::State::new(Vec::new()),
             tunnel_session_search: String::new(),
+            pending_file_panel_fit,
         }
         .with_tunnel_session_picker()
     }
@@ -8109,6 +8117,7 @@ impl App {
                 self.docks.move_to(panel, area);
                 self.docks
                     .widen_for_file_panel(panel, area, self.window_size.width);
+                self.docks.fit_to_window(self.window_size.width);
                 if !self.docks.is_visible(dock::Panel::Sender) {
                     self.sender_focused = false;
                 }
@@ -8121,7 +8130,16 @@ impl App {
                 let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.toggle(panel);
-                self.docks.fit_file_panel(self.window_size.width);
+                // Only showing the Filer in a side dock may widen it; other
+                // toggles keep the user's widths unless they no longer fit.
+                if panel == dock::Panel::Filer
+                    && self.docks.is_visible(panel)
+                    && let Some(area) = self.docks.area_of(panel)
+                {
+                    self.docks
+                        .widen_for_file_panel(panel, area, self.window_size.width);
+                }
+                self.docks.fit_to_window(self.window_size.width);
                 if !self.docks.is_visible(dock::Panel::Sender) {
                     self.sender_focused = false;
                 }
@@ -8142,7 +8160,18 @@ impl App {
                     return self.files_became_visible();
                 }
             }
-            Message::WindowResized(size) => self.window_size = size,
+            Message::WindowResized(size) => {
+                self.window_size = size;
+                // A minimised window reports 0x0; fitting to that would
+                // collapse both side docks for good.
+                if size.width >= 1.0 && size.height >= 1.0 {
+                    if std::mem::take(&mut self.pending_file_panel_fit) {
+                        self.docks.fit_file_panel(size.width);
+                    }
+                    // Not saved here: the next layout action saves it.
+                    self.docks.fit_to_window(size.width);
+                }
+            }
             Message::DockDragStart(area) => {
                 self.dock_menu = None;
                 if self.dialog.is_none() {
@@ -8181,6 +8210,7 @@ impl App {
                 self.docks.retain_available(&available_panels());
                 self.docks.add_missing(&available_panels());
                 self.docks.fit_file_panel(self.window_size.width);
+                self.docks.fit_to_window(self.window_size.width);
                 if !self.docks.is_visible(dock::Panel::Sender) {
                     self.sender_focused = false;
                 }
@@ -12637,6 +12667,47 @@ mod tests {
         );
         let centre = r153_dock_centre(&app.docks, app.window_size.width);
         assert!(centre >= dock::MIN_CENTRE_WIDTH, "centre {centre}");
+    }
+
+    #[test]
+    fn r153_dock_load_fit_waits_for_real_window_width() {
+        let mut app = r153_dock_app("load");
+        let saved = dock::DockLayout::from_json(R153_DOCK_OLD_LAYOUT);
+        (app.docks, app.pending_file_panel_fit) =
+            dock::DockLayout::restore(Some(saved), &available_panels());
+        assert!(app.pending_file_panel_fit);
+        assert_eq!(app.docks.left_width, dock::DEFAULT_SIDE_WIDTH);
+        // A minimised window (0x0) neither consumes the fit nor shrinks.
+        let _ = app.update(Message::WindowResized(iced::Size::new(0.0, 0.0)));
+        assert!(app.pending_file_panel_fit);
+        assert_eq!(app.docks.left_width, dock::DEFAULT_SIDE_WIDTH);
+        let _ = app.update(Message::WindowResized(iced::Size::new(960.0, 640.0)));
+        assert!(!app.pending_file_panel_fit);
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Filer),
+            Some(dock::Area::Left)
+        );
+        // 960 - (214 + 5) - 5 - 320.
+        assert_eq!(app.docks.left_width, 416.0);
+        assert_eq!(app.docks.right_width, dock::DEFAULT_SIDE_WIDTH);
+        assert_eq!(r153_dock_centre(&app.docks, 960.0), dock::MIN_CENTRE_WIDTH);
+        // Later resizes only shrink; a manual width is not re-widened.
+        app.docks.set_width(dock::Area::Left, 300.0);
+        let _ = app.update(Message::WindowResized(iced::Size::new(1280.0, 800.0)));
+        assert_eq!(app.docks.left_width, 300.0);
+    }
+
+    #[test]
+    fn r153_dock_new_side_dock_shrinks_filer_to_fit() {
+        let mut app = r153_dock_app("move");
+        let _ = app.update(Message::DockMove(dock::Panel::Filer, dock::Area::Left));
+        assert_eq!(app.docks.left_width, dock::FILE_PANEL_MIN_WIDTH);
+        // Showing Session in the right dock adds a 214 px dock + splitter.
+        let _ = app.update(Message::DockMove(dock::Panel::Session, dock::Area::Right));
+        let width = app.window_size.width;
+        assert_eq!(r153_dock_centre(&app.docks, width), dock::MIN_CENTRE_WIDTH);
+        assert_eq!(app.docks.right_width, dock::DEFAULT_SIDE_WIDTH);
+        assert_eq!(app.docks.left_width, width - 219.0 - 5.0 - 320.0);
     }
 
     #[test]

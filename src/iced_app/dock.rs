@@ -285,25 +285,54 @@ impl DockLayout {
         }
     }
 
+    /// A side dock is rendered (with its splitter) whenever it holds a
+    /// panel; side docks ignore `collapsed` (see `dock_view::dock_body`).
+    fn side_rendered(&self, area: Area) -> bool {
+        area != Area::Bottom && !self.area(area).panels.is_empty()
+    }
+
+    fn side_width(&self, area: Area) -> f32 {
+        match area {
+            Area::Left => self.left_width,
+            Area::Right => self.right_width,
+            Area::Bottom => 0.0,
+        }
+    }
+
+    /// Horizontal space a side dock takes in the window: its width plus its
+    /// `SPLITTER_GRAB` splitter when rendered, else nothing.
+    fn side_extent(&self, area: Area) -> f32 {
+        if self.side_rendered(area) {
+            self.side_width(area) + SPLITTER_GRAB
+        } else {
+            0.0
+        }
+    }
+
+    /// The room rule shared by widening, splitter drags and window fits:
+    /// the widest `area` may be so that `area` + its splitter + the other
+    /// rendered side dock + its splitter + `MIN_CENTRE_WIDTH` fits
+    /// `window_width`. Never below `MIN_SIDE_WIDTH`.
+    fn side_room(&self, area: Area, window_width: f32) -> f32 {
+        let other = if area == Area::Left {
+            Area::Right
+        } else {
+            Area::Left
+        };
+        (window_width - SPLITTER_GRAB - self.side_extent(other) - MIN_CENTRE_WIDTH)
+            .max(MIN_SIDE_WIDTH)
+    }
+
     /// Ensure a side dock receiving the Filer is wide enough for both halves:
     /// `FILE_PANEL_MIN_WIDTH`, but never squeezing the centre workspace below
-    /// `MIN_CENTRE_WIDTH` in a `window_width` wide window. Never narrows.
+    /// `MIN_CENTRE_WIDTH` (both splitters counted, see `side_room`) in a
+    /// `window_width` wide window. Never narrows.
     pub(super) fn widen_for_file_panel(&mut self, panel: Panel, area: Area, window_width: f32) {
         if panel != Panel::Filer || area == Area::Bottom {
             return;
         }
-        let (current, other_area, other_width) = if area == Area::Left {
-            (self.left_width, Area::Right, self.right_width)
-        } else {
-            (self.right_width, Area::Left, self.left_width)
-        };
-        let other_width = if self.area(other_area).panels.is_empty() {
-            0.0
-        } else {
-            other_width
-        };
-        let room = (window_width - other_width - MIN_CENTRE_WIDTH).max(MIN_SIDE_WIDTH);
-        let target = FILE_PANEL_MIN_WIDTH.min(room);
+        let current = self.side_width(area);
+        let target = FILE_PANEL_MIN_WIDTH.min(self.side_room(area, window_width));
         if current < target {
             self.set_width(area, target);
         }
@@ -319,6 +348,48 @@ impl DockLayout {
         }
     }
 
+    /// Shrink the rendered side docks so the centre workspace keeps
+    /// `MIN_CENTRE_WIDTH` in a `window_width` wide window (splitters
+    /// counted). Never widens and never goes below `MIN_SIDE_WIDTH`.
+    ///
+    /// Rule: with one side dock rendered, that dock gives up the excess.
+    /// With both, the wider dock first shrinks toward the narrower one (so a
+    /// widened Filer dock gives way before a default-width Session dock);
+    /// any remaining excess is split evenly between the two. A window too
+    /// small for that leaves both at `MIN_SIDE_WIDTH`.
+    pub(super) fn fit_to_window(&mut self, window_width: f32) {
+        let used = self.side_extent(Area::Left) + self.side_extent(Area::Right);
+        let mut excess = used + MIN_CENTRE_WIDTH - window_width;
+        // NaN (unknown window width) also skips.
+        if excess.is_nan() || excess <= 0.0 {
+            return;
+        }
+        match (
+            self.side_rendered(Area::Left),
+            self.side_rendered(Area::Right),
+        ) {
+            (true, true) => {
+                let (wide, narrow) = if self.left_width >= self.right_width {
+                    (&mut self.left_width, &mut self.right_width)
+                } else {
+                    (&mut self.right_width, &mut self.left_width)
+                };
+                let cut = excess.min(*wide - narrow.max(MIN_SIDE_WIDTH)).max(0.0);
+                *wide -= cut;
+                excess -= cut;
+                if excess > 0.0 {
+                    // Both are equal now; share what is left.
+                    let each = (*wide - excess / 2.0).max(MIN_SIDE_WIDTH);
+                    *wide = each.min(*wide);
+                    *narrow = each.min(*narrow);
+                }
+            }
+            (true, false) => self.left_width = (self.left_width - excess).max(MIN_SIDE_WIDTH),
+            (false, true) => self.right_width = (self.right_width - excess).max(MIN_SIDE_WIDTH),
+            (false, false) => {}
+        }
+    }
+
     /// Apply a splitter drag: `position` is the cursor in logical window
     /// coordinates, `window` the logical window size.
     pub(super) fn drag_splitter(&mut self, area: Area, position: iced::Point, window: iced::Size) {
@@ -330,18 +401,7 @@ impl DockLayout {
                 } else {
                     window.width - position.x
                 };
-                let other = if area == Area::Left {
-                    if self.right.panels.is_empty() {
-                        0.0
-                    } else {
-                        self.right_width
-                    }
-                } else if self.left.panels.is_empty() {
-                    0.0
-                } else {
-                    self.left_width
-                };
-                let room = (window.width - other - MIN_CENTRE_WIDTH).max(MIN_SIDE_WIDTH);
+                let room = self.side_room(area, window.width);
                 self.set_width(area, wanted.min(room));
             }
             Area::Bottom => {
@@ -420,6 +480,18 @@ impl DockLayout {
             self.area_mut(area).remove(Panel::Explorer);
         }
         self.hidden.retain(|(panel, _)| *panel != Panel::Explorer);
+    }
+
+    /// Start-up restore of a saved layout: sanitize it and match it to the
+    /// `available` panels. Returns the layout and whether the Filer still
+    /// needs the one-time load fit (`fit_file_panel` once the real window
+    /// width is known, followed by `fit_to_window`).
+    pub(super) fn restore(saved: Option<DockLayout>, available: &[Panel]) -> (DockLayout, bool) {
+        let mut docks = saved.unwrap_or_default();
+        docks.sanitize();
+        docks.retain_available(available);
+        docks.add_missing(available);
+        (docks, true)
     }
 
     /// Enforce invariants after deserialising untrusted input.
@@ -550,8 +622,8 @@ mod tests {
         restored.fit_file_panel(1280.0);
         assert_invariants(&restored);
         assert_eq!(restored.area_of(Panel::Filer), Some(Area::Left));
-        // Same clamp as Move to Left: 1280 - 214 - 320.
-        assert_eq!(restored.left_width, 746.0);
+        // Same clamp as Move to Left: 1280 - (214 + 5) - 5 - 320.
+        assert_eq!(restored.left_width, 736.0);
         assert_eq!(restored.right_width, 214.0);
         // A 420 px right-dock Filer with an empty left dock reaches 760.
         let json = r#"{"right": {"panels": ["filer"]}, "right_width": 420.0}"#;
@@ -668,9 +740,10 @@ mod tests {
         let mut layout = DockLayout::preset(Preset::WindTermDefault);
         layout.set_width(Area::Left, 214.0);
         layout.set_width(Area::Right, 214.0);
-        // Right dock holds Session/Outline: 1280 - 214 - 320 = 746.
+        // Right dock holds Session/Outline: 1280 - (214 + 5) - 5 - 320 = 736
+        // (both splitters count).
         layout.widen_for_file_panel(Panel::Filer, Area::Left, 1280.0);
-        assert_eq!(layout.left_width, 746.0);
+        assert_eq!(layout.left_width, 736.0);
         // A tiny window never goes below the side-dock minimum.
         layout.set_width(Area::Left, 150.0);
         layout.widen_for_file_panel(Panel::Filer, Area::Left, 500.0);
@@ -720,6 +793,68 @@ mod tests {
             "Filer still widened"
         );
         assert_eq!(restored.right_width, DEFAULT_SIDE_WIDTH);
+    }
+
+    #[test]
+    fn r153_dock_restore_then_resize_fits_window() {
+        let mut restored = DockLayout::from_json(R153_DOCK_OLD_LAYOUT);
+        restored.fit_file_panel(1280.0);
+        restored.fit_to_window(1280.0);
+        assert_eq!(restored.left_width, 736.0);
+        assert_eq!(r153_dock_centre(&restored, 1280.0), MIN_CENTRE_WIDTH);
+        // Shrinking the window takes the excess from the wider Filer dock.
+        restored.fit_to_window(960.0);
+        assert_invariants(&restored);
+        assert_eq!(restored.left_width, 416.0);
+        assert_eq!(restored.right_width, DEFAULT_SIDE_WIDTH);
+        assert!(r153_dock_centre(&restored, 960.0) >= MIN_CENTRE_WIDTH);
+        // Growing it again never widens.
+        let before = restored.clone();
+        restored.fit_to_window(1600.0);
+        assert_eq!(restored, before);
+    }
+
+    #[test]
+    fn r153_dock_fit_to_window_rules() {
+        // Wider dock first, down to the narrower one, then shared evenly.
+        let mut layout = DockLayout::from_json(R153_DOCK_OLD_LAYOUT);
+        layout.set_width(Area::Left, 500.0);
+        layout.set_width(Area::Right, 300.0);
+        // 500 + 300 + 10 + 320 = 1130; at 1000 the excess is 130.
+        layout.fit_to_window(1000.0);
+        assert_eq!((layout.left_width, layout.right_width), (370.0, 300.0));
+        // At 800 the excess is 200: 70 brings left to 300, then 65 each.
+        layout.fit_to_window(800.0);
+        assert_eq!((layout.left_width, layout.right_width), (235.0, 235.0));
+        assert_eq!(r153_dock_centre(&layout, 800.0), MIN_CENTRE_WIDTH);
+        // Too small for both: each stops at the side-dock minimum.
+        layout.fit_to_window(500.0);
+        assert_eq!(
+            (layout.left_width, layout.right_width),
+            (MIN_SIDE_WIDTH, MIN_SIDE_WIDTH)
+        );
+        // A single rendered dock gives up the whole excess; an empty dock's
+        // width is ignored.
+        let mut single = DockLayout::default();
+        single.move_to(Panel::Filer, Area::Right);
+        single.set_width(Area::Right, 800.0);
+        single.set_width(Area::Left, 900.0);
+        single.fit_to_window(960.0);
+        assert_eq!(single.right_width, 960.0 - SPLITTER_GRAB - MIN_CENTRE_WIDTH);
+        assert_eq!(single.left_width, 900.0);
+        // Bottom-only layouts are untouched.
+        let mut bottom = DockLayout::default();
+        bottom.fit_to_window(200.0);
+        assert_eq!(bottom, DockLayout::default());
+    }
+
+    #[test]
+    fn r153_dock_drag_counts_both_splitters() {
+        let mut layout = DockLayout::from_json(R153_DOCK_OLD_LAYOUT);
+        let win = iced::Size::new(960.0, 640.0);
+        layout.drag_splitter(Area::Left, iced::Point::new(900.0, 100.0), win);
+        assert_eq!(layout.left_width, 960.0 - (214.0 + 5.0) - 5.0 - 320.0);
+        assert_eq!(r153_dock_centre(&layout, 960.0), MIN_CENTRE_WIDTH);
     }
 
     #[test]
