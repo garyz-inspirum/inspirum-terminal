@@ -126,6 +126,32 @@ impl Default for TerminalSize {
     }
 }
 
+impl TerminalSize {
+    /// Grid for a layout of `layout_size` pixels split into cells of
+    /// `font_size` pixels; `None` when not even one cell fits.
+    pub fn for_layout(layout_size: Size, font_size: Size) -> Option<Self> {
+        let lines = (layout_size.height / font_size.height.floor()) as u16;
+        let cols = (layout_size.width / font_size.width.floor()) as u16;
+        (lines > 0 && cols > 0).then_some(Self {
+            layout_size,
+            cell_height: font_size.height as u16,
+            cell_width: font_size.width as u16,
+            num_lines: lines,
+            num_cols: cols,
+        })
+    }
+
+    /// Grid width in cells, as told to the PTY.
+    pub fn num_cols(&self) -> u16 {
+        self.num_cols
+    }
+
+    /// Grid height in cells, as told to the PTY.
+    pub fn num_lines(&self) -> u16 {
+        self.num_lines
+    }
+}
+
 impl Dimensions for TerminalSize {
     fn total_lines(&self) -> usize {
         self.screen_lines()
@@ -726,16 +752,8 @@ impl TerminalBackend {
             return;
         }
 
-        let lines = (layout_size.height / font_size.height.floor()) as u16;
-        let cols = (layout_size.width / font_size.width.floor()) as u16;
-        if lines > 0 && cols > 0 {
-            self.size = TerminalSize {
-                layout_size,
-                cell_height: font_size.height as u16,
-                cell_width: font_size.width as u16,
-                num_lines: lines,
-                num_cols: cols,
-            };
+        if let Some(size) = TerminalSize::for_layout(layout_size, font_size) {
+            self.size = size;
 
             self.notifier.on_resize(self.size.into());
             terminal.resize(TermSize::new(

@@ -12899,6 +12899,60 @@ mod tests {
         assert_eq!(terminal_grid_size(short, (width, height)), (79, 23));
     }
 
+    /// `resize_terminal` sends `columns * cell.0` with the real cell width
+    /// (8.4 px at the default 14 pt font). The backend must derive exactly
+    /// that many columns, or the PTY wraps lines past the drawn canvas.
+    #[test]
+    fn backend_grid_matches_gui_grid_for_fractional_cell_width() {
+        let appearance = crate::appearance::TerminalAppearance::default();
+        let cell = terminal_cell_size(&appearance);
+        let (columns, lines) = terminal_grid_size(iced::Size::new(1307.0, 470.0), cell);
+        let size = terminal_core::TerminalSize::for_layout(
+            terminal_core::Size::new(columns as f32 * cell.0, lines as f32 * cell.1),
+            terminal_core::Size::new(cell.0, cell.1),
+        )
+        .expect("grid");
+        assert_eq!((size.num_cols(), size.num_lines()), (columns, lines));
+    }
+
+    #[test]
+    fn backend_grid_matches_gui_grid_for_every_font_size() {
+        let mut wrong = Vec::new();
+        for tenth in 60..=360 {
+            let font_size = tenth as f32 / 10.0;
+            let cell = (font_size * 0.6, font_size * (18.0 / 14.0));
+            for columns in [1u16, 2, 73, 80, 149, 153, 154, 200, 333, 500] {
+                let got = terminal_core::TerminalSize::for_layout(
+                    terminal_core::Size::new(columns as f32 * cell.0, 24.0 * cell.1),
+                    terminal_core::Size::new(cell.0, cell.1),
+                )
+                .map(|size| (size.num_cols(), size.num_lines()));
+                if got != Some((columns, 24)) {
+                    wrong.push((font_size, columns, got));
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} mismatches, first: {:?}",
+            wrong.len(),
+            &wrong[..wrong.len().min(4)]
+        );
+    }
+
+    /// A pointer over drawn column 100 selects column 100 in the backend.
+    #[test]
+    fn backend_selection_column_uses_fractional_cell_width() {
+        let size = terminal_core::TerminalSize::for_layout(
+            terminal_core::Size::new(153.0 * 8.4, 25.0 * 18.0),
+            terminal_core::Size::new(8.4, 18.0),
+        )
+        .expect("grid");
+        let point =
+            terminal_core::TerminalBackend::selection_point(100.5 * 8.4, 2.5 * 18.0, &size, 0);
+        assert_eq!((point.line.0, point.column.0), (2, 100));
+    }
+
     #[test]
     fn unix_mode_strings_match_ls() {
         assert_eq!(unix_mode_string('-', 0o644), "-rw-r--r--");
