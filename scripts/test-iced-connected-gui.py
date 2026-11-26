@@ -3571,7 +3571,9 @@ async def click_filer_refresh(
 
     Panels only re-list when going hidden -> visible; re-clicking the
     already-active Filer tab does not reload either half (asserted by the
-    caller), so the refresh icon must be clicked. Measured at 1280x800 with a
+    caller: remote by the SFTP_LIST_READY count, local by a new local file
+    staying absent until refresh), so the refresh icon must be clicked.
+    ``completed`` here only watches the REMOTE listing. Measured at 1280x800 with a
     bottom dock: tab labels y~553, 'Remote' heading y 570..584, remote path
     bar y 590..619; at its right end Up/refresh/Go span x 1167..1274, 'Go'
     ending at 1274, refresh icon ~(1222, 604) with a ~22x22 hit box. So the
@@ -5314,14 +5316,30 @@ async def main() -> int:
                 # The text 'Refresh' button is gone (icon only). With one merged
                 # Filer panel the old Explorer<->Filer switch is gone; the
                 # remaining no-reload claim is that re-clicking the already
-                # active Filer tab starts no SFTP listing (this can fail: a tab
-                # click that re-lists would raise here), then the path-bar
-                # refresh icon must start exactly the reload that shows 111.
+                # active Filer tab re-lists NEITHER half, then the path-bar
+                # refresh icon must re-list both.
+                # * Remote: SFTP_LIST_READY (one per server scandir) must not
+                #   move on the tab click; refresh must start exactly the one
+                #   listing that shows 111 (require_refresh_listing_count).
+                # * Local: the fixture event cannot see a local re-list, so a
+                #   new local file is written next to the remote one. It must
+                #   NOT be rendered in the local half after the tab click
+                #   (one require_label_absent, the step's only absence proof)
+                #   and MUST be rendered there after refresh: src/iced_app.rs
+                #   Message::FilesRefresh -> reload_files() re-lists local and
+                #   remote, and nothing re-lists local on a timer or file
+                #   watcher. The positive read also proves the locator can
+                #   see that name in that region, so the absence is not a
+                #   locator blind spot.
                 # Prefixes 111 < 444 < 999 are distinct and OCR-safe (no 0/O);
                 # the third file sorts first, so it stays visible at 960x640.
+                # The local probe sorts first in the local half (local root
+                # holds only 444 and 999, no directories).
                 third_name = "111_GUI_THIRD_FIXTURE.bin"
                 third_bytes = b"GUI_THIRD_FIXTURE" + bytes(range(32))
                 (remote_root / third_name).write_bytes(third_bytes)
+                local_probe_name = "111_GUI_LOCAL_FIXTURE.bin"
+                (local_root / local_probe_name).write_bytes(b"GUI_LOCAL_FIXTURE" + bytes(range(32)))
                 listings_before = events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY")
                 filer_tab = await click_label(
                     window, destination / "connected-files-refresh-back.png",
@@ -5335,6 +5353,20 @@ async def main() -> int:
                         f"SFTP_LIST_READY {listings_before} -> {listings_after_tab} "
                         f"(tab {filer_tab})"
                     )
+                # Same settle as the remote count: a local re-list is one
+                # blocking readdir of a 3-file directory plus a repaint.
+                tab_local_shot = destination / "connected-files-refresh-back-local.png"
+                await asyncio.to_thread(screenshot, window, tab_local_shot, env)
+                try:
+                    await asyncio.to_thread(
+                        require_label_absent, tab_local_shot, local_probe_name, region=local_body,
+                    )
+                except LabelVisible as exc:
+                    raise RuntimeError(
+                        "re-clicking the active Filer tab re-listed the LOCAL half: new local "
+                        f"file {local_probe_name} visible at {exc.bounds} in {tab_local_shot} "
+                        f"(tab {filer_tab})"
+                    ) from exc
                 refresh_clicks = await click_filer_refresh(
                     window, env, destination / "connected-files-refresh-clicked.png",
                     path_bar_y=center(remote_heading)[1] + 27,
@@ -5369,6 +5401,15 @@ async def main() -> int:
                 require_refresh_listing_count(listings_before, listings_after_refresh, refresh_clicks)
                 print(f"filer refresh: {refresh_clicks} click(s), SFTP_LIST_READY "
                       f"{listings_before} -> {listings_after_refresh}", flush=True)
+                # Refresh re-lists the local half too: the probe file written
+                # before the tab click is now rendered there.
+                local_probe_row = await locate_rendered_label(
+                    window, destination / "connected-files-refresh-local-visible.png",
+                    local_probe_name, env=env, region=local_body, timeout=40,
+                )
+                print(f"filer refresh: local half re-listed only on refresh "
+                      f"({local_probe_name} absent after tab click, at {local_probe_row} after refresh)",
+                      flush=True)
                 command(
                     "xdotool", "mousemove", "--window", window,
                     *map(str, center(third_row)), "click", "1", env=env,

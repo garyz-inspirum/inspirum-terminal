@@ -88,6 +88,20 @@ class RefreshCallSiteTest(unittest.TestCase):
         self.assertLess(visible, checked)
         self.assertLess(checked, header_baseline)
 
+    def test_local_half_probe_absent_after_tab_and_visible_after_refresh(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        written = source.index("(local_root / local_probe_name).write_bytes(")
+        tab = source.index('"connected-files-refresh-back.png"', written)
+        absent = source.index(
+            "require_label_absent, tab_local_shot, local_probe_name, region=local_body,", tab)
+        clicked = source.index("refresh_clicks = await click_filer_refresh(", absent)
+        visible = source.index('"connected-files-refresh-local-visible.png"', clicked)
+        self.assertLess(written, tab)
+        self.assertLess(visible, source.index("listings_at_sort = events.path", visible))
+        # One absence proof only (each costs 1-3 min of untimed OCR).
+        step = source[written:visible]
+        self.assertEqual(step.count("require_label_absent"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
