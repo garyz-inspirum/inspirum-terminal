@@ -5048,11 +5048,16 @@ async def main() -> int:
                 # 6*24+2 px for a remote file), so a click near the bottom
                 # opens upward rather than down from the pointer.
                 # No-pause gesture is the regression case for a popup anchored
-                # at a stale pointer. Park at the top right of the terminal
-                # pane, far from the bottom-dock row on the x axis, let that
-                # become the last known pointer, then move and right-press in
-                # one command with no sleep between motion and the press.
-                parked_x, parked_y = 1100, 200
+                # at a stale pointer. Park in the top LEFT of the terminal
+                # pane: the remote row now sits in the right half (name from
+                # x ~663, centre ~790), so the old (1100, 200) park lies inside
+                # the pointer box on x and only 215 px away on y. Derive the
+                # park from the divider: 440 px left of it is >=300 px left
+                # of any box anchored at a remote-half click (box left =
+                # click_x - 10 >= divider - 9). Let that become the last
+                # known pointer, then move and right-press in one command
+                # with no sleep between motion and the press.
+                parked_x, parked_y = max(40, filer_divider - 440), 200
                 command(
                     "xdotool", "mousemove", "--window", window,
                     str(parked_x), str(parked_y), env=env,
@@ -5063,7 +5068,7 @@ async def main() -> int:
                     destination / "connected-files-context-row.png",
                     download_name,
                     env=env,
-                    region=body,
+                    region=remote_body,
                     timeout=20,
                 )
                 click_x, click_y = center(context_row)
@@ -5128,7 +5133,7 @@ async def main() -> int:
                     await asyncio.sleep(.3)
                 # "Rename" is the first OCR token of action-row "Rename remote",
                 # and locate_visible_label cannot require "Rename" not followed
-                # by " remote". That button (x 292-384, y ~760) overlaps a
+                # by " remote". That button (x 918-1039, y ~761) overlaps a
                 # 202x147 menu anchored at this pointer, so a y-cut would also
                 # drop a Rename row that sits anywhere in the menu. Require
                 # Refresh and New Folder in the full pointer box instead:
@@ -5272,7 +5277,7 @@ async def main() -> int:
                         try:
                             restored_row = await asyncio.to_thread(
                                 locate_visible_label,
-                                closed_shot, download_name, region=body,
+                                closed_shot, download_name, region=remote_body,
                             )
                             row_restored = all(
                                 abs(restored_row[edge] - context_row[edge]) <= 6
@@ -5301,7 +5306,7 @@ async def main() -> int:
                         restore_failed.append(
                             f"file row bounds {restored_row} not within 6 px of "
                             f"context_row {context_row} on every edge "
-                            f"(region {body})"
+                            f"(region {remote_body})"
                         )
                     if restore_failed:
                         raise RuntimeError(
@@ -6031,7 +6036,7 @@ async def main() -> int:
                 )
                 await locate_rendered_label(
                     window, destination / "connected-files-filer-again.png",
-                    third_name, env=env, region=body, timeout=40,
+                    third_name, env=env, region=remote_body, timeout=40,
                 )
 
                 # Minimum-size acceptance is interaction, not a screenshot-only
@@ -6047,10 +6052,16 @@ async def main() -> int:
                         f"geometry was {minimum_geometry!r}"
                     )
                 screenshot(window, destination / "connected-files-min-window.png", env)
+                # Both halves must still split the 960 px dock at its middle;
+                # 111 is a remote row, so it must be in the remote half.
+                _min_local, min_remote, min_divider, _min_heading = await asyncio.to_thread(
+                    filer_halves, destination / "connected-files-min-window.png",
+                    dock_body_region(960, 640),
+                )
                 minimum_row = await asyncio.to_thread(
                     locate_visible_label,
                     destination / "connected-files-min-window.png", third_name,
-                    region=dock_body_region(960, 640),
+                    region=min_remote,
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
@@ -6087,15 +6098,26 @@ async def main() -> int:
                     destination / "connected-files-side-dock.png", env,
                 ) < 3000:
                     raise RuntimeError("Move to Right did not visibly re-dock Filer")
-                # The bottom dock (Sender/Session/Transfer/Explorer) stays
-                # below the right dock; its strip top bounds the side dock.
+                # The bottom dock (Sender/Session/Transfer) stays below the
+                # right dock; its strip top bounds the side dock. The side
+                # dock receiving Filer is side_file_dock_width(width) (760 at
+                # 1280: dock.rs FILE_PANEL_MIN_WIDTH, clamped to width - 320)
+                # and still shows Local | Remote side by side, each ~380 px.
                 bottom_top = max(32 + 100, filer_tab[1] - 8)
                 side_region = dock_body_region(
                     width, height, right=True, bottom_top=bottom_top,
                 )
-                side_row = await locate_rendered_label(
+                side_width = side_file_dock_width(width)
+                await locate_rendered_label(
                     window, destination / "connected-files-side-dock.png", third_name, env=env,
                     region=side_region, timeout=40,
+                )
+                _side_local, side_remote, side_divider, _side_heading = await asyncio.to_thread(
+                    filer_halves, destination / "connected-files-side-dock.png", side_region,
+                )
+                side_row = await asyncio.to_thread(
+                    locate_visible_label, destination / "connected-files-side-dock.png",
+                    third_name, region=side_remote,
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
@@ -6105,10 +6127,14 @@ async def main() -> int:
                 screenshot(window, destination / "connected-files-side-selected.png", env)
 
                 # The dock splitter is a 5px grab column centred at
-                # x = width - dock_width - 3. Drag it 200px left: the dock
-                # widens to ~620px and the file row moves with its edge.
+                # x = width - dock_width - 3. Widening by 200 is impossible
+                # now (760 + 200 > width - 320 = 960 clamp), so drag it 200px
+                # RIGHT: the dock narrows to side_width - 200 (560 at 1280,
+                # above MIN_SIDE_WIDTH 140), the divider moves to the new
+                # midpoint and the remote row moves with it.
+                narrowed = side_width - 200
                 await drag_horizontal(
-                    window, env, width - SIDE_FILE_DOCK_WIDTH - 3, width - 620, 300,
+                    window, env, width - side_width - 3, width - narrowed, 300,
                 )
                 screenshot(window, destination / "connected-files-side-resized.png", env)
                 resized_pixels = diff(
@@ -6119,22 +6145,33 @@ async def main() -> int:
                     raise RuntimeError(
                         "dock splitter dragging did not resize the dock: "
                         f"{resized_pixels} pixels changed after dragging x "
-                        f"{width - SIDE_FILE_DOCK_WIDTH - 3} -> {width - 620}"
+                        f"{width - side_width - 3} -> {width - narrowed}"
                     )
+                resized_area = (width - narrowed - 4, 32, width, bottom_top)
                 resized_row = await locate_rendered_label(
                     window, destination / "connected-files-side-resized.png",
-                    third_name, env=env,
-                    region=(width - 660, 32, width, bottom_top), timeout=20,
+                    third_name, env=env, region=resized_area, timeout=20,
                 )
-                if not (width - 640 <= resized_row[0] <= width - 560):
+                # filer_halves asserts the divider sits at the midpoint of
+                # the NARROWED dock (expected width - narrowed / 2), which
+                # moved by ~100 px from side_divider.
+                _rs_local, resized_remote, resized_divider, _rs_heading = await asyncio.to_thread(
+                    filer_halves, destination / "connected-files-side-resized.png", resized_area,
+                )
+                if not (
+                    abs(resized_divider - (side_divider + 100)) <= 12
+                    and _bounds_inside(resized_row, resized_remote) is not None
+                    and 8 <= resized_row[0] - resized_divider <= 60
+                ):
                     raise RuntimeError(
                         "dock splitter drag did not move the side dock edge: "
-                        f"file row left edge {resized_row[0]}, expected "
-                        f"{width - 640}..{width - 560}"
+                        f"divider {side_divider} -> {resized_divider} (expected "
+                        f"{side_divider + 100} +-12), file row {resized_row} vs remote "
+                        f"half {resized_remote} (row left 8..60 px right of the divider)"
                     )
-                # Drag back so later steps see the 420px side dock.
+                # Drag back so later steps see the full side dock.
                 await drag_horizontal(
-                    window, env, width - 620 - 3, width - SIDE_FILE_DOCK_WIDTH, 300,
+                    window, env, width - narrowed - 3, width - side_width, 300,
                 )
                 screenshot(window, destination / "connected-files-side-restored.png", env)
 
@@ -6146,7 +6183,7 @@ async def main() -> int:
                     side_tab = await asyncio.to_thread(
                         locate_visible_label,
                         destination / "connected-files-side-restored.png",
-                        "Filer", region=(width - 430, 32, width, 62),
+                        "Filer", region=(width - side_file_dock_width(width) - 10, 32, width, 62),
                     )
                     gear_y = center(side_tab)[1]
                 except RuntimeError:
@@ -6163,12 +6200,21 @@ async def main() -> int:
                 )
                 screenshot(window, destination / "connected-files-redocked-bottom.png", env)
                 # Move to Bottom appends Filer as the LAST bottom tab (Sender,
-                # Session, Transfer, Explorer, Filer) and activates it; locate
-                # the row in the dock body, never by Filer's old tab position.
-                redocked_row = await locate_rendered_label(
+                # Session, Transfer, Filer) and activates it; locate the row in
+                # the remote half of the dock body, never by Filer's old tab
+                # position.
+                await locate_rendered_label(
                     window, destination / "connected-files-redocked-bottom.png",
                     third_name, env=env,
                     region=dock_body_region(width, height), timeout=40,
+                )
+                _rd_local, redocked_remote, _rd_divider, _rd_heading = await asyncio.to_thread(
+                    filer_halves, destination / "connected-files-redocked-bottom.png",
+                    dock_body_region(width, height),
+                )
+                redocked_row = await asyncio.to_thread(
+                    locate_visible_label, destination / "connected-files-redocked-bottom.png",
+                    third_name, region=redocked_remote,
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
@@ -6192,7 +6238,7 @@ async def main() -> int:
                     extedit_row_shot = destination / "connected-extedit-row.png"
                     extedit_row = await locate_rendered_label(
                         window, extedit_row_shot, download_name, env=env,
-                        region=dock_body_region(width, height), timeout=20,
+                        region=redocked_remote, timeout=20,
                     )
                     ex_x, ex_y = center(extedit_row)
                     ex_region = extedit_menu_region(ex_x, ex_y, width, height)
