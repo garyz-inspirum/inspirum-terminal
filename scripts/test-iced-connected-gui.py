@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import itertools
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -374,6 +376,63 @@ def observe_pty_chunk(events, probe_state: dict[str, str | None], chunk: str) ->
         events.write(f"UNEXPECTED_{probe_state['phase']}_PTY_INPUT")
 
 
+# PTY size oracle. The canvas draws from TERMINAL_TEXT_INSET (10, 6) px in
+# src/iced_app.rs and the default cell is 14 pt * 0.6 = 8.4 px wide, so a pane
+# W px wide fits floor((W - 20) / 8.4) columns. pane_grid(..).spacing(1) in
+# src/iced_app.rs is the divider between split panes.
+TERMINAL_CELL_W = 8.4
+TERMINAL_TEXT_INSET_X = 10
+PANE_GRID_SPACING = 1
+# Each monitored_shell session gets its own serial, so PTY_SIZE lines from
+# several live sessions in the one event log can be told apart.
+_SHELL_SERIAL = itertools.count(1)
+PTY_SIZE_RE = re.compile(r"^PTY_SIZE (\d+) (\d+) s(\d+)$")
+
+
+def pty_size_event(cols: int, rows: int, serial: int) -> str:
+    return f"PTY_SIZE {cols} {rows} s{serial}"
+
+
+def pty_columns_fit(cols: int, pane_width: float, cell_w: float = TERMINAL_CELL_W,
+                    inset: float = TERMINAL_TEXT_INSET_X) -> tuple[bool, int]:
+    """(ok, max_cols): ``cols`` columns fit a ``pane_width`` px pane
+    (cols * cell_w + 2 * inset <= pane_width + 0.5) and are not needlessly
+    narrow (cols >= max_cols - 1), max_cols = floor((pane_width - 2*inset) / cell_w)."""
+    max_cols = int(math.floor((pane_width - 2 * inset) / cell_w + 1e-9))
+    fits = cols * cell_w + 2 * inset <= pane_width + 0.5
+    return fits and cols >= max_cols - 1, max_cols
+
+
+def latest_pty_sizes(log_text: str) -> dict[int, tuple[int, int, int]]:
+    """Session serial -> (cols, rows, log line index) of its newest PTY_SIZE."""
+    latest: dict[int, tuple[int, int, int]] = {}
+    for index, line in enumerate(log_text.splitlines()):
+        match = PTY_SIZE_RE.match(line)
+        if match:
+            cols, rows, serial = (int(group) for group in match.groups())
+            latest[serial] = (cols, rows, index)
+    return latest
+
+
+def pty_fit_problems(sizes: dict[int, tuple[int, int, int]], serials, pane_width: float) -> list[str]:
+    """One message per session in ``serials`` whose newest PTY size does not
+    fit ``pane_width`` (or that never reported one); empty when all fit."""
+    problems = []
+    for serial in serials:
+        if serial not in sizes:
+            problems.append(f"s{serial}: no PTY_SIZE")
+            continue
+        cols, rows, _ = sizes[serial]
+        ok, max_cols = pty_columns_fit(cols, pane_width)
+        if not ok:
+            problems.append(
+                f"s{serial}: {cols}x{rows} needs {cols * TERMINAL_CELL_W + 2 * TERMINAL_TEXT_INSET_X:.1f} px, "
+                f"pane is {pane_width:.1f} px (fits {max_cols} columns; allowed "
+                f"{max_cols - 1}..{max_cols})"
+            )
+    return problems
+
+
 async def monitored_shell(
     stdin: asyncssh.SSHReader[str],
     stdout: asyncssh.SSHWriter[str],
@@ -385,19 +444,27 @@ async def monitored_shell(
     # sftp_factory is configured. In that mode SSHServer.session_requested()
     # is bypassed, so supply an explicit shell stream handler as well.
     del stderr
+    serial = next(_SHELL_SERIAL)
     events.write("SESSION_OPEN")
     events.write("SESSION_STARTED")
+    # SSHWriter.channel -> SSHServerChannel.get_terminal_size() returns the
+    # (width, height, pixwidth, pixheight) the client requested (asyncssh
+    # 2.24.0 stream.py / channel.py; the stream API allows the call as soon
+    # as the handler runs). Logged so the run can compare it with the pane.
+    term_cols, term_rows = stdout.channel.get_terminal_size()[:2]
+    events.write(pty_size_event(term_cols, term_rows, serial))
     stdout.write("NATIVE_SMOKE_READY\r\n")
     buffer = ""
     try:
         while True:
             try:
                 chunk = await stdin.read(8192)
-            except asyncssh.TerminalSizeChanged:
+            except asyncssh.TerminalSizeChanged as change:
                 # AsyncSSH injects terminal-size updates into SSHReader as
                 # exceptions. Splitting the Iced pane and opening the Files
                 # dock both resize a genuine PTY: these are not disconnects.
                 events.write("SHELL_PTY_RESIZE")
+                events.write(pty_size_event(change.width, change.height, serial))
                 continue
             if not chunk:
                 events.write("SHELL_STREAM_EOF")
@@ -3949,6 +4016,35 @@ async def main() -> int:
                     "terminal owns keyboard before chrome menu probes",
                 )
 
+                # REQUIRED: the PTY size the SSH server was told must fit the
+                # single full-width pane. Only one shell session exists here,
+                # so its serial is the only one in the log. The resize is
+                # asynchronous: poll the event log until the deadline.
+                pty_window_w, _ = window_size(window, env)
+                pty_deadline = time.monotonic() + 10 * TIME_SCALE
+                while True:
+                    pty_sizes = latest_pty_sizes(events.path.read_text(encoding="utf-8"))
+                    pty_problems = (
+                        [f"expected one shell session, PTY_SIZE serials {sorted(pty_sizes)}"]
+                        if len(pty_sizes) != 1
+                        else pty_fit_problems(pty_sizes, pty_sizes, pty_window_w)
+                    )
+                    if not pty_problems or time.monotonic() >= pty_deadline:
+                        break
+                    await asyncio.sleep(.2)
+                if pty_problems:
+                    screenshot(window, destination / "connected-pty-size.png", env)
+                    raise RuntimeError(
+                        f"PTY size told to the SSH server does not fit the {pty_window_w} px "
+                        "single pane: " + "; ".join(pty_problems)
+                    )
+                (main_pty_serial, (pty_cols, pty_rows, _)), = pty_sizes.items()
+                print(
+                    f"PASS pty size: {pty_cols}x{pty_rows} fits {pty_window_w} px pane "
+                    f"(max {pty_columns_fit(pty_cols, pty_window_w)[1]} columns)",
+                    flush=True,
+                )
+
                 # Session menu, Sender editor and bottom-dock gear must own
                 # keyboard input locally. Arm the PTY watch only after the
                 # opening click settles: that click can resize the PTY, and
@@ -4184,6 +4280,7 @@ async def main() -> int:
                 # clean close. Shell-end baselines were frozen at exactly one
                 # immediately after that close, before this sleep.
                 started_before_split = count("SESSION_STARTED")
+                pty_before_split = latest_pty_sizes(events.path.read_text(encoding="utf-8"))
                 command("xdotool", "windowfocus", window, "key", "--clearmodifiers", "ctrl+shift+r", env=env)
                 await wait_for(
                     lambda: count("SESSION_STARTED") >= started_before_split + 1,
@@ -4197,6 +4294,48 @@ async def main() -> int:
                 )
                 if split_pixels < 3000:
                     raise RuntimeError(f"split screen changed only {split_pixels} pixels")
+
+                # REQUIRED: after the vertical split both live shells (the
+                # first session, now the left half, and the new split pane's
+                # session, a serial absent before the split) must have been
+                # told a size that fits half the window. The first session
+                # must report a NEWER PTY_SIZE than before the split.
+                split_window_w, _ = window_size(window, env)
+                half_pane_w = (split_window_w - PANE_GRID_SPACING) / 2
+                main_line_before = pty_before_split[main_pty_serial][2]
+                split_deadline = time.monotonic() + 10 * TIME_SCALE
+                while True:
+                    pty_sizes = latest_pty_sizes(events.path.read_text(encoding="utf-8"))
+                    new_serials = sorted(set(pty_sizes) - set(pty_before_split))
+                    split_problems = []
+                    if pty_sizes[main_pty_serial][2] <= main_line_before:
+                        split_problems.append(
+                            f"s{main_pty_serial}: no PTY_SIZE after the split (still "
+                            f"{pty_sizes[main_pty_serial][0]}x{pty_sizes[main_pty_serial][1]})"
+                        )
+                    if len(new_serials) != 1:
+                        split_problems.append(
+                            f"expected one new shell session after the split, got {new_serials}"
+                        )
+                    split_problems += pty_fit_problems(
+                        pty_sizes, [main_pty_serial, *new_serials], half_pane_w,
+                    )
+                    if not split_problems or time.monotonic() >= split_deadline:
+                        break
+                    await asyncio.sleep(.2)
+                if split_problems:
+                    screenshot(window, destination / "connected-pty-size-split.png", env)
+                    raise RuntimeError(
+                        f"PTY size after the vertical split does not fit a {half_pane_w:.1f} px "
+                        f"half pane of the {split_window_w} px window: " + "; ".join(split_problems)
+                    )
+                for serial in (main_pty_serial, *new_serials):
+                    print(
+                        f"PASS pty size after split: s{serial} {pty_sizes[serial][0]}x"
+                        f"{pty_sizes[serial][1]} fits {half_pane_w:.1f} px pane "
+                        f"(max {pty_columns_fit(pty_sizes[serial][0], half_pane_w)[1]} columns)",
+                        flush=True,
+                    )
 
                 command("xdotool", "windowfocus", window, "key", "--clearmodifiers", "ctrl+shift+o", env=env)
                 await wait_for(
