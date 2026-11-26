@@ -58,6 +58,7 @@ LOGGED_ECHO_LINES = (
     "echo:AFTER_EXIT_CANCEL",
     "echo:AFTER_TUNNEL_SETTINGS",
     "echo:AFTER_TUNNEL_TOGGLES",
+    "echo:AFTER_SESSION_DROPDOWN",
     "echo:AFTER_EXTERNAL_EDIT",
     "echo:IN_DUPLICATE_TAB",
     "echo:AFTER_DUPLICATE_TAB",
@@ -615,7 +616,8 @@ async def monitored_shell(
                 return
             # Observe *any* PTY bytes while a chrome control owns focus,
             # including incomplete lines and a bare Escape. Never log input.
-            # Phase names: MENU, SENDER, GEAR, CONTEXT, FIND. The marker is
+            # Phase names: MENU, SENDER, GEAR, CONTEXT, FIND,
+            # SESSION_DROPDOWN. The marker is
             # UNEXPECTED_<PHASE>_PTY_INPUT, so FIND is
             # UNEXPECTED_FIND_PTY_INPUT.
             observe_pty_chunk(events, probe_state, chunk)
@@ -7394,6 +7396,221 @@ async def main() -> int:
                         print("PASS profile edit: popup switch stopped Alpha after idle "
                               "sibling edits", flush=True)
 
+                    async def session_dropdown_probe() -> None:
+                        """Tunnel Settings `Session / profile` combo box.
+
+                        Runs after profile_edit_probe (nothing running,
+                        Tunnel Manager closed). With no forward selected, +
+                        opens an empty draft owned by the FIRST saved
+                        profile (src/iced_app.rs tunnels_view: add_key =
+                        selected owner, else profiles.first()). Typing a
+                        fragment that matches only the other fixture profile
+                        filters the list to that one option; Return picks
+                        the hovered (first, only) option (iced_widget 0.14.2
+                        combo_box: Enter selects ``hovered_option``, reset to
+                        0 on every edit). Save must store the forward under
+                        the CHOSEN profile on disk, the default's forwards
+                        unchanged; no keystroke may reach a terminal.
+                        The forward is left saved and never started: no later
+                        step opens the Tunnels popup or a session of that
+                        profile (DUPTAB duplicates 'CI connected fixture').
+                        """
+                        names = saved_profile_names(profiles)
+                        fixture_names = ("CI connected fixture", "CI tunnel fixture")
+                        if not set(fixture_names) <= set(names):
+                            raise RuntimeError(f"dropdown probe: unexpected saved profiles {names}")
+                        default = names[0]
+                        chosen = next(n for n in fixture_names if n != default)
+                        # The fragment's every search part must occur in the
+                        # chosen option only (case-insensitive substring).
+                        fragment = "tunnel" if chosen == "CI tunnel fixture" else "connected"
+                        if fragment in default.lower() or fragment not in chosen.lower():
+                            raise RuntimeError(f"dropdown fragment {fragment!r} does not single out {chosen!r}")
+                        before = {name: saved_local_forwards(profiles, name) for name in names}
+                        marker = "UNEXPECTED_SESSION_DROPDOWN_PTY_INPUT"
+                        leaked_before = events.path.read_text(encoding="utf-8").count(marker)
+
+                        heading = await open_manager("dropdown")
+                        w, h = window_size(window, env)
+                        form = editor_form_region(w, h)
+                        # Default owner rule needs "nothing selected": the
+                        # previous probe ended with Bravo removed (edit
+                        # cleared) and never touched the manager since.
+                        await locate_rendered_label(
+                            window, destination / "connected-tunnels-dropdown-empty.png",
+                            "Select a tunnel", env=env, region=form, timeout=15,
+                        )
+                        plus_shot = destination / "connected-tunnels-dropdown-plus.png"
+                        await asyncio.to_thread(screenshot, window, plus_shot, env)
+                        x, y = await asyncio.to_thread(tunnel_add_centre, plus_shot, heading, w)
+                        print(f"tunnel dropdown: + button -> ({x},{y})", flush=True)
+                        command("xdotool", "mousemove", "--window", window,
+                                str(x), str(y), "click", "1", env=env)
+                        await asyncio.sleep(.8)
+
+                        # New empty draft: Session field holds the default,
+                        # Listen Port is empty.
+                        session_label = await locate_editor_label(
+                            window, destination / "connected-tunnels-dropdown-draft.png",
+                            "Session / profile", heading, env=env,
+                        )
+                        session_row = editor_value_row_region(session_label, w)
+                        draft_shot = destination / "connected-tunnels-dropdown-draft-default.png"
+                        await locate_rendered_label(
+                            window, draft_shot, default, env=env, region=session_row, timeout=12,
+                        )
+                        listen_label = await listen_label_for(heading, "dropdown")
+                        listen_row = listen_port_row_region(listen_label, w)
+                        digits, _box = await asyncio.to_thread(read_port_digits, draft_shot, listen_row)
+                        if digits != "":
+                            raise RuntimeError(
+                                f"+ did not open an empty draft: Listen Port reads {digits!r} in {draft_shot}"
+                            )
+                        print(f"tunnel dropdown: + draft defaults to {default!r}; Session row {session_row}",
+                              flush=True)
+
+                        # Arm the PTY guard from the first click into the
+                        # combo box until after Save.
+                        probe_state["phase"] = "SESSION_DROPDOWN"
+                        cy = (session_label[1] + session_label[3]) // 2
+                        command("xdotool", "mousemove", "--window", window,
+                                str((session_row[0] + session_row[2]) // 2),
+                                str(cy + TUNNEL_INPUT_CENTRE_DY), "click", "1", env=env)
+                        await asyncio.sleep(.5)
+                        command("xdotool", "type", "--clearmodifiers", "--delay", "40",
+                                fragment, env=env)
+                        await asyncio.sleep(.8)
+                        # The open list hangs below the field (menu height
+                        # 240 px, src/iced_app.rs TUNNEL_SESSION_MENU_HEIGHT).
+                        menu = (session_row[0], session_row[3] - 4, session_row[2],
+                                min(h, session_row[3] + 250))
+                        menu_shot = destination / "connected-tunnels-session-dropdown.png"
+                        option = await locate_rendered_label(
+                            window, menu_shot, chosen, env=env, region=menu, timeout=15,
+                        )
+                        try:
+                            await asyncio.to_thread(
+                                require_label_absent, menu_shot, default, region=menu,
+                            )
+                        except LabelVisible as exc:
+                            raise RuntimeError(
+                                f"dropdown filter {fragment!r} still lists the default {default!r} "
+                                f"at {exc.bounds} in {menu_shot}"
+                            ) from exc
+                        print(f"tunnel dropdown: typed {fragment!r}; list shows only {chosen!r} at {option}",
+                              flush=True)
+                        command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                        await asyncio.sleep(.8)
+                        picked_shot = destination / "connected-tunnels-dropdown-picked.png"
+                        await locate_rendered_label(
+                            window, picked_shot, chosen, env=env, region=session_row, timeout=12,
+                        )
+                        try:
+                            await asyncio.to_thread(
+                                require_label_absent, picked_shot, default, region=session_row,
+                            )
+                        except LabelVisible as exc:
+                            raise RuntimeError(
+                                f"after Return the Session field still shows {default!r} at "
+                                f"{exc.bounds} in {picked_shot}"
+                            ) from exc
+
+                        # Fill the draft like the Bravo add: free loopback
+                        # listen port -> the fixture echo service.
+                        new_port = free_loopback_port({echo_port, port_a, port_b})
+                        await type_listen_port(heading, new_port)
+                        for label_text, value in (("Destination Host", "127.0.0.1"),
+                                                  ("Destination Port", str(echo_port))):
+                            field = await locate_editor_label(
+                                window,
+                                destination / f"connected-tunnels-dropdown-{label_text.split()[1].lower()}-label.png",
+                                label_text, heading, env=env,
+                            )
+                            row = editor_value_row_region(field, w)
+                            fy = (field[1] + field[3]) // 2 + TUNNEL_INPUT_CENTRE_DY
+                            command("xdotool", "mousemove", "--window", window,
+                                    str((row[0] + row[2]) // 2), str(fy), "click", "1", env=env)
+                            await asyncio.sleep(.3)
+                            command("xdotool", "key", "--clearmodifiers", "ctrl+a", env=env)
+                            command("xdotool", "type", "--clearmodifiers", "--delay", "40",
+                                    value, env=env)
+                            await asyncio.sleep(.5)
+                        await require_form(new_port, port_a, heading, "dropdown-filled")
+                        filled = destination / "connected-tunnels-dropdown-filled.png"
+                        dest_label = await locate_editor_label(
+                            window, destination / "connected-tunnels-dropdown-dest-check.png",
+                            "Destination Port", heading, env=env,
+                        )
+                        dest_digits, _box = await asyncio.to_thread(
+                            read_port_digits, filled, editor_value_row_region(dest_label, w),
+                        )
+                        if dest_digits != str(echo_port):
+                            raise RuntimeError(
+                                f"Destination Port reads {dest_digits!r}, typed {echo_port} ({filled})"
+                            )
+                        save_box = await press_save(heading, "dropdown")
+                        await require_notice("saved", save_box, "dropdown")
+
+                        after = {name: saved_local_forwards(profiles, name) for name in names}
+                        if saved_profile_names(profiles) != names:
+                            raise RuntimeError(f"dropdown Save changed profiles: {saved_profile_names(profiles)}")
+                        if after[chosen] != before[chosen] + [spec(new_port)]:
+                            raise RuntimeError(
+                                f"dropdown forward not stored under chosen {chosen!r}: "
+                                f"{before[chosen]} -> {after[chosen]}"
+                            )
+                        for name in names:
+                            if name != chosen and after[name] != before[name]:
+                                raise RuntimeError(
+                                    f"dropdown Save changed {name!r} (default {default!r}): "
+                                    f"{before[name]} -> {after[name]}"
+                                )
+                        await forward_refused(new_port, "saved dropdown forward must stay idle")
+                        leaked = events.path.read_text(encoding="utf-8").count(marker)
+                        probe_state["phase"] = None
+                        if leaked != leaked_before:
+                            raise RuntimeError(
+                                f"typing into the session dropdown reached a terminal "
+                                f"({marker} {leaked_before} -> {leaked})"
+                            )
+
+                        command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                        await asyncio.sleep(.6)
+                        closed = destination / "connected-tunnels-dropdown-closed.png"
+                        await asyncio.to_thread(screenshot, window, closed, env)
+                        dlg_left, dlg_w = tunnel_dialog_left(w)
+                        try:
+                            await asyncio.to_thread(
+                                require_label_absent, closed, "Tunnel Manager",
+                                region=(dlg_left, 42, dlg_left + dlg_w, h),
+                            )
+                        except LabelVisible as exc:
+                            raise RuntimeError(f"Escape did not close the Tunnel Manager ({closed})") from exc
+                        term_x, term_y = (w * 3) // 4, 280
+                        if not (0 <= term_x < w and 0 <= term_y < h and abs(term_x - w // 2) >= 100):
+                            raise RuntimeError(f"terminal refocus click ({term_x}, {term_y}) invalid for {w}x{h}")
+                        command("xdotool", "windowfocus", window, "mousemove", "--window", window,
+                                str(term_x), str(term_y), "click", "1", env=env)
+                        await asyncio.sleep(.3)
+                        command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                                "echo:AFTER_SESSION_DROPDOWN", env=env)
+                        command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                        try:
+                            await wait_for(
+                                lambda: "NATIVE_ECHO:AFTER_SESSION_DROPDOWN" in events.path.read_text(encoding="utf-8").splitlines(),
+                                "shell echo after the session dropdown probe",
+                            )
+                        except RuntimeError:
+                            await asyncio.to_thread(
+                                screenshot, window,
+                                destination / "connected-tunnels-dropdown-echo-timeout.png", env,
+                            )
+                            raise
+                        print(f"PASS tunnel session dropdown: + defaulted to {default!r}; typing "
+                              f"{fragment!r} listed only {chosen!r}; Return picked it; Save stored "
+                              f"{spec(new_port)} under {chosen!r} only; no PTY input; shell answered "
+                              f"AFTER_SESSION_DROPDOWN", flush=True)
+
                     allow_before = events.path.read_text(encoding="utf-8").count("LOCAL_FORWARD_ALLOW")
                     await click_label(
                         window, destination / "connected-tunnels-button-2.png", "Tunnels", env,
@@ -7452,6 +7669,7 @@ async def main() -> int:
                           "(echo + refusal through fixture SSH)", flush=True)
                     await running_edit_delete_probe()
                     await profile_edit_probe()
+                    await session_dropdown_probe()
 
                 if DUPTAB:
                     # Last interactive step before the event-log snapshot: the
@@ -7611,6 +7829,8 @@ async def main() -> int:
                     )
                 ):
                     raise RuntimeError("Session menu, Sender or dock gear keyboard input leaked to SSH")
+                if "UNEXPECTED_SESSION_DROPDOWN_PTY_INPUT" in event_log:
+                    raise RuntimeError("Tunnel Settings session dropdown input leaked to SSH")
                 if event_log.count("AUTH_ACCEPT:native-smoke") < 3:
                     raise RuntimeError(
                         "three sessions (main, auxiliary, split) were not authenticated"
