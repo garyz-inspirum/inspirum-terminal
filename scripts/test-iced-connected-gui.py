@@ -2774,6 +2774,176 @@ def _region_band_label(path: Path, tesseract: str, label: str, region):
     return None
 
 
+# Selected list rows (Tunnel Manager, Sessions, Filer) are painted with a
+# flat fill. On the CI dark frame the selected "Alpha forward" row is luma 58
+# with ~190 text on a luma 25 dialog: the whole-region crop OCR reads the
+# unselected rows but not the filled one, and _visible_bands (global
+# threshold 90, whole window width) merges its title, subtitle and the
+# editor rows beside it into one 26 px band, so only the late inverted
+# stage could read it and click_label's 15 s window ran out first.
+SELECTED_FILL_MIN_DELTA = 16   # fill vs. region background luma
+SELECTED_FILL_MIN_WIDTH = 120  # px of fill on one row
+SELECTED_FILL_HEIGHT = (12, 120)
+SELECTED_TEXT_DELTA = 48       # glyph pixel vs. fill luma
+SELECTED_TEXT_MIN_PIXELS = 4   # per row; a 1-2 px icon stroke is not text
+SELECTED_MAX_LINES = 8
+
+
+def _region_luma(rows, channels, region, width, height):
+    x1, y1, x2, y2 = region
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
+    grid = []
+    for y in range(y1, y2):
+        row = rows[y]
+        grid.append(bytes(
+            (row[x * channels] + row[x * channels + 1] + row[x * channels + 2]) // 3
+            for x in range(x1, x2)
+        ))
+    return (x1, y1), grid
+
+
+def selected_fill_rects(rows, channels, region, width, height):
+    """Flat fills (selected rows) inside ``region``: ``[(x1, y1, x2, y2, luma)]``.
+
+    A fill row has at least ``SELECTED_FILL_MIN_WIDTH`` pixels within 2 luma
+    of one value that is ``SELECTED_FILL_MIN_DELTA`` away from the region's
+    dominant background; consecutive fill rows of the same luma form one
+    rectangle. Glyphs are sparse, so a row through text still counts.
+    Window coordinates; inclusive bounds.
+    """
+    (ox, oy), grid = _region_luma(rows, channels, region, width, height)
+    if not grid or not grid[0]:
+        return []
+    total = [0] * 256
+    for line in grid:
+        for lum in line:
+            total[lum] += 1
+    background = max(range(256), key=lambda lum: (total[lum], -lum))
+    per_row = []
+    for line in grid:
+        counts = [0] * 260
+        for lum in line:
+            counts[lum + 2] += 1
+        best, best_count = None, 0
+        for value in range(256):
+            if not counts[value + 2] or abs(value - background) < SELECTED_FILL_MIN_DELTA:
+                continue
+            near = sum(counts[value:value + 5])
+            if near > best_count:
+                best, best_count = value, near
+        if best is not None and best_count >= SELECTED_FILL_MIN_WIDTH:
+            # The widest run of fill pixels (glyph gaps <= 12 px), so stray
+            # antialiased pixels of a neighbouring card never widen it.
+            xs = [x for x, lum in enumerate(line) if abs(lum - best) <= 2]
+            runs, run_start = [], xs[0]
+            for previous, x in zip(xs, xs[1:]):
+                if x - previous > 12:
+                    runs.append((run_start, previous))
+                    run_start = x
+            runs.append((run_start, xs[-1]))
+            left, right = max(runs, key=lambda run: run[1] - run[0])
+            if right - left + 1 >= SELECTED_FILL_MIN_WIDTH:
+                per_row.append((best, left, right))
+            else:
+                per_row.append(None)
+        else:
+            per_row.append(None)
+    rects = []
+    start = 0
+    while start < len(per_row):
+        if per_row[start] is None:
+            start += 1
+            continue
+        value, left, right = per_row[start]
+        end = start
+        while (end + 1 < len(per_row) and per_row[end + 1] is not None
+               and abs(per_row[end + 1][0] - value) <= 3):
+            end += 1
+            left = min(left, per_row[end][1])
+            right = max(right, per_row[end][2])
+        tall = end - start + 1
+        if SELECTED_FILL_HEIGHT[0] <= tall <= SELECTED_FILL_HEIGHT[1]:
+            rects.append((ox + left, oy + start, ox + right, oy + end, value))
+        start = end + 1
+    return rects
+
+
+def _fill_text_lines(rows, channels, rect):
+    """Text lines inside one fill: ``[(x1, y1, x2, y2)]`` of glyph pixels."""
+    x1, y1, x2, y2, fill = rect
+    lines, active, top = [], False, 0
+    span = []
+    for y in range(y1 + 1, y2 + 1):
+        row = rows[y]
+        lit = [x for x in range(x1 + 2, x2 - 1)
+               if abs((row[x * channels] + row[x * channels + 1]
+                       + row[x * channels + 2]) // 3 - fill) >= SELECTED_TEXT_DELTA]
+        text = len(lit) >= SELECTED_TEXT_MIN_PIXELS and y < y2
+        if text:
+            if not active:
+                active, top, span = True, y, [lit[0], lit[-1]]
+            span = [min(span[0], lit[0]), max(span[1], lit[-1])]
+        elif active:
+            active = False
+            if y - top >= 5:
+                lines.append((span[0], top, span[1], y - 1))
+    return lines
+
+
+def _fill_line_crop(rows, channels, box, fill, scale, dest: Path) -> None:
+    """Write ``box`` upscaled as dark glyphs on white, relative to ``fill``."""
+    left, top, right, bot = box
+    deltas = []
+    for y in range(top, bot + 1):
+        row = rows[y]
+        deltas.append([
+            abs((row[x * channels] + row[x * channels + 1] + row[x * channels + 2]) // 3 - fill)
+            for x in range(left, right + 1)
+        ])
+    peak = max(1, max(max(line) for line in deltas))
+    out_rows = []
+    for line in deltas:
+        grey = bytearray()
+        for delta in line:
+            lum = 255 - min(255, delta * 255 // peak)
+            grey += bytes((lum, lum, lum)) * scale
+        out_rows.append(bytes(grey) * scale)
+    _write_png(dest, (right - left + 1) * scale, (bot - top + 1) * scale, b"".join(out_rows))
+
+
+def _selected_row_label(path: Path, tesseract: str, label: str, region):
+    """Find ``label`` on a selected (flat-filled) row inside ``region``.
+
+    Each text line inside each fill is cropped to its own glyphs, rendered
+    dark-on-white against the fill's luma (not the window threshold) and
+    read as one line. Returns a box wholly inside ``region``, or None (no
+    fill, or the label is not on one). No fill means no OCR at all.
+    """
+    width, height, channels, rows = _read_png(path)
+    lines = []
+    for rect in selected_fill_rects(rows, channels, region, width, height):
+        lines.extend((box, rect[4]) for box in _fill_text_lines(rows, channels, rect))
+    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    try:
+        for (lx1, ly1, lx2, ly2), fill in lines[:SELECTED_MAX_LINES]:
+            box = (max(0, lx1 - 6), max(0, ly1 - 3),
+                   min(width - 1, lx2 + 6), min(height - 1, ly2 + 3))
+            _fill_line_crop(rows, channels, box, fill, 4, temporary)
+            words = [word for word in _scaled_words(
+                _ocr_tsv(tesseract, temporary, "7"), (box[0], box[1]), 4,
+            ) if _word_inside(word, region)]
+            bounds = match_visible_label(words, label)
+            if bounds is None:
+                bounds = match_visible_segment([words], label)
+            bounds = _bounds_inside(bounds, region)
+            if bounds is not None:
+                return bounds
+    finally:
+        temporary.unlink(missing_ok=True)
+    return None
+
+
 def locate_visible_label(
     path: Path,
     label: str,
@@ -2813,6 +2983,14 @@ def locate_visible_label(
             bounds = _bounds_inside(bounds, region)
             if bounds is not None:
                 break
+            if psm == "6" and not invert:
+                # A label on a selected row's fill: read each line of each
+                # fill against the fill itself (cheap, no OCR without a
+                # fill). Right after the first pass, so labels that pass
+                # already finds keep their box.
+                bounds = _selected_row_label(path, tesseract, label, region)
+                if bounds is not None:
+                    break
         # Full-width upscale still drops the trailing token of a 13 px name.
         # Row bands inside the region recover it; never a box outside region.
         if bounds is None:
