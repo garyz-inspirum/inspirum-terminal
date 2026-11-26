@@ -12698,6 +12698,35 @@ mod tests {
     }
 
     #[test]
+    fn r153_dock_manual_filer_width_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("ui-state.json");
+        let mut app = r153_dock_app("restart1");
+        app.ui_state_path = Some(state_path.clone());
+        let saved = dock::DockLayout::from_json(R153_DOCK_OLD_LAYOUT);
+        (app.docks, app.pending_file_panel_fit) =
+            dock::DockLayout::restore(Some(saved), &available_panels());
+        let _ = app.update(Message::WindowResized(iced::Size::new(1280.0, 800.0)));
+        assert_eq!(app.docks.left_width, 736.0, "old layout widened once");
+        let _ = app.update(Message::DockDragStart(dock::Area::Left));
+        let _ = app.update(Message::DockDragMove(iced::Point::new(300.0, 300.0)));
+        let _ = app.update(Message::DockDragEnd);
+        assert_eq!(app.docks.left_width, 300.0);
+
+        // Restart: same start-up restore from the file this build saved.
+        let mut next = r153_dock_app("restart2");
+        (next.docks, next.pending_file_panel_fit) =
+            dock::DockLayout::restore(ui_state::load(&state_path).docks, &available_panels());
+        assert!(!next.pending_file_panel_fit);
+        let _ = next.update(Message::WindowResized(iced::Size::new(1280.0, 800.0)));
+        assert_eq!(next.docks.left_width, 300.0);
+        assert_eq!(
+            next.docks.area_of(dock::Panel::Filer),
+            Some(dock::Area::Left)
+        );
+    }
+
+    #[test]
     fn r153_dock_new_side_dock_shrinks_filer_to_fit() {
         let mut app = r153_dock_app("move");
         let _ = app.update(Message::DockMove(dock::Panel::Filer, dock::Area::Left));

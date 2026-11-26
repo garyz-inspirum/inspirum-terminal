@@ -141,6 +141,12 @@ pub(super) struct DockLayout {
     pub left_width: f32,
     pub right_width: f32,
     pub bottom_ratio: f32,
+    /// True once the one-time load fit of a Filer side dock has run (or the
+    /// layout came from a preset). Layouts from older builds lack the field
+    /// and read as false, so they are widened once; layouts saved by this
+    /// build keep a Filer width the user chose.
+    #[serde(default)]
+    pub file_panel_fitted: bool,
 }
 
 impl Default for DockLayout {
@@ -186,6 +192,7 @@ impl DockLayout {
             left_width: DEFAULT_SIDE_WIDTH,
             right_width: DEFAULT_SIDE_WIDTH,
             bottom_ratio: DEFAULT_BOTTOM_RATIO,
+            file_panel_fitted: true,
         }
     }
 
@@ -341,8 +348,9 @@ impl DockLayout {
     /// Self-correct a Filer sitting in a side dock narrower than usable
     /// (e.g. a layout saved by an older build at 214 px): widen it with the
     /// same rule as `widen_for_file_panel`. No-op when Filer is in the bottom
-    /// dock or closed.
+    /// dock or closed. Marks the layout `file_panel_fitted`.
     pub(super) fn fit_file_panel(&mut self, window_width: f32) {
+        self.file_panel_fitted = true;
         if let Some(area) = self.area_of(Panel::Filer) {
             self.widen_for_file_panel(Panel::Filer, area, window_width);
         }
@@ -485,13 +493,15 @@ impl DockLayout {
     /// Start-up restore of a saved layout: sanitize it and match it to the
     /// `available` panels. Returns the layout and whether the Filer still
     /// needs the one-time load fit (`fit_file_panel` once the real window
-    /// width is known, followed by `fit_to_window`).
+    /// width is known, followed by `fit_to_window`): only layouts saved by
+    /// an older build, which lack `file_panel_fitted`.
     pub(super) fn restore(saved: Option<DockLayout>, available: &[Panel]) -> (DockLayout, bool) {
         let mut docks = saved.unwrap_or_default();
         docks.sanitize();
         docks.retain_available(available);
         docks.add_missing(available);
-        (docks, true)
+        let pending = !docks.file_panel_fitted;
+        (docks, pending)
     }
 
     /// Enforce invariants after deserialising untrusted input.
@@ -849,6 +859,31 @@ mod tests {
     }
 
     #[test]
+    fn r153_dock_marker_fits_old_layout_once_and_keeps_manual_width() {
+        assert!(!R153_DOCK_OLD_LAYOUT.contains("file_panel_fitted"));
+        let (mut docks, pending) = DockLayout::restore(
+            Some(DockLayout::from_json(R153_DOCK_OLD_LAYOUT)),
+            &Panel::ALL,
+        );
+        assert!(pending, "older build: widen once");
+        docks.fit_file_panel(1280.0);
+        docks.fit_to_window(1280.0);
+        assert_eq!(docks.left_width, 736.0);
+        assert!(docks.file_panel_fitted);
+        // The user narrows the Filer; this build saves the marker with it.
+        docks.set_width(Area::Left, 300.0);
+        let json = docks.to_json();
+        assert!(json.contains("\"file_panel_fitted\":true"), "{json}");
+        let (restored, pending) =
+            DockLayout::restore(Some(DockLayout::from_json(&json)), &Panel::ALL);
+        assert!(!pending, "layout from this build is not refitted");
+        assert_eq!(restored.left_width, 300.0);
+        // Presets and the default layout need no load fit either.
+        assert!(!DockLayout::restore(None, &Panel::ALL).1);
+        assert!(DockLayout::preset(Preset::WindTermDefault).file_panel_fitted);
+    }
+
+    #[test]
     fn r153_dock_drag_counts_both_splitters() {
         let mut layout = DockLayout::from_json(R153_DOCK_OLD_LAYOUT);
         let win = iced::Size::new(960.0, 640.0);
@@ -907,6 +942,7 @@ mod tests {
             left_width: f32::NAN,
             right_width: 1.0,
             bottom_ratio: 5.0,
+            file_panel_fitted: false,
         };
         layout.sanitize();
         assert_invariants(&layout);
