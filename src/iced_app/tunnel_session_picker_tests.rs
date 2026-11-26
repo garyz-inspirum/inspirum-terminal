@@ -91,6 +91,78 @@ fn options_sort_case_insensitively_and_keep_duplicate_names_distinct() {
     assert_eq!(keys.len(), profiles.len());
 }
 
+/// Option label by profile key.
+fn r153_labels_by_key(profiles: &[Session]) -> HashMap<String, String> {
+    tunnel_session_options(profiles)
+        .into_iter()
+        .map(|option| (option.key, option.label))
+        .collect()
+}
+
+/// Labels compared the way the combo-box search compares them.
+fn r153_labels_distinct(labels: &HashMap<String, String>) -> usize {
+    labels
+        .values()
+        .map(|label| label.to_lowercase())
+        .collect::<HashSet<String>>()
+        .len()
+}
+
+/// Folders `a/b` and `a / b` share the display path `a / b / web` but are
+/// separate profiles; the third one is literally named `web (2)`.
+fn r153_labels_reviewer_profiles() -> [Session; 3] {
+    [
+        session("a/b", "web"),
+        session("a / b", "web"),
+        session("a/b", "web (2)"),
+    ]
+}
+
+#[test]
+fn r153_labels_literal_suffix_name_does_not_collide_with_generated_suffix() {
+    let profiles = r153_labels_reviewer_profiles();
+    let labels = r153_labels_by_key(&profiles);
+    assert_eq!(labels.len(), 3, "one option per profile key");
+    assert_eq!(r153_labels_distinct(&labels), 3, "labels: {labels:?}");
+    let literal = session_profile_key(&session("a/b", "web (2)"));
+    assert_eq!(labels[&literal], "a / b / web (2)");
+    let others: Vec<&String> = labels
+        .iter()
+        .filter(|(key, _)| **key != literal)
+        .map(|(_, label)| label)
+        .collect();
+    assert_eq!(others.len(), 2);
+    assert!(
+        others
+            .iter()
+            .all(|label| label.to_lowercase() != "a / b / web (2)"),
+        "only the literal profile reads `web (2)`: {labels:?}"
+    );
+}
+
+#[test]
+fn r153_labels_duplicated_literal_suffix_chain_stays_distinct() {
+    let profiles = [
+        session("a/b", "web"),
+        session("a / b", "web"),
+        session("a/b", "web (2)"),
+        session("a / b", "web (2)"),
+    ];
+    let labels = r153_labels_by_key(&profiles);
+    assert_eq!(labels.len(), 4, "one option per profile key");
+    assert_eq!(r153_labels_distinct(&labels), 4, "labels: {labels:?}");
+}
+
+#[test]
+fn r153_labels_do_not_depend_on_input_order() {
+    let profiles = r153_labels_reviewer_profiles();
+    let mut reversed = profiles.clone();
+    reversed.reverse();
+    let forward = r153_labels_by_key(&profiles);
+    assert_eq!(forward, r153_labels_by_key(&reversed));
+    assert_eq!(r153_labels_distinct(&forward), 3, "labels: {forward:?}");
+}
+
 #[test]
 fn picker_options_are_rebuilt_when_profiles_change() {
     let dir = tempfile::tempdir().unwrap();

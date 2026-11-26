@@ -2351,7 +2351,10 @@ fn tunnel_session_display_path(session: &Session) -> String {
 /// Every saved session, sorted case-insensitively by display path. Names
 /// repeated in different folders differ by path; the rare identical path
 /// (for example folder `a/b` versus `a / b`) gets a numeric suffix so every
-/// option reads distinctly.
+/// option reads distinctly. Labels compare case-insensitively, like the
+/// picker search. Every literal path is reserved first, so a suffix skips
+/// any label already in use (a session literally named `web (2)` pushes the
+/// second `web` to `web (3)`); the first of each path keeps it unchanged.
 fn tunnel_session_options(profiles: &[Session]) -> Vec<TunnelSessionOption> {
     let mut options: Vec<TunnelSessionOption> = profiles
         .iter()
@@ -2367,12 +2370,23 @@ fn tunnel_session_options(profiles: &[Session]) -> Vec<TunnelSessionOption> {
             .then_with(|| left.label.cmp(&right.label))
             .then_with(|| left.key.cmp(&right.key))
     });
-    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut taken: HashSet<String> = options
+        .iter()
+        .map(|option| option.label.to_lowercase())
+        .collect();
+    let mut plain: HashSet<String> = HashSet::new();
     for option in &mut options {
-        let count = seen.entry(option.label.to_lowercase()).or_insert(0);
-        *count += 1;
-        if *count > 1 {
-            option.label = format!("{} ({count})", option.label);
+        if plain.insert(option.label.to_lowercase()) {
+            continue;
+        }
+        let mut suffix = 2usize;
+        loop {
+            let candidate = format!("{} ({suffix})", option.label);
+            if taken.insert(candidate.to_lowercase()) {
+                option.label = candidate;
+                break;
+            }
+            suffix += 1;
         }
     }
     options
