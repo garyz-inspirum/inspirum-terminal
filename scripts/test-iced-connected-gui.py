@@ -58,6 +58,7 @@ LOGGED_ECHO_LINES = (
     "echo:AFTER_EXIT_CANCEL",
     "echo:AFTER_TUNNEL_SETTINGS",
     "echo:AFTER_TUNNEL_TOGGLES",
+    "echo:AFTER_SESSION_DROPDOWN",
     "echo:AFTER_EXTERNAL_EDIT",
     "echo:IN_DUPLICATE_TAB",
     "echo:AFTER_DUPLICATE_TAB",
@@ -615,7 +616,8 @@ async def monitored_shell(
                 return
             # Observe *any* PTY bytes while a chrome control owns focus,
             # including incomplete lines and a bare Escape. Never log input.
-            # Phase names: MENU, SENDER, GEAR, CONTEXT, FIND. The marker is
+            # Phase names: MENU, SENDER, GEAR, CONTEXT, FIND,
+            # SESSION_DROPDOWN. The marker is
             # UNEXPECTED_<PHASE>_PTY_INPUT, so FIND is
             # UNEXPECTED_FIND_PTY_INPUT.
             observe_pty_chunk(events, probe_state, chunk)
@@ -1291,24 +1293,45 @@ TOOLBAR_BOTTOM_Y = 90
 
 # Tunnel Settings dialog geometry (src/iced_app.rs): width is
 # clamp(window - 2*24, 600, 840), centred; 12 px padding; the 300 px list
-# card, a 12 px gap, then the editor card. Measured on the 1280x800 populated
-# dark frame (connected-tunnels-editor-selected.png): dialog x 220..1060,
-# list card 245..545, editor card 557..1035, "Listen Port" label x 569..650,
-# its input 719..1023 x 287..310 with digits at y 295..304, Destination Port
-# input y 357..380; OCR puts the "Tunnel Manager" heading top at y 151.
+# card, a 12 px gap, then the editor card. Measured with _read_png on the
+# 1280x800 populated dark frames: dialog x 220..1060, list card 245..545,
+# editor card from x 557, label column from x 569 (TUNNEL_EDITOR_LABEL_MAX
+# 150 wide, so inputs start at 719; 128 px at the narrowest dialog).
+#
+# Editor rows are found from their OCR-located LABEL, not from the heading:
+# the heading's OCR top moved 151 -> 188 when the `Session / profile` row
+# became a 23 px combo box (old plain-text row 261..273), and its distance
+# to the Listen Port input changed with it (+136 -> +144). Per row, input
+# box borders vs the label's located box (x0, y0, x1, y1), centre
+# cy = (y0 + y1) / 2:
+#   old layout (it11 frames): "Listen Port" (574,292,644,296) cy 294,
+#     input 287..309, Destination Host input 322..344;
+#   new layout (it12 frame):  "Listen Port" (574,336,644,340) cy 338,
+#     input 332..354, Session input above 297..319, Destination Host
+#     input 367..389.
+# Inputs are 23 px tall, centred cy+4..cy+5, rows 35 px apart in both.
 TUNNEL_DIALOG_MAX_W = 840
 TUNNEL_DIALOG_MIN_W = 600
 TUNNEL_DIALOG_MARGIN = 24
 # Editor card left edge relative to the dialog's left edge (557 - 220).
 TUNNEL_EDITOR_CARD_DX = 337
-# Listen Port input left edge (719 - 220) at the widest label column; the
-# label column can shrink to 128 px (22 px less) on narrow dialogs.
-TUNNEL_LISTEN_INPUT_DX = 499 - 22 - 6
-# Listen Port row relative to the heading's OCR top: digits at +144..+153.
-# The band stops above the Destination Host input (+171) and far above the
-# Destination Port digits (+216), so a form showing the port in another row
-# cannot satisfy it.
-TUNNEL_LISTEN_ROW_DY = (124, 170)
+# Card padding + widest label column (src/iced_app.rs TUNNEL_EDITOR_PADDING,
+# TUNNEL_EDITOR_LABEL_MAX): the label column spans card + 12 .. card + 162.
+TUNNEL_EDITOR_LABEL_COLUMN = (12, 162)
+# Value column start relative to the label's OCR left (574): 691, left of
+# the input at the narrowest label column (569 + 128 = 697) and right of
+# the longest label's ink (`Session / profile` ends at x 690, and it lies
+# in another row anyway).
+TUNNEL_VALUE_DX = 117
+# Row band relative to the label's vertical centre: cy-13 .. cy+23 brackets
+# the input (cy-6..cy+16 new, cy-7..cy+15 old) with >= 5 px to spare and
+# stops before both neighbours: new Session input bottom is cy-19 and
+# Destination Host input top cy+29; old Session text ends cy-21 and
+# Destination Host starts cy+28.
+TUNNEL_ROW_FROM_LABEL = (-13, 23)
+# Click point inside the input, relative to the label centre (input centre
+# cy+4 old, cy+5 new).
+TUNNEL_INPUT_CENTRE_DY = 5
 
 
 def tunnel_dialog_left(width: int) -> tuple[int, int]:
@@ -1347,38 +1370,128 @@ def tunnel_list_region(heading_bounds, width: int, height: int):
     return (left, 42, right, height)
 
 
-def listen_port_row_region(heading_bounds, width: int):
-    """Tight box around the Listen Port input, anchored to the located
-    "Tunnel Manager" heading. Only digits here prove the selected forward:
-    the editor card also shows the destination port (the shared echo
-    service), so the whole card would accept a port from the wrong row."""
+def tunnel_editor_label_region(heading_bounds, width: int, height: int):
+    """Search box for an editor field LABEL ("Listen Port", "Session /
+    profile", ...): the editor card's label column below the located
+    heading. Values start at the input column (x >= 719 at 1280), outside
+    the box, so a value can never be taken for a label."""
+    left, _dialog = tunnel_dialog_left(width)
+    card = left + TUNNEL_EDITOR_CARD_DX
+    return (card - 6, heading_bounds[1], card + TUNNEL_EDITOR_LABEL_COLUMN[1] - 2, height)
+
+
+def editor_value_row_region(label_bounds, width: int):
+    """Tight box around the input of the editor row whose label was located
+    at ``label_bounds``: value column only, one row tall (see
+    TUNNEL_ROW_FROM_LABEL), so the neighbouring rows' values stay out."""
     left, dialog = tunnel_dialog_left(width)
-    top = heading_bounds[1]
+    cy = (label_bounds[1] + label_bounds[3]) // 2
     return (
-        left + TUNNEL_LISTEN_INPUT_DX,
-        top + TUNNEL_LISTEN_ROW_DY[0],
+        label_bounds[0] + TUNNEL_VALUE_DX,
+        cy + TUNNEL_ROW_FROM_LABEL[0],
         min(width, left + dialog - 20),
-        top + TUNNEL_LISTEN_ROW_DY[1],
+        cy + TUNNEL_ROW_FROM_LABEL[1],
     )
 
 
-# Remove ("−") button under the 350 px list: x 285..313, y 544..567 on the
-# 1280x800 frame, i.e. centre (dialog left + 79, heading top + 405).
-TUNNEL_REMOVE_BUTTON_D = (79, 405)
-# Footer Save (primary fill, right-aligned): y 661..684 = heading top +510..
-# +533. Scanned for, not assumed: the band searched is +300..+620.
+def listen_port_row_region(listen_label_bounds, width: int):
+    """Tight box around the Listen Port input, anchored to the located
+    "Listen Port" label. Only digits here prove the selected forward: the
+    editor card also shows the destination port (the shared echo service),
+    so the whole card would accept a port from the wrong row."""
+    return editor_value_row_region(listen_label_bounds, width)
+
+
+# Footer Save (primary fill, right-aligned): y 661..684 = heading top +510
+# on the old layout, 624..647 = +436 on the new one (combo-box layout, no
+# "Add to session" list). Scanned for, not assumed: band +300..+620.
 TUNNEL_SAVE_SCAN_DY = (300, 620)
 
 
-def listen_input_centre(heading_bounds, width: int) -> tuple[int, int]:
+def listen_input_centre(listen_label_bounds, width: int) -> tuple[int, int]:
     """Click target inside the Listen Port text input."""
-    x1, y1, x2, y2 = listen_port_row_region(heading_bounds, width)
-    return ((x1 + x2) // 2, (y1 + y2) // 2)
+    x1, _y1, x2, _y2 = listen_port_row_region(listen_label_bounds, width)
+    cy = (listen_label_bounds[1] + listen_label_bounds[3]) // 2
+    return ((x1 + x2) // 2, cy + TUNNEL_INPUT_CENTRE_DY)
 
 
-def tunnel_remove_centre(heading_bounds, width: int) -> tuple[int, int]:
+# The "+" / "−" pair under the tunnel list: two outlined 28x23 buttons 4 px
+# apart (border luma 68 on card 25, fill 30). Measured with _read_png:
+# "+" x 253..280, "−" x 285..312; y 544..566 (old layout) and 581..603 (new
+# layout), i.e. 358 px below the list top in both.
+TUNNEL_LIST_BUTTON_BORDER = (50, 100)
+TUNNEL_LIST_BUTTON_W = (18, 40)
+TUNNEL_LIST_BUTTON_H = (18, 28)
+TUNNEL_LIST_BUTTON_GAP = (1, 10)
+
+
+def _border_runs(row, channels, x1, x2):
+    lo, hi = TUNNEL_LIST_BUTTON_BORDER
+    runs, start = [], None
+    for x in range(x1, x2 + 1):
+        on = False
+        if x < x2:
+            r, g, b = row[x * channels], row[x * channels + 1], row[x * channels + 2]
+            on = lo <= (r * 299 + g * 587 + b * 114) // 1000 <= hi
+        if on and start is None:
+            start = x
+        elif not on and start is not None:
+            if TUNNEL_LIST_BUTTON_W[0] <= x - start <= TUNNEL_LIST_BUTTON_W[1]:
+                runs.append((start, x))
+            start = None
+    return runs
+
+
+def tunnel_list_buttons(path: Path, heading_bounds, width: int, *, image=None):
+    """``(plus_box, minus_box)`` of the "+" / "−" pair under the tunnel
+    list, found from pixels inside the list card below the located heading,
+    or ``None``. A pair is two outlined boxes side by side whose top and
+    bottom border runs match. More than one pair raises: the target would
+    be a guess."""
+    img_w, img_h, channels, rows = image or _read_png(path)
     left, _dialog = tunnel_dialog_left(width)
-    return (left + TUNNEL_REMOVE_BUTTON_D[0], heading_bounds[1] + TUNNEL_REMOVE_BUTTON_D[1])
+    x1 = max(0, left + 12)
+    x2 = min(img_w, left + TUNNEL_EDITOR_CARD_DX - 6)
+    pairs = []
+    runs_at = {}
+
+    def runs(y):
+        if y not in runs_at:
+            runs_at[y] = _border_runs(rows[y], channels, x1, x2)
+        return runs_at[y]
+
+    for y in range(max(0, heading_bounds[3]), min(img_h, heading_bounds[1] + 560)):
+        top = runs(y)
+        for a, b in zip(top, top[1:]):
+            if not TUNNEL_LIST_BUTTON_GAP[0] <= b[0] - a[1] <= TUNNEL_LIST_BUTTON_GAP[1]:
+                continue
+            for y2 in range(y + TUNNEL_LIST_BUTTON_H[0], min(img_h, y + TUNNEL_LIST_BUTTON_H[1] + 1)):
+                bottom = runs(y2)
+                if any(abs(c[0] - a[0]) <= 1 and abs(c[1] - a[1]) <= 1 for c in bottom) and \
+                        any(abs(c[0] - b[0]) <= 1 and abs(c[1] - b[1]) <= 1 for c in bottom):
+                    pairs.append(((a[0], y, a[1] + 1, y2 + 1), (b[0], y, b[1] + 1, y2 + 1)))
+                    break
+    if not pairs:
+        return None
+    if len(pairs) > 1:
+        raise RuntimeError(f"several +/- button pairs under the tunnel list in {path}: {pairs}")
+    return pairs[0]
+
+
+def tunnel_remove_centre(path: Path, heading_bounds, width: int) -> tuple[int, int]:
+    """Centre of the "−" (remove) box found by ``tunnel_list_buttons``."""
+    found = tunnel_list_buttons(path, heading_bounds, width)
+    if found is None:
+        raise RuntimeError(f"no +/- buttons under the tunnel list in {path}")
+    return center(found[1])
+
+
+def tunnel_add_centre(path: Path, heading_bounds, width: int) -> tuple[int, int]:
+    """Centre of the "+" (add) box found by ``tunnel_list_buttons``."""
+    found = tunnel_list_buttons(path, heading_bounds, width)
+    if found is None:
+        raise RuntimeError(f"no +/- buttons under the tunnel list in {path}")
+    return center(found[0])
 
 
 def primary_fill_run(path: Path, y: int, x1: int, x2: int, *, min_width: int = 30,
@@ -1881,123 +1994,127 @@ def _port_glyph_cells(path, row_region):
 # (asserted by the unit tests). Host digits with two sub-pixel phases or
 # two runs keep two instances. Source frame
 # (scripts/tests/fixtures/<name>#<glyph index>) is recorded per entry;
-# regenerate with ``build_port_templates``.
+# regenerate with ``build_port_templates``. Patches are cut from the
+# label-derived Listen Port band (``listen_port_row_region``; 691,281..317
+# on the old-layout fixture frames): ink is scaled from the band's median,
+# so patches cut from another band differ (the it11 heading-offset band
+# moved them by up to 3.3 per glyph); recut them when the band changes.
 _PORT_TEMPLATE_TABLE = (
     ('0', 'gh', 'connected-tunnels-edit-bravo-draft-50835-ci.png#1', (
         '0000000000',
-        '0015885200',
-        '0056227410',
+        '0015885100',
+        '0055227400',
         '0163047620',
-        '0253265520',
+        '0252265520',
         '0353542530',
-        '0256522530',
+        '0256522520',
         '0168303520',
-        '0056226410',
-        '0015885200',
+        '0056216410',
+        '0015885100',
         '0000000000',
     )),
     ('0', 'host', 'connected-tunnels-edit-bravo-draft-52045-host.png#2', (
         '0000000000',
         '0026996200',
-        '0058448510',
+        '0057448510',
         '0275105720',
-        '0383005730',
+        '0383005720',
         '0474666730',
-        '0383005730',
+        '0383005720',
         '0275105720',
-        '0058448510',
+        '0057448510',
         '0026996200',
         '0000000000',
     )),
     ('0', 'host', 'connected-tunnels-editor-selected-alpha-60989-host.png#1', (
         '0000000000',
         '0026996200',
-        '0058448510',
+        '0057448510',
         '0275105720',
-        '0383005730',
+        '0383005720',
         '0474666730',
-        '0383005730',
+        '0383005720',
         '0275105720',
-        '0058448510',
+        '0057448510',
         '0026996200',
         '0000000000',
     )),
     ('1', 'gh', 'connected-tunnels-edit-alpha-draft-47031-ci.png#4', (
         '0000000000',
-        '0013771000',
-        '0047571000',
-        '0001271000',
-        '0000371000',
-        '0000371000',
-        '0000371000',
-        '0000371000',
-        '0000371000',
+        '0003770000',
+        '0147570000',
+        '0000370000',
+        '0000370000',
+        '0000370000',
+        '0000370000',
+        '0000370000',
+        '0000370000',
         '0028898600',
         '0000000000',
     )),
     ('1', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#4', (
         '0000000000',
-        '0169973000',
-        '0001473000',
-        '0001473000',
-        '0001473000',
-        '0001473000',
-        '0001473000',
-        '0001473000',
-        '0001473000',
-        '0049999600',
+        '0169972000',
+        '0001472000',
+        '0001472000',
+        '0001472000',
+        '0001472000',
+        '0001472000',
+        '0001472000',
+        '0001472000',
+        '0049999500',
         '0000000000',
     )),
     ('2', 'gh', 'connected-tunnels-edit-bravo-draft-45257-ci.png#2', (
         '0000000000',
         '0037884100',
-        '0143136300',
+        '0143036300',
         '0000016400',
         '0000026300',
-        '0000156200',
-        '0001562000',
-        '0015620000',
+        '0000055100',
+        '0000562000',
+        '0005620000',
         '0156200000',
-        '0389999720',
+        '0389999620',
         '0000000000',
     )),
     ('2', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#2', (
         '0000000000',
-        '0048986100',
-        '0364258510',
+        '0048985100',
+        '0364258410',
         '0000007610',
-        '0000038510',
-        '0000167200',
+        '0000038410',
+        '0000177100',
         '0001672000',
         '0016720000',
         '0167200000',
-        '0389999720',
+        '0489999710',
         '0000000000',
     )),
     ('3', 'gh', 'connected-tunnels-edit-bravo-draft-50835-ci.png#3', (
         '0000000000',
-        '0158973100',
-        '0142047200',
-        '0000028200',
-        '0000156100',
-        '0017972000',
-        '0000138200',
-        '0000007400',
-        '0221038200',
-        '0378973100',
+        '0158972000',
+        '0141047100',
+        '0000028100',
+        '0000165100',
+        '0018972000',
+        '0000038200',
+        '0000007300',
+        '0210038200',
+        '0379973000',
         '0000000000',
     )),
     ('3', 'host', 'connected-tunnels-editor-selected-alpha.png#1', (
         '0000000000',
-        '0058985000',
-        '0274159300',
-        '0000009500',
-        '0000169300',
-        '0008995000',
-        '0000159400',
-        '0000008700',
-        '0563159500',
-        '0168986000',
+        '0158984000',
+        '0373268200',
+        '0000018400',
+        '0000268200',
+        '0018984000',
+        '0000158300',
+        '0000017600',
+        '1562258400',
+        '0268985000',
         '0000000000',
     )),
     ('4', 'gh', 'connected-tunnels-edit-bravo-draft-45257-ci.png#0', (
@@ -2006,63 +2123,63 @@ _PORT_TEMPLATE_TABLE = (
         '0001576000',
         '0003746000',
         '0016346000',
-        '0146146000',
+        '0145146000',
         '0271146000',
-        '0499999810',
+        '1499999810',
         '0000146000',
         '0000146000',
         '0000000000',
     )),
     ('4', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#0', (
         '0000000000',
-        '0000189100',
-        '0000689100',
-        '0003858100',
-        '0018458100',
-        '0067158100',
-        '0382058100',
-        '0599999910',
-        '0000058100',
-        '0000058100',
+        '0000288000',
+        '0001788000',
+        '0004858000',
+        '0018458000',
+        '0166058000',
+        '0482058000',
+        '0599999800',
+        '0000058000',
+        '0000058000',
         '0000000000',
     )),
     ('4', 'host', 'connected-tunnels-edit-bravo-draft-52045-host.png#3', (
         '0000000000',
-        '0000487200',
-        '0002786200',
-        '0006676200',
-        '0047266200',
-        '0274166200',
-        '0562066200',
-        '0699999820',
-        '0000066200',
-        '0000066200',
+        '0000486100',
+        '0002786100',
+        '0006576100',
+        '0047266100',
+        '0274166100',
+        '0661066100',
+        '0799999820',
+        '0000066100',
+        '0000066100',
         '0000000000',
     )),
     ('5', 'gh', 'connected-tunnels-edit-bravo-draft-45257-ci.png#1', (
         '0000000000',
         '0048998300',
         '0054100000',
-        '0054100000',
+        '0054000000',
         '0068984100',
-        '0011137410',
+        '0011037400',
         '0000005510',
         '0000005510',
-        '0121027400',
+        '0121027300',
         '0158874100',
         '0000000000',
     )),
     ('5', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#1', (
         '0000000000',
         '0069999300',
-        '0066200000',
-        '0066200000',
-        '0069986200',
+        '0065100000',
+        '0065100000',
+        '0069985100',
         '0000158510',
         '0000006720',
         '0000006720',
         '0364258510',
-        '0158986200',
+        '0158985100',
         '0000000000',
     )),
     ('6', 'gh', 'connected-tunnels-edit-alpha-draft-35649-ci.png#2', (
@@ -2071,141 +2188,141 @@ _PORT_TEMPLATE_TABLE = (
         '0017510000',
         '0146000000',
         '0156787300',
-        '0167213820',
-        '0164001640',
-        '0155001630',
-        '0038213710',
-        '0013887200',
+        '0167203710',
+        '0164001630',
+        '0154001630',
+        '0037203710',
+        '0003886200',
         '0000000000',
     )),
     ('6', 'host', 'connected-tunnels-editor-selected-alpha-60989-host.png#0', (
         '0000000000',
-        '0004898300',
-        '0048624510',
-        '0066200000',
-        '0277898410',
-        '0278436720',
-        '0276204830',
-        '0066204830',
-        '0058436720',
-        '0016898410',
+        '0004897300',
+        '0048524410',
+        '0066100000',
+        '0177898410',
+        '0278426720',
+        '0276104820',
+        '0066104820',
+        '0058426720',
+        '0016898310',
         '0000000000',
     )),
     ('6', 'host', 'connected-tunnels-editor-selected-bravo-41675-host.png#2', (
         '0000000000',
         '0014897300',
-        '0038634410',
-        '0166200000',
-        '0278898400',
-        '0278536730',
+        '0038624410',
+        '0156100000',
+        '0268798400',
+        '0278426730',
         '0276103740',
         '0266103740',
-        '0048536730',
-        '0025898400',
+        '0048426730',
+        '0015898400',
         '0000000000',
     )),
     ('7', 'gh', 'connected-tunnels-edit-bravo-draft-45257-ci.png#4', (
         '0000000000',
-        '0389999600',
-        '0000014600',
-        '0000025300',
-        '0000036100',
-        '0000254000',
-        '0000362000',
-        '0001550000',
-        '0003630000',
-        '0014600000',
+        '0489999400',
+        '0000015400',
+        '0000035200',
+        '0000055100',
+        '0000253000',
+        '0000451000',
+        '0002630000',
+        '0004520000',
+        '0016400000',
         '0000000000',
     )),
     ('7', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#3', (
         '0000000000',
-        '0599999610',
-        '0000048300',
-        '0000067200',
-        '0000285100',
+        '0589999610',
+        '0000037300',
+        '0000057200',
+        '0000275100',
         '0000572000',
-        '0001761000',
+        '0001661000',
         '0004830000',
         '0006720000',
-        '0038510000',
+        '0027510000',
         '0000000000',
     )),
     ('8', 'gh', 'connected-tunnels-edit-bravo-draft-50835-ci.png#2', (
         '0000000000',
-        '0025885200',
-        '0156126500',
-        '0155014600',
-        '0036436300',
+        '0015885100',
+        '0146115500',
+        '0155004600',
+        '0026335300',
         '0015875100',
-        '0155125510',
+        '0145115500',
         '0253003620',
-        '0255115610',
+        '0155115610',
         '0026886200',
         '0000000000',
     )),
     ('8', 'host', 'connected-tunnels-editor-selected-alpha-60989-host.png#3', (
         '0000000000',
-        '0037997300',
-        '0267337610',
-        '0275015720',
-        '0157337510',
         '0027997300',
-        '0267336720',
-        '0374004730',
-        '0277337730',
+        '0267337610',
+        '0275004720',
+        '0157337510',
+        '0027997200',
+        '0267326720',
+        '0374003730',
+        '0277326730',
         '0037997300',
         '0000000000',
     )),
     ('8', 'host', 'connected-tunnels-editor-selected-bravo-58191-host.png#1', (
         '0000000000',
         '0037997200',
-        '0177337620',
-        '0275106720',
-        '0167337510',
-        '0037997200',
+        '0167337620',
+        '0275105720',
+        '0067337510',
+        '0027997200',
         '0276237620',
-        '0483005720',
-        '0376237720',
-        '0047997310',
+        '0373004730',
+        '0276227720',
+        '0037997300',
         '0000000000',
     )),
     ('9', 'gh', 'connected-tunnels-edit-alpha-draft-35649-ci.png#4', (
         '0000000000',
-        '0026885100',
-        '0165126500',
-        '0262003700',
-        '0272002600',
-        '0165126700',
-        '0026875700',
-        '0000014600',
+        '0026884000',
+        '0155126400',
+        '0261003600',
+        '0261003600',
+        '0264126600',
+        '0026875600',
+        '0000014500',
         '0000147200',
         '0039862000',
         '0000000000',
     )),
     ('9', 'host', 'connected-tunnels-editor-selected-alpha-60989-host.png#2', (
         '0000000000',
-        '0047986100',
+        '0047985100',
         '0286248410',
-        '0482006710',
-        '0482006720',
-        '0286248820',
-        '0048987720',
-        '0000006610',
-        '0054268300',
+        '0481007610',
+        '0481007710',
+        '0286248810',
+        '0048987710',
+        '0000007610',
+        '0053268300',
         '0037984100',
         '0000000000',
     )),
     ('9', 'host', 'connected-tunnels-editor-selected-bravo-58191-host.png#3', (
         '0000000000',
-        '0048985100',
-        '0376258300',
-        '0573016620',
-        '0573016720',
-        '0375258720',
+        '0047985100',
+        '0376258400',
+        '0473016620',
+        '0473016720',
+        '0376258720',
         '0048978620',
-        '0000027510',
-        '0054368300',
-        '0048984100',
+        '0000016510',
+        '0044368300',
+        '0037984100',
         '0000000000',
     )),
 )
@@ -3087,6 +3204,19 @@ def window_size(window: str, env: dict[str, str]) -> tuple[int, int]:
     return int(fields["WIDTH"]), int(fields["HEIGHT"])
 
 
+async def locate_editor_label(window: str, path: Path, label: str, heading_bounds, *,
+                              env: dict[str, str], timeout: float = 15):
+    """Bounds of a Tunnel Manager editor field label ("Listen Port", ...)
+    inside the editor's label column under the located heading. Row bands
+    (``editor_value_row_region``) are derived from it, so a row added or
+    resized above the field moves the band with it."""
+    w, h = window_size(window, env)
+    return await locate_rendered_label(
+        window, path, label, env=env, timeout=timeout,
+        region=tunnel_editor_label_region(heading_bounds, w, h),
+    )
+
+
 def dock_strip_region(width: int, height: int):
     """Bottom dock tab strip (Sender/Session/Transfer/Filer) search box.
 
@@ -3733,10 +3863,14 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
                 await asyncio.sleep(1)
                 selected = tour_dir / f"tour-05f-tunnel-manager-alpha-{tag}.png"
                 shot(selected.name)
+                listen_label = await asyncio.to_thread(
+                    light_locate, selected, "Listen Port",
+                    region=tunnel_editor_label_region(heading, min_w, min_h),
+                )
                 port_box = await asyncio.to_thread(
                     require_editor_selection, selected, forward_ports[0], forward_ports[1],
                     editor_form_region(min_w, min_h),
-                    row_region=listen_port_row_region(heading, min_w),
+                    row_region=listen_port_row_region(listen_label, min_w),
                     locate=light_locate,
                     # No light-theme digit templates exist (read_port_digits
                     # raises on a light row): keep the light locator here.
@@ -6725,8 +6859,8 @@ async def main() -> int:
                     # form with the sibling's port absent (no-op click fails).
                     ed_w, ed_h = window_size(window, env)
                     form_region = editor_form_region(ed_w, ed_h)
-                    listen_row = listen_port_row_region(heading_bounds, ed_w)
                     list_region = tunnel_list_region(heading_bounds, ed_w, ed_h)
+                    listen_row = None
                     for idx, (label, name) in enumerate(
                         zip(POPULATED_LABELS, ("alpha", "bravo"))
                     ):
@@ -6734,6 +6868,16 @@ async def main() -> int:
                             window, destination / f"connected-tunnels-editor-pre-{name}.png",
                             label, env, region=list_region, timeout=15, settle=.8,
                         )
+                        if listen_row is None:
+                            # The editor (and its labels) exists once a row
+                            # is selected; the band comes from the label.
+                            listen_label = await locate_editor_label(
+                                window, destination / "connected-tunnels-editor-listen-label.png",
+                                "Listen Port", heading_bounds, env=env,
+                            )
+                            listen_row = listen_port_row_region(listen_label, ed_w)
+                            print(f"tunnel editor: Listen Port label {listen_label} -> row {listen_row}",
+                                  flush=True)
                         shot = destination / f"connected-tunnels-editor-selected-{name}.png"
                         deadline = time.monotonic() + 15 * TIME_SCALE
                         while True:
@@ -6823,8 +6967,24 @@ async def main() -> int:
                             "Tunnel Manager", env=env, timeout=15,
                         )
 
+                    listen_labels: dict[tuple, tuple] = {}
+
+                    async def listen_label_for(heading, tag: str):
+                        """Located "Listen Port" label for this opening of the
+                        manager (cached per heading box: the rows above it
+                        do not change while the dialog stays open)."""
+                        key = tuple(heading)
+                        if key not in listen_labels:
+                            listen_labels[key] = await locate_editor_label(
+                                window, destination / f"connected-tunnels-{tag}-listen-label.png",
+                                "Listen Port", heading, env=env,
+                            )
+                            print(f"tunnel {tag}: Listen Port label {listen_labels[key]}", flush=True)
+                        return listen_labels[key]
+
                     async def require_form(port, sibling, heading, tag):
                         w, h = window_size(window, env)
+                        listen_label = await listen_label_for(heading, tag)
                         shot = destination / f"connected-tunnels-{tag}.png"
                         deadline = time.monotonic() + 15 * TIME_SCALE
                         while True:
@@ -6833,7 +6993,7 @@ async def main() -> int:
                                 return await asyncio.to_thread(
                                     require_editor_selection, shot, port, sibling,
                                     editor_form_region(w, h),
-                                    row_region=listen_port_row_region(heading, w),
+                                    row_region=listen_port_row_region(listen_label, w),
                                 )
                             except RuntimeError:
                                 if time.monotonic() >= deadline:
@@ -6852,7 +7012,7 @@ async def main() -> int:
 
                     async def type_listen_port(heading, value: int) -> None:
                         w, _h = window_size(window, env)
-                        x, y = listen_input_centre(heading, w)
+                        x, y = listen_input_centre(await listen_label_for(heading, "type-listen"), w)
                         command("xdotool", "mousemove", "--window", window,
                                 str(x), str(y), "click", "1", env=env)
                         await asyncio.sleep(.3)
@@ -6878,7 +7038,9 @@ async def main() -> int:
 
                     async def press_remove(heading, tag: str) -> None:
                         w, _h = window_size(window, env)
-                        x, y = tunnel_remove_centre(heading, w)
+                        shot = destination / f"connected-tunnels-{tag}-remove.png"
+                        await asyncio.to_thread(screenshot, window, shot, env)
+                        x, y = await asyncio.to_thread(tunnel_remove_centre, shot, heading, w)
                         print(f"tunnel {tag}: remove button -> ({x},{y})", flush=True)
                         command("xdotool", "mousemove", "--window", window,
                                 str(x), str(y), "click", "1", env=env)
@@ -7234,6 +7396,221 @@ async def main() -> int:
                         print("PASS profile edit: popup switch stopped Alpha after idle "
                               "sibling edits", flush=True)
 
+                    async def session_dropdown_probe() -> None:
+                        """Tunnel Settings `Session / profile` combo box.
+
+                        Runs after profile_edit_probe (nothing running,
+                        Tunnel Manager closed). With no forward selected, +
+                        opens an empty draft owned by the FIRST saved
+                        profile (src/iced_app.rs tunnels_view: add_key =
+                        selected owner, else profiles.first()). Typing a
+                        fragment that matches only the other fixture profile
+                        filters the list to that one option; Return picks
+                        the hovered (first, only) option (iced_widget 0.14.2
+                        combo_box: Enter selects ``hovered_option``, reset to
+                        0 on every edit). Save must store the forward under
+                        the CHOSEN profile on disk, the default's forwards
+                        unchanged; no keystroke may reach a terminal.
+                        The forward is left saved and never started: no later
+                        step opens the Tunnels popup or a session of that
+                        profile (DUPTAB duplicates 'CI connected fixture').
+                        """
+                        names = saved_profile_names(profiles)
+                        fixture_names = ("CI connected fixture", "CI tunnel fixture")
+                        if not set(fixture_names) <= set(names):
+                            raise RuntimeError(f"dropdown probe: unexpected saved profiles {names}")
+                        default = names[0]
+                        chosen = next(n for n in fixture_names if n != default)
+                        # The fragment's every search part must occur in the
+                        # chosen option only (case-insensitive substring).
+                        fragment = "tunnel" if chosen == "CI tunnel fixture" else "connected"
+                        if fragment in default.lower() or fragment not in chosen.lower():
+                            raise RuntimeError(f"dropdown fragment {fragment!r} does not single out {chosen!r}")
+                        before = {name: saved_local_forwards(profiles, name) for name in names}
+                        marker = "UNEXPECTED_SESSION_DROPDOWN_PTY_INPUT"
+                        leaked_before = events.path.read_text(encoding="utf-8").count(marker)
+
+                        heading = await open_manager("dropdown")
+                        w, h = window_size(window, env)
+                        form = editor_form_region(w, h)
+                        # Default owner rule needs "nothing selected": the
+                        # previous probe ended with Bravo removed (edit
+                        # cleared) and never touched the manager since.
+                        await locate_rendered_label(
+                            window, destination / "connected-tunnels-dropdown-empty.png",
+                            "Select a tunnel", env=env, region=form, timeout=15,
+                        )
+                        plus_shot = destination / "connected-tunnels-dropdown-plus.png"
+                        await asyncio.to_thread(screenshot, window, plus_shot, env)
+                        x, y = await asyncio.to_thread(tunnel_add_centre, plus_shot, heading, w)
+                        print(f"tunnel dropdown: + button -> ({x},{y})", flush=True)
+                        command("xdotool", "mousemove", "--window", window,
+                                str(x), str(y), "click", "1", env=env)
+                        await asyncio.sleep(.8)
+
+                        # New empty draft: Session field holds the default,
+                        # Listen Port is empty.
+                        session_label = await locate_editor_label(
+                            window, destination / "connected-tunnels-dropdown-draft.png",
+                            "Session / profile", heading, env=env,
+                        )
+                        session_row = editor_value_row_region(session_label, w)
+                        draft_shot = destination / "connected-tunnels-dropdown-draft-default.png"
+                        await locate_rendered_label(
+                            window, draft_shot, default, env=env, region=session_row, timeout=12,
+                        )
+                        listen_label = await listen_label_for(heading, "dropdown")
+                        listen_row = listen_port_row_region(listen_label, w)
+                        digits, _box = await asyncio.to_thread(read_port_digits, draft_shot, listen_row)
+                        if digits != "":
+                            raise RuntimeError(
+                                f"+ did not open an empty draft: Listen Port reads {digits!r} in {draft_shot}"
+                            )
+                        print(f"tunnel dropdown: + draft defaults to {default!r}; Session row {session_row}",
+                              flush=True)
+
+                        # Arm the PTY guard from the first click into the
+                        # combo box until after Save.
+                        probe_state["phase"] = "SESSION_DROPDOWN"
+                        cy = (session_label[1] + session_label[3]) // 2
+                        command("xdotool", "mousemove", "--window", window,
+                                str((session_row[0] + session_row[2]) // 2),
+                                str(cy + TUNNEL_INPUT_CENTRE_DY), "click", "1", env=env)
+                        await asyncio.sleep(.5)
+                        command("xdotool", "type", "--clearmodifiers", "--delay", "40",
+                                fragment, env=env)
+                        await asyncio.sleep(.8)
+                        # The open list hangs below the field (menu height
+                        # 240 px, src/iced_app.rs TUNNEL_SESSION_MENU_HEIGHT).
+                        menu = (session_row[0], session_row[3] - 4, session_row[2],
+                                min(h, session_row[3] + 250))
+                        menu_shot = destination / "connected-tunnels-session-dropdown.png"
+                        option = await locate_rendered_label(
+                            window, menu_shot, chosen, env=env, region=menu, timeout=15,
+                        )
+                        try:
+                            await asyncio.to_thread(
+                                require_label_absent, menu_shot, default, region=menu,
+                            )
+                        except LabelVisible as exc:
+                            raise RuntimeError(
+                                f"dropdown filter {fragment!r} still lists the default {default!r} "
+                                f"at {exc.bounds} in {menu_shot}"
+                            ) from exc
+                        print(f"tunnel dropdown: typed {fragment!r}; list shows only {chosen!r} at {option}",
+                              flush=True)
+                        command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                        await asyncio.sleep(.8)
+                        picked_shot = destination / "connected-tunnels-dropdown-picked.png"
+                        await locate_rendered_label(
+                            window, picked_shot, chosen, env=env, region=session_row, timeout=12,
+                        )
+                        try:
+                            await asyncio.to_thread(
+                                require_label_absent, picked_shot, default, region=session_row,
+                            )
+                        except LabelVisible as exc:
+                            raise RuntimeError(
+                                f"after Return the Session field still shows {default!r} at "
+                                f"{exc.bounds} in {picked_shot}"
+                            ) from exc
+
+                        # Fill the draft like the Bravo add: free loopback
+                        # listen port -> the fixture echo service.
+                        new_port = free_loopback_port({echo_port, port_a, port_b})
+                        await type_listen_port(heading, new_port)
+                        for label_text, value in (("Destination Host", "127.0.0.1"),
+                                                  ("Destination Port", str(echo_port))):
+                            field = await locate_editor_label(
+                                window,
+                                destination / f"connected-tunnels-dropdown-{label_text.split()[1].lower()}-label.png",
+                                label_text, heading, env=env,
+                            )
+                            row = editor_value_row_region(field, w)
+                            fy = (field[1] + field[3]) // 2 + TUNNEL_INPUT_CENTRE_DY
+                            command("xdotool", "mousemove", "--window", window,
+                                    str((row[0] + row[2]) // 2), str(fy), "click", "1", env=env)
+                            await asyncio.sleep(.3)
+                            command("xdotool", "key", "--clearmodifiers", "ctrl+a", env=env)
+                            command("xdotool", "type", "--clearmodifiers", "--delay", "40",
+                                    value, env=env)
+                            await asyncio.sleep(.5)
+                        await require_form(new_port, port_a, heading, "dropdown-filled")
+                        filled = destination / "connected-tunnels-dropdown-filled.png"
+                        dest_label = await locate_editor_label(
+                            window, destination / "connected-tunnels-dropdown-dest-check.png",
+                            "Destination Port", heading, env=env,
+                        )
+                        dest_digits, _box = await asyncio.to_thread(
+                            read_port_digits, filled, editor_value_row_region(dest_label, w),
+                        )
+                        if dest_digits != str(echo_port):
+                            raise RuntimeError(
+                                f"Destination Port reads {dest_digits!r}, typed {echo_port} ({filled})"
+                            )
+                        save_box = await press_save(heading, "dropdown")
+                        await require_notice("saved", save_box, "dropdown")
+
+                        after = {name: saved_local_forwards(profiles, name) for name in names}
+                        if saved_profile_names(profiles) != names:
+                            raise RuntimeError(f"dropdown Save changed profiles: {saved_profile_names(profiles)}")
+                        if after[chosen] != before[chosen] + [spec(new_port)]:
+                            raise RuntimeError(
+                                f"dropdown forward not stored under chosen {chosen!r}: "
+                                f"{before[chosen]} -> {after[chosen]}"
+                            )
+                        for name in names:
+                            if name != chosen and after[name] != before[name]:
+                                raise RuntimeError(
+                                    f"dropdown Save changed {name!r} (default {default!r}): "
+                                    f"{before[name]} -> {after[name]}"
+                                )
+                        await forward_refused(new_port, "saved dropdown forward must stay idle")
+                        leaked = events.path.read_text(encoding="utf-8").count(marker)
+                        probe_state["phase"] = None
+                        if leaked != leaked_before:
+                            raise RuntimeError(
+                                f"typing into the session dropdown reached a terminal "
+                                f"({marker} {leaked_before} -> {leaked})"
+                            )
+
+                        command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                        await asyncio.sleep(.6)
+                        closed = destination / "connected-tunnels-dropdown-closed.png"
+                        await asyncio.to_thread(screenshot, window, closed, env)
+                        dlg_left, dlg_w = tunnel_dialog_left(w)
+                        try:
+                            await asyncio.to_thread(
+                                require_label_absent, closed, "Tunnel Manager",
+                                region=(dlg_left, 42, dlg_left + dlg_w, h),
+                            )
+                        except LabelVisible as exc:
+                            raise RuntimeError(f"Escape did not close the Tunnel Manager ({closed})") from exc
+                        term_x, term_y = (w * 3) // 4, 280
+                        if not (0 <= term_x < w and 0 <= term_y < h and abs(term_x - w // 2) >= 100):
+                            raise RuntimeError(f"terminal refocus click ({term_x}, {term_y}) invalid for {w}x{h}")
+                        command("xdotool", "windowfocus", window, "mousemove", "--window", window,
+                                str(term_x), str(term_y), "click", "1", env=env)
+                        await asyncio.sleep(.3)
+                        command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                                "echo:AFTER_SESSION_DROPDOWN", env=env)
+                        command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                        try:
+                            await wait_for(
+                                lambda: "NATIVE_ECHO:AFTER_SESSION_DROPDOWN" in events.path.read_text(encoding="utf-8").splitlines(),
+                                "shell echo after the session dropdown probe",
+                            )
+                        except RuntimeError:
+                            await asyncio.to_thread(
+                                screenshot, window,
+                                destination / "connected-tunnels-dropdown-echo-timeout.png", env,
+                            )
+                            raise
+                        print(f"PASS tunnel session dropdown: + defaulted to {default!r}; typing "
+                              f"{fragment!r} listed only {chosen!r}; Return picked it; Save stored "
+                              f"{spec(new_port)} under {chosen!r} only; no PTY input; shell answered "
+                              f"AFTER_SESSION_DROPDOWN", flush=True)
+
                     allow_before = events.path.read_text(encoding="utf-8").count("LOCAL_FORWARD_ALLOW")
                     await click_label(
                         window, destination / "connected-tunnels-button-2.png", "Tunnels", env,
@@ -7292,6 +7669,7 @@ async def main() -> int:
                           "(echo + refusal through fixture SSH)", flush=True)
                     await running_edit_delete_probe()
                     await profile_edit_probe()
+                    await session_dropdown_probe()
 
                 if DUPTAB:
                     # Last interactive step before the event-log snapshot: the
@@ -7451,6 +7829,8 @@ async def main() -> int:
                     )
                 ):
                     raise RuntimeError("Session menu, Sender or dock gear keyboard input leaked to SSH")
+                if "UNEXPECTED_SESSION_DROPDOWN_PTY_INPUT" in event_log:
+                    raise RuntimeError("Tunnel Settings session dropdown input leaked to SSH")
                 if event_log.count("AUTH_ACCEPT:native-smoke") < 3:
                     raise RuntimeError(
                         "three sessions (main, auxiliary, split) were not authenticated"
