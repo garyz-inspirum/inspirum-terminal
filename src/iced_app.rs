@@ -14113,9 +14113,13 @@ mod tests {
         app.ui_state_path = None;
         assert!(!available_panels().contains(&dock::Panel::Explorer));
         {
-            // No tab: the placeholder container (one child).
+            // No tab: the "Open a session" placeholder, not the halves
+            // column. iced's Container is transparent in the widget tree
+            // (iced_widget 0.14.2 container.rs `children()` forwards to its
+            // content), so the placeholder text yields no child trees.
+            assert!(app.tabs.is_empty());
             let body = app.dock_panel_body(dock::Panel::Filer);
-            assert_eq!(Tree::new(&body).children.len(), 1);
+            assert!(Tree::new(&body).children.is_empty());
         }
         let profile = Session {
             host: "example.invalid".into(),

@@ -523,7 +523,7 @@ mod tests {
         assert_eq!(layout.active_panel(Area::Left), Some(Panel::Shell));
         layout.move_to(Panel::Shell, Area::Left);
         assert_invariants(&layout);
-        assert_eq!(layout.left.panels.len(), 3);
+        assert_eq!(layout.left.panels, vec![Panel::Filer, Panel::Shell]);
     }
 
     #[test]
