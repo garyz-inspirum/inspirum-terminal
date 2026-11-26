@@ -3111,7 +3111,7 @@ def side_file_dock_width(width: int, other_side: int = 0) -> int:
 
 
 SIDE_FILE_DOCK_WIDTH = side_file_dock_width(1280)
-# Max distance between the Filer divider (Remote heading left edge - 6) and
+# Max distance between the Filer divider (located Remote heading left - 11) and
 # the midpoint of the dock body it splits.
 FILER_DIVIDER_TOLERANCE = 24
 
@@ -3130,7 +3130,9 @@ def filer_halves(shot: Path, area):
     left, top, right, bottom = area
     heading_band = (left, top, right, top + (bottom - top) // 3)
     heading = locate_visible_label(shot, "Remote", region=heading_band)
-    divider = heading[0] - 6
+    # Rendered heading starts 6 px right of the divider (646 vs 640); the
+    # locator returns interior bounds inset ~5 px more (replayed: 651).
+    divider = heading[0] - 11
     midpoint = (left + right) // 2
     if abs(divider - midpoint) > FILER_DIVIDER_TOLERANCE:
         raise RuntimeError(
