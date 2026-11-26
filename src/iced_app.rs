@@ -14129,11 +14129,14 @@ mod tests {
         let pane = app.new_terminal_pane(profile.clone());
         app.tabs.push(Workspace::new(profile, pane));
         {
-            // Tab open: column [halves row, editor section]; the row holds
-            // local half, divider, remote half.
+            // Tab open, no remote editor: column [halves row]; the row holds
+            // local half, divider, remote half. The closed editor section is
+            // void, and iced's Column::push drops void children (iced_widget
+            // 0.14.2 column.rs:147), so it adds no child tree.
+            assert!(app.remote_editor.is_none());
             let body = app.dock_panel_body(dock::Panel::Filer);
             let tree = Tree::new(&body);
-            assert_eq!(tree.children.len(), 2);
+            assert_eq!(tree.children.len(), 1);
             assert_eq!(tree.children[0].children.len(), 3);
         }
 
