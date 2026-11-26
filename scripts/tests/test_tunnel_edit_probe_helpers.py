@@ -248,3 +248,140 @@ class PopulatedMinimumWindowTest(unittest.TestCase):
         self.assertLess(body.index("try:"), body.index("require_min_window"))
         self.assertIn("light_locate", body)
         self.assertIn("require_editor_selection", body)
+
+
+# Located label boxes (locate_visible_label) on the real editor frames.
+NEW_ORDER = {
+    "Session / profile": (573, 301, 687, 308),
+    "Listen Port": (574, 336, 644, 340),
+    "Destination Host": (573, 371, 680, 375),
+}
+OLD_ORDER = {
+    "Session / profile": (573, 264, 687, 271),
+    "Listen Port": (574, 292, 644, 296),
+    "Destination Host": (573, 327, 680, 331),
+}
+
+
+class EditorRowOrderTest(unittest.TestCase):
+    """``require_editor_row_order``: Session / profile < Listen Port <
+    Destination Host, with a minimum gap and the Listen Port digit band
+    ending above the Destination Host input."""
+
+    def test_measured_orders_pass(self):
+        for boxes in (NEW_ORDER, OLD_ORDER):
+            with self.subTest(listen=boxes["Listen Port"]):
+                module.require_editor_row_order(dict(boxes))
+
+    def test_listen_band_stays_above_destination_host_input(self):
+        # Destination Host input measured 367..389 (new), 322..344 (old).
+        for boxes, dest_input_top in ((NEW_ORDER, 367), (OLD_ORDER, 322)):
+            band = module.listen_port_row_region(boxes["Listen Port"], 1280)
+            self.assertLess(band[3], dest_input_top, band)
+
+    def test_swapped_listen_and_destination_host_raise(self):
+        boxes = dict(NEW_ORDER)
+        boxes["Listen Port"], boxes["Destination Host"] = (
+            (574, 371, 644, 375), (573, 336, 680, 340))
+        # Before this check nothing else looked at the order: the band is
+        # derived from wherever "Listen Port" was located, without error.
+        module.listen_port_row_region(boxes["Listen Port"], 1280)
+        with self.assertRaisesRegex(RuntimeError, r"'Listen Port' top y=371.*'Destination Host' top y=336"):
+            module.require_editor_row_order(boxes)
+
+    def test_session_below_listen_raises(self):
+        boxes = dict(NEW_ORDER)
+        boxes["Session / profile"] = (573, 350, 687, 357)
+        with self.assertRaisesRegex(RuntimeError, "Session / profile"):
+            module.require_editor_row_order(boxes)
+
+    def test_equal_tops_raise(self):
+        boxes = dict(NEW_ORDER)
+        boxes["Destination Host"] = (573, 336, 680, 340)
+        with self.assertRaisesRegex(RuntimeError, "Destination Host"):
+            module.require_editor_row_order(boxes)
+
+    def test_overlapping_boxes_raise(self):
+        boxes = dict(NEW_ORDER)
+        # Tall Listen box reaching into the next label (gap 22 >= 20).
+        boxes["Listen Port"] = (574, 336, 644, 365)
+        boxes["Destination Host"] = (573, 358, 680, 362)
+        with self.assertRaisesRegex(RuntimeError, "not overlap"):
+            module.require_editor_row_order(boxes)
+
+    def test_small_gap_raises(self):
+        boxes = dict(NEW_ORDER)
+        boxes["Destination Host"] = (573, 350, 680, 354)
+        with self.assertRaisesRegex(RuntimeError, "Destination Host"):
+            module.require_editor_row_order(boxes)
+
+    def test_band_reaching_destination_input_raises(self):
+        # Ordered with the minimum gap, but rows only 25 px apart: the
+        # Listen Port band (cy+23) would reach the Destination Host input.
+        boxes = dict(NEW_ORDER)
+        boxes["Destination Host"] = (573, 361, 680, 365)
+        with self.assertRaisesRegex(RuntimeError, "digit band"):
+            module.require_editor_row_order(boxes)
+
+    def test_missing_label_raises(self):
+        for name in module.TUNNEL_EDITOR_ROW_ORDER:
+            with self.subTest(missing=name):
+                boxes = dict(NEW_ORDER)
+                del boxes[name]
+                with self.assertRaisesRegex(RuntimeError, "not located"):
+                    module.require_editor_row_order(boxes)
+        boxes = dict(NEW_ORDER)
+        boxes["Destination Host"] = None
+        with self.assertRaisesRegex(RuntimeError, "not located"):
+            module.require_editor_row_order(boxes)
+
+    def test_every_listen_locate_for_a_required_check_gates_order(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        # Two dark connected sites (editor selection loop, listen_label_for)
+        # and the light tour.
+        self.assertEqual(source.count("await require_located_editor_row_order("), 2)
+        self.assertEqual(source.count("require_editor_row_order(order_boxes)"), 1)
+
+
+def _swap_rows(src: Path, dst: Path, top: int, pitch: int) -> None:
+    """Write ``src`` with the pixel stripes [top, top+pitch) and
+    [top+pitch, top+2*pitch) exchanged (labels and inputs move together)."""
+    width, height, channels, rows = module._read_png(src)
+    rgb = [bytes(b for i, b in enumerate(row) if channels == 3 or i % 4 != 3) for row in rows]
+    a = rgb[top:top + pitch]
+    b = rgb[top + pitch:top + 2 * pitch]
+    rgb[top:top + 2 * pitch] = b + a
+    module._write_png(dst, width, height, b"".join(rgb))
+
+
+@unittest.skipUnless(shutil.which("tesseract"), "tesseract is not installed")
+@unittest.skipUnless(NEW_EDITOR.is_file(), "new-layout editor fixture missing")
+class SwappedRowsFrameTest(unittest.TestCase):
+    """A real frame with the Listen Port and Destination Host rows swapped:
+    the exact digit read the probes already did still accepts it; the
+    order gate rejects it."""
+
+    def setUp(self):
+        module._OCR_FAILURES.clear()
+        module._LOCATE_CUT_SHORT.clear()
+        module._PIXEL_CACHE.clear()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_swapped_frame_passes_digit_read_but_fails_order(self):
+        swapped = self.tmp / "editor-swapped-listen-desthost.png"
+        # Listen Port row cy 338, Destination Host cy 373: 35 px stripes
+        # from cy-17 (Session input ends at 319, Destination Port row
+        # input starts at 402).
+        _swap_rows(NEW_EDITOR, swapped, 321, 35)
+        region = module.tunnel_editor_label_region(NEW_HEADING, 1280, 800)
+        boxes = {name: module.locate_visible_label(swapped, name, region=region)
+                 for name in module.TUNNEL_EDITOR_ROW_ORDER}
+        print(f"swapped frame labels: {boxes}", flush=True)
+        self.assertGreater(boxes["Listen Port"][1], boxes["Destination Host"][1])
+        digits, _box = module.read_port_digits(
+            swapped, module.listen_port_row_region(boxes["Listen Port"], 1280))
+        # require_editor_selection's row check is digits == str(port).
+        self.assertEqual(digits, "52241")
+        with self.assertRaisesRegex(RuntimeError, "out of order"):
+            module.require_editor_row_order(boxes)

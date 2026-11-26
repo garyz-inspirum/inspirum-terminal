@@ -1402,6 +1402,57 @@ def listen_port_row_region(listen_label_bounds, width: int):
     return editor_value_row_region(listen_label_bounds, width)
 
 
+# Top-to-bottom order of the editor rows the probes read (src/iced_app.rs
+# tunnel editor grid: Name, Type, Session / profile, Listen Port,
+# Destination Host, Destination Port, ...). The row bands are anchored to
+# whatever box the locator returns for each label, so without this check
+# a build with Listen Port and Destination Host swapped (label and input
+# moving together) still reads the right digits from the "Listen Port"
+# band and passes.
+TUNNEL_EDITOR_ROW_ORDER = ("Session / profile", "Listen Port", "Destination Host")
+# Minimum top-to-top distance between consecutive rows. Measured located
+# label tops: new layout 301 / 336 / 371 (35, 35), old plain-text session
+# row 264 / 292 / 327 (28, 35). Equal or overlapping boxes fail.
+TUNNEL_ROW_ORDER_MIN_GAP = 20
+# Top of a row's input relative to its label centre: cy-7 on the old
+# layout, cy-6 on the new one (see TUNNEL_ROW_FROM_LABEL); the higher one.
+TUNNEL_INPUT_TOP_FROM_LABEL = -7
+
+
+def require_editor_row_order(label_bounds_by_name: dict) -> None:
+    """Raise ``RuntimeError`` unless the located editor labels are stacked
+    ``Session / profile`` < ``Listen Port`` < ``Destination Host``.
+
+    ``label_bounds_by_name`` maps label text to its located box (x1, y1,
+    x2, y2). Each label's top must be at least TUNNEL_ROW_ORDER_MIN_GAP
+    below the previous one's top and below its bottom (overlap fails), and
+    the Listen Port digit band (``listen_port_row_region``: label centre +
+    TUNNEL_ROW_FROM_LABEL[1]) must end above the Destination Host input
+    (its label centre + TUNNEL_INPUT_TOP_FROM_LABEL), so the value read is
+    bound to the Listen Port row alone. Measured: band bottom 361 vs input
+    top 366 (new layout), 317 vs 322 (old)."""
+    missing = [name for name in TUNNEL_EDITOR_ROW_ORDER if label_bounds_by_name.get(name) is None]
+    if missing:
+        raise RuntimeError(f"editor row order: label(s) {missing} not located")
+    for upper, lower in zip(TUNNEL_EDITOR_ROW_ORDER, TUNNEL_EDITOR_ROW_ORDER[1:]):
+        a = label_bounds_by_name[upper]
+        b = label_bounds_by_name[lower]
+        if b[1] - a[1] < TUNNEL_ROW_ORDER_MIN_GAP or b[1] <= a[3]:
+            raise RuntimeError(
+                f"editor rows out of order: {upper!r} top y={a[1]} (bottom {a[3]}) must be "
+                f">= {TUNNEL_ROW_ORDER_MIN_GAP} px above {lower!r} top y={b[1]} and not overlap it"
+            )
+    listen = label_bounds_by_name["Listen Port"]
+    dest = label_bounds_by_name["Destination Host"]
+    band_bottom = (listen[1] + listen[3]) // 2 + TUNNEL_ROW_FROM_LABEL[1]
+    dest_input_top = (dest[1] + dest[3]) // 2 + TUNNEL_INPUT_TOP_FROM_LABEL
+    if band_bottom >= dest_input_top:
+        raise RuntimeError(
+            f"Listen Port digit band ends at y={band_bottom} (label y={listen[1]}), not above "
+            f"the Destination Host input top y={dest_input_top} (label y={dest[1]})"
+        )
+
+
 # Footer Save (primary fill, right-aligned): y 661..684 = heading top +510
 # on the old layout, 624..647 = +436 on the new one (combo-box layout, no
 # "Add to session" list). Scanned for, not assumed: band +300..+620.
@@ -3382,6 +3433,23 @@ async def locate_editor_label(window: str, path: Path, label: str, heading_bound
     )
 
 
+async def require_located_editor_row_order(window: str, path_stem: Path, heading_bounds,
+                                           listen_label, *, env: dict[str, str]):
+    """Locate the ``Session / profile`` and ``Destination Host`` labels of
+    the open editor (same locator and region as the Listen Port label) and
+    ``require_editor_row_order`` on all three. Call once per dialog opening,
+    right after the Listen Port label is located; returns the boxes."""
+    boxes = {"Listen Port": tuple(listen_label)}
+    for name, suffix in (("Session / profile", "session"), ("Destination Host", "desthost")):
+        boxes[name] = tuple(await locate_editor_label(
+            window, path_stem.with_name(f"{path_stem.name}-order-{suffix}.png"),
+            name, heading_bounds, env=env,
+        ))
+    require_editor_row_order(boxes)
+    print(f"tunnel editor row order ok: {boxes}", flush=True)
+    return boxes
+
+
 def dock_strip_region(width: int, height: int):
     """Bottom dock tab strip (Sender/Session/Transfer/Filer) search box.
 
@@ -4032,6 +4100,16 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
                     light_locate, selected, "Listen Port",
                     region=tunnel_editor_label_region(heading, min_w, min_h),
                 )
+                # Same row-order gate as the dark connected probes, on the
+                # same frame with the same light locator.
+                order_boxes = {"Listen Port": tuple(listen_label)}
+                for order_label in ("Session / profile", "Destination Host"):
+                    order_boxes[order_label] = tuple(await asyncio.to_thread(
+                        light_locate, selected, order_label,
+                        region=tunnel_editor_label_region(heading, min_w, min_h),
+                    ))
+                require_editor_row_order(order_boxes)
+                print(f"tour: {tag} editor row order ok: {order_boxes}", flush=True)
                 port_box = await asyncio.to_thread(
                     require_editor_selection, selected, forward_ports[0], forward_ports[1],
                     editor_form_region(min_w, min_h),
@@ -7043,6 +7121,13 @@ async def main() -> int:
                             listen_row = listen_port_row_region(listen_label, ed_w)
                             print(f"tunnel editor: Listen Port label {listen_label} -> row {listen_row}",
                                   flush=True)
+                            # The rows must be Session / profile, Listen
+                            # Port, Destination Host top to bottom; the band
+                            # above follows the label wherever it sits.
+                            await require_located_editor_row_order(
+                                window, destination / "connected-tunnels-editor", heading_bounds,
+                                listen_label, env=env,
+                            )
                         shot = destination / f"connected-tunnels-editor-selected-{name}.png"
                         deadline = time.monotonic() + 15 * TIME_SCALE
                         while True:
@@ -7146,11 +7231,18 @@ async def main() -> int:
                         do not change while the dialog stays open)."""
                         key = tuple(heading)
                         if key not in listen_labels:
-                            listen_labels[key] = await locate_editor_label(
+                            label = await locate_editor_label(
                                 window, destination / f"connected-tunnels-{tag}-listen-label.png",
                                 "Listen Port", heading, env=env,
                             )
-                            print(f"tunnel {tag}: Listen Port label {listen_labels[key]}", flush=True)
+                            print(f"tunnel {tag}: Listen Port label {label}", flush=True)
+                            # Once per opening, before the label is cached:
+                            # the rows must be in product order.
+                            await require_located_editor_row_order(
+                                window, destination / f"connected-tunnels-{tag}", heading,
+                                label, env=env,
+                            )
+                            listen_labels[key] = label
                         return listen_labels[key]
 
                     async def require_form(port, sibling, heading, tag):
