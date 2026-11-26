@@ -30,8 +30,9 @@ use crate::{
 };
 use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
 use iced::widget::{
-    Column, button, canvas, center, column, container, mouse_area, opaque, operation, pane_grid,
-    progress_bar, responsive, row, scrollable, sensor, space, stack, text, text_editor, text_input,
+    Column, button, canvas, center, column, combo_box, container, mouse_area, opaque, operation,
+    pane_grid, progress_bar, responsive, row, scrollable, sensor, space, stack, text, text_editor,
+    text_input,
 };
 use iced::{
     Border, Color, Element, Fill, Font, Length, Subscription, Task, Theme, event, font, keyboard,
@@ -2225,13 +2226,96 @@ const TUNNEL_SETTINGS_TITLE: &str = "Tunnel Settings";
 /// Interior heading, kept distinct from the window title for OCR acceptance.
 const TUNNEL_MANAGER_HEADING: &str = "Tunnel Manager";
 /// Creation guidance is shown once (editor empty state), not beside the list.
-const TUNNEL_CREATE_HINT: &str = "To create one, choose a session below the list and press +.";
-const TUNNEL_SESSION_PICKER_LABEL: &str = "Add to session";
+const TUNNEL_CREATE_HINT: &str = "To create one, press + and choose its session in the editor.";
+const TUNNEL_MOVE_RUNNING: &str = "Stop this forward before moving it to another session.";
+const TUNNEL_MOVE_TARGET_RUNNING: &str =
+    "Stop the target session's tunnel process before moving a forward into it.";
+const TUNNEL_MOVE_DUPLICATE: &str = "The target session already has this forward.";
+const TUNNEL_SESSION_PLACEHOLDER: &str = "Type to search sessions";
+/// Popup height of the session picker; it scrolls beyond this.
+const TUNNEL_SESSION_MENU_HEIGHT: f32 = 240.0;
 
-/// The session picker heads an interactive choice, so it uses primary dock
-/// ink rather than gray help text.
-fn tunnel_session_picker_label_color(p: &theme::Palette) -> Color {
-    p.text_dock
+/// Separator between folder segments and the session name in the picker.
+const TUNNEL_SESSION_PATH_SEPARATOR: &str = " / ";
+
+/// One saved session in the Tunnel Settings `Session / profile` picker. The
+/// label is the full folder path and name; the key is the stable profile key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TunnelSessionOption {
+    label: String,
+    key: String,
+}
+
+impl std::fmt::Display for TunnelSessionOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// `Prod / DB / pg-primary`: the folder string splits on `/` into
+/// subfolders; empty segments are dropped, and an empty folder shows the
+/// name alone.
+fn tunnel_session_display_path(session: &Session) -> String {
+    session
+        .folder
+        .split('/')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .chain(std::iter::once(session.name.as_str()))
+        .collect::<Vec<_>>()
+        .join(TUNNEL_SESSION_PATH_SEPARATOR)
+}
+
+/// Every saved session, sorted case-insensitively by display path. Names
+/// repeated in different folders differ by path; the rare identical path
+/// (for example folder `a/b` versus `a / b`) gets a numeric suffix so every
+/// option reads distinctly.
+fn tunnel_session_options(profiles: &[Session]) -> Vec<TunnelSessionOption> {
+    let mut options: Vec<TunnelSessionOption> = profiles
+        .iter()
+        .map(|profile| TunnelSessionOption {
+            label: tunnel_session_display_path(profile),
+            key: session_profile_key(profile),
+        })
+        .collect();
+    options.sort_by(|left, right| {
+        left.label
+            .to_lowercase()
+            .cmp(&right.label.to_lowercase())
+            .then_with(|| left.label.cmp(&right.label))
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for option in &mut options {
+        let count = seen.entry(option.label.to_lowercase()).or_insert(0);
+        *count += 1;
+        if *count > 1 {
+            option.label = format!("{} ({count})", option.label);
+        }
+    }
+    options
+}
+
+/// Popup list of the session picker: the menu-bar drop-down surface
+/// (`list` fill, `text_dock` outline) with primary text, so it reads in both
+/// themes instead of the stock Iced palette.
+fn tunnel_session_menu_style(_: &Theme) -> iced::widget::overlay::menu::Style {
+    tunnel_session_menu_style_for(theme::palette())
+}
+
+fn tunnel_session_menu_style_for(p: &theme::Palette) -> iced::widget::overlay::menu::Style {
+    iced::widget::overlay::menu::Style {
+        background: p.list.into(),
+        border: Border {
+            color: p.text_dock,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        text_color: p.text_dock,
+        selected_text_color: p.text_dock,
+        selected_background: p.selected_row.into(),
+        shadow: iced::Shadow::default(),
+    }
 }
 
 /// One saved forward as shown in the quick menu. Snapshot taken on open and
@@ -3072,6 +3156,7 @@ enum Message {
     },
     ExternalEditorInput(String),
     ExternalEditorSave,
+    TunnelDraftSession(TunnelSessionOption),
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -4199,6 +4284,9 @@ struct TunnelEditState {
     profile_key: String,
     original: Option<(tunnels::ForwardKind, String)>,
     draft: tunnels::ForwardDraft,
+    /// Session chosen in the `Session / profile` picker. Equal to
+    /// `profile_key` unless a saved forward is being moved on Save.
+    target_key: String,
 }
 
 struct App {
@@ -4307,6 +4395,9 @@ struct App {
     external_edit_tick_scheduled: bool,
     /// Editor command setting; empty means the OS default application.
     external_editor: String,
+    /// Searchable `Session / profile` picker in Tunnel Settings; rebuilt with
+    /// the profile list and whenever the dialog opens.
+    tunnel_session_picker: combo_box::State<TunnelSessionOption>,
 }
 
 const FILES_PANELS: [dock::Panel; 3] = [
@@ -4463,7 +4554,18 @@ impl App {
             next_external_edit_id: 1,
             external_edit_tick_scheduled: false,
             external_editor: std::mem::take(&mut saved_ui.external_editor),
+            tunnel_session_picker: combo_box::State::new(Vec::new()),
         }
+        .with_tunnel_session_picker()
+    }
+
+    fn with_tunnel_session_picker(mut self) -> Self {
+        self.rebuild_tunnel_session_picker();
+        self
+    }
+
+    fn rebuild_tunnel_session_picker(&mut self) {
+        self.tunnel_session_picker = combo_box::State::new(tunnel_session_options(&self.profiles));
     }
 
     fn refresh_profile_matches(&mut self) {
@@ -4480,6 +4582,7 @@ impl App {
         self.selected_profile = None;
         self.selected_profile_key = None;
         self.session_click = None;
+        self.rebuild_tunnel_session_picker();
     }
 
     fn new_terminal_pane(&mut self, profile: Session) -> TerminalPane {
@@ -6065,6 +6168,7 @@ impl App {
             }
             Message::Tunnels => {
                 self.refresh_tunnel_status();
+                self.rebuild_tunnel_session_picker();
                 self.dialog = Some(Dialog::Tunnels);
             }
             Message::TunnelRefresh => {
@@ -6164,6 +6268,7 @@ impl App {
                     return Task::none();
                 }
                 self.tunnel_edit = Some(TunnelEditState {
+                    target_key: key.clone(),
                     profile_key: key,
                     original: None,
                     draft: tunnels::ForwardDraft::default(),
@@ -6187,6 +6292,7 @@ impl App {
                     return Task::none();
                 };
                 self.tunnel_edit = Some(TunnelEditState {
+                    target_key: key.clone(),
                     profile_key: key,
                     original: Some((kind, spec)),
                     draft: tunnels::ForwardDraft::from_row(&row),
@@ -6262,6 +6368,50 @@ impl App {
                     return Task::none();
                 }
                 let mut profiles = self.profiles.clone();
+                if let Some((old_kind, old_spec)) = &edit.original
+                    && edit.target_key != edit.profile_key
+                {
+                    // Moving a saved forward: one profile-store write removes
+                    // it from the owner and adds it, label kept, to the target.
+                    if let Err(notice) = self.tunnel_move_allowed(&edit, *old_kind, old_spec, &spec)
+                    {
+                        self.tunnel_notice = notice.into();
+                        self.refresh_tunnel_status();
+                        return Task::none();
+                    }
+                    let source = profiles
+                        .iter()
+                        .position(|profile| session_profile_key(profile) == edit.profile_key);
+                    let target = profiles
+                        .iter()
+                        .position(|profile| session_profile_key(profile) == edit.target_key);
+                    let (Some(source), Some(target)) = (source, target) else {
+                        self.tunnel_notice = "Profile no longer exists.".into();
+                        return Task::none();
+                    };
+                    let target_name = profiles[target].name.clone();
+                    let result =
+                        tunnels::remove_forward(&mut profiles[source], *old_kind, old_spec)
+                            .and_then(|_| {
+                                tunnels::add_forward(
+                                    &mut profiles[target],
+                                    edit.draft.kind,
+                                    spec,
+                                    &edit.draft.label,
+                                )
+                            })
+                            .and_then(|_| save_sessions(&self.profiles_path, &profiles));
+                    if let Err(error) = result {
+                        self.tunnel_notice = format!("Cannot move tunnel: {error:#}");
+                        return Task::none();
+                    }
+                    self.profiles = profiles;
+                    self.refresh_profile_matches();
+                    self.tunnel_edit = None;
+                    self.tunnel_notice = format!("Tunnel moved to {target_name}.");
+                    self.refresh_tunnel_status();
+                    return Task::none();
+                }
                 let Some(profile) = profiles
                     .iter_mut()
                     .find(|profile| session_profile_key(profile) == edit.profile_key)
@@ -8167,6 +8317,25 @@ impl App {
             }
             Message::ExternalEditorInput(value) => self.external_editor_input(value),
             Message::ExternalEditorSave => return self.save_external_editor_setting(),
+            Message::TunnelDraftSession(option) => {
+                if !self
+                    .profiles
+                    .iter()
+                    .any(|profile| session_profile_key(profile) == option.key)
+                {
+                    self.tunnel_notice = "Profile no longer exists.".into();
+                    return Task::none();
+                }
+                if let Some(edit) = self.tunnel_edit.as_mut() {
+                    // A new draft has no live state yet, so it simply changes
+                    // owner. A saved forward keeps its owner until Save moves it.
+                    if edit.original.is_none() {
+                        edit.profile_key = option.key.clone();
+                    }
+                    edit.target_key = option.key;
+                    self.tunnel_notice.clear();
+                }
+            }
         }
         Task::none()
     }
@@ -9678,6 +9847,43 @@ impl App {
         pending
     }
 
+    /// Extra guards for moving a saved forward to another session, applied
+    /// after the edit guards. The live forward and any aggregate process on
+    /// either side must be stopped, and the target must not already hold the
+    /// same kind and spec.
+    fn tunnel_move_allowed(
+        &self,
+        edit: &TunnelEditState,
+        old_kind: tunnels::ForwardKind,
+        old_spec: &str,
+        spec: &str,
+    ) -> Result<(), &'static str> {
+        if self
+            .tunnels
+            .forward_status(&edit.profile_key, old_kind, old_spec)
+            .is_running()
+        {
+            return Err(TUNNEL_MOVE_RUNNING);
+        }
+        if self.tunnels.status(&edit.target_key).is_running() {
+            return Err(TUNNEL_MOVE_TARGET_RUNNING);
+        }
+        let Some(target) = self
+            .profiles
+            .iter()
+            .find(|profile| session_profile_key(profile) == edit.target_key)
+        else {
+            return Err("Profile no longer exists.");
+        };
+        if tunnels::rows_for(target)
+            .iter()
+            .any(|row| row.kind == edit.draft.kind && row.spec == spec)
+        {
+            return Err(TUNNEL_MOVE_DUPLICATE);
+        }
+        Ok(())
+    }
+
     fn refresh_tunnel_status(&mut self) {
         self.tunnel_status.clear();
         for profile in &self.profiles {
@@ -9902,6 +10108,38 @@ impl App {
         .into()
     }
 
+    /// Searchable session picker filling the editor value column. The closed
+    /// field shows the selection truncated to the column; the popup lists
+    /// full paths.
+    fn tunnel_session_picker_view(
+        &self,
+        target_key: &str,
+        field_chars: usize,
+    ) -> Element<'_, Message> {
+        let selected = self
+            .tunnel_session_picker
+            .options()
+            .iter()
+            .find(|option| option.key == target_key)
+            .map(|option| TunnelSessionOption {
+                label: truncate(&option.label, field_chars),
+                key: option.key.clone(),
+            });
+        combo_box(
+            &self.tunnel_session_picker,
+            TUNNEL_SESSION_PLACEHOLDER,
+            selected.as_ref(),
+            Message::TunnelDraftSession,
+        )
+        .input_style(flat_input)
+        .menu_style(tunnel_session_menu_style)
+        .size(13)
+        .padding([3, 6])
+        .width(Fill)
+        .menu_height(TUNNEL_SESSION_MENU_HEIGHT)
+        .into()
+    }
+
     fn tunnels_view(&self) -> Element<'_, Message> {
         let ink = theme::palette().text_dock;
         let selected_key = self
@@ -9958,8 +10196,8 @@ impl App {
             tunnel_list = tunnel_list.push(text(TUNNEL_MENU_EMPTY).size(12).color(muted()));
         }
 
-        // + uses the current owner (or first session); the session buttons
-        // below it let users explicitly choose where a new forward is saved.
+        // + uses the current owner (or first session); the editor's
+        // `Session / profile` picker then chooses where it is saved.
         let add_key = selected_key
             .map(str::to_owned)
             .or_else(|| self.profiles.first().map(session_profile_key));
@@ -9977,27 +10215,10 @@ impl App {
         } else {
             button(text("−"))
         };
-        let mut session_picker = column![
-            text(TUNNEL_SESSION_PICKER_LABEL)
-                .size(11)
-                .color(tunnel_session_picker_label_color(theme::palette()))
-        ]
-        .spacing(3);
-        for profile in &self.profiles {
-            session_picker = session_picker.push(
-                action(
-                    truncate(&profile.name, 32),
-                    Message::TunnelAdd(session_profile_key(profile)),
-                )
-                .width(Fill)
-                .style(quiet),
-            );
-        }
         let list_panel = container(
             column![
                 scrollable(tunnel_list).height(350),
                 row![add.style(quiet), remove.style(quiet)].spacing(4),
-                session_picker,
             ]
             .spacing(8),
         )
@@ -10006,7 +10227,6 @@ impl App {
         .style(card);
 
         let editor: Element<'_, Message> = if let Some(edit) = &self.tunnel_edit {
-            let profile_name = owner.map_or("Session unavailable", |profile| profile.name.as_str());
             let status = self
                 .tunnel_status
                 .get(&edit.profile_key)
@@ -10090,10 +10310,7 @@ impl App {
                 row![tunnel_editor_label("Type", label_width, ink), kind_row],
                 row![
                     tunnel_editor_label("Session / profile", label_width, ink),
-                    text(truncate(profile_name, field_chars))
-                        .size(12)
-                        .color(ink)
-                        .wrapping(iced::widget::text::Wrapping::None),
+                    self.tunnel_session_picker_view(&edit.target_key, field_chars),
                 ],
                 row![
                     tunnel_editor_label("Listen Port", label_width, ink),
@@ -12081,9 +12298,11 @@ mod tests {
         assert!(!TUNNEL_MENU_EMPTY.contains('+'));
         assert!(TUNNEL_CREATE_HINT.contains("press +"));
         for p in [super::theme::LIGHT, super::theme::DARK] {
-            let label = tunnel_session_picker_label_color(&p);
-            assert_eq!(label, p.text_dock);
-            assert_ne!(label, p.muted);
+            // The session picker popup uses primary ink on the menu surface.
+            let menu = tunnel_session_menu_style_for(&p);
+            assert_eq!(menu.text_color, p.text_dock);
+            assert_ne!(menu.text_color, p.muted);
+            assert_eq!(menu.background, iced::Background::from(p.list));
         }
     }
 
