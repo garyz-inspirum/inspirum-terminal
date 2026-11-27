@@ -76,38 +76,102 @@ pub struct SearchHit {
 }
 
 pub fn find_text(haystack: &str, needle: &str, limit: usize) -> Vec<SearchHit> {
-    let query = needle.trim();
-    if query.is_empty() || limit == 0 {
+    let Some(query) = TextQuery::new(needle) else {
         return Vec::new();
-    }
-    let query_lower = query.to_lowercase();
+    };
     let mut hits = Vec::new();
     for (line_index, line) in haystack.lines().enumerate() {
-        let line_lower = line.to_lowercase();
-        let mut start = 0;
-        while start <= line_lower.len() {
-            let Some(found) = line_lower[start..].find(&query_lower) else {
-                break;
-            };
-            let byte_column = start + found;
-            let column = line_lower[..byte_column].chars().count() + 1;
-            let preview = if line.chars().count() > 180 {
-                line.chars().take(177).collect::<String>() + "..."
-            } else {
-                line.to_owned()
-            };
-            hits.push(SearchHit {
-                line: line_index + 1,
-                column,
-                preview,
-            });
-            if hits.len() >= limit {
-                return hits;
-            }
-            start = byte_column + query_lower.len().max(1);
+        query.find_in_line(line, line_index + 1, limit, &mut hits);
+        if hits.len() >= limit {
+            break;
         }
     }
     hits
+}
+
+/// A case-insensitive literal query, lowercased once per search.
+///
+/// Matches are non-overlapping, scanned left to right (after a match the scan resumes after
+/// its end), `column` is the 1-based char index of the match start. ASCII query against an
+/// ASCII line compares bytes with ASCII case folding and allocates nothing per line; any
+/// non-ASCII on either side uses Unicode `to_lowercase`.
+pub struct TextQuery {
+    lower: String,
+    ascii: bool,
+}
+
+impl TextQuery {
+    /// `None` for an empty (after trimming) query.
+    pub fn new(needle: &str) -> Option<Self> {
+        let query = needle.trim();
+        if query.is_empty() {
+            return None;
+        }
+        Some(Self {
+            lower: query.to_lowercase(),
+            ascii: query.is_ascii(),
+        })
+    }
+
+    /// Append hits in `line` (reported as line number `line_number`) until `hits` holds
+    /// `limit` entries.
+    pub fn find_in_line(
+        &self,
+        line: &str,
+        line_number: usize,
+        limit: usize,
+        hits: &mut Vec<SearchHit>,
+    ) {
+        if hits.len() >= limit {
+            return;
+        }
+        if self.ascii && line.is_ascii() {
+            let needle = self.lower.as_bytes();
+            let bytes = line.as_bytes();
+            let mut start = 0;
+            while start + needle.len() <= bytes.len() {
+                if bytes[start..start + needle.len()].eq_ignore_ascii_case(needle) {
+                    hits.push(SearchHit {
+                        line: line_number,
+                        column: start + 1,
+                        preview: preview_of(line),
+                    });
+                    if hits.len() >= limit {
+                        return;
+                    }
+                    start += needle.len();
+                } else {
+                    start += 1;
+                }
+            }
+            return;
+        }
+        let line_lower = line.to_lowercase();
+        let mut start = 0;
+        while start <= line_lower.len() {
+            let Some(found) = line_lower[start..].find(&self.lower) else {
+                break;
+            };
+            let byte_column = start + found;
+            hits.push(SearchHit {
+                line: line_number,
+                column: line_lower[..byte_column].chars().count() + 1,
+                preview: preview_of(line),
+            });
+            if hits.len() >= limit {
+                return;
+            }
+            start = byte_column + self.lower.len();
+        }
+    }
+}
+
+fn preview_of(line: &str) -> String {
+    if line.chars().count() > 180 {
+        line.chars().take(177).collect::<String>() + "..."
+    } else {
+        line.to_owned()
+    }
 }
 
 /// Creates a new session log without overwriting an existing file.
@@ -255,5 +319,78 @@ mod tests {
         let saved = std::fs::read_to_string(path).unwrap();
         assert!(saved.contains("WARNING"));
         assert_eq!(saved.matches("--- screen snapshot ---").count(), 2);
+    }
+}
+
+#[cfg(test)]
+mod text_query_tests {
+    use super::*;
+
+    /// The pre-TextQuery implementation, kept as the reference.
+    fn find_text_reference(haystack: &str, needle: &str, limit: usize) -> Vec<SearchHit> {
+        let query = needle.trim();
+        if query.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let query_lower = query.to_lowercase();
+        let mut hits = Vec::new();
+        for (line_index, line) in haystack.lines().enumerate() {
+            let line_lower = line.to_lowercase();
+            let mut start = 0;
+            while start <= line_lower.len() {
+                let Some(found) = line_lower[start..].find(&query_lower) else {
+                    break;
+                };
+                let byte_column = start + found;
+                let column = line_lower[..byte_column].chars().count() + 1;
+                hits.push(SearchHit {
+                    line: line_index + 1,
+                    column,
+                    preview: preview_of(line),
+                });
+                if hits.len() >= limit {
+                    return hits;
+                }
+                start = byte_column + query_lower.len().max(1);
+            }
+        }
+        hits
+    }
+
+    #[test]
+    fn matches_reference_on_table() {
+        let long = "x".repeat(200) + "Needle";
+        let cases: &[(&str, &str)] = &[
+            ("Alpha beta ALPHA", "alpha"),
+            ("aaaa", "aa"),
+            ("aaa", "aa"),
+            ("東京 network 東京", "東京"),
+            ("Cafe\u{301} CAFE\u{301}", "cafe\u{301}"),
+            ("ÀB àb", "àb"),
+            ("status 🚀 ready", "READY"),
+            ("plain ascii", "ÀB"),
+            ("line one\nLINE two\nnone", "line"),
+            ("anything", ""),
+            ("anything", "   "),
+            (long.as_str(), "needle"),
+        ];
+        for (haystack, needle) in cases {
+            for limit in [0, 1, 2, 500] {
+                assert_eq!(
+                    find_text(haystack, needle, limit),
+                    find_text_reference(haystack, needle, limit),
+                    "{haystack:?} / {needle:?} / {limit}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn matches_do_not_overlap() {
+        let hits = find_text("aaaa", "aa", 10);
+        assert_eq!(
+            hits.iter().map(|hit| hit.column).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
     }
 }

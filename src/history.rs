@@ -1,5 +1,5 @@
 //! In-memory retained terminal history indexing, marks and bounded folding.
-use crate::terminal_ux::{SearchHit, find_text};
+use crate::terminal_ux::TextQuery;
 use std::collections::{BTreeMap, BTreeSet};
 use terminal_core::LogicalLine;
 
@@ -321,16 +321,17 @@ impl HistoryState {
     /// gone, select the nearest later hit (the first hit when its line rolled off the top).
     fn refresh_search(&mut self, anchor: Option<(u64, usize)>) {
         self.hits.clear();
-        let query = self.query.trim();
-        if query.is_empty() {
+        let Some(query) = TextQuery::new(&self.query) else {
             self.selected_hit = 0;
             return;
-        }
+        };
 
         // Search each retained logical row separately so stable line IDs survive viewport movement.
+        let mut local = Vec::new();
         for (index, line) in self.lines.iter().enumerate() {
-            let local: Vec<SearchHit> = find_text(&line.text, query, 500 - self.hits.len());
-            for hit in local {
+            local.clear();
+            query.find_in_line(&line.text, index + 1, 500 - self.hits.len(), &mut local);
+            for hit in local.drain(..) {
                 self.hits.push(HistoryHit {
                     line_id: line.id,
                     line_number: index + 1,
