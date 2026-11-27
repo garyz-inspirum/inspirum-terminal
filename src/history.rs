@@ -43,12 +43,26 @@ pub struct HistoryState {
     truncated_lines: u64,
 }
 
-fn overlap_len(old: &[HistoryLine], new: &[String]) -> usize {
+/// How many trailing rows of the previous snapshot may have changed in place.
+///
+/// Rows on the live screen (prompt being typed, blank rows below the cursor, progress bars)
+/// are rewritten in place; rows above the screen are immutable once scrolled into history.
+/// The bound is larger than any realistic screen height; the alignment pass is a single
+/// linear scan regardless of its value.
+const LIVE_TAIL_ROWS: usize = 512;
+
+/// Align `new` against `old` when up to `max_tail` trailing rows of `old` may have been
+/// rewritten in place.
+///
+/// Returns `(overlap, tail)`: the first `overlap` rows of `new` equal the `overlap` rows of
+/// `old` that end `tail` rows before its end. Picks the longest overlap, then the smallest
+/// tail. `(0, 0)` means nothing aligned.
+fn align_snapshot(old: &[HistoryLine], new: &[String], max_tail: usize) -> (usize, usize) {
     if old.is_empty() || new.is_empty() {
-        return 0;
+        return (0, 0);
     }
 
-    // KMP: longest prefix of the new snapshot equal to a suffix of the old snapshot.
+    // KMP failure table over the new snapshot.
     let mut prefix = vec![0usize; new.len()];
     for index in 1..new.len() {
         let mut matched = prefix[index - 1];
@@ -61,23 +75,29 @@ fn overlap_len(old: &[HistoryLine], new: &[String]) -> usize {
         prefix[index] = matched;
     }
 
+    // One pass over old: `matched` after old[i] is the longest prefix of new that is a
+    // suffix of old[..=i], i.e. the overlap when old rows after i are the mutable tail.
+    let first_candidate = old.len().saturating_sub(max_tail.saturating_add(1));
+    let mut best = (0usize, 0usize);
     let mut matched = 0usize;
-    for line in old {
-        while matched > 0 && (matched == new.len() || line.text != new[matched]) {
+    for (index, line) in old.iter().enumerate() {
+        while matched > 0 && line.text != new[matched] {
             matched = prefix[matched - 1];
         }
-        if matched < new.len() && line.text == new[matched] {
+        if line.text == new[matched] {
             matched += 1;
         }
-        if matched == new.len() {
-            // Keep a full match only when it reaches the end of the old snapshot; otherwise
-            // continue searching for the longest suffix match.
-            if line.id != old.last().map(|line| line.id).unwrap_or_default() {
-                matched = prefix[matched - 1];
+        if index >= first_candidate {
+            let tail = old.len() - 1 - index;
+            if matched > best.0 || (matched == best.0 && matched > 0 && tail < best.1) {
+                best = (matched, tail);
             }
         }
+        if matched == new.len() {
+            matched = prefix[matched - 1];
+        }
     }
-    matched
+    best
 }
 
 impl HistoryState {
@@ -110,20 +130,35 @@ impl HistoryState {
     }
 
     pub fn update_snapshot(&mut self, snapshot: Vec<String>) {
-        let overlap = overlap_len(&self.lines, &snapshot);
-        let removed = self.lines.len().saturating_sub(overlap);
-        if removed > 0 {
-            self.truncated_lines = self.truncated_lines.saturating_add(removed as u64);
+        let anchor = self.selected_anchor();
+        let (overlap, tail) = align_snapshot(&self.lines, &snapshot, LIVE_TAIL_ROWS);
+        let aligned_end = self.lines.len() - tail;
+        let retained_start = aligned_end - overlap;
+        if retained_start > 0 {
+            self.truncated_lines = self.truncated_lines.saturating_add(retained_start as u64);
         }
 
-        let retained_start = self.lines.len().saturating_sub(overlap);
-        let mut next = self.lines[retained_start..].to_vec();
-        for text in snapshot.into_iter().skip(overlap) {
-            self.next_line_id = self.next_line_id.saturating_add(1).max(1);
-            next.push(HistoryLine {
-                id: self.next_line_id,
-                text,
-            });
+        // Rows above the mutable tail keep their ids. Rewritten tail rows keep the id of the
+        // grid row they replaced in place (same position), so a mark on a prompt row being
+        // typed into survives; genuinely new rows get fresh ids.
+        let old_tail: Vec<u64> = if overlap > 0 {
+            self.lines[aligned_end..]
+                .iter()
+                .map(|line| line.id)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut next = self.lines[retained_start..aligned_end].to_vec();
+        for (offset, text) in snapshot.into_iter().skip(overlap).enumerate() {
+            let id = match old_tail.get(offset) {
+                Some(id) => *id,
+                None => {
+                    self.next_line_id = self.next_line_id.saturating_add(1).max(1);
+                    self.next_line_id
+                }
+            };
+            next.push(HistoryLine { id, text });
         }
         if let Some(max_id) = next.iter().map(|line| line.id).max() {
             self.next_line_id = self.next_line_id.max(max_id);
@@ -132,7 +167,15 @@ impl HistoryState {
 
         let retained_ids: BTreeSet<u64> = self.lines.iter().map(|line| line.id).collect();
         self.marks.retain(|id, _| retained_ids.contains(id));
-        self.refresh_search();
+        self.refresh_search(anchor);
+    }
+
+    /// `(line id, match column)` of the selected hit, used to keep the selection on the same
+    /// match while lines arrive or roll off.
+    fn selected_anchor(&self) -> Option<(u64, usize)> {
+        self.hits
+            .get(self.selected_hit)
+            .map(|hit| (hit.line_id, hit.column))
     }
 
     pub fn set_query(&mut self, query: impl Into<String>) {
@@ -140,7 +183,7 @@ impl HistoryState {
         if self.query != query {
             self.query = query;
             self.selected_hit = 0;
-            self.refresh_search();
+            self.refresh_search(None);
         }
     }
 
@@ -247,7 +290,9 @@ impl HistoryState {
         rows
     }
 
-    fn refresh_search(&mut self) {
+    /// Recompute hits. With `anchor`, reselect the same (line id, column) match; when it is
+    /// gone, select the nearest later hit (the first hit when its line rolled off the top).
+    fn refresh_search(&mut self, anchor: Option<(u64, usize)>) {
         self.hits.clear();
         let query = self.query.trim();
         if query.is_empty() {
@@ -272,6 +317,19 @@ impl HistoryState {
         }
         if self.hits.is_empty() {
             self.selected_hit = 0;
+            return;
+        }
+        if let Some((line_id, column)) = anchor {
+            let anchor_line = self.lines.iter().position(|line| line.id == line_id);
+            self.selected_hit = match anchor_line {
+                // Hits are ordered by (line_number, column); first one at or after the anchor.
+                Some(line_index) => self
+                    .hits
+                    .iter()
+                    .position(|hit| (hit.line_number - 1, hit.column) >= (line_index, column))
+                    .unwrap_or(self.hits.len() - 1),
+                None => 0,
+            };
         } else {
             self.selected_hit = self.selected_hit.min(self.hits.len() - 1);
         }
@@ -436,5 +494,36 @@ mod tests {
         state.update_snapshot(vec!["B".into(), "C".into(), "D".into(), "".into()]);
         assert_eq!(ids_of(&state, &["B", "C"]), before);
         assert_eq!(state.truncated_lines(), 1);
+    }
+
+    #[test]
+    fn selected_hit_follows_its_line_when_lines_arrive_and_roll_off() {
+        let mut state = HistoryState::default();
+        state.update_snapshot(vec!["hit a".into(), "x".into(), "hit b".into(), "".into()]);
+        state.set_query("hit");
+        state.select_next_hit();
+        let selected = state.selected_hit().unwrap().line_id;
+        state.update_snapshot(vec![
+            "hit a".into(),
+            "x".into(),
+            "hit b".into(),
+            "hit c".into(),
+            "".into(),
+        ]);
+        assert_eq!(state.selected_hit().unwrap().line_id, selected);
+        // "hit a" rolls off: selection stays on "hit b", now at list index 0.
+        state.update_snapshot(vec!["x".into(), "hit b".into(), "hit c".into(), "".into()]);
+        assert_eq!(state.selected_hit().unwrap().line_id, selected);
+        assert_eq!(state.selected_hit_index(), 0);
+    }
+
+    #[test]
+    fn selection_moves_to_nearest_later_hit_when_its_line_rolls_off() {
+        let mut state = HistoryState::default();
+        state.update_snapshot(vec!["hit a".into(), "x".into(), "hit b".into(), "".into()]);
+        state.set_query("hit");
+        assert_eq!(state.selected_hit().unwrap().preview, "hit a");
+        state.update_snapshot(vec!["x".into(), "hit b".into(), "y".into(), "".into()]);
+        assert_eq!(state.selected_hit().unwrap().preview, "hit b");
     }
 }
