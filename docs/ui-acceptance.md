@@ -92,8 +92,10 @@ remote-editor acceptance.
 **21 November 2026:** the evidence index above predates the WindTerm layout
 rebuild (#140, PR #141). The E4, E6 and E8 screenshots show the previous
 layout (session sidebar, Files view with Dock right / Dock bottom buttons).
-The file browser and transfer queue are now the Filer, Explorer and Transfer
-dock panels, moved with each panel's gear menu. Acceptance on the new layout
+The file browser and transfer queue are now the Filer and Transfer dock
+panels, moved with each panel's gear menu. (A separate Explorer panel for
+local files existed until 2026-11-26; it was then merged into the Filer as
+its Local half.) Acceptance on the new layout
 is pending; nothing in this paragraph is an acceptance claim.
 
 ## Proposed roadmap issue corrections (not applied here)

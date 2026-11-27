@@ -9,6 +9,7 @@ controls so a missed click or an accepted write cannot pass.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import sys
@@ -162,12 +163,27 @@ class ProfileNamesTest(unittest.TestCase):
             self.assertEqual(module.saved_profile_names(path), ["a", "b"])
 
 
+def function_source(src: str, name: str) -> str:
+    """Exact source segment of the single (async) def called `name`."""
+    nodes = [node for node in ast.walk(ast.parse(src))
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name]
+    if len(nodes) != 1:
+        raise AssertionError(f"expected one def {name}, found {len(nodes)}")
+    return ast.get_source_segment(src, nodes[0])
+
+
 class ProbeWiringTest(unittest.TestCase):
     src = SOURCE.read_text(encoding="utf-8")
 
     def body(self) -> str:
-        start = self.src.index("async def profile_edit_probe")
-        return self.src[start:self.src.index("allow_before = ", start)]
+        # Exactly profile_edit_probe's own source (via ast), so later sibling
+        # probes can neither trip nor satisfy these checks.
+        return function_source(self.src, "profile_edit_probe")
+
+    def test_body_is_exactly_profile_edit_probe(self):
+        body = self.body()
+        self.assertTrue(body.startswith("async def profile_edit_probe("))
+        self.assertNotIn("async def session_dropdown_probe", body)
 
     def test_runs_after_running_edit_delete_probe(self):
         first = self.src.index("await running_edit_delete_probe()")

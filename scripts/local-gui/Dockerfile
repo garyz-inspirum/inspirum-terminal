@@ -3,7 +3,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      xvfb xdotool x11-utils imagemagick fonts-dejavu-core tesseract-ocr tesseract-ocr-eng \
+      xvfb xdotool x11-utils imagemagick fonts-dejavu-core tesseract-ocr tesseract-ocr-eng xclip \
       python3 python3-pip python3-venv python3-yaml openssh-client ca-certificates \
       libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libfreetype6 libx11-6 libx11-xcb1 libxcb1 \
       libxcursor1 libxi6 libxrandr2 libgl1 libegl1 libvulkan1 mesa-vulkan-drivers libwayland-client0 \

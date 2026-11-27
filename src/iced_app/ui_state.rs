@@ -15,6 +15,8 @@ const MAX_BYTES: u64 = 64 * 1024;
 pub(super) struct UiState {
     pub(super) theme: String,
     pub(super) docks: Option<DockLayout>,
+    /// External editor command; empty means the OS default application.
+    pub(super) external_editor: String,
 }
 
 pub(super) fn path_for(profiles_path: &Path) -> PathBuf {
@@ -59,9 +61,31 @@ mod tests {
         let state = UiState {
             theme: "dark".into(),
             docks: Some(DockLayout::default()),
+            external_editor: String::new(),
         };
         save(&path, &state).unwrap();
         assert_eq!(load(&path), state);
+    }
+
+    #[test]
+    fn external_editor_round_trips() {
+        let path = temp_path("editor");
+        let state = UiState {
+            theme: "light".into(),
+            docks: None,
+            external_editor: r#""C:\Program Files\Notepad++\notepad++.exe" {file}"#.into(),
+        };
+        save(&path, &state).unwrap();
+        assert_eq!(load(&path), state);
+    }
+
+    #[test]
+    fn file_without_external_editor_loads_empty() {
+        let path = temp_path("no-editor");
+        std::fs::write(&path, br#"{"theme":"dark"}"#).unwrap();
+        let state = load(&path);
+        assert_eq!(state.theme, "dark");
+        assert!(state.external_editor.is_empty());
     }
 
     #[test]

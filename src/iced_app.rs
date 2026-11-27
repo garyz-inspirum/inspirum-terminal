@@ -5,7 +5,10 @@
 //! host-key, argv, paste, process-lifecycle, or transfer safeguards.
 mod dock;
 mod dock_view;
+mod external_edit_ui;
+mod external_editor_setting;
 use dock_view::available_panels;
+use external_editor_setting::{EXTERNAL_EDITOR_HELP, EXTERNAL_EDITOR_INPUT_ID};
 mod icons;
 mod menu;
 mod terminal_ime;
@@ -13,12 +16,14 @@ mod theme;
 mod tools;
 #[cfg(test)]
 mod tunnel_edit_lifecycle_tests;
+#[cfg(test)]
+mod tunnel_session_picker_tests;
 mod ui_state;
 
 use crate::{
     ProxyAuth, ProxyKind, Session, SessionImportMode,
     command_palette::{self, PaletteItem, Snippet, SnippetLibrary},
-    import_sessions, load_sessions,
+    external_edit, import_sessions, load_sessions,
     remote_edit::{self, SaveOutcome},
     save_session_edit, save_sessions, session_matches_query, session_profile_key,
     session_requires_forward_risk_ack, sftp, terminal,
@@ -27,8 +32,9 @@ use crate::{
 };
 use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
 use iced::widget::{
-    Column, button, canvas, center, column, container, mouse_area, opaque, operation, pane_grid,
-    progress_bar, responsive, row, scrollable, sensor, space, stack, text, text_editor, text_input,
+    Column, button, canvas, center, column, combo_box, container, mouse_area, opaque, operation,
+    pane_grid, progress_bar, responsive, row, scrollable, sensor, space, stack, text, text_editor,
+    text_input,
 };
 use iced::{
     Border, Color, Element, Fill, Font, Length, Subscription, Task, Theme, event, font, keyboard,
@@ -327,7 +333,21 @@ fn local_navigation_scroll(key: &keyboard::Key, modifiers: keyboard::Modifiers) 
 pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result {
     theme::init_from_env();
     iced::application(
-        move || App::startup(profiles_path.clone(), ssh_config.clone()),
+        // `resize_events` only reports later resizes (the initial size comes
+        // as `window::Event::Opened`), so ask for the real size at start-up.
+        // `startup` adds the one opt-in tunnel auto-start pass.
+        move || {
+            let (app, auto_start) = App::startup(profiles_path.clone(), ssh_config.clone());
+            (
+                app,
+                Task::batch([
+                    iced::window::latest()
+                        .and_then(iced::window::size)
+                        .map(Message::WindowResized),
+                    auto_start,
+                ]),
+            )
+        },
         App::update,
         App::view,
     )
@@ -801,10 +821,31 @@ struct TerminalPane {
     terminal_grid_size: Option<(u16, u16)>,
     cell_size: (f32, f32),
     canvas_size: Option<iced::Size>,
+    /// Last snapshot-vs-GUI grid mismatch already corrected, so a backend
+    /// that keeps disagreeing gets one corrective resize, not one per frame.
+    grid_mismatch_corrected: Option<GridMismatch>,
     terminal_title: Option<String>,
     error: Option<String>,
     exited: bool,
     refresh_pending: Arc<AtomicBool>,
+    /// True for panes of a 2nd+ tab of the same profile. Instance 1 owns the
+    /// profile's -L/-R/-D listeners; a second ssh binding the same ports would
+    /// die on ExitOnForwardFailure. `profile` keeps the saved forwards so
+    /// lookups and Save Workspace see the canonical profile.
+    suppress_forwards: bool,
+}
+
+impl TerminalPane {
+    /// The profile this pane's ssh/sftp connection is started with.
+    fn launch_profile(&self) -> Session {
+        let mut profile = self.profile.clone();
+        if self.suppress_forwards {
+            profile.ssh.local_forwards.clear();
+            profile.ssh.remote_forwards.clear();
+            profile.ssh.dynamic_forwards.clear();
+        }
+        profile
+    }
 }
 
 struct Workspace {
@@ -812,6 +853,9 @@ struct Workspace {
     profile: Session,
     panes: pane_grid::State<TerminalPane>,
     focus: pane_grid::Pane,
+    /// 1-based ordinal among open tabs of the same `session_profile_key`,
+    /// fixed when the tab opens so closing another tab never renumbers it.
+    instance: u32,
 }
 
 impl Workspace {
@@ -823,6 +867,16 @@ impl Workspace {
             profile,
             panes,
             focus,
+            instance: 1,
+        }
+    }
+
+    /// Static profile-based tab label: `name`, then `name (2)`, `name (3)`.
+    fn label(&self) -> String {
+        if self.instance > 1 {
+            format!("{} ({})", self.profile.name, self.instance)
+        } else {
+            self.profile.name.clone()
         }
     }
 
@@ -864,6 +918,32 @@ struct PendingTransfer {
 struct PreparedTransfer {
     pending: PendingTransfer,
     conflict: bool,
+}
+
+/// Shared so the blocking upload task can borrow the edit while the App
+/// keeps owning it. The UI thread only ever `try_lock`s it.
+#[derive(Clone)]
+struct ExternalEditHandle(Arc<Mutex<external_edit::ExternalEdit>>);
+
+impl std::fmt::Debug for ExternalEditHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_tuple("ExternalEditHandle").finish()
+    }
+}
+
+/// One remote file open in a desktop editor.
+struct ExternalEditState {
+    id: u64,
+    session: Session,
+    session_key: String,
+    remote: String,
+    working_path: PathBuf,
+    handle: ExternalEditHandle,
+    /// An upload task for this edit is running; never start a second one.
+    uploading: bool,
+    /// A detected save failed to upload (conflict or error). The working
+    /// copy is kept until a later save uploads.
+    unsaved: bool,
 }
 
 #[derive(Clone)]
@@ -1912,6 +1992,7 @@ enum FileContextAction {
     Rename,
     Delete,
     Refresh,
+    OpenExternal,
 }
 
 /// One right-click menu. File rows and session rows share this state so the
@@ -1951,18 +2032,61 @@ enum SessionContextAction {
     Import,
 }
 
-const FILE_CONTEXT_MENU_WIDTH: f32 = 200.0;
+/// Narrowest file/session context menu column.
+const FILE_CONTEXT_MENU_MIN_WIDTH: f32 = 200.0;
 const FILE_CONTEXT_ITEM_HEIGHT: f32 = 24.0;
+/// Horizontal padding on each side of a context-menu item label.
+const FILE_CONTEXT_ITEM_PAD_X: f32 = 10.0;
+/// Spare room beyond the estimate so a label never touches the clip edge.
+const FILE_CONTEXT_LABEL_SLACK: f32 = 8.0;
+
+/// Estimated rendered width of a context-menu label: the same ~0.62 em
+/// monospace advance the tunnel menu and top drop-down titles use.
+fn context_menu_label_width(label: &str) -> f32 {
+    label.chars().count() as f32 * theme::metrics::UI_TEXT * 0.62
+}
+
+/// Every label any file or session context menu can show.
+fn all_context_menu_labels() -> Vec<&'static str> {
+    let mut labels = Vec::new();
+    for side in [FileContextSide::Remote, FileContextSide::Local] {
+        for is_dir in [false, true] {
+            let menu = FileContextMenu {
+                side,
+                is_dir,
+                open_path: String::new(),
+                local_path: None,
+                anchor: iced::Point::ORIGIN,
+            };
+            labels.extend(file_context_entries(&menu).into_iter().map(|(l, _)| l));
+        }
+    }
+    labels.extend(session_context_entries().into_iter().map(|(l, _)| l));
+    labels
+}
+
+/// Column width shared by every file and session context menu: wide enough
+/// for the longest label of any variant plus item padding, never below
+/// [`FILE_CONTEXT_MENU_MIN_WIDTH`].
+fn context_menu_width() -> f32 {
+    let longest = all_context_menu_labels()
+        .into_iter()
+        .map(context_menu_label_width)
+        .fold(0.0_f32, f32::max);
+    (longest + 2.0 * FILE_CONTEXT_ITEM_PAD_X + FILE_CONTEXT_LABEL_SLACK)
+        .ceil()
+        .max(FILE_CONTEXT_MENU_MIN_WIDTH)
+}
 
 fn file_context_menu_height(item_count: usize) -> f32 {
     item_count as f32 * FILE_CONTEXT_ITEM_HEIGHT + 2.0
 }
 
 /// Visual popup size, including the 1px padding that holds the border.
-/// The column itself stays [`FILE_CONTEXT_MENU_WIDTH`] by [`FILE_CONTEXT_ITEM_HEIGHT`].
+/// The column itself is [`context_menu_width`] by [`FILE_CONTEXT_ITEM_HEIGHT`] rows.
 fn context_menu_popup_size(item_count: usize) -> iced::Size {
     iced::Size::new(
-        FILE_CONTEXT_MENU_WIDTH + 2.0,
+        context_menu_width() + 2.0,
         file_context_menu_height(item_count),
     )
 }
@@ -1999,6 +2123,7 @@ fn file_context_entries(menu: &FileContextMenu) -> Vec<(&'static str, FileContex
             if !menu.is_dir {
                 items.push(("Download", FileContextAction::Download));
                 items.push(("Edit", FileContextAction::Edit));
+                items.push(("Open in External Editor", FileContextAction::OpenExternal));
             }
         }
         FileContextSide::Local => {
@@ -2052,6 +2177,9 @@ fn file_context_action_message(
             Some(Message::FilesRequestDeleteLocal)
         }
         (_, FileContextAction::Refresh) => Some(Message::FilesRefresh),
+        (FileContextSide::Remote, FileContextAction::OpenExternal) if !menu.is_dir => {
+            Some(Message::FilesRequestEditExternal)
+        }
         // Cross-side items (local Download, remote Upload) and Edit on a
         // directory or a local row are not offered. Drop a stale message.
         _ => None,
@@ -2114,13 +2242,181 @@ const TUNNEL_SETTINGS_TITLE: &str = "Tunnel Settings";
 /// Interior heading, kept distinct from the window title for OCR acceptance.
 const TUNNEL_MANAGER_HEADING: &str = "Tunnel Manager";
 /// Creation guidance is shown once (editor empty state), not beside the list.
-const TUNNEL_CREATE_HINT: &str = "To create one, choose a session below the list and press +.";
-const TUNNEL_SESSION_PICKER_LABEL: &str = "Add to session";
+const TUNNEL_CREATE_HINT: &str = "To create one, press + and choose its session in the editor.";
+const TUNNEL_MOVE_RUNNING: &str = "Stop this forward before moving it to another session.";
+const TUNNEL_MOVE_TARGET_RUNNING: &str =
+    "Stop the target session's tunnel process before moving a forward into it.";
+const TUNNEL_MOVE_DUPLICATE: &str = "The target session already has this forward.";
+const TUNNEL_SESSION_PLACEHOLDER: &str = "Type to search sessions";
+/// Popup height cap of the session picker; it scrolls beyond this.
+const TUNNEL_SESSION_MENU_HEIGHT: f32 = 240.0;
+/// Text size of the session picker input and of its popup rows.
+const TUNNEL_SESSION_TEXT_SIZE: f32 = 13.0;
+/// Dropdown chevron drawn over the right end of the session picker input.
+const TUNNEL_SESSION_CHEVRON_SIZE: f32 = 12.0;
+/// Gap between the chevron and the field's right border.
+const TUNNEL_SESSION_CHEVRON_INSET: f32 = 5.0;
+/// Input padding: text keeps clear of the chevron; the vertical padding (and
+/// so the 23 px row height) matches the plain text inputs.
+const TUNNEL_SESSION_INPUT_PADDING: iced::Padding = iced::Padding {
+    top: 3.0,
+    right: 6.0 + TUNNEL_SESSION_CHEVRON_SIZE + TUNNEL_SESSION_CHEVRON_INSET,
+    bottom: 3.0,
+    left: 6.0,
+};
 
-/// The session picker heads an interactive choice, so it uses primary dock
-/// ink rather than gray help text.
-fn tunnel_session_picker_label_color(p: &theme::Palette) -> Color {
-    p.text_dock
+// The chevron sits inside the input's right padding, clear of the text.
+const _: () = assert!(
+    TUNNEL_SESSION_INPUT_PADDING.right
+        >= TUNNEL_SESSION_CHEVRON_SIZE + TUNNEL_SESSION_CHEVRON_INSET
+);
+
+/// Height of one popup row, computed as iced 0.14's `overlay::menu::List`
+/// does (layout, hit-testing and draw all use `text_line_height
+/// .to_absolute(text_size) + padding.y()`). The combo box passes its own
+/// `size` and `padding` to the menu and leaves the menu's line height at
+/// `LineHeight::default()`.
+fn tunnel_session_menu_row_height() -> f32 {
+    let line = iced::widget::text::LineHeight::default()
+        .to_absolute(iced::Pixels(TUNNEL_SESSION_TEXT_SIZE));
+    f32::from(line) + TUNNEL_SESSION_INPUT_PADDING.y()
+}
+
+/// Popup height for `matches` visible options: the list's own height (the
+/// menu adds no layout padding; its border is drawn inside the bounds), capped
+/// so longer lists scroll. With no match iced opens no popup at all.
+fn tunnel_session_menu_height(matches: usize) -> f32 {
+    (matches as f32 * tunnel_session_menu_row_height()).min(TUNNEL_SESSION_MENU_HEIGHT)
+}
+
+/// The same lowercase alphanumeric matcher iced's combo box builds per option.
+fn tunnel_session_matcher(label: &str) -> String {
+    label
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// Options iced's combo box shows for `query`: every non-alphanumeric run
+/// splits the lowercase query into parts, and each part must occur in the
+/// option's matcher (an empty query matches everything).
+fn tunnel_session_match_count(options: &[TunnelSessionOption], query: &str) -> usize {
+    let query = query.to_lowercase();
+    let parts: Vec<&str> = query.split(|c: char| !c.is_ascii_alphanumeric()).collect();
+    options
+        .iter()
+        .filter(|option| {
+            let matcher = tunnel_session_matcher(&option.label);
+            parts.iter().all(|part| matcher.contains(part))
+        })
+        .count()
+}
+
+/// Characters of the selected session shown in a `field` px value column:
+/// the chevron's reserve is taken from the text budget.
+fn tunnel_session_field_chars(field: f32) -> usize {
+    chars_fitting(
+        field - TUNNEL_SESSION_CHEVRON_SIZE - TUNNEL_SESSION_CHEVRON_INSET,
+        12.0,
+    )
+}
+
+/// Separator between folder segments and the session name in the picker.
+const TUNNEL_SESSION_PATH_SEPARATOR: &str = " / ";
+
+/// One saved session in the Tunnel Settings `Session / profile` picker. The
+/// label is the full folder path and name; the key is the stable profile key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TunnelSessionOption {
+    label: String,
+    key: String,
+}
+
+impl std::fmt::Display for TunnelSessionOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// `Prod / DB / pg-primary`: the folder string splits on `/` into
+/// subfolders; empty segments are dropped, and an empty folder shows the
+/// name alone.
+fn tunnel_session_display_path(session: &Session) -> String {
+    session
+        .folder
+        .split('/')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .chain(std::iter::once(session.name.as_str()))
+        .collect::<Vec<_>>()
+        .join(TUNNEL_SESSION_PATH_SEPARATOR)
+}
+
+/// Every saved session, sorted case-insensitively by display path. Names
+/// repeated in different folders differ by path; the rare identical path
+/// (for example folder `a/b` versus `a / b`) gets a numeric suffix so every
+/// option reads distinctly. Labels compare case-insensitively, like the
+/// picker search. Every literal path is reserved first, so a suffix skips
+/// any label already in use (a session literally named `web (2)` pushes the
+/// second `web` to `web (3)`); the first of each path keeps it unchanged.
+fn tunnel_session_options(profiles: &[Session]) -> Vec<TunnelSessionOption> {
+    let mut options: Vec<TunnelSessionOption> = profiles
+        .iter()
+        .map(|profile| TunnelSessionOption {
+            label: tunnel_session_display_path(profile),
+            key: session_profile_key(profile),
+        })
+        .collect();
+    options.sort_by(|left, right| {
+        left.label
+            .to_lowercase()
+            .cmp(&right.label.to_lowercase())
+            .then_with(|| left.label.cmp(&right.label))
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    let mut taken: HashSet<String> = options
+        .iter()
+        .map(|option| option.label.to_lowercase())
+        .collect();
+    let mut plain: HashSet<String> = HashSet::new();
+    for option in &mut options {
+        if plain.insert(option.label.to_lowercase()) {
+            continue;
+        }
+        let mut suffix = 2usize;
+        loop {
+            let candidate = format!("{} ({suffix})", option.label);
+            if taken.insert(candidate.to_lowercase()) {
+                option.label = candidate;
+                break;
+            }
+            suffix += 1;
+        }
+    }
+    options
+}
+
+/// Popup list of the session picker: the menu-bar drop-down surface
+/// (`list` fill, `text_dock` outline) with primary text, so it reads in both
+/// themes instead of the stock Iced palette.
+fn tunnel_session_menu_style(_: &Theme) -> iced::widget::overlay::menu::Style {
+    tunnel_session_menu_style_for(theme::palette())
+}
+
+fn tunnel_session_menu_style_for(p: &theme::Palette) -> iced::widget::overlay::menu::Style {
+    iced::widget::overlay::menu::Style {
+        background: p.list.into(),
+        border: Border {
+            color: p.text_dock,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        text_color: p.text_dock,
+        selected_text_color: p.text_dock,
+        selected_background: p.selected_row.into(),
+        shadow: iced::Shadow::default(),
+    }
 }
 
 /// One saved forward as shown in the quick menu. Snapshot taken on open and
@@ -2617,17 +2913,27 @@ fn menu_popup_style(_: &Theme) -> container::Style {
 }
 
 fn context_popup<'a>(items: Vec<(&'static str, Message)>) -> Element<'a, Message> {
-    let mut rows = column![].width(FILE_CONTEXT_MENU_WIDTH);
+    let mut rows = column![].width(context_menu_width());
     for (label, message) in items {
         rows = rows.push(
             button(
-                text(label)
-                    .size(theme::metrics::UI_TEXT)
-                    .color(theme::palette().text),
+                container(
+                    text(label)
+                        .size(theme::metrics::UI_TEXT)
+                        .color(theme::palette().text)
+                        .wrapping(text::Wrapping::None),
+                )
+                .width(Fill)
+                .clip(true),
             )
             .width(Fill)
             .height(FILE_CONTEXT_ITEM_HEIGHT)
-            .padding([3, 10])
+            .padding(iced::Padding {
+                top: 3.0,
+                bottom: 3.0,
+                left: FILE_CONTEXT_ITEM_PAD_X,
+                right: FILE_CONTEXT_ITEM_PAD_X,
+            })
             .style(menu_item)
             .on_press(message),
         );
@@ -2747,6 +3053,12 @@ enum Dialog {
     ImportProfiles,
     About,
     Exit,
+    /// External editor command setting; `input` is the unsaved text and
+    /// `error` the last rejected Save.
+    ExternalEditor {
+        input: String,
+        error: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3036,6 +3348,22 @@ enum Message {
     FindFocusSynced(bool),
     /// Start the next queued opted-in forward of the start-up pass.
     TunnelAutoStartNext,
+    FilesRequestEditExternal,
+    ExternalEditOpened {
+        session: Session,
+        session_key: String,
+        remote: String,
+        result: Result<ExternalEditHandle, String>,
+    },
+    ExternalEditTick,
+    ExternalEditUploaded {
+        id: u64,
+        result: Result<external_edit::UploadOutcome, String>,
+    },
+    ExternalEditorInput(String),
+    ExternalEditorSave,
+    TunnelDraftSession(TunnelSessionOption),
+    TunnelSessionSearch(String),
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -3284,7 +3612,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
         bounds: iced::Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
-        let position = cursor.position_in(bounds);
+        let position = cursor.position_in(bounds).map(terminal_text_point);
         if let Some(position) = position {
             state.last_position = Some(position);
         }
@@ -3299,8 +3627,12 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                 let (width, height) = terminal_cell_size(&self.appearance);
                 let cell = self.snapshot.cells.iter().find(|cell| cell.cursor);
                 let rectangle = iced::Rectangle {
-                    x: bounds.x + cell.map_or(0.0, |c| c.column as f32 * width),
-                    y: bounds.y + cell.map_or(0.0, |c| c.row as f32 * height),
+                    x: bounds.x
+                        + TERMINAL_TEXT_INSET.x
+                        + cell.map_or(0.0, |c| c.column as f32 * width),
+                    y: bounds.y
+                        + TERMINAL_TEXT_INSET.y
+                        + cell.map_or(0.0, |c| c.row as f32 * height),
                     width,
                     height,
                 };
@@ -3521,9 +3853,12 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
             if state.pointer_hidden && self.appearance.hide_pointer_while_typing {
                 mouse::Interaction::Hidden
             } else if state.selecting {
-                mouse::Interaction::Grabbing
+                // Keep the I-beam while a press-and-hold selects text; a
+                // grabbing hand reads as "drag the pane".
+                mouse::Interaction::Text
             } else if self.remote_mouse_enabled(state.modifiers) {
-                mouse::Interaction::Pointer
+                // The remote app owns the mouse: plain arrow, never a hand.
+                mouse::Interaction::default()
             } else {
                 mouse::Interaction::Text
             }
@@ -3618,9 +3953,11 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
             let geometry = caches[row].draw(renderer, bounds.size(), |frame| {
                 let url_spans = visible_url_ranges(&self.snapshot.cells[start..end]);
                 for (cell_index, cell) in self.snapshot.cells[start..end].iter().enumerate() {
-                    let x = cell.column as f32 * cell_width;
-                    let y = cell.row as f32 * cell_height;
-                    if x >= bounds.width || y >= bounds.height {
+                    let x = TERMINAL_TEXT_INSET.x + cell.column as f32 * cell_width;
+                    let y = TERMINAL_TEXT_INSET.y + cell.row as f32 * cell_height;
+                    if x >= bounds.width - TERMINAL_TEXT_INSET.x
+                        || y >= bounds.height - TERMINAL_TEXT_INSET.y
+                    {
                         continue;
                     }
 
@@ -3750,6 +4087,56 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
 
         geometries
     }
+}
+
+/// Clear space between the terminal pane edge and the first/last glyphs
+/// (x = left and right, y = top and bottom). Drawing, pointer-to-cell
+/// mapping, the IME cursor and the PTY grid size all use this one inset.
+const TERMINAL_TEXT_INSET: iced::Vector = iced::Vector { x: 10.0, y: 6.0 };
+
+/// Map a point relative to the canvas bounds to the text area's origin.
+/// Points inside the inset clamp to the first row/column.
+fn terminal_text_point(position: iced::Point) -> iced::Point {
+    iced::Point::new(
+        (position.x - TERMINAL_TEXT_INSET.x).max(0.0),
+        (position.y - TERMINAL_TEXT_INSET.y).max(0.0),
+    )
+}
+
+/// Columns and lines that fit in a terminal viewport of `size` after the
+/// inset is removed from both sides.
+fn terminal_grid_size(size: iced::Size, cell: (f32, f32)) -> (u16, u16) {
+    let columns = ((size.width - 2.0 * TERMINAL_TEXT_INSET.x).max(1.0) / cell.0)
+        .floor()
+        .max(1.0) as u16;
+    let lines = ((size.height - 2.0 * TERMINAL_TEXT_INSET.y).max(1.0) / cell.1)
+        .floor()
+        .max(1.0) as u16;
+    (columns, lines)
+}
+
+/// A backend grid (snapshot columns x rows) that disagrees with the grid the
+/// GUI computed for the current canvas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GridMismatch {
+    backend: (usize, usize),
+    expected: (u16, u16),
+}
+
+/// The mismatch to correct with one resend, or `None` when the grids agree,
+/// no canvas size is known yet, or this exact mismatch was already resent
+/// (a backend that ignores the resend must not cause a resize loop).
+fn grid_mismatch_to_correct(
+    backend: (usize, usize),
+    expected: Option<(u16, u16)>,
+    already_corrected: Option<GridMismatch>,
+) -> Option<GridMismatch> {
+    let expected = expected?;
+    if backend == (expected.0 as usize, expected.1 as usize) {
+        return None;
+    }
+    let mismatch = GridMismatch { backend, expected };
+    (already_corrected != Some(mismatch)).then_some(mismatch)
 }
 
 fn terminal_cell_size(appearance: &crate::appearance::TerminalAppearance) -> (f32, f32) {
@@ -4104,6 +4491,9 @@ struct TunnelEditState {
     profile_key: String,
     original: Option<(tunnels::ForwardKind, String)>,
     draft: tunnels::ForwardDraft,
+    /// Session chosen in the `Session / profile` picker. Equal to
+    /// `profile_key` unless a saved forward is being moved on Save.
+    target_key: String,
     /// Draft of the saved forward's opt-in auto-start flag; persisted only
     /// by `TunnelSaveEdit`, never by toggling or cancelling.
     auto_start: bool,
@@ -4236,13 +4626,27 @@ struct App {
     auto_start: Option<AutoStartPass>,
     #[cfg(test)]
     auto_start_fake: Option<AutoStartFake>,
+    /// Remote files open in a desktop editor; saves upload on the tick.
+    external_edits: Vec<ExternalEditState>,
+    next_external_edit_id: u64,
+    /// One sleep task is in flight; only scheduled while edits exist.
+    external_edit_tick_scheduled: bool,
+    /// Editor command setting; empty means the OS default application.
+    external_editor: String,
+    /// Searchable `Session / profile` picker in Tunnel Settings; rebuilt with
+    /// the profile list and whenever the dialog opens.
+    tunnel_session_picker: combo_box::State<TunnelSessionOption>,
+    /// The picker's search text, mirrored from its `on_input` so the popup
+    /// can be sized to the options iced shows. iced keeps the text across
+    /// focus changes and clears it on a selection or a state rebuild; so
+    /// does this.
+    tunnel_session_search: String,
+    /// A restored layout still needs its one-time Filer side-dock widening;
+    /// done on the first real `WindowResized`, when the width is known.
+    pending_file_panel_fit: bool,
 }
 
-const FILES_PANELS: [dock::Panel; 3] = [
-    dock::Panel::Filer,
-    dock::Panel::Explorer,
-    dock::Panel::Transfer,
-];
+const FILES_PANELS: [dock::Panel; 2] = [dock::Panel::Filer, dock::Panel::Transfer];
 
 impl App {
     fn save_ui_state(&mut self) {
@@ -4252,6 +4656,7 @@ impl App {
         let state = ui_state::UiState {
             theme: theme::current().as_str().to_string(),
             docks: Some(self.docks.clone()),
+            external_editor: self.external_editor.clone(),
         };
         if let Err(error) = ui_state::save(path, &state) {
             self.status = format!("Could not save UI layout: {error}");
@@ -4314,6 +4719,10 @@ impl App {
                 None => message.clone(),
             });
         }
+        // Older builds could leave Filer in a 214/420 px side dock; it is
+        // widened once the real window width arrives (`WindowResized`).
+        let (docks, pending_file_panel_fit) =
+            dock::DockLayout::restore(saved_ui.docks.take(), &available_panels());
         Self {
             tools,
             profiles_path,
@@ -4338,13 +4747,7 @@ impl App {
             open_menu: None,
             dock_drag: None,
             window_size: iced::Size::new(1280.0, 800.0),
-            docks: {
-                let mut docks = saved_ui.docks.take().unwrap_or_default();
-                docks.sanitize();
-                docks.retain_available(&available_panels());
-                docks.add_missing(&available_panels());
-                docks
-            },
+            docks,
             ui_state_path,
             dock_menu: None,
             privacy_locked: false,
@@ -4395,7 +4798,25 @@ impl App {
             auto_start,
             #[cfg(test)]
             auto_start_fake: None,
+            external_edits: Vec::new(),
+            next_external_edit_id: 1,
+            external_edit_tick_scheduled: false,
+            external_editor: std::mem::take(&mut saved_ui.external_editor),
+            tunnel_session_picker: combo_box::State::new(Vec::new()),
+            tunnel_session_search: String::new(),
+            pending_file_panel_fit,
         }
+        .with_tunnel_session_picker()
+    }
+
+    fn with_tunnel_session_picker(mut self) -> Self {
+        self.rebuild_tunnel_session_picker();
+        self
+    }
+
+    fn rebuild_tunnel_session_picker(&mut self) {
+        self.tunnel_session_picker = combo_box::State::new(tunnel_session_options(&self.profiles));
+        self.tunnel_session_search.clear();
     }
 
     /// `boot` plus the one start-up auto-start pass, scheduled as a task so
@@ -4556,6 +4977,7 @@ impl App {
         self.selected_profile = None;
         self.selected_profile_key = None;
         self.session_click = None;
+        self.rebuild_tunnel_session_picker();
     }
 
     fn new_terminal_pane(&mut self, profile: Session) -> TerminalPane {
@@ -4563,6 +4985,17 @@ impl App {
     }
 
     fn new_terminal_pane_kind(&mut self, profile: Session, sftp: bool) -> TerminalPane {
+        self.new_terminal_pane_with(profile, sftp, false)
+    }
+
+    /// Build a pane and start it at once when the pty bridge exists, so
+    /// `suppress_forwards` is fixed before the connection is built.
+    fn new_terminal_pane_with(
+        &mut self,
+        profile: Session,
+        sftp: bool,
+        suppress_forwards: bool,
+    ) -> TerminalPane {
         let id = self.next_terminal_id;
         self.next_terminal_id = self.next_terminal_id.saturating_add(1);
 
@@ -4578,10 +5011,12 @@ impl App {
             terminal_grid_size: None,
             cell_size: (TERMINAL_CELL_WIDTH, TERMINAL_CELL_HEIGHT),
             canvas_size: None,
+            grid_mismatch_corrected: None,
             terminal_title: None,
             error: None,
             exited: false,
             refresh_pending: Arc::new(AtomicBool::new(false)),
+            suppress_forwards,
         };
 
         // Iced subscriptions are initialized asynchronously. A fast click on a saved
@@ -4618,10 +5053,11 @@ impl App {
                 }
             });
 
+        let profile = pane.launch_profile();
         let connection = if pane.sftp {
-            terminal::connect_sftp_with_event_sink(pane.id, &pane.profile, config, event_sink)
+            terminal::connect_sftp_with_event_sink(pane.id, &profile, config, event_sink)
         } else {
-            terminal::connect_with_event_sink(pane.id, &pane.profile, config, event_sink)
+            terminal::connect_with_event_sink(pane.id, &profile, config, event_sink)
         };
         match connection {
             Ok(mut terminal) => {
@@ -4948,6 +5384,32 @@ impl App {
                         .effective_for(&session_profile_key(&pane.profile));
                     let snapshot =
                         terminal.display_snapshot(&crate::appearance::terminal_theme(&appearance));
+                    if let Some(mismatch) = grid_mismatch_to_correct(
+                        (snapshot.columns, snapshot.rows),
+                        pane.terminal_grid_size,
+                        pane.grid_mismatch_corrected,
+                    ) {
+                        // The draw loop skips cells past the right inset, so a
+                        // wider backend grid silently loses text at every wrap.
+                        eprintln!(
+                            "terminal {}: backend grid {}x{} differs from canvas grid {}x{}; resending size",
+                            pane.id,
+                            mismatch.backend.0,
+                            mismatch.backend.1,
+                            mismatch.expected.0,
+                            mismatch.expected.1
+                        );
+                        pane.grid_mismatch_corrected = Some(mismatch);
+                        let (columns, lines) = mismatch.expected;
+                        let cell = pane.cell_size;
+                        terminal.process_command(terminal_core::BackendCommand::Resize(
+                            terminal_core::Size::new(
+                                columns as f32 * cell.0,
+                                lines as f32 * cell.1,
+                            ),
+                            terminal_core::Size::new(cell.0, cell.1),
+                        ));
+                    }
                     if pane.display.as_ref() != Some(&snapshot) {
                         pane.display = Some(snapshot);
                         pane.display_generation = pane.display_generation.wrapping_add(1);
@@ -4993,8 +5455,7 @@ impl App {
                     .appearance
                     .effective_for(&session_profile_key(&pane.profile));
                 let cell = terminal_cell_size(&appearance);
-                let columns = ((size.width - 28.0).max(1.0) / cell.0).floor().max(1.0) as u16;
-                let lines = ((size.height - 28.0).max(1.0) / cell.1).floor().max(1.0) as u16;
+                let (columns, lines) = terminal_grid_size(size, cell);
                 pane.canvas_size = Some(size);
                 if pane.terminal_grid_size == Some((columns, lines)) && pane.cell_size == cell {
                     return;
@@ -5012,20 +5473,29 @@ impl App {
         }
     }
 
+    /// Lowest instance number not used by an open tab of `profile`.
+    fn next_tab_instance(&self, profile: &Session) -> u32 {
+        let key = session_profile_key(profile);
+        let used: HashSet<u32> = self
+            .tabs
+            .iter()
+            .filter(|tab| session_profile_key(&tab.profile) == key)
+            .map(|tab| tab.instance)
+            .collect();
+        (1..).find(|instance| !used.contains(instance)).unwrap_or(1)
+    }
+
+    /// Every open creates a new, independent tab and SSH session, even when
+    /// a tab for the same profile is already open.
     fn open(&mut self, index: usize) {
         if let Some(profile) = self.profiles.get(index).cloned() {
-            let key = session_profile_key(&profile);
-            if let Some(existing) = self
-                .tabs
-                .iter()
-                .position(|tab| session_profile_key(&tab.profile) == key)
-            {
-                self.activate_tab(existing);
-            } else {
-                let terminal = self.new_terminal_pane(profile.clone());
-                self.tabs.push(Workspace::new(profile, terminal));
-                self.activate_tab(self.tabs.len() - 1);
-            }
+            let instance = self.next_tab_instance(&profile);
+            // Panes of a 2nd+ tab are plain shells; see `suppress_forwards`.
+            let terminal = self.new_terminal_pane_with(profile.clone(), false, instance > 1);
+            let mut tab = Workspace::new(profile, terminal);
+            tab.instance = instance;
+            self.tabs.push(tab);
+            self.activate_tab(self.tabs.len() - 1);
             self.status = if self.pty_bridge.is_some() {
                 "Session opened.".into()
             } else {
@@ -5084,11 +5554,7 @@ impl App {
             }
         } else if !self.tabs.is_empty() {
             // Filer last so it ends up the active panel of its area.
-            for panel in [
-                dock::Panel::Transfer,
-                dock::Panel::Explorer,
-                dock::Panel::Filer,
-            ] {
+            for panel in [dock::Panel::Transfer, dock::Panel::Filer] {
                 self.docks.show(panel);
             }
         }
@@ -6005,7 +6471,7 @@ impl App {
             Message::MenuCommand(command) => {
                 // The menu is not shown under the privacy curtain or a modal.
                 // A queued Exit must not close the window or replace that modal.
-                if matches!(command, menu::Command::Exit)
+                if matches!(command, menu::Command::Exit | menu::Command::ExternalEditor)
                     && (self.privacy_locked || self.dialog.is_some())
                 {
                     return Task::none();
@@ -6087,11 +6553,13 @@ impl App {
                     C::Tool(panel) => Message::Tool(tools::Action::Open(panel)),
                     C::About => Message::About,
                     C::Exit => Message::Exit,
+                    C::ExternalEditor => return self.open_external_editor_dialog(),
                 };
                 return self.update(message);
             }
             Message::Tunnels => {
                 self.refresh_tunnel_status();
+                self.rebuild_tunnel_session_picker();
                 self.dialog = Some(Dialog::Tunnels);
             }
             Message::TunnelRefresh => {
@@ -6191,6 +6659,7 @@ impl App {
                     return Task::none();
                 }
                 self.tunnel_edit = Some(TunnelEditState {
+                    target_key: key.clone(),
                     profile_key: key,
                     original: None,
                     draft: tunnels::ForwardDraft::default(),
@@ -6216,6 +6685,7 @@ impl App {
                 };
                 let auto_start = tunnels::auto_start_for(profile, kind, &spec);
                 self.tunnel_edit = Some(TunnelEditState {
+                    target_key: key.clone(),
                     profile_key: key,
                     original: Some((kind, spec)),
                     draft: tunnels::ForwardDraft::from_row(&row),
@@ -6302,14 +6772,6 @@ impl App {
                     self.refresh_tunnel_status();
                     return Task::none();
                 }
-                let mut profiles = self.profiles.clone();
-                let Some(profile) = profiles
-                    .iter_mut()
-                    .find(|profile| session_profile_key(profile) == edit.profile_key)
-                else {
-                    self.tunnel_notice = "Profile no longer exists.".into();
-                    return Task::none();
-                };
                 // Re-check against the spec being saved now, so a bind edited
                 // after ticking the box cannot slip through as auto-start.
                 if edit.auto_start
@@ -6318,6 +6780,68 @@ impl App {
                     self.tunnel_notice = reason.into();
                     return Task::none();
                 }
+                let mut profiles = self.profiles.clone();
+                if let Some((old_kind, old_spec)) = &edit.original
+                    && edit.target_key != edit.profile_key
+                {
+                    // Moving a saved forward: one profile-store write removes
+                    // it from the owner and adds it, label kept, to the target.
+                    if let Err(notice) = self.tunnel_move_allowed(&edit, *old_kind, old_spec, &spec)
+                    {
+                        self.tunnel_notice = notice.into();
+                        self.refresh_tunnel_status();
+                        return Task::none();
+                    }
+                    let source = profiles
+                        .iter()
+                        .position(|profile| session_profile_key(profile) == edit.profile_key);
+                    let target = profiles
+                        .iter()
+                        .position(|profile| session_profile_key(profile) == edit.target_key);
+                    let (Some(source), Some(target)) = (source, target) else {
+                        self.tunnel_notice = "Profile no longer exists.".into();
+                        return Task::none();
+                    };
+                    let target_name = profiles[target].name.clone();
+                    let result =
+                        tunnels::remove_forward(&mut profiles[source], *old_kind, old_spec)
+                            .and_then(|_| {
+                                tunnels::add_forward(
+                                    &mut profiles[target],
+                                    edit.draft.kind,
+                                    spec.clone(),
+                                    &edit.draft.label,
+                                )
+                            })
+                            // `remove_forward` drops the source's metadata, so
+                            // the moved row gets its auto-start flag back here.
+                            .and_then(|_| {
+                                tunnels::set_auto_start(
+                                    &mut profiles[target],
+                                    edit.draft.kind,
+                                    &spec,
+                                    edit.auto_start,
+                                )
+                            })
+                            .and_then(|_| save_sessions(&self.profiles_path, &profiles));
+                    if let Err(error) = result {
+                        self.tunnel_notice = format!("Cannot move tunnel: {error:#}");
+                        return Task::none();
+                    }
+                    self.profiles = profiles;
+                    self.refresh_profile_matches();
+                    self.tunnel_edit = None;
+                    self.tunnel_notice = format!("Tunnel moved to {target_name}.");
+                    self.refresh_tunnel_status();
+                    return Task::none();
+                }
+                let Some(profile) = profiles
+                    .iter_mut()
+                    .find(|profile| session_profile_key(profile) == edit.profile_key)
+                else {
+                    self.tunnel_notice = "Profile no longer exists.".into();
+                    return Task::none();
+                };
                 let result = if let Some((old_kind, old_spec)) = &edit.original {
                     tunnels::replace_forward(
                         profile,
@@ -6507,6 +7031,7 @@ impl App {
                         self.remote_editor = None;
                     }
                     self.tabs.remove(index);
+                    self.close_orphaned_external_edits();
                     self.close_find_strip();
                     self.prune_tool_panes();
                     self.prune_free_type();
@@ -7430,10 +7955,18 @@ impl App {
                     .tabs
                     .get(self.active)
                     .and_then(|tab| tab.panes.get(pane_id))
-                    .map(|pane| (pane.profile.clone(), pane.sftp, pane.auxiliary_shell));
+                    .map(|pane| {
+                        (
+                            pane.profile.clone(),
+                            pane.sftp,
+                            pane.auxiliary_shell,
+                            pane.suppress_forwards,
+                        )
+                    });
 
-                if let Some((profile, sftp, auxiliary_shell)) = profile {
-                    let mut replacement = self.new_terminal_pane_kind(profile, sftp);
+                if let Some((profile, sftp, auxiliary_shell, suppress_forwards)) = profile {
+                    let mut replacement =
+                        self.new_terminal_pane_with(profile, sftp, suppress_forwards);
                     replacement.auxiliary_shell = auxiliary_shell;
                     if let Some(previous_id) = self
                         .tabs
@@ -7475,13 +8008,13 @@ impl App {
                 }
                 self.tools.sync.set_armed(false);
                 self.dialog = None;
-                if let Some((profile, sftp)) = self
+                if let Some((profile, sftp, suppress_forwards)) = self
                     .tabs
                     .get(self.active)
                     .and_then(|tab| tab.panes.get(tab.focus))
-                    .map(|p| (p.profile.clone(), p.sftp))
+                    .map(|p| (p.profile.clone(), p.sftp, p.suppress_forwards))
                 {
-                    let terminal = self.new_terminal_pane_kind(profile, sftp);
+                    let terminal = self.new_terminal_pane_with(profile, sftp, suppress_forwards);
                     if let Some(tab) = self.tabs.get_mut(self.active) {
                         tab.split(axis, terminal);
                     }
@@ -7517,8 +8050,10 @@ impl App {
                 // Open an independent authenticated PTY for the same profile.
                 // Never reuse the original pane's terminal backend or input.
                 let profile = tab.profile.clone();
+                // A duplicate tab's shell must not bind the listeners either.
+                let suppress_forwards = tab.instance > 1;
                 self.tools.sync.set_armed(false);
-                let mut shell = self.new_terminal_pane_kind(profile, false);
+                let mut shell = self.new_terminal_pane_with(profile, false, suppress_forwards);
                 shell.auxiliary_shell = true;
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.split(pane_grid::Axis::Vertical, shell);
@@ -7925,7 +8460,9 @@ impl App {
                 let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.move_to(panel, area);
-                self.docks.widen_for_file_panel(panel, area);
+                self.docks
+                    .widen_for_file_panel(panel, area, self.window_size.width);
+                self.docks.fit_to_window(self.window_size.width);
                 if !self.docks.is_visible(dock::Panel::Sender) {
                     self.sender_focused = false;
                 }
@@ -7938,6 +8475,16 @@ impl App {
                 let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.toggle(panel);
+                // Only showing the Filer in a side dock may widen it; other
+                // toggles keep the user's widths unless they no longer fit.
+                if panel == dock::Panel::Filer
+                    && self.docks.is_visible(panel)
+                    && let Some(area) = self.docks.area_of(panel)
+                {
+                    self.docks
+                        .widen_for_file_panel(panel, area, self.window_size.width);
+                }
+                self.docks.fit_to_window(self.window_size.width);
                 if !self.docks.is_visible(dock::Panel::Sender) {
                     self.sender_focused = false;
                 }
@@ -7958,7 +8505,18 @@ impl App {
                     return self.files_became_visible();
                 }
             }
-            Message::WindowResized(size) => self.window_size = size,
+            Message::WindowResized(size) => {
+                self.window_size = size;
+                // A minimised window reports 0x0; fitting to that would
+                // collapse both side docks for good.
+                if size.width >= 1.0 && size.height >= 1.0 {
+                    if std::mem::take(&mut self.pending_file_panel_fit) {
+                        self.docks.fit_file_panel(size.width);
+                    }
+                    // Not saved here: the next layout action saves it.
+                    self.docks.fit_to_window(size.width);
+                }
+            }
             Message::DockDragStart(area) => {
                 self.dock_menu = None;
                 if self.dialog.is_none() {
@@ -7996,6 +8554,8 @@ impl App {
                 });
                 self.docks.retain_available(&available_panels());
                 self.docks.add_missing(&available_panels());
+                self.docks.fit_file_panel(self.window_size.width);
+                self.docks.fit_to_window(self.window_size.width);
                 if !self.docks.is_visible(dock::Panel::Sender) {
                     self.sender_focused = false;
                 }
@@ -8026,6 +8586,7 @@ impl App {
                 self.dock_menu = None;
                 self.context_menu = None;
                 if self.tabs.is_empty() {
+                    self.close_external_edits_for_exit();
                     return iced::exit();
                 }
                 self.dialog = Some(Dialog::Exit);
@@ -8034,6 +8595,7 @@ impl App {
                 if !matches!(self.dialog, Some(Dialog::Exit)) {
                     return Task::none();
                 }
+                self.close_external_edits_for_exit();
                 return iced::exit();
             }
             Message::SelectSession(index) => {
@@ -8194,6 +8756,41 @@ impl App {
                 self.find_focused = focused && self.find_open;
                 if self.find_focused {
                     self.sender_focused = false;
+                }
+            }
+            Message::FilesRequestEditExternal => return self.request_external_edit(),
+            Message::ExternalEditOpened {
+                session,
+                session_key,
+                remote,
+                result,
+            } => return self.external_edit_opened(session, session_key, remote, result),
+            Message::ExternalEditTick => return self.external_edit_tick(),
+            Message::ExternalEditUploaded { id, result } => {
+                self.external_edit_uploaded(id, result);
+            }
+            Message::ExternalEditorInput(value) => self.external_editor_input(value),
+            Message::ExternalEditorSave => return self.save_external_editor_setting(),
+            Message::TunnelSessionSearch(value) => self.tunnel_session_search = value,
+            Message::TunnelDraftSession(option) => {
+                // iced clears its search text on every selection.
+                self.tunnel_session_search.clear();
+                if !self
+                    .profiles
+                    .iter()
+                    .any(|profile| session_profile_key(profile) == option.key)
+                {
+                    self.tunnel_notice = "Profile no longer exists.".into();
+                    return Task::none();
+                }
+                if let Some(edit) = self.tunnel_edit.as_mut() {
+                    // A new draft has no live state yet, so it simply changes
+                    // owner. A saved forward keeps its owner until Save moves it.
+                    if edit.original.is_none() {
+                        edit.profile_key = option.key.clone();
+                    }
+                    edit.target_key = option.key;
+                    self.tunnel_notice.clear();
                 }
             }
         }
@@ -8792,10 +9389,7 @@ impl App {
         for (index, tab) in self.tabs.iter().enumerate() {
             let active = index == self.active;
             let focused_pane = tab.panes.get(tab.focus);
-            let tab_label = focused_pane
-                .and_then(|pane| pane.terminal_title.as_deref())
-                .unwrap_or(&tab.profile.name)
-                .to_owned();
+            let tab_label = tab.label();
             let connected = focused_pane.is_some_and(|pane| {
                 pane.terminal.is_some() && !pane.exited && pane.error.is_none()
             });
@@ -9418,41 +10012,46 @@ impl App {
         .into()
     }
 
-    /// Filer dock panel (spec 5.2): remote path bar, table, actions, editor.
+    /// Filer dock panel (spec 5.2): local listing on the left, remote listing
+    /// on the right, each with its own heading and action row; the inline
+    /// remote editor spans the full width below while it is open.
     fn filer_panel(&self) -> Element<'_, Message> {
         if self.tabs.is_empty() {
             return self.files_unavailable();
         }
-        let (_, remote_panel) = self.file_listing_panels();
-        let actions = files_action_row(vec![
+        let (local_panel, remote_panel) = self.file_listing_panels();
+        let local_actions = files_action_row(vec![
+            action("Upload ->", Message::FilesRequestUpload).into(),
+            action("New local folder", Message::FilesRequestMkdirLocal).into(),
+            action("Rename local", Message::FilesRequestRenameLocal).into(),
+            action("Delete local", Message::FilesRequestDeleteLocal).into(),
+        ]);
+        let remote_actions = files_action_row(vec![
             action("<- Download", Message::FilesRequestDownload).into(),
             action("New remote folder", Message::FilesRequestMkdirRemote).into(),
             action("Rename remote", Message::FilesRequestRenameRemote).into(),
             action("Edit remote", Message::FilesRequestEditRemote).into(),
             action("Delete remote", Message::FilesRequestDeleteRemote).into(),
         ]);
-        column![remote_panel, actions, self.remote_editor_section()]
+        let local_half = column![files_side_heading("Local"), local_panel, local_actions]
+            .width(Length::FillPortion(1))
+            .height(Fill);
+        let remote_half = column![files_side_heading("Remote"), remote_panel, remote_actions]
+            .width(Length::FillPortion(1))
+            .height(Fill);
+        let divider = container(space::horizontal())
+            .width(1)
             .height(Fill)
-            .width(Fill)
-            .into()
-    }
-
-    /// Explorer dock panel: local path bar, table and local actions.
-    fn explorer_panel(&self) -> Element<'_, Message> {
-        if self.tabs.is_empty() {
-            return self.files_unavailable();
-        }
-        let (local_panel, _) = self.file_listing_panels();
-        let actions = files_action_row(vec![
-            action("Upload ->", Message::FilesRequestUpload).into(),
-            action("New local folder", Message::FilesRequestMkdirLocal).into(),
-            action("Rename local", Message::FilesRequestRenameLocal).into(),
-            action("Delete local", Message::FilesRequestDeleteLocal).into(),
-        ]);
-        column![local_panel, actions]
-            .height(Fill)
-            .width(Fill)
-            .into()
+            .style(split_divider_fill);
+        column![
+            row![local_half, divider, remote_half]
+                .width(Fill)
+                .height(Fill),
+            self.remote_editor_section(),
+        ]
+        .height(Fill)
+        .width(Fill)
+        .into()
     }
 
     /// Transfer dock panel (spec 5.3): one block per job with a progress bar.
@@ -9710,6 +10309,43 @@ impl App {
         pending
     }
 
+    /// Extra guards for moving a saved forward to another session, applied
+    /// after the edit guards. The live forward and any aggregate process on
+    /// either side must be stopped, and the target must not already hold the
+    /// same kind and spec.
+    fn tunnel_move_allowed(
+        &mut self,
+        edit: &TunnelEditState,
+        old_kind: tunnels::ForwardKind,
+        old_spec: &str,
+        spec: &str,
+    ) -> Result<(), &'static str> {
+        if self
+            .tunnels
+            .forward_status(&edit.profile_key, old_kind, old_spec)
+            .is_running()
+        {
+            return Err(TUNNEL_MOVE_RUNNING);
+        }
+        if self.tunnels.status(&edit.target_key).is_running() {
+            return Err(TUNNEL_MOVE_TARGET_RUNNING);
+        }
+        let Some(target) = self
+            .profiles
+            .iter()
+            .find(|profile| session_profile_key(profile) == edit.target_key)
+        else {
+            return Err("Profile no longer exists.");
+        };
+        if tunnels::rows_for(target)
+            .iter()
+            .any(|row| row.kind == edit.draft.kind && row.spec == spec)
+        {
+            return Err(TUNNEL_MOVE_DUPLICATE);
+        }
+        Ok(())
+    }
+
     fn refresh_tunnel_status(&mut self) {
         self.tunnel_status.clear();
         for profile in &self.profiles {
@@ -9934,6 +10570,59 @@ impl App {
         .into()
     }
 
+    /// Searchable session picker filling the editor value column. The closed
+    /// field shows the selection truncated to the column; the popup lists
+    /// full paths.
+    fn tunnel_session_picker_view(
+        &self,
+        target_key: &str,
+        field_chars: usize,
+    ) -> Element<'_, Message> {
+        let selected = self
+            .tunnel_session_picker
+            .options()
+            .iter()
+            .find(|option| option.key == target_key)
+            .map(|option| TunnelSessionOption {
+                label: truncate(&option.label, field_chars),
+                key: option.key.clone(),
+            });
+        let picker = combo_box(
+            &self.tunnel_session_picker,
+            TUNNEL_SESSION_PLACEHOLDER,
+            selected.as_ref(),
+            Message::TunnelDraftSession,
+        )
+        .input_style(flat_input)
+        .menu_style(tunnel_session_menu_style)
+        .on_input(Message::TunnelSessionSearch)
+        .size(TUNNEL_SESSION_TEXT_SIZE)
+        .padding(TUNNEL_SESSION_INPUT_PADDING)
+        .width(Fill)
+        .menu_height(tunnel_session_menu_height(tunnel_session_match_count(
+            self.tunnel_session_picker.options(),
+            &self.tunnel_session_search,
+        )));
+        // Dropdown affordance inside the field's right padding. The icon
+        // canvas neither captures events nor reports a mouse interaction, so
+        // the stack passes clicks on it to the input below: clicking the
+        // chevron focuses the input, which opens the list.
+        let chevron = container(icons::icon(
+            icons::Icon::ChevronDown,
+            TUNNEL_SESSION_CHEVRON_SIZE,
+            theme::palette().text,
+        ))
+        .padding(iced::Padding {
+            right: TUNNEL_SESSION_CHEVRON_INSET,
+            ..iced::Padding::ZERO
+        })
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::alignment::Horizontal::Right)
+        .align_y(iced::Center);
+        stack![picker, chevron].width(Fill).into()
+    }
+
     fn tunnels_view(&self) -> Element<'_, Message> {
         let ink = theme::palette().text_dock;
         let selected_key = self
@@ -9990,8 +10679,8 @@ impl App {
             tunnel_list = tunnel_list.push(text(TUNNEL_MENU_EMPTY).size(12).color(muted()));
         }
 
-        // + uses the current owner (or first session); the session buttons
-        // below it let users explicitly choose where a new forward is saved.
+        // + uses the current owner (or first session); the editor's
+        // `Session / profile` picker then chooses where it is saved.
         let add_key = selected_key
             .map(str::to_owned)
             .or_else(|| self.profiles.first().map(session_profile_key));
@@ -10009,27 +10698,10 @@ impl App {
         } else {
             button(text("−"))
         };
-        let mut session_picker = column![
-            text(TUNNEL_SESSION_PICKER_LABEL)
-                .size(11)
-                .color(tunnel_session_picker_label_color(theme::palette()))
-        ]
-        .spacing(3);
-        for profile in &self.profiles {
-            session_picker = session_picker.push(
-                action(
-                    truncate(&profile.name, 32),
-                    Message::TunnelAdd(session_profile_key(profile)),
-                )
-                .width(Fill)
-                .style(quiet),
-            );
-        }
         let list_panel = container(
             column![
                 scrollable(tunnel_list).height(350),
                 row![add.style(quiet), remove.style(quiet)].spacing(4),
-                session_picker,
             ]
             .spacing(8),
         )
@@ -10038,7 +10710,6 @@ impl App {
         .style(card);
 
         let editor: Element<'_, Message> = if let Some(edit) = &self.tunnel_edit {
-            let profile_name = owner.map_or("Session unavailable", |profile| profile.name.as_str());
             let status = self
                 .tunnel_status
                 .get(&edit.profile_key)
@@ -10104,10 +10775,9 @@ impl App {
             let label_width = tunnel_editor_label_width(tunnel_editor_panel_width(
                 tunnel_settings_dialog_width(self.window_size.width),
             ));
-            let field_chars = chars_fitting(
+            let field_chars = tunnel_session_field_chars(
                 tunnel_editor_panel_width(tunnel_settings_dialog_width(self.window_size.width))
                     - label_width,
-                12.0,
             );
             let grid = column![
                 row![
@@ -10122,10 +10792,7 @@ impl App {
                 row![tunnel_editor_label("Type", label_width, ink), kind_row],
                 row![
                     tunnel_editor_label("Session / profile", label_width, ink),
-                    text(truncate(profile_name, field_chars))
-                        .size(12)
-                        .color(ink)
-                        .wrapping(iced::widget::text::Wrapping::None),
+                    self.tunnel_session_picker_view(&edit.target_key, field_chars),
                 ],
                 row![
                     tunnel_editor_label("Listen Port", label_width, ink),
@@ -10311,6 +10978,7 @@ impl App {
             Dialog::Tunnels => TUNNEL_SETTINGS_TITLE,
             Dialog::About => "Inspirum Terminal · Iced",
             Dialog::Exit => "Exit",
+            Dialog::ExternalEditor { .. } => "External Editor",
         };
         let body: Element<'_, Message> = match dialog {
             Dialog::Tools => self.tools_view(),
@@ -10982,6 +11650,32 @@ impl App {
             ]
             .spacing(8)
             .into(),
+            Dialog::ExternalEditor { input, error } => {
+                let mut form = column![
+                    text("Editor command used by Open in External Editor.").color(fg()),
+                    text_input("System default", input)
+                        .style(flat_input)
+                        .id(EXTERNAL_EDITOR_INPUT_ID)
+                        .on_input(Message::ExternalEditorInput)
+                        .on_submit(Message::ExternalEditorSave)
+                        .size(13)
+                        .padding([3, 6]),
+                    text(EXTERNAL_EDITOR_HELP).size(12).color(muted()),
+                ]
+                .spacing(8);
+                if let Some(error) = error {
+                    form = form.push(text(error).size(12).color(fg()));
+                }
+                form.push(
+                    row![
+                        space::horizontal(),
+                        action("Cancel", Message::CloseDialog),
+                        action("Save", Message::ExternalEditorSave).style(primary)
+                    ]
+                    .spacing(8),
+                )
+                .into()
+            }
         };
 
         // Keep form controls inside the scroll rail, not underneath it. The
@@ -11424,6 +12118,10 @@ fn border_fill(_: &Theme) -> container::Style {
     fill_style(theme::palette().border)
 }
 
+fn split_divider_fill(_: &Theme) -> container::Style {
+    fill_style(theme::palette().split_divider())
+}
+
 fn accent_fill(_: &Theme) -> container::Style {
     fill_style(theme::palette().accent)
 }
@@ -11729,6 +12427,19 @@ fn files_path_bar<'a>(
     .into()
 }
 
+/// Small `Local` / `Remote` heading above each half of the Filer panel.
+fn files_side_heading(label: &'static str) -> Element<'static, Message> {
+    container(
+        text(label)
+            .size(12)
+            .color(theme::palette().section_heading())
+            .wrapping(text::Wrapping::None),
+    )
+    .padding([2, 6])
+    .width(Fill)
+    .into()
+}
+
 fn files_action_row(buttons: Vec<Element<'_, Message>>) -> Element<'_, Message> {
     scrollable(
         row(buttons)
@@ -11869,6 +12580,14 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn filer_split_divider_uses_strong_token_not_border() {
+        let style = split_divider_fill(&Theme::Light);
+        let expected = theme::palette().split_divider();
+        assert_eq!(style.background, Some(iced::Background::Color(expected)));
+        assert_ne!(expected, theme::palette().border);
+    }
 
     #[test]
     fn flat_input_uses_control_outline_not_divider_in_both_themes() {
@@ -12094,9 +12813,11 @@ mod tests {
         assert!(!TUNNEL_MENU_EMPTY.contains('+'));
         assert!(TUNNEL_CREATE_HINT.contains("press +"));
         for p in [super::theme::LIGHT, super::theme::DARK] {
-            let label = tunnel_session_picker_label_color(&p);
-            assert_eq!(label, p.text_dock);
-            assert_ne!(label, p.muted);
+            // The session picker popup uses primary ink on the menu surface.
+            let menu = tunnel_session_menu_style_for(&p);
+            assert_eq!(menu.text_color, p.text_dock);
+            assert_ne!(menu.text_color, p.muted);
+            assert_eq!(menu.background, iced::Background::from(p.list));
         }
     }
 
@@ -12149,6 +12870,30 @@ mod tests {
     }
 
     #[test]
+    fn windterm_preset_docks_filer_at_bottom_beside_transfer() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-dock-preset-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.ui_state_path = None;
+        let _ = app.update(Message::DockPreset(true));
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Filer),
+            Some(dock::Area::Bottom)
+        );
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Transfer),
+            Some(dock::Area::Bottom)
+        );
+        assert!(app.docks.left.panels.is_empty());
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Session),
+            Some(dock::Area::Right)
+        );
+    }
+
+    #[test]
     fn dock_splitter_drag_resizes_right_dock() {
         let path = std::env::temp_dir().join(format!(
             "inspirum-iced-dock-drag-{}-nonexistent.json",
@@ -12165,6 +12910,186 @@ mod tests {
         assert!((app.docks.right_width - 500.0).abs() <= 1.0);
         let _ = app.update(Message::DockDragEnd);
         assert_eq!(app.dock_drag, None);
+    }
+
+    /// Layout saved by an older build: Filer alone in a 214 px left dock,
+    /// Session/Outline in a 214 px right dock.
+    const R153_DOCK_OLD_LAYOUT: &str = r#"{
+        "left": {"panels": ["filer"], "active": 0, "collapsed": false},
+        "right": {"panels": ["session", "outline"], "active": 0, "collapsed": false},
+        "bottom": {"panels": ["sender", "transfer", "shell"], "active": 0, "collapsed": false},
+        "hidden": [],
+        "left_width": 214.0,
+        "right_width": 214.0,
+        "bottom_ratio": 0.32
+    }"#;
+
+    fn r153_dock_app(name: &str) -> App {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-r153-dock-{name}-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.ui_state_path = None;
+        app
+    }
+
+    /// Centre workspace width as `dock_body` lays it out: each rendered
+    /// (non-empty) side dock takes its width plus its splitter.
+    fn r153_dock_centre(docks: &dock::DockLayout, window_width: f32) -> f32 {
+        let mut centre = window_width;
+        if !docks.left.panels.is_empty() {
+            centre -= docks.left_width + dock::SPLITTER_GRAB;
+        }
+        if !docks.right.panels.is_empty() {
+            centre -= docks.right_width + dock::SPLITTER_GRAB;
+        }
+        centre
+    }
+
+    #[test]
+    fn r153_dock_restore_then_resize_keeps_centre() {
+        let mut app = r153_dock_app("resize");
+        // What start-up did with a restored layout: fit for a 1280 px window.
+        let mut docks = dock::DockLayout::from_json(R153_DOCK_OLD_LAYOUT);
+        docks.retain_available(&available_panels());
+        docks.add_missing(&available_panels());
+        docks.fit_file_panel(1280.0);
+        app.docks = docks;
+        let _ = app.update(Message::WindowResized(iced::Size::new(1280.0, 800.0)));
+        let centre = r153_dock_centre(&app.docks, 1280.0);
+        assert!(
+            centre >= dock::MIN_CENTRE_WIDTH,
+            "1280: centre {centre} (left {}, right {})",
+            app.docks.left_width,
+            app.docks.right_width
+        );
+        let _ = app.update(Message::WindowResized(iced::Size::new(960.0, 640.0)));
+        let centre = r153_dock_centre(&app.docks, 960.0);
+        assert!(
+            centre >= dock::MIN_CENTRE_WIDTH,
+            "960: centre {centre} (left {}, right {})",
+            app.docks.left_width,
+            app.docks.right_width
+        );
+        assert!(app.docks.left_width >= dock::MIN_SIDE_WIDTH);
+        assert!(app.docks.right_width >= dock::MIN_SIDE_WIDTH);
+    }
+
+    #[test]
+    fn r153_dock_transfer_toggle_keeps_manual_filer_width() {
+        let mut app = r153_dock_app("toggle");
+        let _ = app.update(Message::DockMove(dock::Panel::Filer, dock::Area::Left));
+        let _ = app.update(Message::DockDragStart(dock::Area::Left));
+        let _ = app.update(Message::DockDragMove(iced::Point::new(300.0, 300.0)));
+        let _ = app.update(Message::DockDragEnd);
+        assert!((app.docks.left_width - 300.0).abs() <= 1.0);
+        let _ = app.update(Message::DockToggle(dock::Panel::Transfer));
+        assert!(
+            (app.docks.left_width - 300.0).abs() <= 1.0,
+            "after first Transfer toggle: left {}",
+            app.docks.left_width
+        );
+        let _ = app.update(Message::DockToggle(dock::Panel::Transfer));
+        assert!(
+            (app.docks.left_width - 300.0).abs() <= 1.0,
+            "after second Transfer toggle: left {}",
+            app.docks.left_width
+        );
+    }
+
+    #[test]
+    fn r153_dock_showing_filer_in_side_dock_widens_it() {
+        let mut app = r153_dock_app("show");
+        let _ = app.update(Message::DockMove(dock::Panel::Filer, dock::Area::Left));
+        app.docks
+            .set_width(dock::Area::Left, dock::DEFAULT_SIDE_WIDTH);
+        let _ = app.update(Message::DockToggle(dock::Panel::Filer));
+        assert_eq!(app.docks.area_of(dock::Panel::Filer), None);
+        assert_eq!(app.docks.left_width, dock::DEFAULT_SIDE_WIDTH);
+        let _ = app.update(Message::DockToggle(dock::Panel::Filer));
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Filer),
+            Some(dock::Area::Left)
+        );
+        assert!(app.docks.is_visible(dock::Panel::Filer));
+        assert!(
+            app.docks.left_width >= dock::FILE_PANEL_MIN_WIDTH,
+            "left {}",
+            app.docks.left_width
+        );
+        let centre = r153_dock_centre(&app.docks, app.window_size.width);
+        assert!(centre >= dock::MIN_CENTRE_WIDTH, "centre {centre}");
+    }
+
+    #[test]
+    fn r153_dock_load_fit_waits_for_real_window_width() {
+        let mut app = r153_dock_app("load");
+        let saved = dock::DockLayout::from_json(R153_DOCK_OLD_LAYOUT);
+        (app.docks, app.pending_file_panel_fit) =
+            dock::DockLayout::restore(Some(saved), &available_panels());
+        assert!(app.pending_file_panel_fit);
+        assert_eq!(app.docks.left_width, dock::DEFAULT_SIDE_WIDTH);
+        // A minimised window (0x0) neither consumes the fit nor shrinks.
+        let _ = app.update(Message::WindowResized(iced::Size::new(0.0, 0.0)));
+        assert!(app.pending_file_panel_fit);
+        assert_eq!(app.docks.left_width, dock::DEFAULT_SIDE_WIDTH);
+        let _ = app.update(Message::WindowResized(iced::Size::new(960.0, 640.0)));
+        assert!(!app.pending_file_panel_fit);
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Filer),
+            Some(dock::Area::Left)
+        );
+        // 960 - (214 + 5) - 5 - 320.
+        assert_eq!(app.docks.left_width, 416.0);
+        assert_eq!(app.docks.right_width, dock::DEFAULT_SIDE_WIDTH);
+        assert_eq!(r153_dock_centre(&app.docks, 960.0), dock::MIN_CENTRE_WIDTH);
+        // Later resizes only shrink; a manual width is not re-widened.
+        app.docks.set_width(dock::Area::Left, 300.0);
+        let _ = app.update(Message::WindowResized(iced::Size::new(1280.0, 800.0)));
+        assert_eq!(app.docks.left_width, 300.0);
+    }
+
+    #[test]
+    fn r153_dock_manual_filer_width_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("ui-state.json");
+        let mut app = r153_dock_app("restart1");
+        app.ui_state_path = Some(state_path.clone());
+        let saved = dock::DockLayout::from_json(R153_DOCK_OLD_LAYOUT);
+        (app.docks, app.pending_file_panel_fit) =
+            dock::DockLayout::restore(Some(saved), &available_panels());
+        let _ = app.update(Message::WindowResized(iced::Size::new(1280.0, 800.0)));
+        assert_eq!(app.docks.left_width, 736.0, "old layout widened once");
+        let _ = app.update(Message::DockDragStart(dock::Area::Left));
+        let _ = app.update(Message::DockDragMove(iced::Point::new(300.0, 300.0)));
+        let _ = app.update(Message::DockDragEnd);
+        assert_eq!(app.docks.left_width, 300.0);
+
+        // Restart: same start-up restore from the file this build saved.
+        let mut next = r153_dock_app("restart2");
+        (next.docks, next.pending_file_panel_fit) =
+            dock::DockLayout::restore(ui_state::load(&state_path).docks, &available_panels());
+        assert!(!next.pending_file_panel_fit);
+        let _ = next.update(Message::WindowResized(iced::Size::new(1280.0, 800.0)));
+        assert_eq!(next.docks.left_width, 300.0);
+        assert_eq!(
+            next.docks.area_of(dock::Panel::Filer),
+            Some(dock::Area::Left)
+        );
+    }
+
+    #[test]
+    fn r153_dock_new_side_dock_shrinks_filer_to_fit() {
+        let mut app = r153_dock_app("move");
+        let _ = app.update(Message::DockMove(dock::Panel::Filer, dock::Area::Left));
+        assert_eq!(app.docks.left_width, dock::FILE_PANEL_MIN_WIDTH);
+        // Showing Session in the right dock adds a 214 px dock + splitter.
+        let _ = app.update(Message::DockMove(dock::Panel::Session, dock::Area::Right));
+        let width = app.window_size.width;
+        assert_eq!(r153_dock_centre(&app.docks, width), dock::MIN_CENTRE_WIDTH);
+        assert_eq!(app.docks.right_width, dock::DEFAULT_SIDE_WIDTH);
+        assert_eq!(app.docks.left_width, width - 219.0 - 5.0 - 320.0);
     }
 
     #[test]
@@ -12876,6 +13801,510 @@ mod tests {
     }
 
     #[test]
+    fn terminal_canvas_never_shows_a_hand_cursor() {
+        use iced::widget::canvas::Program;
+        let snapshot = terminal_core::DisplaySnapshot {
+            rows: 24,
+            columns: 80,
+            background: [0, 0, 0],
+            row_ranges: vec![(0, 0); 24],
+            cells: Vec::new(),
+        };
+        let (_panes, pane) = pane_grid::State::new(0_u8);
+        let plain = TerminalCanvas {
+            focused: true,
+            remote_key_mode: false,
+            pane,
+            id: 7,
+            generation: 0,
+            terminal_mode: terminal_core::TerminalMode::empty(),
+            snapshot: &snapshot,
+            appearance: crate::appearance::TerminalAppearance::default(),
+        };
+        let bounds = iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(200.0, 200.0));
+        let inside = mouse::Cursor::Available(iced::Point::new(50.0, 50.0));
+        let idle = TerminalCanvasState::default();
+        assert_eq!(
+            plain.mouse_interaction(&idle, bounds, inside),
+            mouse::Interaction::Text
+        );
+        let selecting = TerminalCanvasState {
+            selecting: true,
+            ..TerminalCanvasState::default()
+        };
+        assert_eq!(
+            plain.mouse_interaction(&selecting, bounds, inside),
+            mouse::Interaction::Text
+        );
+        let remote = TerminalCanvas {
+            terminal_mode: terminal_core::TerminalMode::MOUSE_MODE,
+            ..plain
+        };
+        let shown = remote.mouse_interaction(&idle, bounds, inside);
+        assert_eq!(shown, mouse::Interaction::default());
+        assert!(!matches!(
+            shown,
+            mouse::Interaction::Pointer | mouse::Interaction::Grabbing | mouse::Interaction::Grab
+        ));
+    }
+
+    #[test]
+    fn terminal_text_inset_aligns_pointer_cells_and_grid_size() {
+        let snapshot = terminal_core::DisplaySnapshot {
+            rows: 24,
+            columns: 80,
+            background: [0, 0, 0],
+            row_ranges: vec![(0, 0); 24],
+            cells: Vec::new(),
+        };
+        let (_panes, pane) = pane_grid::State::new(0_u8);
+        let canvas = TerminalCanvas {
+            focused: true,
+            remote_key_mode: false,
+            pane,
+            id: 7,
+            generation: 0,
+            terminal_mode: terminal_core::TerminalMode::empty(),
+            snapshot: &snapshot,
+            appearance: crate::appearance::TerminalAppearance::default(),
+        };
+        let (width, height) = canvas.cell_size();
+        let origin = iced::Point::new(TERMINAL_TEXT_INSET.x, TERMINAL_TEXT_INSET.y);
+        assert_eq!(canvas.cell_at(terminal_text_point(origin)), (0, 0));
+        // The inset band itself clamps to the first cell.
+        assert_eq!(
+            canvas.cell_at(terminal_text_point(iced::Point::ORIGIN)),
+            (0, 0)
+        );
+        let second = iced::Point::new(
+            TERMINAL_TEXT_INSET.x + width + 0.5,
+            TERMINAL_TEXT_INSET.y + height + 0.5,
+        );
+        assert_eq!(canvas.cell_at(terminal_text_point(second)), (1, 1));
+
+        let size = iced::Size::new(
+            2.0 * TERMINAL_TEXT_INSET.x + 80.0 * width + 0.5,
+            2.0 * TERMINAL_TEXT_INSET.y + 24.0 * height + 0.5,
+        );
+        assert_eq!(terminal_grid_size(size, (width, height)), (80, 24));
+        let short = iced::Size::new(size.width - 1.0, size.height - 1.0);
+        assert_eq!(terminal_grid_size(short, (width, height)), (79, 23));
+    }
+
+    /// `resize_terminal` sends `columns * cell.0` with the real cell width
+    /// (8.4 px at the default 14 pt font). The backend must derive exactly
+    /// that many columns, or the PTY wraps lines past the drawn canvas.
+    #[test]
+    fn backend_grid_matches_gui_grid_for_fractional_cell_width() {
+        let appearance = crate::appearance::TerminalAppearance::default();
+        let cell = terminal_cell_size(&appearance);
+        let (columns, lines) = terminal_grid_size(iced::Size::new(1307.0, 470.0), cell);
+        let size = terminal_core::TerminalSize::for_layout(
+            terminal_core::Size::new(columns as f32 * cell.0, lines as f32 * cell.1),
+            terminal_core::Size::new(cell.0, cell.1),
+        )
+        .expect("grid");
+        assert_eq!((size.num_cols(), size.num_lines()), (columns, lines));
+    }
+
+    #[test]
+    fn backend_grid_matches_gui_grid_for_every_font_size() {
+        let mut wrong = Vec::new();
+        for tenth in 60..=360 {
+            let font_size = tenth as f32 / 10.0;
+            let cell = (font_size * 0.6, font_size * (18.0 / 14.0));
+            for columns in [1u16, 2, 73, 80, 149, 153, 154, 200, 333, 500] {
+                let got = terminal_core::TerminalSize::for_layout(
+                    terminal_core::Size::new(columns as f32 * cell.0, 24.0 * cell.1),
+                    terminal_core::Size::new(cell.0, cell.1),
+                )
+                .map(|size| (size.num_cols(), size.num_lines()));
+                if got != Some((columns, 24)) {
+                    wrong.push((font_size, columns, got));
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} mismatches, first: {:?}",
+            wrong.len(),
+            &wrong[..wrong.len().min(4)]
+        );
+    }
+
+    #[test]
+    fn grid_mismatch_is_corrected_once_per_distinct_disagreement() {
+        assert_eq!(
+            grid_mismatch_to_correct((153, 25), Some((153, 25)), None),
+            None
+        );
+        assert_eq!(grid_mismatch_to_correct((160, 25), None, None), None);
+        let first = grid_mismatch_to_correct((160, 25), Some((153, 25)), None);
+        assert_eq!(
+            first,
+            Some(GridMismatch {
+                backend: (160, 25),
+                expected: (153, 25)
+            })
+        );
+        // Same disagreement on the next frame: no second resend (no loop).
+        assert_eq!(
+            grid_mismatch_to_correct((160, 25), Some((153, 25)), first),
+            None
+        );
+        // The canvas changed since: the new disagreement is corrected again.
+        assert!(grid_mismatch_to_correct((160, 25), Some((120, 25)), first).is_some());
+    }
+
+    /// A pointer over drawn column 100 selects column 100 in the backend.
+    #[test]
+    fn backend_selection_column_uses_fractional_cell_width() {
+        let size = terminal_core::TerminalSize::for_layout(
+            terminal_core::Size::new(153.0 * 8.4, 25.0 * 18.0),
+            terminal_core::Size::new(8.4, 18.0),
+        )
+        .expect("grid");
+        let point =
+            terminal_core::TerminalBackend::selection_point(100.5 * 8.4, 2.5 * 18.0, &size, 0);
+        assert_eq!((point.line.0, point.column.0), (2, 100));
+    }
+
+    const DRAG_CELL_W: f32 = 8.4;
+    const DRAG_CELL_H: f32 = 18.0;
+
+    fn drag_test_size() -> terminal_core::TerminalSize {
+        terminal_core::TerminalSize::for_layout(
+            terminal_core::Size::new(160.0 * DRAG_CELL_W, 4.0 * DRAG_CELL_H),
+            terminal_core::Size::new(DRAG_CELL_W, DRAG_CELL_H),
+        )
+        .expect("grid")
+    }
+
+    /// Text-area x of `fraction` of the way into `column` with the default
+    /// 8.4 px cell, and y in the middle of `row`.
+    fn drag_xy(column: usize, fraction: f32, row: usize) -> (f32, f32) {
+        (
+            (column as f32 + fraction) * DRAG_CELL_W,
+            (row as f32 + 0.5) * DRAG_CELL_H,
+        )
+    }
+
+    fn drag_line_with_word(column: usize, word: &str) -> String {
+        format!("{}{word} tail", "x".repeat(column))
+    }
+
+    #[test]
+    fn drag_selection_starts_at_the_pressed_cell_for_every_press_offset() {
+        let size = drag_test_size();
+        let mut failures = Vec::new();
+        for column in [0usize, 23, 61, 140] {
+            let line = drag_line_with_word(column, "highlight");
+            for press_fraction in [0.1f32, 0.5, 0.6, 0.95] {
+                for (end_offset, end_fraction, expected) in [
+                    (8usize, 0.3f32, "highlight"),
+                    (8, 0.9, "highlight"),
+                    (3, 0.2, "high"),
+                    (1, 0.05, "hi"),
+                ] {
+                    let probe = terminal_core::probe_drag_selection(
+                        &size,
+                        &[&line],
+                        drag_xy(column, press_fraction, 0),
+                        &[drag_xy(column + end_offset, end_fraction, 0)],
+                    );
+                    let first = probe.selected.first().copied();
+                    let last = probe.selected.last().copied();
+                    if probe.text != expected
+                        || first != Some((0, column))
+                        || last != Some((0, column + end_offset))
+                    {
+                        failures.push(format!(
+                            "col {column} press {press_fraction} -> +{end_offset}@{end_fraction}: \
+                             text {:?} cells {first:?}..{last:?}",
+                            probe.text
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} cases:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn drag_selection_right_to_left_includes_press_and_pointer_cells() {
+        let size = drag_test_size();
+        let mut failures = Vec::new();
+        for column in [0usize, 23, 61, 140] {
+            let line = drag_line_with_word(column, "highlight");
+            for press_fraction in [0.1f32, 0.5, 0.6, 0.95] {
+                for end_fraction in [0.05f32, 0.6, 0.95] {
+                    let probe = terminal_core::probe_drag_selection(
+                        &size,
+                        &[&line],
+                        drag_xy(column + 8, press_fraction, 0),
+                        &[drag_xy(column, end_fraction, 0)],
+                    );
+                    if probe.text != "highlight"
+                        || probe.selected.first() != Some(&(0, column))
+                        || probe.selected.last() != Some(&(0, column + 8))
+                    {
+                        failures.push(format!(
+                            "col {column} press {press_fraction} end {end_fraction}: text {:?}",
+                            probe.text
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} cases:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn drag_selection_across_lines_includes_both_end_cells() {
+        let size = drag_test_size();
+        let lines = ["xxhighlight", "abcdef"];
+        let probe = terminal_core::probe_drag_selection(
+            &size,
+            &lines,
+            drag_xy(2, 0.9, 0),
+            &[drag_xy(3, 0.1, 1)],
+        );
+        assert_eq!(probe.text, "highlight\nabcd");
+        assert_eq!(probe.selected.first(), Some(&(0, 2)));
+        assert_eq!(probe.selected.last(), Some(&(1, 3)));
+        let back = terminal_core::probe_drag_selection(
+            &size,
+            &lines,
+            drag_xy(3, 0.1, 1),
+            &[drag_xy(2, 0.9, 0)],
+        );
+        assert_eq!(back.text, "highlight\nabcd");
+    }
+
+    fn drag_test_size_3_rows() -> terminal_core::TerminalSize {
+        terminal_core::TerminalSize::for_layout(
+            terminal_core::Size::new(160.0 * DRAG_CELL_W, 3.0 * DRAG_CELL_H),
+            terminal_core::Size::new(DRAG_CELL_W, DRAG_CELL_H),
+        )
+        .expect("grid")
+    }
+
+    const SCROLL_LINES: [&str; 3] = ["aaaa", "bbbb", "cccc"];
+
+    #[test]
+    fn drag_selection_follows_text_scrolled_by_output() {
+        use terminal_core::DragProbeStep::{Feed, Move};
+        let size = drag_test_size_3_rows();
+        let (x1, y1) = drag_xy(1, 0.5, 1);
+        let (x2, y2) = drag_xy(2, 0.5, 0);
+        // `\r\ndddd` scrolls the content up one row: the `b`s move to row 0.
+        let probe = terminal_core::probe_drag_selection_steps(
+            &size,
+            &SCROLL_LINES,
+            drag_xy(0, 0.5, 1),
+            &[Move(x1, y1), Feed("\r\ndddd"), Move(x2, y2)],
+        );
+        assert_eq!(probe.text, "bbb");
+        assert_eq!(probe.selected, vec![(0, 0), (0, 1), (0, 2)]);
+    }
+
+    #[test]
+    fn backward_drag_selection_follows_text_scrolled_by_output() {
+        use terminal_core::DragProbeStep::{Feed, Move};
+        let size = drag_test_size_3_rows();
+        let (x1, y1) = drag_xy(1, 0.5, 1);
+        let (x0, y0) = drag_xy(0, 0.5, 0);
+        let probe = terminal_core::probe_drag_selection_steps(
+            &size,
+            &SCROLL_LINES,
+            drag_xy(2, 0.5, 1),
+            &[Move(x1, y1), Feed("\r\ndddd"), Move(x0, y0)],
+        );
+        assert_eq!(probe.text, "bbb");
+        assert_eq!(probe.selected, vec![(0, 0), (0, 1), (0, 2)]);
+    }
+
+    #[test]
+    fn unmoved_press_anchor_follows_text_scrolled_by_output() {
+        use terminal_core::DragProbeStep::{Feed, Move};
+        let size = drag_test_size_3_rows();
+        let (x3, y3) = drag_xy(3, 0.5, 0);
+        let probe = terminal_core::probe_drag_selection_steps(
+            &size,
+            &SCROLL_LINES,
+            drag_xy(1, 0.5, 1),
+            &[Feed("\r\ndddd"), Move(x3, y3)],
+        );
+        assert_eq!(probe.text, "bbb");
+        assert_eq!(probe.selected, vec![(0, 1), (0, 2), (0, 3)]);
+    }
+
+    #[test]
+    fn drag_selection_dropped_by_alternate_screen_output_stays_empty() {
+        use terminal_core::DragProbeStep::{Feed, Move};
+        let size = drag_test_size_3_rows();
+        let (x1, y1) = drag_xy(1, 0.5, 1);
+        let (x3, y3) = drag_xy(3, 0.5, 0);
+        // The alternate screen has no history to scroll the pressed line
+        // into, and Alacritty drops the selection on the switch; the drag
+        // must not resurrect it from the stale press cell.
+        let probe = terminal_core::probe_drag_selection_steps(
+            &size,
+            &SCROLL_LINES,
+            drag_xy(0, 0.5, 1),
+            &[
+                Move(x1, y1),
+                Feed("\x1b[?1049hdddd\r\neeee\r\nffff\r\ngggg"),
+                Move(x3, y3),
+            ],
+        );
+        assert_eq!(probe.text, "");
+        assert!(probe.selected.is_empty());
+    }
+
+    #[test]
+    fn plain_click_selects_nothing_and_small_horizontal_drag_selects_one_cell() {
+        let size = drag_test_size();
+        let line = drag_line_with_word(23, "highlight");
+        // Column 23 spans x 193.2..201.6; `h` is the pressed character. Every
+        // x below is exact in f32 and stays inside column 23.
+        let row_y = 0.5 * DRAG_CELL_H;
+        let probe = |press_x: f32, moves: &[(f32, f32)]| {
+            terminal_core::probe_drag_selection(&size, &[&line], (press_x, row_y), moves)
+        };
+        // Jitter below 3 px, either way, and pure vertical movement inside
+        // the cell: nothing selected, nothing copied.
+        for offset in [0.0f32, 1.0, -1.0, 2.9, -2.9] {
+            let jitter = probe(197.0, &[(197.0 + offset, row_y)]);
+            assert_eq!(jitter.text, "", "jitter {offset}");
+            assert!(jitter.selected.is_empty(), "jitter {offset}");
+        }
+        let vertical = probe(
+            197.0,
+            &[(197.0, 0.1 * DRAG_CELL_H), (197.0, 0.9 * DRAG_CELL_H)],
+        );
+        assert_eq!(vertical.text, "");
+        assert!(vertical.selected.is_empty());
+        // 3 px or more, right or left, still inside the cell: exactly the
+        // pressed character.
+        for (press_x, end_x) in [
+            (197.0f32, 200.0f32),
+            (197.0, 194.0),
+            (194.0, 200.0),
+            (200.5, 194.5),
+        ] {
+            let one = probe(press_x, &[(end_x, row_y)]);
+            assert_eq!(one.text, "h", "press {press_x} -> {end_x}");
+            assert_eq!(one.selected, vec![(0, 23)], "press {press_x} -> {end_x}");
+        }
+        // Coming back within 2 px of the press x clears it again.
+        for back_x in [197.0f32, 198.5, 195.5] {
+            let cleared = probe(197.0, &[(200.5, row_y), (back_x, row_y)]);
+            assert_eq!(cleared.text, "", "back to {back_x}");
+            assert!(cleared.selected.is_empty(), "back to {back_x}");
+        }
+        // Leaving the cell and coming back near the press x clears the
+        // highlight; coming back 3 px or more away keeps the one cell.
+        let back = probe(197.0, &[(drag_xy(26, 0.5, 0).0, row_y), (197.5, row_y)]);
+        assert_eq!(back.text, "");
+        assert!(back.selected.is_empty());
+        let back_far = probe(197.0, &[(drag_xy(26, 0.5, 0).0, row_y), (200.5, row_y)]);
+        assert_eq!(back_far.text, "h");
+        assert_eq!(back_far.selected, vec![(0, 23)]);
+        // A wide glyph: `日` covers columns 2-3 (x 16.8..33.6), pressed on
+        // either half, selects the whole glyph and copies it.
+        let wide = "ab日本cd";
+        for (press_x, end_x) in [(20.0f32, 23.0f32), (23.0, 20.0), (30.0, 26.0), (20.0, 30.0)] {
+            let none = terminal_core::probe_drag_selection(
+                &size,
+                &[wide],
+                (press_x, row_y),
+                &[(press_x + 1.0, row_y)],
+            );
+            assert_eq!(none.text, "", "wide jitter at {press_x}");
+            let glyph = terminal_core::probe_drag_selection(
+                &size,
+                &[wide],
+                (press_x, row_y),
+                &[(end_x, row_y)],
+            );
+            assert_eq!(glyph.text, "日", "wide press {press_x} -> {end_x}");
+            assert_eq!(
+                glyph.selected,
+                vec![(0, 2)],
+                "wide press {press_x} -> {end_x}"
+            );
+        }
+    }
+
+    #[test]
+    fn drag_selection_includes_whole_wide_glyphs() {
+        let size = drag_test_size();
+        // `日` covers columns 2-3 and `本` 4-5; `c` is column 6.
+        let line = "ab日本cd";
+        for press_column in [2usize, 3] {
+            let probe = terminal_core::probe_drag_selection(
+                &size,
+                &[line],
+                drag_xy(press_column, 0.7, 0),
+                &[drag_xy(6, 0.1, 0)],
+            );
+            assert_eq!(probe.text, "日本c", "press column {press_column}");
+            assert_eq!(probe.selected, vec![(0, 2), (0, 4), (0, 6)]);
+        }
+        for end_column in [4usize, 5] {
+            let probe = terminal_core::probe_drag_selection(
+                &size,
+                &[line],
+                drag_xy(1, 0.9, 0),
+                &[drag_xy(end_column, 0.1, 0)],
+            );
+            assert_eq!(probe.text, "b日本", "end column {end_column}");
+            assert_eq!(probe.selected, vec![(0, 1), (0, 2), (0, 4)]);
+        }
+        let back = terminal_core::probe_drag_selection(
+            &size,
+            &[line],
+            drag_xy(6, 0.2, 0),
+            &[drag_xy(5, 0.9, 0)],
+        );
+        assert_eq!(back.text, "本c");
+        assert_eq!(back.selected, vec![(0, 4), (0, 6)]);
+    }
+
+    #[test]
+    fn drag_selection_press_at_text_inset_is_column_zero() {
+        let size = drag_test_size();
+        let line = "highlight tail";
+        let row_y = TERMINAL_TEXT_INSET.y + 0.5 * DRAG_CELL_H;
+        let end = terminal_text_point(iced::Point::new(
+            TERMINAL_TEXT_INSET.x + 3.2 * DRAG_CELL_W,
+            row_y,
+        ));
+        for press_x in [TERMINAL_TEXT_INSET.x, TERMINAL_TEXT_INSET.x + 0.5, 3.0, 0.0] {
+            let press = terminal_text_point(iced::Point::new(press_x, row_y));
+            let probe = terminal_core::probe_drag_selection(
+                &size,
+                &[line],
+                (press.x, press.y),
+                &[(end.x, end.y)],
+            );
+            assert_eq!(probe.text, "high", "canvas press x {press_x}");
+            assert_eq!(probe.selected.first(), Some(&(0, 0)));
+        }
+    }
+
+    #[test]
     fn unix_mode_strings_match_ls() {
         assert_eq!(unix_mode_string('-', 0o644), "-rw-r--r--");
         assert_eq!(unix_mode_string('d', 0o755), "drwxr-xr-x");
@@ -13264,7 +14693,6 @@ mod tests {
                 dock::Panel::Session,
                 dock::Panel::Transfer,
                 dock::Panel::Filer,
-                dock::Panel::Explorer,
             ]
         );
         assert!(app.docks.is_visible(dock::Panel::Session));
@@ -13359,7 +14787,7 @@ mod tests {
             app.docks.is_visible(dock::Panel::Filer),
             "Filer opens last, active"
         );
-        assert!(app.docks.area_of(dock::Panel::Explorer).is_some());
+        assert_eq!(app.docks.area_of(dock::Panel::Explorer), None);
         assert!(app.docks.area_of(dock::Panel::Transfer).is_some());
         app.docks.move_to(dock::Panel::Filer, dock::Area::Right);
         assert_eq!(
@@ -13377,6 +14805,55 @@ mod tests {
         for panel in FILES_PANELS {
             assert_eq!(app.docks.area_of(panel), None);
         }
+    }
+
+    #[test]
+    fn merged_filer_panel_body_and_files_open() {
+        use iced::advanced::widget::Tree;
+
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-merged-filer-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.ui_state_path = None;
+        assert!(!available_panels().contains(&dock::Panel::Explorer));
+        {
+            // No tab: the "Open a session" placeholder, not the halves
+            // column. iced's Container is transparent in the widget tree
+            // (iced_widget 0.14.2 container.rs `children()` forwards to its
+            // content), so the placeholder text yields no child trees.
+            assert!(app.tabs.is_empty());
+            let body = app.dock_panel_body(dock::Panel::Filer);
+            assert!(Tree::new(&body).children.is_empty());
+        }
+        let profile = Session {
+            host: "example.invalid".into(),
+            name: "merged filer fixture".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        app.tabs.push(Workspace::new(profile, pane));
+        {
+            // Tab open, no remote editor: column [halves row]; the row holds
+            // local half, divider, remote half. The closed editor section is
+            // void, and iced's Column::push drops void children (iced_widget
+            // 0.14.2 column.rs:147), so it adds no child tree.
+            assert!(app.remote_editor.is_none());
+            let body = app.dock_panel_body(dock::Panel::Filer);
+            let tree = Tree::new(&body);
+            assert_eq!(tree.children.len(), 1);
+            assert_eq!(tree.children[0].children.len(), 3);
+        }
+
+        // Only Filer visible (Transfer closed): files are open.
+        app.docks.close(dock::Panel::Transfer);
+        app.docks.activate(dock::Panel::Filer);
+        assert!(app.docks.is_visible(dock::Panel::Filer));
+        assert!(!app.docks.is_visible(dock::Panel::Transfer));
+        assert!(app.files_open());
+        let _ = app.update(Message::DockActivate(dock::Panel::Session));
+        assert!(!app.files_open());
     }
 
     #[test]
@@ -13861,6 +15338,30 @@ mod tests {
             terminal_key_bytes(&key, none, None, terminal_core::TerminalMode::empty(),),
             None
         );
+    }
+
+    #[test]
+    fn tab_label_keeps_profile_name_after_remote_title() {
+        let profiles_path = std::env::temp_dir().join(format!(
+            "inspirum-iced-tab-title-{}-missing.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(profiles_path, None);
+        let profile = Session {
+            name: "prod web".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        let id = pane.id;
+        app.tabs.push(Workspace::new(profile, pane));
+        let long = format!("user@host:/{}", "very/long/directory/".repeat(20));
+        let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::Title(long)));
+        let (_, pane) = app.tabs[0].panes.iter().next().unwrap();
+        assert!(pane.terminal_title.is_some());
+        assert_eq!(app.tabs[0].label(), "prod web");
+        let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::ResetTitle));
+        assert_eq!(app.tabs[0].label(), "prod web");
     }
 
     #[test]
@@ -14891,8 +16392,365 @@ mod tests {
         assert_eq!(
             app.tabs.len(),
             1,
-            "a follow-up click must not open a second tab"
+            "a lone follow-up click must not open a second tab"
         );
+    }
+
+    #[test]
+    fn session_double_click_on_open_profile_opens_a_new_numbered_tab() {
+        let mut app = session_click_app();
+        let _ = app.update(Message::SelectSession(1));
+        let _ = app.update(Message::SelectSession(1));
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs[0].label(), "beta");
+
+        // A second double-click on the already-open profile opens a new tab.
+        let _ = app.update(Message::SelectSession(1));
+        let _ = app.update(Message::SelectSession(1));
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active, 1, "the new tab is active");
+        assert_eq!(app.tabs[0].label(), "beta");
+        assert_eq!(app.tabs[1].label(), "beta (2)");
+        assert_ne!(app.tabs[0].id, app.tabs[1].id);
+        let first_pane = app.tabs[0].panes.get(app.tabs[0].focus).map(|pane| pane.id);
+        let second_pane = app.tabs[1].panes.get(app.tabs[1].focus).map(|pane| pane.id);
+        assert!(first_pane.is_some() && second_pane.is_some());
+        assert_ne!(first_pane, second_pane, "each tab has its own SSH pane");
+    }
+
+    #[test]
+    fn duplicate_tab_number_is_stable_and_lowest_free_is_reused() {
+        let mut app = session_click_app();
+        app.open(0);
+        app.open(0);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs[1].label(), "alpha (2)");
+
+        let _ = app.update(Message::ConfirmClose(0));
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(
+            app.tabs[0].label(),
+            "alpha (2)",
+            "closing tab 1 must not renumber the remaining tab"
+        );
+
+        // Lowest free number among open tabs of the profile.
+        app.open(0);
+        assert_eq!(app.tabs[1].label(), "alpha");
+        app.open(0);
+        assert_eq!(app.tabs[2].label(), "alpha (3)");
+        // Another profile numbers independently.
+        app.open(1);
+        assert_eq!(app.tabs[3].label(), "beta");
+    }
+
+    #[test]
+    fn duplicate_tab_does_not_rebind_saved_forwards() {
+        let mut app = session_click_app();
+        app.profiles[0].ssh.local_forwards = vec!["8080:localhost:80".into()];
+        app.open(0);
+        app.open(0);
+        let forwards = |tab: &Workspace| {
+            tab.panes
+                .get(tab.focus)
+                .map(|pane| pane.launch_profile().ssh.local_forwards.len())
+        };
+        assert_eq!(forwards(&app.tabs[0]), Some(1));
+        assert_eq!(forwards(&app.tabs[1]), Some(0));
+        // Tab state still carries the saved profile.
+        assert_eq!(app.tabs[1].profile.ssh.local_forwards.len(), 1);
+    }
+
+    fn forwards_profile_app() -> App {
+        let mut app = session_click_app();
+        app.profiles[0].ssh.local_forwards = vec!["8080:localhost:80".into()];
+        app.profiles[0].ssh.remote_forwards = vec!["9090:localhost:90".into()];
+        app.profiles[0].ssh.dynamic_forwards = vec!["1080".into()];
+        app
+    }
+
+    fn has_forwards(profile: &Session) -> bool {
+        !profile.ssh.local_forwards.is_empty()
+            && !profile.ssh.remote_forwards.is_empty()
+            && !profile.ssh.dynamic_forwards.is_empty()
+    }
+
+    fn has_no_forwards(profile: &Session) -> bool {
+        profile.ssh.local_forwards.is_empty()
+            && profile.ssh.remote_forwards.is_empty()
+            && profile.ssh.dynamic_forwards.is_empty()
+    }
+
+    #[test]
+    fn duplicate_tab_pane_keeps_canonical_profile_and_strips_only_launch() {
+        let mut app = forwards_profile_app();
+        app.open(0);
+        app.open(0);
+        let first = app.tabs[0].panes.get(app.tabs[0].focus).unwrap();
+        assert!(!first.suppress_forwards);
+        assert!(has_forwards(&first.profile));
+        assert!(has_forwards(&first.launch_profile()));
+        let second = app.tabs[1].panes.get(app.tabs[1].focus).unwrap();
+        assert!(second.suppress_forwards);
+        assert!(has_forwards(&second.profile));
+        assert_eq!(second.profile, app.profiles[0]);
+        assert!(has_no_forwards(&second.launch_profile()));
+        // Only the forwards differ from the saved profile.
+        let mut expected = app.profiles[0].clone();
+        expected.ssh.local_forwards.clear();
+        expected.ssh.remote_forwards.clear();
+        expected.ssh.dynamic_forwards.clear();
+        assert_eq!(second.launch_profile(), expected);
+    }
+
+    #[test]
+    fn duplicate_tab_saved_workspace_restores_forwards_as_first_tab() {
+        let mut app = forwards_profile_app();
+        app.open(0);
+        app.open(0);
+        assert_eq!(app.tabs[1].instance, 2);
+        let layout = app.workspace_layout_of(&app.tabs[1]);
+        assert_eq!(layout.panes.len(), 1);
+        assert!(layout.panes.iter().all(has_forwards));
+        let json = serde_json::to_string(&layout).unwrap();
+        assert!(json.contains("8080:localhost:80"));
+        assert!(json.contains("9090:localhost:90"));
+
+        while !app.tabs.is_empty() {
+            let _ = app.update(Message::ConfirmClose(0));
+        }
+        let mut layout = layout;
+        layout.reconnect_on_restore = true;
+        app.tools.workspace = Some(layout);
+        let _ = app.update(Message::Tool(tools::Action::RestoreWorkspace));
+
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs[0].instance, 1);
+        assert!(has_forwards(&app.tabs[0].profile));
+        let pane = app.tabs[0].panes.get(app.tabs[0].focus).unwrap();
+        assert!(!pane.suppress_forwards);
+        assert!(has_forwards(&pane.profile));
+        assert!(has_forwards(&pane.launch_profile()));
+    }
+
+    #[test]
+    fn restoring_layout_beside_first_tab_suppresses_but_keeps_full_profile() {
+        let mut app = forwards_profile_app();
+        app.open(0);
+        let mut layout = app.workspace_layout_of(&app.tabs[0]);
+        layout.reconnect_on_restore = true;
+        app.tools.workspace = Some(layout);
+        let _ = app.update(Message::Tool(tools::Action::RestoreWorkspace));
+
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs[1].instance, 2);
+        assert!(has_forwards(&app.tabs[1].profile));
+        for (_, pane) in app.tabs[1].panes.iter() {
+            assert!(pane.suppress_forwards);
+            assert!(has_forwards(&pane.profile));
+            assert!(has_no_forwards(&pane.launch_profile()));
+        }
+        // Saving the restored duplicate again still persists the forwards.
+        let resaved = app.workspace_layout_of(&app.tabs[1]);
+        assert!(resaved.panes.iter().all(has_forwards));
+    }
+
+    #[test]
+    fn split_reconnect_and_shell_in_duplicate_tab_keep_forwards_suppressed() {
+        let mut app = forwards_profile_app();
+        app.open(0);
+        app.open(0);
+        assert_eq!(app.active, 1);
+        let _ = app.update(Message::Split(pane_grid::Axis::Vertical));
+        let _ = app.update(Message::ToggleAuxiliaryShell);
+        assert_eq!(app.tabs[1].panes.len(), 3);
+        let focus = app.tabs[1].focus;
+        let _ = app.update(Message::Reconnect(focus));
+        assert_eq!(app.tabs[1].panes.len(), 3);
+        for (_, pane) in app.tabs[1].panes.iter() {
+            assert!(pane.suppress_forwards);
+            assert!(has_forwards(&pane.profile));
+            assert!(has_no_forwards(&pane.launch_profile()));
+        }
+
+        // The first tab keeps today's behaviour: forwards on every new pane.
+        app.activate_tab(0);
+        let _ = app.update(Message::Split(pane_grid::Axis::Vertical));
+        let focus = app.tabs[0].focus;
+        let _ = app.update(Message::Reconnect(focus));
+        assert_eq!(app.tabs[0].panes.len(), 2);
+        for (_, pane) in app.tabs[0].panes.iter() {
+            assert!(!pane.suppress_forwards);
+            assert!(has_forwards(&pane.launch_profile()));
+        }
+    }
+
+    #[test]
+    fn external_editor_menu_item_is_offered_for_remote_files_only() {
+        assert!(remote_context_labels(false).contains(&"Open in External Editor"));
+        assert!(!remote_context_labels(true).contains(&"Open in External Editor"));
+        let file_menu = FileContextMenu {
+            side: FileContextSide::Remote,
+            is_dir: false,
+            open_path: "/srv/item".into(),
+            local_path: None,
+            anchor: iced::Point::ORIGIN,
+        };
+        assert!(matches!(
+            file_context_action_message(&file_menu, FileContextAction::OpenExternal),
+            Some(Message::FilesRequestEditExternal)
+        ));
+        let dir_menu = FileContextMenu {
+            is_dir: true,
+            ..file_menu
+        };
+        assert!(file_context_action_message(&dir_menu, FileContextAction::OpenExternal).is_none());
+    }
+
+    #[test]
+    fn stale_external_edit_open_result_for_a_closed_tab_is_dropped() {
+        let mut app = session_click_app();
+        let closed = Session {
+            name: "closed".into(),
+            host: "closed.example.invalid".into(),
+            ..Session::default()
+        };
+        let _ = app.update(Message::ExternalEditOpened {
+            session_key: session_profile_key(&closed),
+            session: closed,
+            remote: "/srv/notes.txt".into(),
+            result: Err("never reached".into()),
+        });
+        assert!(app.external_edits.is_empty());
+        assert!(app.status.contains("its SSH session was closed"));
+        // A tick with nothing open must not reschedule itself.
+        let _ = app.update(Message::ExternalEditTick);
+        assert!(!app.external_edit_tick_scheduled);
+    }
+
+    /// Register a real (network-free) external edit for `session` holding
+    /// `content`; returns the working copy and its private root directory.
+    fn push_test_external_edit(
+        app: &mut App,
+        session: &Session,
+        content: &[u8],
+    ) -> (u64, PathBuf, PathBuf) {
+        let edit = external_edit::ExternalEdit::for_test("/srv/notes.txt", content).unwrap();
+        let working_path = edit.working_path().to_owned();
+        // `<private root>/edit/<file>`.
+        let root = working_path
+            .parent()
+            .and_then(std::path::Path::parent)
+            .unwrap()
+            .to_owned();
+        let id = app.next_external_edit_id;
+        app.next_external_edit_id += 1;
+        app.external_edits.push(ExternalEditState {
+            id,
+            session: session.clone(),
+            session_key: session_profile_key(session),
+            remote: "/srv/notes.txt".into(),
+            working_path: working_path.clone(),
+            handle: ExternalEditHandle(Arc::new(Mutex::new(edit))),
+            uploading: false,
+            unsaved: false,
+        });
+        (id, working_path, root)
+    }
+
+    #[test]
+    fn closing_last_tab_right_after_a_save_keeps_the_external_edit_copy() {
+        let mut app = session_click_app();
+        app.open(0);
+        let session = app.tabs[0].profile.clone();
+        let (_, working, root) = push_test_external_edit(&mut app, &session, b"v1");
+        // Saved in the editor; no tick has run, so `unsaved` is still false.
+        std::fs::write(&working, b"v2 saved").unwrap();
+
+        let _ = app.update(Message::ConfirmClose(0));
+        assert!(app.tabs.is_empty());
+        assert!(working.is_file(), "the just-saved copy must not be deleted");
+        assert_eq!(std::fs::read(&working).unwrap(), b"v2 saved");
+        assert_eq!(app.external_edits.len(), 1);
+        assert!(app.external_edits[0].unsaved);
+        assert!(app.status.contains(&working.display().to_string()));
+        assert!(app.status.contains("was not uploaded"));
+
+        // A later orphan sweep (e.g. another tab closing) keeps it too.
+        app.close_orphaned_external_edits();
+        assert_eq!(app.external_edits.len(), 1);
+        assert!(working.is_file());
+
+        app.external_edits.clear();
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn exit_right_after_a_save_leaks_the_external_edit_copy() {
+        let mut app = session_click_app();
+        let session = app.profiles[0].clone();
+        let (_, working, root) = push_test_external_edit(&mut app, &session, b"v1");
+        let (_, _, clean_root) = push_test_external_edit(&mut app, &session, b"clean");
+        std::fs::write(&working, b"v2 saved").unwrap();
+
+        // No tabs: Exit closes external edits immediately, no tick first.
+        assert!(app.tabs.is_empty());
+        let _ = app.update(Message::Exit);
+        assert!(app.external_edits.is_empty());
+        assert!(working.is_file(), "the just-saved copy must survive exit");
+        assert_eq!(std::fs::read(&working).unwrap(), b"v2 saved");
+        assert!(
+            !clean_root.exists(),
+            "a synced copy is still removed on exit"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn closing_last_tab_removes_an_unmodified_external_edit_copy() {
+        let mut app = session_click_app();
+        app.open(0);
+        let session = app.tabs[0].profile.clone();
+        let (_, working, root) = push_test_external_edit(&mut app, &session, b"v1");
+        assert!(working.is_file());
+
+        let _ = app.update(Message::ConfirmClose(0));
+        assert!(app.tabs.is_empty());
+        assert!(app.external_edits.is_empty());
+        assert!(!root.exists(), "a synced copy is cleaned up");
+    }
+
+    #[test]
+    fn save_during_in_flight_upload_survives_close_and_exit() {
+        let mut app = session_click_app();
+        app.open(0);
+        let session = app.tabs[0].profile.clone();
+        let (id, working, root) = push_test_external_edit(&mut app, &session, b"v1");
+        // An upload of the first save is running when the tab closes.
+        app.external_edits[0].uploading = true;
+        let _ = app.update(Message::ConfirmClose(0));
+        assert!(app.tabs.is_empty());
+        assert_eq!(app.external_edits.len(), 1, "kept while uploading");
+
+        // Saved again meanwhile: the disk now differs from what the upload
+        // sent (the test edit's synced bytes stay "v1").
+        std::fs::write(&working, b"v3 saved during upload").unwrap();
+        let _ = app.update(Message::ExternalEditUploaded {
+            id,
+            result: Ok(external_edit::UploadOutcome::Uploaded),
+        });
+        assert_eq!(app.external_edits.len(), 1, "newer save must be kept");
+        assert!(app.external_edits[0].unsaved);
+        assert!(working.is_file());
+        assert!(app.status.contains(&working.display().to_string()));
+
+        let _ = app.update(Message::Exit);
+        assert!(app.external_edits.is_empty());
+        assert!(working.is_file(), "exit leaks the kept copy");
+        assert_eq!(std::fs::read(&working).unwrap(), b"v3 saved during upload");
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     fn remote_context_labels(is_dir: bool) -> Vec<&'static str> {
@@ -14936,6 +16794,7 @@ mod tests {
             vec![
                 "Download",
                 "Edit",
+                "Open in External Editor",
                 "New Folder",
                 "Rename",
                 "Delete",
@@ -15189,6 +17048,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn context_menu_labels_fit_on_one_line_in_the_menu_width() {
+        let width = context_menu_width();
+        assert!(width >= FILE_CONTEXT_MENU_MIN_WIDTH);
+        let mut variants = vec![
+            remote_context_labels(false),
+            remote_context_labels(true),
+            local_context_labels(false),
+            local_context_labels(true),
+        ];
+        variants.push(
+            session_context_entries()
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect(),
+        );
+        for labels in &variants {
+            for label in labels {
+                let needed = context_menu_label_width(label) + 2.0 * FILE_CONTEXT_ITEM_PAD_X;
+                assert!(
+                    needed <= width,
+                    "{label:?} needs {needed} px but the menu is {width} px"
+                );
+            }
+            // One fixed-height row per item, plus the 1px border padding.
+            let size = context_menu_popup_size(labels.len());
+            assert_eq!(
+                size.height,
+                labels.len() as f32 * FILE_CONTEXT_ITEM_HEIGHT + 2.0
+            );
+            assert_eq!(size.width, width + 2.0);
+        }
+        // The old fixed 200 px column wrapped this label.
+        let external =
+            context_menu_label_width("Open in External Editor") + 2.0 * FILE_CONTEXT_ITEM_PAD_X;
+        assert!(external > 200.0, "{external}");
+
+        // Opened at the right edge, the wider menu still stays inside.
+        let window = iced::Size::new(1280.0, 800.0);
+        let menu = context_menu_popup_size(variants[0].len());
+        let right = clamp_context_menu_anchor(iced::Point::new(1275.0, 300.0), window, menu);
+        assert!(right.x + menu.width <= window.width - 2.0);
+    }
+
     fn local_context_labels(is_dir: bool) -> Vec<&'static str> {
         file_context_entries(&FileContextMenu {
             side: FileContextSide::Local,
@@ -15270,6 +17173,7 @@ mod tests {
             vec![
                 "Download",
                 "Edit",
+                "Open in External Editor",
                 "New Folder",
                 "Rename",
                 "Delete",
@@ -16043,6 +17947,54 @@ mod tunnel_layout_tests {
         assert!(field > 250.0, "value col {field}px");
         for value in ["CI tunnel fixture", "Alpha forward", "127.0.0.1", "Running"] {
             assert!(value.chars().count() <= chars_fitting(field - 12.0, 13.0));
+        }
+    }
+
+    #[test]
+    fn session_picker_popup_shrinks_to_matching_options() {
+        // 13 px text at iced's default 1.3 line height plus 3 + 3 padding.
+        let row = tunnel_session_menu_row_height();
+        assert!((row - 22.9).abs() < 1e-4, "{row}");
+        let option = |label: &str| TunnelSessionOption {
+            label: label.into(),
+            key: label.into(),
+        };
+        let options: Vec<_> = ["CI tunnel fixture", "Prod / DB / pg-primary", "Prod / web"]
+            .into_iter()
+            .map(option)
+            .collect();
+        assert_eq!(tunnel_session_match_count(&options, ""), 3);
+        assert_eq!(tunnel_session_match_count(&options, "tunnel"), 1);
+        assert_eq!(tunnel_session_match_count(&options, "PROD db"), 1);
+        assert_eq!(tunnel_session_match_count(&options, "prod"), 2);
+        assert_eq!(tunnel_session_match_count(&options, "zzz"), 0);
+        assert!((tunnel_session_menu_height(1) - row).abs() < 1e-4);
+        assert!((tunnel_session_menu_height(3) - 3.0 * row).abs() < 1e-4);
+        // Eleven rows (251.9 px) hit the cap; the list scrolls from there.
+        assert!(tunnel_session_menu_height(10) < TUNNEL_SESSION_MENU_HEIGHT);
+        assert_eq!(tunnel_session_menu_height(11), TUNNEL_SESSION_MENU_HEIGHT);
+        assert_eq!(tunnel_session_menu_height(500), TUNNEL_SESSION_MENU_HEIGHT);
+        // No match: iced opens no popup, and no height is reserved.
+        assert_eq!(tunnel_session_menu_height(0), 0.0);
+    }
+
+    #[test]
+    fn session_picker_chevron_keeps_row_height_and_value_budget() {
+        // Same vertical padding as the plain text inputs: row height unchanged.
+        assert_eq!(TUNNEL_SESSION_INPUT_PADDING.top, 3.0);
+        assert_eq!(TUNNEL_SESSION_INPUT_PADDING.bottom, 3.0);
+        assert_eq!(TUNNEL_SESSION_INPUT_PADDING.left, 6.0);
+        for window in [960.0, 1280.0] {
+            let panel = tunnel_editor_panel_width(tunnel_settings_dialog_width(window));
+            let field = panel - tunnel_editor_label_width(panel);
+            let chars = tunnel_session_field_chars(field);
+            assert!(chars < chars_fitting(field, 12.0), "chevron reserve taken");
+            let name = "CI tunnel fixture";
+            assert_eq!(truncate(name, chars), name, "{field}px field");
+            // Text area left of the chevron still clears the minimum field.
+            let text_area =
+                field - TUNNEL_SESSION_INPUT_PADDING.left - TUNNEL_SESSION_INPUT_PADDING.right;
+            assert!(text_area >= TUNNEL_EDITOR_MIN_FIELD - 40.0, "{text_area}px");
         }
     }
 

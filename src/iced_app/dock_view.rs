@@ -8,15 +8,10 @@ use iced::widget::{column, row};
 
 const GEAR_MENU_WIDTH: f32 = 200.0;
 
-/// Panels that have a body in this stage. Later stages add Filer, Shell, ...
+/// Panels that have a body in this stage. The legacy `Explorer` panel is
+/// merged into `Filer` (local left, remote right) and never offered.
 pub(super) fn available_panels() -> Vec<dock::Panel> {
-    vec![
-        Panel::Sender,
-        Panel::Session,
-        Panel::Transfer,
-        Panel::Filer,
-        Panel::Explorer,
-    ]
+    vec![Panel::Sender, Panel::Session, Panel::Transfer, Panel::Filer]
 }
 
 fn split_portions(ratio: f32) -> (u16, u16) {
@@ -126,10 +121,10 @@ impl App {
         match panel {
             Panel::Session => self.sidebar(),
             Panel::Filer => self.filer_panel(),
-            Panel::Explorer => self.explorer_panel(),
             Panel::Transfer => self.transfer_panel(),
             Panel::Sender => self.sender_panel(),
-            Panel::Outline | Panel::Shell => column![].into(),
+            // Explorer is a legacy saved-layout value; sanitize() migrates it.
+            Panel::Outline | Panel::Shell | Panel::Explorer => column![].into(),
         }
     }
 

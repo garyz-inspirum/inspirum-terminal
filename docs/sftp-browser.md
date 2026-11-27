@@ -10,7 +10,14 @@ The graphical workflow uses OpenSSH batch commands for machine-readable operatio
 
 ## Browsing and remote operations
 
-Remote directories are shown in the **Filer** dock panel and local directories in the **Explorer** dock panel; the transfer queue is the **Transfer** panel. By default all three are tabs in the bottom dock. Each panel's gear menu moves it to the Left, Right or Bottom dock area; there are no Dock right / Dock bottom buttons. Double-click folders to enter them, or use Up and Refresh. Remote operations include:
+Local and remote directories are shown side by side in one **Filer** dock panel; the transfer queue is the **Transfer** panel. By default both are tabs in the bottom dock. Each panel's gear menu moves it to the Left, Right or Bottom dock area; there are no Dock right / Dock bottom buttons.
+
+The Filer has two halves separated by a 1 px line:
+
+- **Local** (left): path bar, file table, then `Upload ->`, `New local folder`, `Rename local` and `Delete local`.
+- **Remote** (right, the active session): path bar, file table, then `<- Download`, `New remote folder`, `Rename remote`, `Edit remote` and `Delete remote`.
+
+When the panel is narrow, each table scrolls horizontally. The remote text editor opens below both halves at full width. Moving the Filer to the Left or Right dock widens that dock to 760 px, or less when the window leaves no room (the centre workspace keeps at least 320 px). Double-click folders to enter them, or use Up and Refresh in each path bar. Right-clicking a row opens a context menu (Open, Upload or Download, Edit, Open in External Editor, New Folder, Rename, Delete, Refresh); items that do not apply to that row are left out. Remote operations include:
 
 - create directory;
 - rename the selected entry;
@@ -92,6 +99,8 @@ The editor never executes the edited file and never launches it as a local proce
 
 ## WindTerm-style Files pane
 
-Since the WindTerm layout rebuild (issue #140) the graphical SFTP surface is split into dock panels: **Filer** (remote files of the active session), **Explorer** (local files) and **Transfer** (queue). They can be shown or hidden from the View menu and moved between the Left, Right and Bottom dock areas with each panel's gear menu (Move to Left, Move to Right, Move to Bottom, Close). Dock areas are resized with their splitters. The `Window > Layout: Bottom tabs` preset (default) places them as bottom tabs; `Window > Layout: WindTerm default` places Filer and Explorer in the left dock and Transfer in the bottom dock.
+Since the WindTerm layout rebuild (issue #140) the graphical SFTP surface is two dock panels: **Filer** (local files on the left, remote files of the active session on the right) and **Transfer** (queue). They can be shown or hidden from the View menu (`Filer`, `Transfer`, or `Files` (Ctrl+Shift+O) for both) and moved between the Left, Right and Bottom dock areas with each panel's gear menu (Move to Left, Move to Right, Move to Bottom, Close). Dock areas are resized with their splitters. The `Window > Layout: Bottom tabs` preset (default) places them as bottom tabs; `Window > Layout: WindTerm default` places Filer and Transfer in the bottom dock (Filer's local and remote halves need about 760 px, more than a side dock beside Session can spare at the 960 px minimum window). A Filer left in a narrow side dock by an older saved layout is widened on load with the same rule as Move to Left/Right.
+
+There is no separate Explorer panel any more: on 2026-11-26 the local file browser was merged into the Filer at the owner's request. A layout saved by an older build that names Explorer still loads. Explorer is removed, and the Filer takes its slot when Explorer was the tab on show or the layout had no Filer.
 
 File tables use the columns Name, Date Modified, Type, Size, Permissions, Owner and Group. The layout is described in [the WindTerm UI specification](design/windterm-ui-spec.md); its implementation status is in section 11 there.

@@ -77,6 +77,8 @@ impl Menu {
                 Entry::Separator,
                 item("Command Palette", "", Palette),
                 item("Snippets", "", Tool(Panel::Snippets)),
+                Entry::Separator,
+                item("External Editor...", "", ExternalEditor),
             ],
             Menu::View => vec![
                 item("Theme: Light", "", ThemeLight),
@@ -91,7 +93,6 @@ impl Menu {
                 item("Sender", "", TogglePanel(DockPanel::Sender)),
                 item("Transfer", "", TogglePanel(DockPanel::Transfer)),
                 item("Filer", "", TogglePanel(DockPanel::Filer)),
-                item("Explorer", "", TogglePanel(DockPanel::Explorer)),
                 item("Shell", "", ToggleShell),
             ],
             Menu::Mode => vec![
@@ -172,6 +173,7 @@ pub(super) enum Command {
     LayoutBottomTabs,
     LayoutWindTerm,
     Exit,
+    ExternalEditor,
 }
 
 #[cfg(test)]
