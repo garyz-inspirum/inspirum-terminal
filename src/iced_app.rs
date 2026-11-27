@@ -1379,14 +1379,19 @@ fn display_leaf(value: &str) -> String {
         .collect()
 }
 
-const FILE_COL_NAME: f32 = 290.0;
-const FILE_COL_TIME: f32 = 168.0;
+/// Name takes what the visible half leaves after Size and Date Modified,
+/// within this range; below the minimum the table scrolls horizontally.
+const FILE_COL_NAME_MIN: f32 = 180.0;
+const FILE_COL_NAME_MAX: f32 = 420.0;
 const FILE_COL_TYPE: f32 = 132.0;
-const FILE_COL_SIZE: f32 = 76.0;
 const FILE_COL_PERMS: f32 = 106.0;
 const FILE_COL_OWNER: f32 = 62.0;
 const FILE_COL_GROUP: f32 = 80.0;
 const FILE_CELL_PAD: u16 = 6;
+/// Longest Date Modified value (local and remote formatters).
+const FILE_TIME_SAMPLE: &str = "2026/11/26 08:10:44";
+/// Longest [`windterm_size`] value: under 1 KB it prints whole bytes.
+const FILE_SIZE_SAMPLE: &str = "1023 Bytes";
 
 struct FileListingCells {
     name: String,
@@ -1399,23 +1404,66 @@ struct FileListingCells {
     group: String,
 }
 
-fn file_listing_columns() -> [(&'static str, f32, bool); 7] {
+/// Monospace cell width for `sample`: the ~0.62 em glyph estimate used for
+/// menu labels, rounded up, plus the cell's left and right padding.
+fn file_text_column_width(sample: &str) -> f32 {
+    (sample.chars().count() as f32 * theme::metrics::UI_TEXT * 0.62).ceil()
+        + 2.0 * f32::from(FILE_CELL_PAD)
+}
+
+fn file_col_time() -> f32 {
+    file_text_column_width(FILE_TIME_SAMPLE)
+}
+
+fn file_col_size() -> f32 {
+    file_text_column_width(FILE_SIZE_SAMPLE)
+}
+
+/// Name width for a half `view_width` px wide: the space left after Size
+/// and Date Modified and the three 1 px dividers, clamped.
+fn file_col_name(view_width: f32) -> f32 {
+    (view_width - file_col_size() - file_col_time() - 3.0)
+        .clamp(FILE_COL_NAME_MIN, FILE_COL_NAME_MAX)
+}
+
+/// Column identity, header label, content width (excluding the 1 px
+/// divider) and right alignment, in display order. Header and rows both
+/// read this; sorting is keyed by the [`FileSortColumn`], not the position.
+fn file_listing_columns(view_width: f32) -> [(FileSortColumn, &'static str, f32, bool); 7] {
     [
-        ("Name", FILE_COL_NAME, false),
-        ("Date Modified", FILE_COL_TIME, false),
-        ("Type", FILE_COL_TYPE, false),
-        ("Size", FILE_COL_SIZE, true),
-        ("Permissions", FILE_COL_PERMS, false),
-        ("Owner", FILE_COL_OWNER, false),
-        ("Group", FILE_COL_GROUP, false),
+        (
+            FileSortColumn::Name,
+            "Name",
+            file_col_name(view_width),
+            false,
+        ),
+        (FileSortColumn::Size, "Size", file_col_size(), true),
+        (
+            FileSortColumn::DateModified,
+            "Date Modified",
+            file_col_time(),
+            false,
+        ),
+        (FileSortColumn::Type, "Type", FILE_COL_TYPE, false),
+        (
+            FileSortColumn::Permissions,
+            "Permissions",
+            FILE_COL_PERMS,
+            false,
+        ),
+        (FileSortColumn::Owner, "Owner", FILE_COL_OWNER, false),
+        (FileSortColumn::Group, "Group", FILE_COL_GROUP, false),
     ]
 }
 
-fn file_listing_table_width() -> f32 {
-    file_listing_columns()
+/// Table width for a half `view_width` px wide: every column plus its
+/// divider, or the whole half if that is wider (the last column fills).
+fn file_listing_table_width(view_width: f32) -> f32 {
+    file_listing_columns(view_width)
         .iter()
-        .map(|(_, width, _)| width + 1.0)
-        .sum()
+        .map(|(_, _, width, _)| width + 1.0)
+        .sum::<f32>()
+        .max(view_width)
 }
 
 fn file_cell<'a>(value: String, width: impl Into<Length>, right: bool) -> Element<'a, Message> {
@@ -1438,18 +1486,16 @@ fn file_cell<'a>(value: String, width: impl Into<Length>, right: bool) -> Elemen
 }
 
 fn file_listing_header<'a>(
-    table_width: f32,
+    view_width: f32,
     remote: bool,
     sort_column: FileSortColumn,
     ascending: bool,
 ) -> Element<'a, Message> {
+    let table_width = file_listing_table_width(view_width);
     let mut header = row![];
-    let columns = file_listing_columns();
+    let columns = file_listing_columns(view_width);
     let last = columns.len() - 1;
-    debug_assert_eq!(columns.len(), FileSortColumn::COLUMNS.len());
-    for (index, ((label, width, right), column)) in
-        columns.into_iter().zip(FileSortColumn::COLUMNS).enumerate()
-    {
+    for (index, (column, label, width, right)) in columns.into_iter().enumerate() {
         let width = if index == last {
             Length::Fill
         } else {
@@ -1558,7 +1604,7 @@ fn file_header_button(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-/// Column a Filer or Explorer table is ordered by. Header order matches
+/// Column a Filer or Explorer table is ordered by. Display order is
 /// [`file_listing_columns`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FileSortColumn {
@@ -1569,18 +1615,6 @@ enum FileSortColumn {
     Permissions,
     Owner,
     Group,
-}
-
-impl FileSortColumn {
-    const COLUMNS: [Self; 7] = [
-        Self::Name,
-        Self::DateModified,
-        Self::Type,
-        Self::Size,
-        Self::Permissions,
-        Self::Owner,
-        Self::Group,
-    ];
 }
 
 /// A new column starts ascending; clicking the active column reverses it.
@@ -1903,7 +1937,7 @@ fn file_listing_row<'a>(
     cells: FileListingCells,
     message: Message,
     selected: bool,
-    table_width: f32,
+    view_width: f32,
     on_right_press: Option<Message>,
 ) -> Element<'a, Message> {
     let (glyph, color) = if cells.is_dir {
@@ -1927,22 +1961,54 @@ fn file_listing_row<'a>(
     ]
     .spacing(6)
     .align_y(iced::Center);
-    let name = container(name)
-        .width(FILE_COL_NAME + 1.0)
-        .height(Fill)
-        .padding([0, FILE_CELL_PAD])
-        .align_y(iced::Center)
-        .clip(true);
-    let content = row![
-        name,
-        file_cell(cells.modified, FILE_COL_TIME + 1.0, false),
-        file_cell(cells.kind, FILE_COL_TYPE + 1.0, false),
-        file_cell(cells.size, FILE_COL_SIZE + 1.0, true),
-        file_cell(cells.permissions, FILE_COL_PERMS + 1.0, false),
-        file_cell(cells.owner, FILE_COL_OWNER + 1.0, false),
-        file_cell(cells.group, Length::Fill, false),
-    ]
-    .height(theme::metrics::ROW_HEIGHT);
+    let mut name = Some(name);
+    let mut values = [
+        Some(cells.size),
+        Some(cells.modified),
+        Some(cells.kind),
+        Some(cells.permissions),
+        Some(cells.owner),
+        Some(cells.group),
+    ];
+    let table_width = file_listing_table_width(view_width);
+    let columns = file_listing_columns(view_width);
+    let last = columns.len() - 1;
+    let mut content = row![].height(theme::metrics::ROW_HEIGHT);
+    for (index, (column, _, width, right)) in columns.into_iter().enumerate() {
+        // Same widths as the header: content plus its 1 px divider; the
+        // last column fills the rest of the row.
+        let width = if index == last {
+            Length::Fill
+        } else {
+            Length::Fixed(width + 1.0)
+        };
+        let slot = match column {
+            FileSortColumn::Name => None,
+            FileSortColumn::Size => Some(0),
+            FileSortColumn::DateModified => Some(1),
+            FileSortColumn::Type => Some(2),
+            FileSortColumn::Permissions => Some(3),
+            FileSortColumn::Owner => Some(4),
+            FileSortColumn::Group => Some(5),
+        };
+        let cell: Option<Element<'a, Message>> = match slot {
+            None => name.take().map(|name| {
+                container(name)
+                    .width(width)
+                    .height(Fill)
+                    .padding([0, FILE_CELL_PAD])
+                    .align_y(iced::Center)
+                    .clip(true)
+                    .into()
+            }),
+            Some(slot) => values[slot]
+                .take()
+                .map(|value| file_cell(value, width, right)),
+        };
+        if let Some(cell) = cell {
+            content = content.push(cell);
+        }
+    }
     let row = button(content)
         .on_press(message)
         .padding(0)
@@ -9434,9 +9500,9 @@ impl App {
     /// Local and remote file tables laid out `table_width` wide.
     ///
     /// Walks the cached display order and takes the visible page. Does not sort.
-    fn file_lists(&self, table_width: f32) -> (Column<'_, Message>, Column<'_, Message>) {
+    fn file_lists(&self, view_width: f32) -> (Column<'_, Message>, Column<'_, Message>) {
         let mut local_list = column![file_listing_header(
-            table_width,
+            view_width,
             false,
             self.local_file_sort,
             self.local_file_sort_ascending,
@@ -9481,7 +9547,7 @@ impl App {
                     cells,
                     activate,
                     selected,
-                    table_width,
+                    view_width,
                     Some(Message::OpenLocalFileContext {
                         path: entry.path.clone(),
                         is_dir: entry.is_dir,
@@ -9504,7 +9570,7 @@ impl App {
         }
 
         let mut remote_list = column![file_listing_header(
-            table_width,
+            view_width,
             true,
             self.remote_file_sort,
             self.remote_file_sort_ascending,
@@ -9554,7 +9620,7 @@ impl App {
                     cells,
                     activate,
                     selected,
-                    table_width,
+                    view_width,
                     Some(Message::OpenRemoteFileContext {
                         entry: entry.clone(),
                         open_path,
@@ -9617,15 +9683,12 @@ impl App {
             ),
             responsive(move |size| {
                 container(
-                    scrollable(
-                        self.file_lists(size.width.max(file_listing_table_width()))
-                            .0,
-                    )
-                    .direction(scrollable::Direction::Both {
-                        vertical: scrollable::Scrollbar::default(),
-                        horizontal: scrollable::Scrollbar::default(),
-                    })
-                    .height(Fill),
+                    scrollable(self.file_lists(size.width).0)
+                        .direction(scrollable::Direction::Both {
+                            vertical: scrollable::Scrollbar::default(),
+                            horizontal: scrollable::Scrollbar::default(),
+                        })
+                        .height(Fill),
                 )
                 .width(Fill)
                 .height(Fill)
@@ -9650,15 +9713,12 @@ impl App {
             ),
             responsive(move |size| {
                 container(
-                    scrollable(
-                        self.file_lists(size.width.max(file_listing_table_width()))
-                            .1,
-                    )
-                    .direction(scrollable::Direction::Both {
-                        vertical: scrollable::Scrollbar::default(),
-                        horizontal: scrollable::Scrollbar::default(),
-                    })
-                    .height(Fill),
+                    scrollable(self.file_lists(size.width).1)
+                        .direction(scrollable::Direction::Both {
+                            vertical: scrollable::Scrollbar::default(),
+                            horizontal: scrollable::Scrollbar::default(),
+                        })
+                        .height(Fill),
                 )
                 .width(Fill)
                 .height(Fill)
@@ -15681,6 +15741,119 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["garbage", "missing", "zeta"]
         );
+    }
+
+    #[test]
+    fn file_columns_put_name_size_date_first() {
+        let order: Vec<_> = file_listing_columns(639.0)
+            .iter()
+            .map(|(column, label, _, _)| (*column, *label))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                (FileSortColumn::Name, "Name"),
+                (FileSortColumn::Size, "Size"),
+                (FileSortColumn::DateModified, "Date Modified"),
+                (FileSortColumn::Type, "Type"),
+                (FileSortColumn::Permissions, "Permissions"),
+                (FileSortColumn::Owner, "Owner"),
+                (FileSortColumn::Group, "Group"),
+            ]
+        );
+        // Size is the only right-aligned column.
+        let right: Vec<_> = file_listing_columns(639.0)
+            .iter()
+            .filter(|(_, _, _, right)| *right)
+            .map(|(column, _, _, _)| *column)
+            .collect();
+        assert_eq!(right, [FileSortColumn::Size]);
+    }
+
+    #[test]
+    fn file_size_and_date_columns_fit_their_longest_values() {
+        let glyph = theme::metrics::UI_TEXT * 0.62;
+        let pad = 2.0 * f32::from(FILE_CELL_PAD);
+        assert!(file_col_time() >= "2026/11/26 08:10:44".len() as f32 * glyph + pad);
+        for sample in ["1023.9 KB", "1023 Bytes", "1023.9 TB"] {
+            assert!(
+                file_col_size() >= sample.len() as f32 * glyph + pad,
+                "{sample}"
+            );
+        }
+        assert!(file_col_size() >= "Size".len() as f32 * glyph + pad + FILE_SORT_MARK);
+    }
+
+    #[test]
+    fn file_name_column_adapts_to_half_width() {
+        for half in [600.0_f32, 639.0, 760.0, 420.0] {
+            let columns = file_listing_columns(half);
+            let name = columns[0].2;
+            let visible: f32 = columns[..3]
+                .iter()
+                .map(|(_, _, width, _)| width + 1.0)
+                .sum();
+            assert!(
+                (FILE_COL_NAME_MIN..=FILE_COL_NAME_MAX).contains(&name),
+                "{half}"
+            );
+            if half >= 600.0 {
+                assert!(visible <= half, "{half}: {visible}");
+            } else {
+                assert_eq!(name, FILE_COL_NAME_MIN, "{half}");
+                assert!(file_listing_table_width(half) > half, "{half}");
+            }
+            assert!(file_listing_table_width(half) >= half);
+        }
+        // 639 px half: nothing hits the clamp, so Name gets all the slack.
+        let columns = file_listing_columns(639.0);
+        let visible: f32 = columns[..3]
+            .iter()
+            .map(|(_, _, width, _)| width + 1.0)
+            .sum();
+        assert_eq!(visible, 639.0);
+        assert_eq!(file_col_name(2000.0), FILE_COL_NAME_MAX);
+    }
+
+    #[test]
+    fn file_header_and_rows_share_column_widths() {
+        // Header and row both lay out from file_listing_columns(view_width)
+        // and file_listing_table_width(view_width): the table width is the
+        // sum of the header cells plus dividers, or the half if wider.
+        for half in [420.0_f32, 600.0, 639.0, 760.0] {
+            let header_widths: f32 = file_listing_columns(half)
+                .iter()
+                .map(|(_, _, width, _)| width + 1.0)
+                .sum();
+            assert_eq!(file_listing_table_width(half), header_widths.max(half));
+        }
+    }
+
+    #[test]
+    fn file_sort_size_and_date_follow_column_identity_after_reorder() {
+        let columns = file_listing_columns(639.0);
+        let at = |column| {
+            columns
+                .iter()
+                .position(|(id, _, _, _)| *id == column)
+                .unwrap()
+        };
+        assert_eq!(columns[at(FileSortColumn::Size)].1, "Size");
+        assert_eq!(columns[at(FileSortColumn::DateModified)].1, "Date Modified");
+        assert_eq!(
+            (at(FileSortColumn::Size), at(FileSortColumn::DateModified)),
+            (1, 2)
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+        std::fs::write(&path, b"[]").unwrap();
+        let mut app = App::boot(path, None);
+        let _ = app.update(Message::FilesSortRemote(columns[1].0));
+        assert_eq!(app.remote_file_sort, FileSortColumn::Size);
+        let _ = app.update(Message::FilesSortLocal(columns[2].0));
+        assert_eq!(app.local_file_sort, FileSortColumn::DateModified);
+        assert_eq!(app.remote_file_sort, FileSortColumn::Size);
     }
 
     #[test]
