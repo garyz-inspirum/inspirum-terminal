@@ -3548,13 +3548,6 @@ DARK_SCROLL_RAIL_RGB = (0x37, 0x37, 0x37)
 DARK_SCROLLER_RGB = (0x51, 0x51, 0x51)
 
 
-def filer_name_column_width(half_width: int) -> int:
-    """Name width for a Filer half: what Size, Date Modified and three 1 px
-    dividers leave, clamped to [FILER_COL_NAME_MIN, FILER_COL_NAME_MAX]."""
-    return max(FILER_COL_NAME_MIN, min(FILER_COL_NAME_MAX,
-                                       half_width - FILER_COL_SIZE - FILER_COL_TIME - 3))
-
-
 def window_width_for_filer_half(window_width: int, half_width: int, target_half: int) -> int:
     """Window width expected to give a ``target_half`` px Filer half.
 
