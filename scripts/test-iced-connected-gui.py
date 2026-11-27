@@ -49,6 +49,7 @@ LOGGED_ECHO_LINES = (
     "echo:AFTER_GEAR",
     "echo:AFTER_CONTEXT_MENU",
     "echo:AFTER_FIND",
+    "echo:AFTER_CTRL_F",
     "echo:FIND_P1_PANE",
     "echo:FIND_P1_AFTER",
     "echo:FIND_P2_PANE",
@@ -385,6 +386,91 @@ def observe_pty_chunk(events, probe_state: dict[str, str | None], chunk: str) ->
         events.write(f"UNEXPECTED_{probe_state['phase']}_PTY_INPUT")
 
 
+# Alternate-screen control-byte report (ctrl_f_probe). While a monitored
+# shell is in the alternate screen it logs ALT_BYTE:<hex> for every C0
+# control byte it receives, except CR/LF (line ends of the fixture's own
+# commands) and ESC (escape sequences keep their existing handling). The
+# reported bytes are removed from the line buffer so a stray 0x06 cannot
+# turn the following "screen-off" into an unknown command. Control bytes are
+# not user text; nothing printable is ever logged.
+ALT_BYTE_PREFIX = "ALT_BYTE:"
+_ALT_BYTE_SKIP = frozenset("\r\n\x1b")
+
+
+def alt_screen_control_tokens(chunk: str) -> tuple[list[str], str]:
+    """(ALT_BYTE:<HH> tokens in order, chunk with those bytes removed)."""
+    tokens = []
+    kept = []
+    for char in chunk:
+        if ord(char) < 0x20 and char not in _ALT_BYTE_SKIP:
+            tokens.append(f"{ALT_BYTE_PREFIX}{ord(char):02X}")
+        else:
+            kept.append(char)
+    return tokens, "".join(kept)
+
+
+def alt_byte_count(log_text: str, byte: int) -> int:
+    """Number of whole event-log lines that are exactly ALT_BYTE:<byte>."""
+    token = f"{ALT_BYTE_PREFIX}{byte:02X}"
+    return sum(1 for line in log_text.splitlines() if line == token)
+
+
+# ctrl_f_probe query plan. OCR does not read the Find input text, so the
+# input-content oracle is the hit counter: FIRST matches a fixture line,
+# FIRST+NOHIT matches none (the counter must read 0/0 before the second
+# Ctrl+F, so a stale frame cannot pass), and REPLACEMENT matches again. Every
+# way the second Ctrl+F could go wrong (append instead of select-all, a typed
+# f, or both) yields a query that matches no fixture line and reads 0/0.
+CTRL_F_FIRST_QUERY = "NATIVE"
+CTRL_F_NOHIT_SUFFIX = "ZZQ"
+CTRL_F_REPLACEMENT = "SMOKE"
+
+
+def ctrl_f_failure_queries(first: str, suffix: str, replacement: str) -> list[str]:
+    """Queries the input would hold if the second Ctrl+F did not select all
+    (append) and/or typed an ``f``."""
+    stale = first + suffix
+    return [stale + replacement, "f" + replacement, stale + "f" + replacement,
+            replacement + "f", stale + replacement + "f"]
+
+
+def ctrl_f_plan_problems(lines, first: str = CTRL_F_FIRST_QUERY,
+                         suffix: str = CTRL_F_NOHIT_SUFFIX,
+                         replacement: str = CTRL_F_REPLACEMENT) -> list[str]:
+    """Why the plan cannot discriminate against ``lines`` (ASCII case-fold,
+    as the product's Find); empty when it can."""
+    folded = [line.lower() for line in lines]
+    hits = lambda query: sum(line.count(query.lower()) for line in folded)
+    problems = []
+    if "f" in replacement.lower():
+        problems.append(f"replacement {replacement!r} contains f")
+    if not hits(first):
+        problems.append(f"first query {first!r} matches no line")
+    if hits(first + suffix):
+        problems.append(f"no-hit query {first + suffix!r} matches a line")
+    if not hits(replacement):
+        problems.append(f"replacement {replacement!r} matches no line")
+    for query in ctrl_f_failure_queries(first, suffix, replacement):
+        if hits(query):
+            problems.append(f"failure query {query!r} matches a line")
+    return problems
+
+
+def ctrl_f_counter_problem(parsed, *, want_hits: bool) -> str | None:
+    """None when a find_hit_counter result is a match (want_hits: total >= 1
+    and 1 <= current <= total) or exactly 0/0 (not want_hits)."""
+    if parsed is None:
+        return "no counter read"
+    current, total = parsed[0], parsed[1]
+    if want_hits:
+        if total >= 1 and 1 <= current <= total:
+            return None
+        return f"counter {current}/{total} is not a match"
+    if current == 0 and total == 0:
+        return None
+    return f"counter {current}/{total} is not 0/0"
+
+
 # PTY size oracle. The canvas draws from TERMINAL_TEXT_INSET (10, 6) px in
 # src/iced_app.rs and the default cell is 14 pt * 0.6 = 8.4 px wide, so a pane
 # W px wide fits floor((W - 20) / 8.4) columns. pane_grid(..).spacing(1) in
@@ -600,6 +686,8 @@ async def monitored_shell(
     events.write(pty_size_event(term_cols, term_rows, serial))
     stdout.write("NATIVE_SMOKE_READY\r\n")
     buffer = ""
+    # Per-session: True between this shell's screen-on and screen-off.
+    alt_screen = False
     try:
         while True:
             try:
@@ -625,6 +713,10 @@ async def monitored_shell(
             # press Return only after the paste bytes arrived.
             if probe_state.get("select_capture"):
                 probe_state["select_chunks"] = str(int(probe_state.get("select_chunks") or 0) + 1)
+            if alt_screen:
+                alt_tokens, chunk = alt_screen_control_tokens(chunk)
+                for token in alt_tokens:
+                    events.write(token)
             buffer += chunk.replace("\r\n", "\n").replace("\r", "\n")
             # Cursor-key escape sequences are unbuffered PTY input, not
             # newline-terminated shell commands. Detect them as bytes arrive;
@@ -647,9 +739,11 @@ async def monitored_shell(
                     events.write("UNEXPECTED_LOCKED_PTY_INPUT")
                 elif line == "screen-on":
                     events.write("SCREEN_ON")
+                    alt_screen = True
                     stdout.write("\x1b[?1049h\x1b[2J\x1b[H\x1b[44;97mNATIVE_FULLSCREEN_ACTIVE\x1b[0m\r\n")
                 elif line == "screen-off":
                     events.write("SCREEN_OFF")
+                    alt_screen = False
                     stdout.write("\x1b[?1049l")
                 elif line in ("\x1b[D", "\x1bOD"):
                     events.write("REMOTE_CURSOR_LEFT")
@@ -4601,6 +4695,170 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
     return 0
 
 
+def _event_count(events, marker: str) -> int:
+    return sum(1 for line in events.path.read_text(encoding="utf-8").splitlines()
+               if line == marker)
+
+
+async def _ctrl_f_counter(app, window, shot: Path, find_band, env, *, want_hits: bool,
+                          deadline_s: float):
+    """Poll the strip counter until ctrl_f_counter_problem passes."""
+    deadline = time.monotonic() + deadline_s
+    while True:
+        if app.poll() is not None:
+            raise RuntimeError(f"ctrl_f_probe: GUI exited ({app.returncode})")
+        await asyncio.to_thread(screenshot, window, shot, env)
+        words = await asyncio.to_thread(read_strip_words, shot, find_band)
+        parsed = find_hit_counter(strip_words_as_rows(words))
+        problem = ctrl_f_counter_problem(parsed, want_hits=want_hits)
+        if problem is None:
+            return parsed
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"ctrl_f_probe: {problem} in {find_band} ({shot.name}); "
+                f"words={[text for text, _bounds in words][:40]}"
+            )
+        await asyncio.sleep(.3)
+
+
+async def ctrl_f_probe(app, window, env, events, probe_state, destination: Path,
+                       find_band) -> None:
+    """Required: plain Ctrl+F on the main screen opens Find with no PTY input;
+    Ctrl+F inside the input selects the query (replace, not append, no ``f``);
+    Escape hands the keyboard back. Precondition: the terminal owns the
+    keyboard (the caller's last step is a shell echo) and Find is closed."""
+    marker = "UNEXPECTED_FIND_PTY_INPUT"
+    before = destination / "connected-find-ctrl-f-before.png"
+    opened = destination / "connected-find-ctrl-f.png"
+    await asyncio.to_thread(screenshot, window, before, env)
+    # Armed BEFORE the chord: a 0x06 forwarded to the shell is a chunk.
+    probe_state["phase"] = "FIND"
+    try:
+        pty0 = _event_count(events, marker)
+        command("xdotool", "windowfocus", window, "key", "--clearmodifiers",
+                "ctrl+f", env=env)
+        deadline = time.monotonic() + 20 * TIME_SCALE
+        pixels = 0
+        words = []
+        while True:
+            if app.poll() is not None:
+                raise RuntimeError(f"ctrl_f_probe: GUI exited opening Find ({app.returncode})")
+            await asyncio.to_thread(screenshot, window, opened, env)
+            pixels = await asyncio.to_thread(diff, before, opened, env)
+            if pixels >= 50:
+                words = await asyncio.to_thread(read_strip_words, opened, find_band)
+                prev = match_strip_label(words, "Prev", find_band)
+                nxt = match_strip_label(words, "Next", find_band)
+                if prev is not None and nxt is not None:
+                    break
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "ctrl_f_probe: plain Ctrl+F did not open the Find strip "
+                    f"(pixels={pixels} band={find_band} words={words[:40]})"
+                )
+            await asyncio.sleep(.4 * TIME_SCALE)
+        if _event_count(events, marker) != pty0:
+            raise RuntimeError("ctrl_f_probe: plain Ctrl+F reached the shell as input")
+        print(f"ctrl_f_probe: plain Ctrl+F opened Find: Prev {prev} Next {nxt}; "
+              f"{pixels} pixels; no PTY input", flush=True)
+
+        command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                CTRL_F_FIRST_QUERY, env=env)
+        first = await _ctrl_f_counter(
+            app, window, destination / "connected-find-ctrl-f-typed.png", find_band, env,
+            want_hits=True, deadline_s=8 * TIME_SCALE)
+        command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                CTRL_F_NOHIT_SUFFIX, env=env)
+        await _ctrl_f_counter(
+            app, window, destination / "connected-find-ctrl-f-nohit.png", find_band, env,
+            want_hits=False, deadline_s=8 * TIME_SCALE)
+        pty1 = _event_count(events, marker)
+        if pty1 != pty0:
+            raise RuntimeError(f"ctrl_f_probe: Find typing reached the shell ({pty0} -> {pty1})")
+
+        # Ctrl+F inside the input: keeps focus and selects the query.
+        command("xdotool", "key", "--clearmodifiers", "ctrl+f", env=env)
+        await asyncio.sleep(.5 * TIME_SCALE)
+        command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                CTRL_F_REPLACEMENT, env=env)
+        replaced_shot = destination / "connected-find-ctrl-f-replaced.png"
+        try:
+            replaced = await _ctrl_f_counter(
+                app, window, replaced_shot, find_band, env,
+                want_hits=True, deadline_s=8 * TIME_SCALE)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"{exc}. The input does not hold exactly {CTRL_F_REPLACEMENT!r}: the "
+                "second Ctrl+F appended or typed f (any of "
+                f"{ctrl_f_failure_queries(CTRL_F_FIRST_QUERY, CTRL_F_NOHIT_SUFFIX, CTRL_F_REPLACEMENT)} "
+                "reads 0/0), or focus left the input"
+            ) from None
+        await asyncio.sleep(.5 * TIME_SCALE)
+        pty2 = _event_count(events, marker)
+        if pty2 != pty0:
+            raise RuntimeError(
+                f"ctrl_f_probe: Ctrl+F in the Find input reached the shell ({pty0} -> {pty2})")
+        command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+        closed_pixels, _words = await wait_find_strip_closed(
+            app, window, replaced_shot, destination / "connected-find-ctrl-f-closed.png",
+            find_band, env, label="Escape after plain Ctrl+F",
+        )
+        pty3 = _event_count(events, marker)
+        if pty3 != pty0:
+            raise RuntimeError(f"ctrl_f_probe: Escape reached the shell ({pty0} -> {pty3})")
+    finally:
+        probe_state["phase"] = None
+    # No click: the terminal must own the keyboard again. The fixture
+    # matches whole lines, so a late-delivered 0x06 or f would also make this
+    # echo fail ("\x06echo:AFTER_CTRL_F" is not the sentinel).
+    command("xdotool", "windowfocus", window, "type", "--clearmodifiers", "--delay", "25",
+            "echo:AFTER_CTRL_F", env=env)
+    command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+    await wait_for(
+        lambda: "NATIVE_ECHO:AFTER_CTRL_F" in events.path.read_text(encoding="utf-8").splitlines(),
+        "shell echo after closing the plain-Ctrl+F Find strip without a click",
+    )
+    print(f"ctrl_f_probe: main screen PASS: counter {first[0]}/{first[1]} -> 0/0 -> "
+          f"{replaced[0]}/{replaced[1]} ({CTRL_F_REPLACEMENT!r} replaced the query); "
+          f"close delta {closed_pixels}; PTY {pty0}->{pty3}", flush=True)
+
+
+async def ctrl_f_altscreen_probe(app, window, env, events, destination: Path,
+                                 active_frame: Path, find_band) -> None:
+    """Required: in the alternate screen plain Ctrl+F reaches the program as
+    exactly one 0x06 and does not open Find. Precondition: the focused pane's
+    shell has logged SCREEN_ON and active_frame shows the painted alt screen."""
+    shot = destination / "connected-find-ctrl-f-altscreen.png"
+    text = lambda: events.path.read_text(encoding="utf-8")
+    before = alt_byte_count(text(), 0x06)
+    other_before = sum(1 for line in text().splitlines() if line.startswith(ALT_BYTE_PREFIX))
+    command("xdotool", "windowfocus", window, "key", "--clearmodifiers", "ctrl+f", env=env)
+    await wait_for(lambda: alt_byte_count(text(), 0x06) > before,
+                   "ALT_BYTE:06 after plain Ctrl+F in the alternate screen",
+                   timeout=10 * TIME_SCALE)
+    # Settle so a duplicate (key repeat, double dispatch) is counted too.
+    await asyncio.sleep(1.0 * TIME_SCALE)
+    after = alt_byte_count(text(), 0x06)
+    other_after = sum(1 for line in text().splitlines() if line.startswith(ALT_BYTE_PREFIX))
+    if after - before != 1 or other_after - other_before != 1:
+        raise RuntimeError(
+            f"ctrl_f_altscreen_probe: expected exactly one 0x06 and no other control "
+            f"byte; ALT_BYTE:06 {before}->{after}, all ALT_BYTE {other_before}->{other_after}"
+        )
+    await asyncio.to_thread(screenshot, window, shot, env)
+    pixels = await asyncio.to_thread(diff, active_frame, shot, env)
+    words = await asyncio.to_thread(read_strip_words, shot, find_band)
+    residue = find_strip_residue(words, find_band)
+    if pixels >= 200 or any(value is not None for value in residue.values()):
+        raise RuntimeError(
+            f"ctrl_f_altscreen_probe: Find strip appeared in the alternate screen: "
+            f"{pixels} pixels vs {active_frame.name} (need < 200), residue {residue} "
+            f"in {find_band}; words={[t for t, _b in words][:40]}"
+        )
+    print(f"ctrl_f_altscreen_probe: one 0x06 forwarded, Find not opened "
+          f"({pixels} pixels vs {active_frame.name})", flush=True)
+
+
 async def main() -> int:
     if sys.platform != "linux":
         raise RuntimeError("Linux-only native GUI fixture")
@@ -6707,6 +6965,11 @@ async def main() -> int:
                       f"PTY={p3_initial}->{p3_typed}->{p3_chord_pty}"
                       f"->{p3_before}->{p3_after}->{p3_escaped}", flush=True)
 
+                # Required ctrl_f_probe (main screen): terminal owns the
+                # keyboard (FIND_P3_AFTER echo above) and Find is closed.
+                await ctrl_f_probe(app, window, env, events, probe_state,
+                                   destination, find_band)
+
                 # The populated queue lives in the Transfer tab. Both completed
                 # jobs must be listed; scroll its visible interior and retain
                 # the resulting production screenshot.
@@ -7165,6 +7428,16 @@ async def main() -> int:
                     raise RuntimeError(
                         f"alternate-screen enter changed only {active_pixels} pixels"
                     )
+                # Required ctrl_f_probe (alternate screen). The Find band is
+                # recomputed from the newest Filer tab: the dock moved since
+                # the main Find step.
+                alt_w, alt_h = window_size(window, env)
+                alt_tab_top = center(filer_tab)[1] - 13
+                alt_find_band = (0, max(0, alt_tab_top - 40), alt_w, min(alt_h, alt_tab_top + 4))
+                await ctrl_f_altscreen_probe(
+                    app, window, env, events, destination,
+                    destination / "connected-fullscreen-active.png", alt_find_band,
+                )
                 command("xdotool", "type", "--clearmodifiers", "--delay", "25",
                         "screen-off", env=env)
                 command("xdotool", "key", "--clearmodifiers", "Return", env=env)
