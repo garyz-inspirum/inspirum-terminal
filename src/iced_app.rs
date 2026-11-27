@@ -2753,6 +2753,17 @@ struct AutoStartCandidate {
     spec: String,
 }
 
+/// Launches one forward for the start-up pass: `Manager::start_forward` in
+/// the app, a recording fake in tests.
+type AutoStartLaunch<'a> = dyn FnMut(
+        &mut tunnels::Manager,
+        &Session,
+        tunnels::ForwardKind,
+        &str,
+        Option<&std::path::Path>,
+    ) -> anyhow::Result<tunnels::Status>
+    + 'a;
+
 /// Start-up auto-start pass. Drained one forward per
 /// `Message::TunnelAutoStartNext`, so each launch is a separate update and
 /// the UI is never held by a loop of launches.
@@ -4863,16 +4874,7 @@ impl App {
     /// Each candidate is re-read from the current library and re-checked:
     /// saved JSON can be hand-edited, so an opted-in forward that binds
     /// beyond loopback is skipped and never silently acknowledged.
-    fn auto_start_step(
-        &mut self,
-        launch: &mut dyn FnMut(
-            &mut tunnels::Manager,
-            &Session,
-            tunnels::ForwardKind,
-            &str,
-            Option<&std::path::Path>,
-        ) -> anyhow::Result<tunnels::Status>,
-    ) -> Task<Message> {
+    fn auto_start_step(&mut self, launch: &mut AutoStartLaunch<'_>) -> Task<Message> {
         let Some(pass) = self.auto_start.as_mut() else {
             return Task::none();
         };
@@ -18109,6 +18111,101 @@ mod tunnel_layout_tests {
         let _ = reopened.update(Message::TunnelSaveEdit);
         assert_eq!(reopened.tunnel_notice, "Tunnel saved.");
         assert!(tunnels::auto_start_forwards(&load_sessions(&path).unwrap()[0]).is_empty());
+    }
+
+    fn auto_start_move_app() -> (tempfile::TempDir, PathBuf, App, String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+        let mut source = Session {
+            name: "auto start".into(),
+            host: "example.invalid".into(),
+            ..Session::default()
+        };
+        source.ssh.local_forwards.push(AUTO_START_WEB.into());
+        tunnels::set_auto_start(
+            &mut source,
+            tunnels::ForwardKind::Local,
+            AUTO_START_WEB,
+            true,
+        )
+        .unwrap();
+        let target = Session {
+            name: "move target".into(),
+            host: "target.invalid".into(),
+            ..Session::default()
+        };
+        save_sessions(&path, &[source, target]).unwrap();
+        let app = App::boot(path.clone(), None);
+        let source_key = session_profile_key(&app.profiles[0]);
+        let target_key = session_profile_key(&app.profiles[1]);
+        assert_ne!(source_key, target_key);
+        (dir, path, app, source_key, target_key)
+    }
+
+    fn pick_tunnel_session(app: &mut App, key: &str) {
+        let option = tunnel_session_options(&app.profiles)
+            .into_iter()
+            .find(|option| option.key == key)
+            .unwrap();
+        let _ = app.update(Message::TunnelDraftSession(option));
+    }
+
+    #[test]
+    fn moving_an_opted_in_forward_keeps_its_auto_start_flag() {
+        let (_dir, path, mut app, source_key, target_key) = auto_start_move_app();
+        edit_auto_start_web(&mut app, &source_key);
+        assert!(app.tunnel_edit.as_ref().unwrap().auto_start);
+        pick_tunnel_session(&mut app, &target_key);
+        let _ = app.update(Message::TunnelSaveEdit);
+        assert!(
+            app.tunnel_notice.starts_with("Tunnel moved to"),
+            "{}",
+            app.tunnel_notice
+        );
+
+        let loaded = load_sessions(&path).unwrap();
+        let by_key = |key: &str| {
+            loaded
+                .iter()
+                .find(|profile| session_profile_key(profile) == key)
+                .unwrap()
+                .clone()
+        };
+        let (source, target) = (by_key(&source_key), by_key(&target_key));
+        assert!(tunnels::rows_for(&source).is_empty());
+        assert!(tunnels::auto_start_forwards(&source).is_empty());
+        assert_eq!(
+            tunnels::auto_start_forwards(&target),
+            vec![(tunnels::ForwardKind::Local, AUTO_START_WEB.to_owned())]
+        );
+    }
+
+    #[test]
+    fn moving_an_opted_in_forward_checks_eligibility_of_the_saved_spec() {
+        let (_dir, path, mut app, source_key, target_key) = auto_start_move_app();
+        let before = std::fs::read_to_string(&path).unwrap();
+        edit_auto_start_web(&mut app, &source_key);
+        let _ = app.update(Message::TunnelDraftBind("0.0.0.0".into()));
+        pick_tunnel_session(&mut app, &target_key);
+        let _ = app.update(Message::TunnelSaveEdit);
+        assert_eq!(app.tunnel_notice, TUNNEL_AUTO_START_UNSAFE);
+        assert!(app.tunnel_edit.is_some());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+        // Opting out lets the same move through, without the flag.
+        let _ = app.update(Message::TunnelDraftAutoStart(false));
+        let _ = app.update(Message::TunnelSaveEdit);
+        assert!(
+            app.tunnel_notice.starts_with("Tunnel moved to"),
+            "{}",
+            app.tunnel_notice
+        );
+        let loaded = load_sessions(&path).unwrap();
+        assert!(
+            loaded
+                .iter()
+                .all(|profile| tunnels::auto_start_forwards(profile).is_empty())
+        );
     }
 
     #[test]
