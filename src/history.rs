@@ -395,4 +395,46 @@ mod tests {
         state.select_next_hit();
         assert_eq!(state.selected_hit().unwrap().line_number, 1);
     }
+
+    fn ids_of(state: &HistoryState, texts: &[&str]) -> Vec<u64> {
+        texts
+            .iter()
+            .map(|text| {
+                state
+                    .lines()
+                    .iter()
+                    .find(|line| line.text == *text)
+                    .map(|line| line.id)
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ids_survive_append_when_live_tail_row_changes() {
+        let mut state = HistoryState::default();
+        state.update_snapshot(vec!["A".into(), "B".into(), "".into()]);
+        let before = ids_of(&state, &["A", "B"]);
+        state.update_snapshot(vec!["A".into(), "B".into(), "X".into(), "".into()]);
+        assert_eq!(ids_of(&state, &["A", "B"]), before);
+    }
+
+    #[test]
+    fn ids_survive_in_place_edit_of_live_last_row() {
+        let mut state = HistoryState::default();
+        state.update_snapshot(vec!["A".into(), "B".into(), "pro".into()]);
+        let before = ids_of(&state, &["A", "B"]);
+        state.update_snapshot(vec!["A".into(), "B".into(), "prompt$ ".into()]);
+        assert_eq!(ids_of(&state, &["A", "B"]), before);
+    }
+
+    #[test]
+    fn ids_survive_roll_off_with_live_tail() {
+        let mut state = HistoryState::default();
+        state.update_snapshot(vec!["A".into(), "B".into(), "C".into(), "".into()]);
+        let before = ids_of(&state, &["B", "C"]);
+        state.update_snapshot(vec!["B".into(), "C".into(), "D".into(), "".into()]);
+        assert_eq!(ids_of(&state, &["B", "C"]), before);
+        assert_eq!(state.truncated_lines(), 1);
+    }
 }
