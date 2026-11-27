@@ -462,7 +462,7 @@ impl App {
                     .histories
                     .entry(pane.id)
                     .or_default()
-                    .update_snapshot(terminal.history_lines());
+                    .update_lines(terminal.history_lines());
             }
         }
     }
@@ -515,7 +515,7 @@ impl App {
             && let Some(pane) = tab.panes.get_mut(tab.focus)
             && let Some(terminal) = &mut pane.terminal
         {
-            terminal.scroll_to_history_index(hit.line_number.saturating_sub(1));
+            terminal.scroll_to_history_index(hit.grid_row);
             return self.defer_terminal_refresh(id);
         }
         Task::none()

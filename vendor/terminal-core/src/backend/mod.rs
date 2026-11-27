@@ -565,37 +565,20 @@ impl TerminalBackend {
 
     /// Snapshot retained scrollback plus the visible screen without changing viewport state.
     ///
-    /// Lines are returned oldest-to-newest and trailing blank cells are trimmed. This reads the
-    /// terminal's existing in-memory grid; it does not capture keyboard input or write to disk.
-    pub fn history_lines(&self) -> Vec<String> {
+    /// Returns logical lines oldest-to-newest: soft-wrapped grid rows are joined, wide-char
+    /// spacer cells are skipped and combining marks follow their base character (see
+    /// [`logical_lines_from_rows`]). This reads the terminal's existing in-memory grid; it does
+    /// not capture keyboard input or write to disk.
+    pub fn history_lines(&self) -> Vec<LogicalLine> {
         let term = self.term.clone();
         let terminal = term.lock();
-        let grid = terminal.grid();
-        let start = Point::new(terminal.topmost_line(), Column(0));
-        let end_line = terminal.bottommost_line();
-
-        let mut lines = Vec::with_capacity(terminal.total_lines());
-        // Grid::iter_from advances from the supplied point, so seed the first retained cell.
-        let mut current_line = Some(start.line);
-        let mut current = String::from(grid.index(start).c);
-        for indexed in grid.iter_from(start) {
-            if indexed.point.line > end_line {
-                break;
-            }
-            if current_line != Some(indexed.point.line) {
-                lines.push(current.trim_end_matches(' ').to_owned());
-                current.clear();
-                current_line = Some(indexed.point.line);
-            }
-            current.push(indexed.c);
-        }
-        lines.push(current.trim_end_matches(' ').to_owned());
-        lines
+        grid_logical_lines(&terminal)
     }
 
     /// Scroll the viewport so a retained-history line is visible.
     ///
-    /// `index` is zero-based from the oldest retained line returned by `history_lines`.
+    /// `index` is a zero-based grid row counted from the oldest retained row (see
+    /// [`LogicalLine::row_for_char`]).
     pub fn scroll_to_history_index(&mut self, index: usize) -> bool {
         let term = self.term.clone();
         let mut terminal = term.lock();
@@ -1178,6 +1161,223 @@ pub fn probe_drag_selection_steps(
     DragSelectionProbe {
         text: terminal.selection_to_string().unwrap_or_default(),
         selected,
+    }
+}
+
+/// One logical line of retained history: soft-wrapped grid rows joined into one string.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LogicalLine {
+    /// Text with wide-char spacers removed and combining marks after their base character.
+    /// Trailing spaces of the last row are trimmed.
+    pub text: String,
+    /// Zero-based grid row (from the oldest retained row) of the first row of this line.
+    pub first_row: usize,
+    /// Char offsets into `text` at which each grid row starts; always begins with `0`.
+    pub segment_starts: Vec<usize>,
+}
+
+impl LogicalLine {
+    /// Grid row containing the char at `char_offset` (zero-based) of `text`.
+    pub fn row_for_char(&self, char_offset: usize) -> usize {
+        let segment = self
+            .segment_starts
+            .iter()
+            .rposition(|start| *start <= char_offset)
+            .unwrap_or(0);
+        self.first_row + segment
+    }
+}
+
+/// One grid cell as seen by [`logical_lines_from_rows`].
+#[derive(Clone, Copy, Debug)]
+pub struct HistoryCell<'a> {
+    pub c: char,
+    /// `WIDE_CHAR_SPACER` or `LEADING_WIDE_CHAR_SPACER`: not part of the text.
+    pub spacer: bool,
+    /// Zero-width (combining) characters attached to this cell.
+    pub zerowidth: &'a [char],
+}
+
+/// Build logical lines from grid rows, oldest first. Each row is its cells plus whether it
+/// soft-wraps into the next row (`WRAPLINE` on its last cell). A row that exactly fills the
+/// width and then ends with a newline is not wrapped and is not joined.
+pub fn logical_lines_from_rows<'a, R, C>(rows: R) -> Vec<LogicalLine>
+where
+    R: IntoIterator<Item = (C, bool)>,
+    C: IntoIterator<Item = HistoryCell<'a>>,
+{
+    let mut lines = Vec::new();
+    let mut current = LogicalLine::default();
+    let mut chars = 0usize;
+    let mut open = false;
+    for (row_index, (cells, wrapped)) in rows.into_iter().enumerate() {
+        if !open {
+            current = LogicalLine {
+                text: String::new(),
+                first_row: row_index,
+                segment_starts: Vec::new(),
+            };
+            chars = 0;
+            open = true;
+        }
+        current.segment_starts.push(chars);
+        for cell in cells {
+            if cell.spacer {
+                continue;
+            }
+            current.text.push(cell.c);
+            chars += 1;
+            for mark in cell.zerowidth {
+                current.text.push(*mark);
+                chars += 1;
+            }
+        }
+        if !wrapped {
+            let trimmed = current.text.trim_end_matches(' ').len();
+            current.text.truncate(trimmed);
+            lines.push(std::mem::take(&mut current));
+            open = false;
+        }
+    }
+    if open {
+        let trimmed = current.text.trim_end_matches(' ').len();
+        current.text.truncate(trimmed);
+        lines.push(current);
+    }
+    lines
+}
+
+/// Adapt a real alacritty grid (topmost retained row to bottom of screen) to
+/// [`logical_lines_from_rows`].
+fn grid_logical_lines<T>(terminal: &Term<T>) -> Vec<LogicalLine> {
+    let grid = terminal.grid();
+    let top = terminal.topmost_line().0;
+    let bottom = terminal.bottommost_line().0;
+    let spacer = term::cell::Flags::WIDE_CHAR_SPACER | term::cell::Flags::LEADING_WIDE_CHAR_SPACER;
+    logical_lines_from_rows((top..=bottom).map(|line| {
+        let row = &grid[Line(line)];
+        let columns = row.len();
+        let wrapped = columns > 0
+            && row[Column(columns - 1)]
+                .flags
+                .contains(term::cell::Flags::WRAPLINE);
+        let cells = (0..columns).map(move |column| {
+            let cell = &row[Column(column)];
+            HistoryCell {
+                c: cell.c,
+                spacer: cell.flags.intersects(spacer),
+                zerowidth: cell.zerowidth().unwrap_or(&[]),
+            }
+        });
+        (cells, wrapped)
+    }))
+}
+
+#[cfg(test)]
+mod logical_line_tests {
+    use super::*;
+
+    fn row(text: &str, wrapped: bool) -> (Vec<HistoryCell<'static>>, bool) {
+        let cells = text
+            .chars()
+            .map(|c| HistoryCell {
+                c,
+                spacer: false,
+                zerowidth: &[],
+            })
+            .collect();
+        (cells, wrapped)
+    }
+
+    #[test]
+    fn wide_spacers_are_skipped() {
+        let cells = vec![
+            HistoryCell {
+                c: '東',
+                spacer: false,
+                zerowidth: &[],
+            },
+            HistoryCell {
+                c: ' ',
+                spacer: true,
+                zerowidth: &[],
+            },
+            HistoryCell {
+                c: '京',
+                spacer: false,
+                zerowidth: &[],
+            },
+            HistoryCell {
+                c: ' ',
+                spacer: true,
+                zerowidth: &[],
+            },
+        ];
+        let lines = logical_lines_from_rows(vec![(cells, false)]);
+        assert_eq!(lines[0].text, "東京");
+    }
+
+    #[test]
+    fn combining_marks_follow_their_base() {
+        static ACUTE: [char; 1] = ['\u{301}'];
+        let cells = vec![
+            HistoryCell {
+                c: 'e',
+                spacer: false,
+                zerowidth: &ACUTE,
+            },
+            HistoryCell {
+                c: 'x',
+                spacer: false,
+                zerowidth: &[],
+            },
+        ];
+        let lines = logical_lines_from_rows(vec![(cells, false)]);
+        assert_eq!(lines[0].text, "e\u{301}x");
+    }
+
+    #[test]
+    fn wrapped_rows_join_and_map_offsets_to_rows() {
+        let lines = logical_lines_from_rows(vec![
+            row("top   ", false),
+            row("abcdef", true),
+            row("ghi   ", false),
+        ]);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "top");
+        assert_eq!(lines[1].text, "abcdefghi");
+        assert_eq!(lines[1].first_row, 1);
+        assert_eq!(lines[1].segment_starts, vec![0, 6]);
+        // "efg" straddles the wrap and starts on the first row; "ghi" starts on the second.
+        assert_eq!(lines[1].row_for_char(lines[1].text.find("efg").unwrap()), 1);
+        assert_eq!(lines[1].row_for_char(lines[1].text.find("ghi").unwrap()), 2);
+    }
+
+    #[test]
+    fn full_width_row_without_wrap_flag_is_not_joined() {
+        let lines = logical_lines_from_rows(vec![row("abcdef", false), row("ghi", false)]);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "abcdef");
+        assert_eq!(lines[1].first_row, 1);
+    }
+
+    #[test]
+    fn real_term_cjk_wraps_into_one_logical_line() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+
+        let dimensions = TermSize::new(10, 4);
+        let mut terminal = Term::new(term::Config::default(), &dimensions, VoidListener);
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        // 東京 takes 4 columns; 10 ASCII chars force one soft wrap at width 10.
+        parser.advance(&mut terminal, "東京abcdefghij\r\nnext".as_bytes());
+        let lines = grid_logical_lines(&terminal);
+        assert_eq!(lines[0].text, "東京abcdefghij");
+        assert_eq!(lines[0].first_row, 0);
+        // Row 1 starts after 東京abcdef (8 chars, 10 columns).
+        assert_eq!(lines[0].segment_starts, vec![0, 8]);
+        assert_eq!(lines[1].text, "next");
+        assert_eq!(lines[1].first_row, 2);
     }
 }
 

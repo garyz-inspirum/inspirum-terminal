@@ -1,11 +1,15 @@
 //! In-memory retained terminal history indexing, marks and bounded folding.
 use crate::terminal_ux::{SearchHit, find_text};
 use std::collections::{BTreeMap, BTreeSet};
+use terminal_core::LogicalLine;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HistoryLine {
     pub id: u64,
+    /// Logical line: soft-wrapped grid rows joined (see `terminal_core::LogicalLine`).
     pub text: String,
+    /// Where this line sits in the grid, for mapping a hit back to a scroll target.
+    pub location: LogicalLine,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -13,6 +17,8 @@ pub struct HistoryHit {
     pub line_id: u64,
     pub line_number: usize,
     pub column: usize,
+    /// Zero-based grid row (from the oldest retained row) containing the match start.
+    pub grid_row: usize,
     pub preview: String,
 }
 
@@ -57,7 +63,7 @@ const LIVE_TAIL_ROWS: usize = 512;
 /// Returns `(overlap, tail)`: the first `overlap` rows of `new` equal the `overlap` rows of
 /// `old` that end `tail` rows before its end. Picks the longest overlap, then the smallest
 /// tail. `(0, 0)` means nothing aligned.
-fn align_snapshot(old: &[HistoryLine], new: &[String], max_tail: usize) -> (usize, usize) {
+fn align_snapshot(old: &[HistoryLine], new: &[LogicalLine], max_tail: usize) -> (usize, usize) {
     if old.is_empty() || new.is_empty() {
         return (0, 0);
     }
@@ -66,10 +72,10 @@ fn align_snapshot(old: &[HistoryLine], new: &[String], max_tail: usize) -> (usiz
     let mut prefix = vec![0usize; new.len()];
     for index in 1..new.len() {
         let mut matched = prefix[index - 1];
-        while matched > 0 && new[index] != new[matched] {
+        while matched > 0 && new[index].text != new[matched].text {
             matched = prefix[matched - 1];
         }
-        if new[index] == new[matched] {
+        if new[index].text == new[matched].text {
             matched += 1;
         }
         prefix[index] = matched;
@@ -81,10 +87,10 @@ fn align_snapshot(old: &[HistoryLine], new: &[String], max_tail: usize) -> (usiz
     let mut best = (0usize, 0usize);
     let mut matched = 0usize;
     for (index, line) in old.iter().enumerate() {
-        while matched > 0 && line.text != new[matched] {
+        while matched > 0 && line.text != new[matched].text {
             matched = prefix[matched - 1];
         }
-        if line.text == new[matched] {
+        if line.text == new[matched].text {
             matched += 1;
         }
         if index >= first_candidate {
@@ -129,7 +135,23 @@ impl HistoryState {
         self.truncated_lines
     }
 
+    /// Test convenience: one unwrapped grid row per string.
+    #[cfg(test)]
     pub fn update_snapshot(&mut self, snapshot: Vec<String>) {
+        self.update_lines(
+            snapshot
+                .into_iter()
+                .enumerate()
+                .map(|(row, text)| LogicalLine {
+                    text,
+                    first_row: row,
+                    segment_starts: vec![0],
+                })
+                .collect(),
+        );
+    }
+
+    pub fn update_lines(&mut self, snapshot: Vec<LogicalLine>) {
         let anchor = self.selected_anchor();
         let (overlap, tail) = align_snapshot(&self.lines, &snapshot, LIVE_TAIL_ROWS);
         let aligned_end = self.lines.len() - tail;
@@ -140,25 +162,30 @@ impl HistoryState {
 
         // Rows above the mutable tail keep their ids. Rewritten tail rows keep the id of the
         // grid row they replaced in place (same position), so a mark on a prompt row being
-        // typed into survives; genuinely new rows get fresh ids.
-        let old_tail: Vec<u64> = if overlap > 0 {
-            self.lines[aligned_end..]
+        // typed into survives; genuinely new rows get fresh ids. Grid locations always come
+        // from the new snapshot because rows shift as history grows.
+        let reused: Vec<u64> = if overlap > 0 {
+            self.lines[retained_start..]
                 .iter()
                 .map(|line| line.id)
                 .collect()
         } else {
             Vec::new()
         };
-        let mut next = self.lines[retained_start..aligned_end].to_vec();
-        for (offset, text) in snapshot.into_iter().skip(overlap).enumerate() {
-            let id = match old_tail.get(offset) {
+        let mut next = Vec::with_capacity(snapshot.len());
+        for (index, location) in snapshot.into_iter().enumerate() {
+            let id = match reused.get(index) {
                 Some(id) => *id,
                 None => {
                     self.next_line_id = self.next_line_id.saturating_add(1).max(1);
                     self.next_line_id
                 }
             };
-            next.push(HistoryLine { id, text });
+            next.push(HistoryLine {
+                id,
+                text: location.text.clone(),
+                location,
+            });
         }
         if let Some(max_id) = next.iter().map(|line| line.id).max() {
             self.next_line_id = self.next_line_id.max(max_id);
@@ -308,6 +335,7 @@ impl HistoryState {
                     line_id: line.id,
                     line_number: index + 1,
                     column: hit.column,
+                    grid_row: line.location.row_for_char(hit.column - 1),
                     preview: hit.preview,
                 });
             }
@@ -525,5 +553,27 @@ mod tests {
         assert_eq!(state.selected_hit().unwrap().preview, "hit a");
         state.update_snapshot(vec!["x".into(), "hit b".into(), "y".into(), "".into()]);
         assert_eq!(state.selected_hit().unwrap().preview, "hit b");
+    }
+
+    #[test]
+    fn hit_in_wrapped_line_targets_the_row_holding_the_match_start() {
+        let mut state = HistoryState::default();
+        state.update_lines(vec![
+            LogicalLine {
+                text: "top".into(),
+                first_row: 0,
+                segment_starts: vec![0],
+            },
+            LogicalLine {
+                text: "abcdefghi".into(),
+                first_row: 1,
+                segment_starts: vec![0, 6],
+            },
+        ]);
+        state.set_query("efg");
+        assert_eq!(state.selected_hit().unwrap().grid_row, 1);
+        state.set_query("ghi");
+        assert_eq!(state.selected_hit().unwrap().grid_row, 2);
+        assert_eq!(state.selected_hit().unwrap().line_number, 2);
     }
 }
