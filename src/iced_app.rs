@@ -468,6 +468,28 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                 {
                     Some(Message::KeyChord(KeyChord::Find))
                 }
+                // Plain Ctrl+F (Cmd+F on macOS) is the primary Find chord.
+                // This closure cannot read app state, so off macOS it emits
+                // FindOrForward and `update` decides: alt-screen programs
+                // (vim, less, htop) still get 0x06, otherwise Find opens.
+                // Returning this message instead of Message::Event is what
+                // keeps the key off the ordinary KeyPressed path, so it is
+                // delivered exactly once. On macOS `command()` is Cmd, which
+                // never reaches a PTY as a control byte, so Cmd+F opens Find
+                // unconditionally and Ctrl+F still falls through to the PTY.
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                    if status == event::Status::Ignored
+                        && modifiers.command()
+                        && !modifiers.shift()
+                        && !modifiers.alt()
+                        && matches!(key.as_ref(), keyboard::Key::Character("f" | "F")) =>
+                {
+                    Some(if cfg!(target_os = "macos") {
+                        Message::KeyChord(KeyChord::Find)
+                    } else {
+                        Message::FindOrForward(event)
+                    })
+                }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if status == event::Status::Ignored
                         && modifiers.command()
@@ -2981,6 +3003,41 @@ impl KeyChord {
     }
 }
 
+/// Where plain Ctrl+F goes (`Message::FindOrForward`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FindChordRoute {
+    /// An open menu owns the keyboard: dropped, like Ctrl+Shift+F.
+    Drop,
+    /// The Find input already owns the keyboard: keep focus, select its text.
+    Reselect,
+    /// Same as Ctrl+Shift+F (`Message::FindOpen` and its own guards).
+    Open,
+    /// Re-dispatch the original key through `Message::Event` so the PTY
+    /// receives 0x06 under every ordinary key rule.
+    Forward,
+}
+
+/// `keyboard_owned`: a dialog, the remote editor, the privacy lock, the
+/// Sender editor or the focused pane's free-type draft owns the keyboard. In
+/// those states Ctrl+F does exactly what Ctrl+Shift+F does. Only an
+/// unowned focused pane in alternate-screen mode forwards the key.
+fn find_chord_route(
+    menu_open: bool,
+    find_focused: bool,
+    keyboard_owned: bool,
+    alt_screen: bool,
+) -> FindChordRoute {
+    if menu_open {
+        FindChordRoute::Drop
+    } else if find_focused {
+        FindChordRoute::Reselect
+    } else if !keyboard_owned && alt_screen {
+        FindChordRoute::Forward
+    } else {
+        FindChordRoute::Open
+    }
+}
+
 #[derive(Clone, Debug)]
 enum Message {
     Tool(tools::Action),
@@ -3254,6 +3311,8 @@ enum Message {
     ExternalEditorSave,
     TunnelDraftSession(TunnelSessionOption),
     TunnelSessionSearch(String),
+    /// Plain Ctrl+F: open Find, or forward the key in alternate screen.
+    FindOrForward(iced::Event),
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -5642,6 +5701,12 @@ impl App {
                 }
                 return self.update(chord.message());
             }
+            Message::FindOrForward(event) => {
+                let alt_screen = self
+                    .focused_terminal_mode()
+                    .contains(terminal_core::TerminalMode::ALT_SCREEN);
+                return self.find_or_forward(event, alt_screen);
+            }
             other => other,
         };
         if matches!(&message, Message::TogglePrivacyLock) {
@@ -5819,6 +5884,7 @@ impl App {
             Message::TerminalImeCursor(..) | Message::TerminalImeCommit(..) => {}
             Message::TogglePrivacyLock => unreachable!("privacy lock handled before match"),
             Message::KeyChord(_) => unreachable!("key chord handled before match"),
+            Message::FindOrForward(_) => unreachable!("Find chord handled before match"),
             Message::ToggleFocusMode => unreachable!("focus mode handled before match"),
             Message::ToggleLocalNavigation => {
                 unreachable!("local navigation handled before match")
@@ -11426,6 +11492,42 @@ impl App {
         self.find_open = true;
         self.find_focused = true;
         operation::focus(FIND_INPUT_ID)
+    }
+
+    /// `alt_screen` is the focused terminal's mode bit, passed in so unit
+    /// panes (no live terminal) can exercise the forward branch.
+    fn find_or_forward(&mut self, event: iced::Event, alt_screen: bool) -> Task<Message> {
+        let menu_open = self.open_menu.is_some()
+            || self.dock_menu.is_some()
+            || self.context_menu.is_some()
+            || self.tunnel_menu;
+        let free_type_draft = self.tabs.get(self.active).is_some_and(|tab| {
+            tab.panes
+                .get(tab.focus)
+                .is_some_and(|pane| self.free_type.contains_key(&pane.id))
+        });
+        let keyboard_owned = self.dialog.is_some()
+            || self.remote_editor.is_some()
+            || self.privacy_locked
+            || self.sender_focused
+            || free_type_draft;
+        match find_chord_route(menu_open, self.find_focused, keyboard_owned, alt_screen) {
+            FindChordRoute::Drop => Task::none(),
+            FindChordRoute::Reselect => {
+                let open = self.update(Message::FindOpen);
+                if self.find_open
+                    && self.find_focused
+                    && self.dialog.is_none()
+                    && !self.privacy_locked
+                {
+                    Task::batch([open, operation::select_all(FIND_INPUT_ID)])
+                } else {
+                    open
+                }
+            }
+            FindChordRoute::Open => self.update(Message::FindOpen),
+            FindChordRoute::Forward => self.update(Message::Event(event)),
+        }
     }
 
     fn find_strip(&self) -> Element<'_, Message> {
@@ -17249,6 +17351,106 @@ mod tests {
         app.privacy_locked = true;
         let _ = app.update(Message::KeyChord(KeyChord::Find));
         assert!(!app.find_open, "privacy lock must drop the Find chord");
+    }
+
+    fn ctrl_f_event() -> iced::Event {
+        iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            modified_key: keyboard::Key::Character("f".into()),
+            key: keyboard::Key::Character("f".into()),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyF),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::CTRL,
+            text: None,
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn find_chord_route_covers_every_ownership_state() {
+        use FindChordRoute::{Drop, Forward, Open, Reselect};
+        // (menu_open, find_focused, keyboard_owned, alt_screen) -> route
+        let cases = [
+            ((false, false, false, false), Open),
+            ((false, false, false, true), Forward),
+            ((false, false, true, false), Open),
+            ((false, false, true, true), Open),
+            ((false, true, false, false), Reselect),
+            ((false, true, false, true), Reselect),
+            ((false, true, true, true), Reselect),
+            ((true, false, false, false), Drop),
+            ((true, false, false, true), Drop),
+            ((true, true, true, true), Drop),
+        ];
+        for ((menu, find, owned, alt), want) in cases {
+            assert_eq!(
+                find_chord_route(menu, find, owned, alt),
+                want,
+                "menu={menu} find={find} owned={owned} alt={alt}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_ctrl_f_opens_find_on_main_screen_and_writes_nothing() {
+        let (mut app, id) = app_with_focused_pane("ctrl-f-main");
+        app.pty_write_log.clear();
+        // Unit panes have no live terminal, so the mode is the main screen.
+        let _ = app.update(Message::FindOrForward(ctrl_f_event()));
+        assert!(app.find_open && app.find_focused, "Ctrl+F must open Find");
+        assert_eq!(app.tools.history_owner, Some(id));
+        assert!(
+            app.pty_write_log.is_empty(),
+            "no 0x06 may reach the PTY when Find opens: {:?}",
+            app.pty_write_log
+        );
+    }
+
+    #[test]
+    fn plain_ctrl_f_in_alt_screen_writes_0x06_exactly_once() {
+        let (mut app, id) = app_with_focused_pane("ctrl-f-alt");
+        app.pty_write_log.clear();
+        let _ = app.find_or_forward(ctrl_f_event(), true);
+        assert_eq!(app.pty_write_log, vec![(id, vec![0x06])]);
+        assert!(!app.find_open, "alt screen keeps Ctrl+F for the program");
+    }
+
+    #[test]
+    fn plain_ctrl_f_in_alt_screen_follows_keyboard_ownership() {
+        // Menu open: dropped, like Ctrl+Shift+F.
+        let (mut app, _id) = app_with_focused_pane("ctrl-f-menu");
+        app.open_menu = Some(menu::Menu::Edit);
+        app.pty_write_log.clear();
+        let _ = app.find_or_forward(ctrl_f_event(), true);
+        assert!(!app.find_open && app.pty_write_log.is_empty());
+        assert!(app.open_menu.is_some(), "Ctrl+F must not close the menu");
+
+        // Privacy lock: dropped, nothing reaches the PTY.
+        let (mut app, _id) = app_with_focused_pane("ctrl-f-privacy");
+        app.privacy_locked = true;
+        app.pty_write_log.clear();
+        let _ = app.find_or_forward(ctrl_f_event(), true);
+        assert!(!app.find_open && app.pty_write_log.is_empty());
+
+        // Sender editor owns the keyboard: same as Ctrl+Shift+F (opens Find).
+        let (mut app, _id) = app_with_focused_pane("ctrl-f-sender");
+        app.sender_focused = true;
+        app.pty_write_log.clear();
+        let _ = app.find_or_forward(ctrl_f_event(), true);
+        assert!(app.find_open && app.find_focused);
+        assert!(app.pty_write_log.is_empty());
+
+        // Find already focused: keeps focus, no byte, query untouched.
+        let (mut app, id) = app_with_focused_pane("ctrl-f-refocus");
+        let _ = app.update(Message::FindOpen);
+        let _ = app.update(Message::FindQuery("needle".into()));
+        let query = |app: &App| app.tools.histories.get(&id).map(|h| h.query().to_owned());
+        let before = query(&app);
+        app.pty_write_log.clear();
+        let _ = app.find_or_forward(ctrl_f_event(), true);
+        let _ = app.update(Message::FindOrForward(ctrl_f_event()));
+        assert!(app.find_open && app.find_focused);
+        assert_eq!(query(&app), before, "Ctrl+F must not type 'f'");
+        assert!(app.pty_write_log.is_empty());
     }
 
     #[test]

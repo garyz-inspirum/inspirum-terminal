@@ -50,11 +50,28 @@ in-memory scrollback buffer. Inspirum does not create a parallel keystroke log a
 not write retained history to disk. Disk output still requires the separate explicit
 **Start logging** action.
 
-Open **Search** or press **Ctrl/Cmd+Shift+F**. Search covers retained scrollback plus the
-visible screen. Results are shown with retained line and column positions, and the
-selected result is visibly highlighted in the result list. **F3** selects the next
-result and **Shift+F3** selects the previous result; navigation wraps and scrolls the
-terminal viewport so the selected retained line is visible.
+Open **Search**, choose **Edit > Find**, or press **Ctrl+F** (Cmd+F on macOS) to open
+the Find strip for the focused pane. Search covers retained scrollback plus the visible
+screen. Results are shown with retained line and column positions, and the selected
+result is visibly highlighted in the result list.
+
+Find shortcut rules:
+
+- **Ctrl+F** opens Find, except when the focused pane is in alternate-screen mode
+  (vim, less, htop and other full-screen programs). There Ctrl+F is sent to the
+  program as before (byte 0x06, page-forward in vim/less), exactly once.
+- **Ctrl/Cmd+Shift+F** always opens Find, including in alternate-screen programs.
+- On macOS, **Cmd+F** always opens Find and **Ctrl+F** is always sent to the program.
+- While a menu is open, Ctrl+F is ignored. While a dialog, the remote editor, the
+  privacy lock, the Sender editor or a free-type draft owns the keyboard, Ctrl+F does
+  what Ctrl+Shift+F does in that state, and is never sent to the terminal.
+- With the Find input already focused, Ctrl+F keeps focus there and selects the query.
+
+In the Find strip, **Enter** or **Next** selects the next result and **Prev** the
+previous one; navigation wraps and scrolls the terminal viewport so the selected
+retained line is visible.
+**F3** and **Shift+F3** are not Find keys yet: they are sent to the terminal program.
+Find-strip key navigation is left for a later stage.
 
 **Mark output boundary** bookmarks the newest retained non-empty output line. Optional
 timestamps store only a Unix timestamp alongside the in-memory mark. Marks survive
