@@ -186,6 +186,10 @@ FIND_INJECT_PTY_BYTE = os.environ.get("INSPIRUM_GUI_FIND_INJECT_PTY_BYTE") == "1
 # Tunnels quick menu. Default mode keeps the empty-tunnel profile.
 POPULATED = os.environ.get("INSPIRUM_GUI_POPULATED") == "1"
 POPULATED_LABELS = ("Alpha forward", "Bravo forward")
+# Opt-in gate: at a 600 px local Filer half with an overflowing listing, the
+# Date Modified text must clear the vertical scrollbar thumb (PR #154 review).
+# Off by default; when off the connected run is unchanged.
+FILER_GUTTER_PROBE = os.environ.get("INSPIRUM_GUI_FILER_GUTTER_PROBE") == "1"
 # Product minimum (src/iced_app.rs window min_size). The X window manager in
 # the tour honours any xdotool size, bypassing iced's min_size, so a smaller
 # request yields a clipped frame the app never supports. Minimum-size evidence
@@ -3523,6 +3527,364 @@ def name_order_tops(shot, first_label, second_label, rows_region):
     return (first[1], second[1])
 
 
+# Filer column arithmetic mirrored from src/iced_app.rs (file_col_size,
+# file_col_time, file_col_name_min, FILE_COL_NAME_MAX, file_col_name): each
+# column is followed by a 1 px divider; rows are 23 px high.
+FILER_COL_SIZE = 93
+FILER_COL_TIME = 166
+FILER_COL_NAME_MIN = 258
+FILER_COL_NAME_MAX = 420
+FILER_ROW_HEIGHT = 23
+# Dark theme (src/iced_app/theme.rs DARK.list = 0x1E1E1E, text 0xBFBFBF).
+# The Filer scrollables use Scrollbar::default() and no .style(), so iced
+# 0.14 scrollable::default draws the idle thumb in
+# extended_palette().background.strongest = deviate(0x1E1E1E, 0.20) and the
+# rail in background.weak = deviate(0x1E1E1E, 0.10); for this neutral grey
+# that is 0x515151 and 0x373737 (Oklch lighten, computed from iced_core
+# 0.14.0 theme/palette.rs). A hovered/dragged thumb uses the primary colour
+# instead; the probe keeps the pointer off the scrollbar.
+DARK_LIST_RGB = (0x1E, 0x1E, 0x1E)
+DARK_SCROLL_RAIL_RGB = (0x37, 0x37, 0x37)
+DARK_SCROLLER_RGB = (0x51, 0x51, 0x51)
+
+
+def filer_name_column_width(half_width: int) -> int:
+    """Name width for a Filer half: what Size, Date Modified and three 1 px
+    dividers leave, clamped to [FILER_COL_NAME_MIN, FILER_COL_NAME_MAX]."""
+    return max(FILER_COL_NAME_MIN, min(FILER_COL_NAME_MAX,
+                                       half_width - FILER_COL_SIZE - FILER_COL_TIME - 3))
+
+
+def window_width_for_filer_half(window_width: int, half_width: int, target_half: int) -> int:
+    """Window width expected to give a ``target_half`` px Filer half.
+
+    Assumes the bottom dock spans the window width, so every window pixel
+    goes to the dock, and the merged Filer row is ``local | 1 px | remote``
+    with both halves FillPortion(1): each half is (dock - 1) / 2. One pixel
+    of half therefore costs two pixels of window. Measured at another size,
+    the error is corrected by the caller re-measuring.
+    """
+    return window_width + 2 * (target_half - half_width)
+
+
+def _rgb_image(shot):
+    """``shot`` as an RGB PIL image (a path or an already open image)."""
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError(
+            "gutter probe requires Pillow (pip install Pillow==13.0.0; see scripts/local-gui/Dockerfile)"
+        ) from exc
+    if isinstance(shot, (str, Path)):
+        return Image.open(shot).convert("RGB")
+    return shot.convert("RGB")
+
+
+def _clamped_box(image, box):
+    left, top, right, bottom = (int(edge) for edge in box)
+    left, top = max(0, left), max(0, top)
+    right, bottom = min(image.width, right), min(image.height, bottom)
+    if right <= left or bottom <= top:
+        raise ValueError(f"box {box} is empty inside {image.width}x{image.height}")
+    return left, top, right, bottom
+
+
+def text_right_edge(shot, box, *, min_luma_delta: int = 60, background_luma=None):
+    """Rightmost x in ``box`` (left, top, right, bottom; right/bottom
+    exclusive) whose luma differs from the row background by more than
+    ``min_luma_delta``, i.e. the right edge of the rendered glyph cores.
+
+    The background is the median luma of the box unless given. Luma is
+    (r + g + b) // 3 as elsewhere in this script. The default 60 keeps the
+    dark scrollbar out of the measurement (thumb 0x51 is 51 above the
+    0x1E list, rail 0x37 is 25) while text 0xBFBFBF is 161 above it.
+    Returns None when the box holds no such pixel.
+    """
+    image = _rgb_image(shot)
+    left, top, right, bottom = _clamped_box(image, box)
+    pixels = image.load()
+    lumas = [
+        [sum(pixels[x, y]) // 3 for x in range(left, right)]
+        for y in range(top, bottom)
+    ]
+    if background_luma is None:
+        flat = sorted(value for row in lumas for value in row)
+        background_luma = flat[len(flat) // 2]
+    for offset in range(right - left - 1, -1, -1):
+        if any(abs(row[offset] - background_luma) > min_luma_delta for row in lumas):
+            return left + offset
+    return None
+
+
+def vertical_thumb_box(shot, half_box, *, thumb_rgb=DARK_SCROLLER_RGB,
+                       tolerance: int = 12, min_run: int = 20, min_width: int = 6,
+                       strip: int = 12):
+    """Box (left, top, right, bottom) of the vertical scrollbar thumb in the
+    rightmost ``strip`` px of ``half_box``, or None.
+
+    A thumb column is a vertical run of at least ``min_run`` pixels each
+    within ``tolerance`` (per channel) of ``thumb_rgb`` and not within
+    ``tolerance`` of the half's background (its median colour), so neither
+    the list fill nor the rail (0x373737) nor a glyph can qualify. The box
+    unions the qualifying columns and their longest runs; fewer than
+    ``min_width`` qualifying columns (the idle thumb is 10 px wide) is no
+    thumb. iced sizes the thumb viewport^2 / content (>= 2 px), so a long
+    listing needs a smaller ``min_run`` than the default.
+    """
+    image = _rgb_image(shot)
+    left, top, right, bottom = _clamped_box(image, half_box)
+    pixels = image.load()
+    sample = sorted(
+        pixels[x, y] for y in range(top, bottom, 4) for x in range(left, right, 4)
+    )
+    background = sample[len(sample) // 2]
+
+    def near(colour, target):
+        return all(abs(a - b) <= tolerance for a, b in zip(colour, target))
+
+    found = []
+    for x in range(max(left, right - strip), right):
+        best = (0, None)
+        run_start = None
+        for y in range(top, bottom + 1):
+            hit = y < bottom and near(pixels[x, y], thumb_rgb) and not near(pixels[x, y], background)
+            if hit and run_start is None:
+                run_start = y
+            elif not hit and run_start is not None:
+                if y - run_start > best[0]:
+                    best = (y - run_start, run_start)
+                run_start = None
+        if best[0] >= min_run:
+            found.append((x, best[1], best[1] + best[0]))
+    if len(found) < min_width:
+        return None
+    return (
+        min(x for x, _t, _b in found), min(t for _x, t, _b in found),
+        max(x for x, _t, _b in found) + 1, max(b for _x, _t, b in found),
+    )
+
+
+def vertical_thumb_left_edge(shot, half_box, **kwargs):
+    """Left x of the vertical scrollbar thumb in ``half_box`` or None
+    (see ``vertical_thumb_box``; dark-theme colours by default)."""
+    box = vertical_thumb_box(shot, half_box, **kwargs)
+    return None if box is None else box[0]
+
+
+def _gutter_probe_ocr_text(shot, tesseract, region, expected):
+    """OCR one Date Modified cell; the pass equal to ``expected`` wins, else
+    the first non-empty read. Words joined left to right with one space."""
+    reads = []
+    for psm, invert in (("7", True), ("7", False), ("6", True)):
+        words = region_upscaled_rows(shot, tesseract, region, psm=psm, invert=invert)
+        # _scaled_words tuples: (text, x, y, width, height, confidence).
+        text = " ".join(word[0] for word in sorted(words, key=lambda item: item[1]))
+        text = " ".join(text.split())
+        if text == expected:
+            return text
+        reads.append(text)
+    return next((text for text in reads if text), "")
+
+
+async def filer_gutter_probe_step(app, window, env, destination, local_root, events, remote_heading):
+    """Opt-in (INSPIRUM_GUI_FILER_GUTTER_PROBE=1) PR #154 gutter gate.
+
+    Overflow the LOCAL listing with probe files of one known mtime, shrink
+    the window until the local half is 600 px (Name 338 + Size 93 + Date
+    166 + 3 dividers fill it exactly), scroll the listing to its end so the
+    thumb sits beside probe rows, and require the Date Modified glyphs of
+    every row beside the thumb to end left of it and the cell to OCR as the
+    expected timestamp. Always removes the files, restores the window size
+    and re-lists the local half.
+    """
+    count_lists = lambda: events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY")
+    path_bar_y = center(remote_heading)[1] + 27
+    tesseract = shutil.which("tesseract")
+    if tesseract is None:
+        raise RuntimeError("gutter probe requires tesseract")
+    original_size = window_size(window, env)
+    width, height = original_size
+    probe_paths = []
+
+    async def relist(label):
+        before = count_lists()
+        await click_filer_refresh(
+            window, env, destination / "connected-files-gutter-refresh.png",
+            path_bar_y=path_bar_y, completed=lambda: count_lists() > before, label=label,
+        )
+        await asyncio.sleep(1.5 * TIME_SCALE)
+
+    async def measure(tag):
+        shot = destination / f"connected-files-gutter-{tag}.png"
+        await asyncio.to_thread(screenshot, window, shot, env)
+        w, h = window_size(window, env)
+        local, _remote, _divider, heading = await asyncio.to_thread(
+            filer_halves, shot, dock_body_region(w, h),
+        )
+        return (w, h), local, heading, local[2] - local[0]
+
+    def listing_box(local, heading):
+        # Below the local path bar (heading centre + 27, ~30 px tall).
+        return (local[0], center(heading)[1] + 27 + 16, local[2], local[3])
+
+    async def scroll_listing(local, heading, button):
+        box = listing_box(local, heading)
+        x = (box[0] + box[2]) // 2
+        y = (box[1] + box[3]) // 2
+        command("xdotool", "mousemove", "--window", window, str(x), str(y),
+                "click", "--repeat", "40", "--delay", "25", button, env=env)
+        # Park the pointer on the Remote heading, off both scrollbars, so
+        # the thumb keeps its idle (non-hovered) colour.
+        command("xdotool", "mousemove", "--window", window,
+                *map(str, center(heading)), env=env)
+        await asyncio.sleep(.6 * TIME_SCALE)
+
+    try:
+        # a. Overflow the local listing. zz_ sorts after every fixture name;
+        #    no other step looks for 'gutter'. One mtime ending in :58.
+        _size, local0, _heading0, _half0 = await measure("before")
+        rows_fit = max(1, (local0[3] - local0[1]) // FILER_ROW_HEIGHT)
+        probe_count = max(40, rows_fit + 20)
+        now = int(time.time())
+        stamp = now - now % 60 - 60 + 58
+        for index in range(probe_count):
+            path = Path(local_root) / f"zz_gutter_probe_{index:02d}.bin"
+            path.write_bytes(b"g" * (1 + index * 7))
+            probe_paths.append(path)
+            os.utime(path, (stamp, stamp))
+            read_back = int(os.stat(path).st_mtime)
+            if read_back != stamp:
+                raise RuntimeError(f"gutter probe: {path.name} mtime read back {read_back}, set {stamp}")
+        expected = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime(stamp))
+        print(f"gutter probe: wrote {probe_count} local files (rows_fit={rows_fit}), "
+              f"mtime {stamp} -> expected {expected!r} "
+              f"(script TZ={os.environ.get('TZ', '<unset>')}, GUI TZ={env.get('TZ', '<unset>')})",
+              flush=True)
+
+        # b. Re-list the local half with the path-bar refresh icon.
+        await relist("gutter probe local re-list")
+
+        # c. Resize until the local half is 600 px.
+        _size, local1, _heading1, half1 = await measure("measure")
+        target = window_width_for_filer_half(width, half1, 600)
+        command("xdotool", "windowsize", window, str(target), str(height), env=env)
+        await asyncio.sleep(.7 * TIME_SCALE)
+        size, local, heading, half = await measure("resized")
+        if half != 600:
+            target = window_width_for_filer_half(size[0], half, 600)
+            command("xdotool", "windowsize", window, str(target), str(height), env=env)
+            await asyncio.sleep(.7 * TIME_SCALE)
+            size, local, heading, half = await measure("resized2")
+        print(f"gutter probe: window {size[0]}x{size[1]} (from {width}x{height}, "
+              f"half {half1} -> {half}), local half {local}", flush=True)
+        if abs(half - 600) > 1:
+            raise RuntimeError(
+                f"gutter probe: local half is {half} px at window {size[0]}x{size[1]}, need 600"
+            )
+
+        # Scroll to the end: the thumb then sits beside the last probe rows.
+        await scroll_listing(local, heading, "5")
+        listing = listing_box(local, heading)
+        last_name = probe_paths[-1].name
+        shot = destination / "connected-files-gutter-probe.png"
+        deadline = time.monotonic() + 40 * TIME_SCALE
+        while True:
+            # d. The evidence frame.
+            await asyncio.to_thread(screenshot, window, shot, env)
+            try:
+                last_row = await asyncio.to_thread(
+                    locate_visible_label, shot, last_name, region=listing,
+                )
+                break
+            except RuntimeError:
+                if app.poll() is not None or time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"gutter probe: {last_name} not rendered in the local listing {listing} "
+                        f"after re-list and scroll ({shot})"
+                    )
+                await scroll_listing(local, heading, "5")
+
+        # e. A thumb is required.
+        # iced thumb length = viewport^2 / content: ~13 px for ~45 rows in a
+        # ~120 px viewport, so the 20 px default run is too strict here; the
+        # 10 px width (min_width 6) and the thumb colour carry the test.
+        thumb = await asyncio.to_thread(vertical_thumb_box, shot, listing, min_run=6)
+        if thumb is None:
+            raise RuntimeError(
+                f"gutter probe: local listing did not overflow (no vertical thumb in the "
+                f"rightmost 12 px of {listing}, {probe_count} probe files, {shot})"
+            )
+        thumb_left = thumb[0]
+
+        # f. Date Modified band per row, stepping up from the last row.
+        name_width = filer_name_column_width(half)
+        date_left = local[0] + name_width + 1 + FILER_COL_SIZE + 1
+        row_centre = center(last_row)[1]
+        rows = []
+        for step in range(6):
+            cy = row_centre - step * FILER_ROW_HEIGHT
+            band = (date_left, cy - 9, local[2], cy + 10)
+            if band[1] < listing[1]:
+                break
+            right_edge = await asyncio.to_thread(text_right_edge, shot, band)
+            if right_edge is None:
+                continue
+            beside = cy - 11 < thumb[3] and cy + 12 > thumb[1]
+            gap = thumb_left - right_edge
+            rows.append((cy, band, right_edge, gap, beside))
+            print(f"gutter probe row y={cy} text_right={right_edge} thumb_left={thumb_left} "
+                  f"gap={gap} beside_thumb={beside}"
+                  + ("" if beside else " (informational)"), flush=True)
+        if len(rows) < 3:
+            raise RuntimeError(
+                f"gutter probe: only {len(rows)} probe rows with Date Modified text above "
+                f"{last_name} at {last_row} ({shot})"
+            )
+        beside_rows = [row for row in rows if row[4]]
+        if not beside_rows:
+            raise RuntimeError(
+                f"gutter probe: no measured row is beside the thumb {thumb} "
+                f"(rows {[row[0] for row in rows]}, {shot})"
+            )
+        min_gap = min(row[3] for row in beside_rows)
+
+        # g. OCR one Date Modified cell beside the thumb (crop stops at the
+        #    thumb, so text hidden under it cannot be read back).
+        ocr_cy, ocr_band = beside_rows[0][0], beside_rows[0][1]
+        ocr_region = (ocr_band[0], ocr_band[1] - 2, thumb_left, ocr_band[3] + 2)
+        ocr_text = await asyncio.to_thread(_gutter_probe_ocr_text, shot, tesseract, ocr_region, expected)
+        print(f"gutter probe OCR row y={ocr_cy} read={ocr_text!r} expected={expected!r}", flush=True)
+
+        # h. Verdict.
+        verdict = "CLEAR" if min_gap >= 1 and ocr_text == expected else "OVERLAP"
+        line = (f"GUTTER_PROBE half={half} thumb_left={thumb_left} min_gap={min_gap} "
+                f"ocr={ocr_text.replace(' ', '_') or '<none>'} "
+                f"expected={expected.replace(' ', '_')} verdict={verdict}")
+        print(line, flush=True)
+        if verdict != "CLEAR":
+            raise RuntimeError(line)
+    finally:
+        # i. Leave the state the minimum-window step expects.
+        for path in probe_paths:
+            path.unlink(missing_ok=True)
+        try:
+            _size, local_now, heading_now, _half_now = await measure("restore-scroll")
+            await scroll_listing(local_now, heading_now, "4")
+        except RuntimeError as exc:
+            print(f"gutter probe restore: scroll-up skipped ({exc})", flush=True)
+        command("xdotool", "windowsize", window, str(width), str(height), env=env)
+        await asyncio.sleep(.7 * TIME_SCALE)
+        await relist("gutter probe restore re-list")
+        restored = window_size(window, env)
+        print(f"gutter probe restore: removed {len(probe_paths)} files, window "
+              f"{restored[0]}x{restored[1]} (was {width}x{height})", flush=True)
+        if restored != original_size:
+            raise RuntimeError(
+                f"gutter probe restore: window is {restored[0]}x{restored[1]}, expected "
+                f"{width}x{height}"
+            )
+
+
 def center(bounds):
     return ((bounds[0] + bounds[2]) // 2, (bounds[1] + bounds[3]) // 2)
 
@@ -6799,6 +7161,12 @@ async def main() -> int:
                     window, destination / "connected-files-filer-again.png",
                     third_name, env=env, region=remote_body, timeout=40,
                 )
+
+                if FILER_GUTTER_PROBE:
+                    await filer_gutter_probe_step(
+                        app, window, env, destination, local_root, events,
+                        remote_heading,
+                    )
 
                 # Minimum-size acceptance is interaction, not a screenshot-only
                 # artifact. The same distinct row must remain visibly targetable.
