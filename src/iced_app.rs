@@ -15800,6 +15800,34 @@ mod tests {
     }
 
     #[test]
+    fn file_size_column_fits_every_windterm_size_output() {
+        let glyph = theme::metrics::UI_TEXT * 0.62;
+        let pad = 2.0 * f32::from(FILE_CELL_PAD);
+        let mut values = vec![0, 1, 2, 999, 1023, u64::MAX];
+        for s in [10_u32, 20, 30, 40, 50, 60] {
+            values.extend([(1_u64 << s) - 1, 1_u64 << s, (1_u64 << s) + 1]);
+            if s + 10 <= 63 {
+                values.push((1_u64 << (s + 10)) - 1);
+            }
+        }
+        for v in values {
+            let out = windterm_size(v);
+            let chars = out.chars().count();
+            assert!(
+                chars <= FILE_SIZE_SAMPLE.chars().count(),
+                "{v}: {out:?} is longer than {FILE_SIZE_SAMPLE:?}"
+            );
+            assert!(
+                file_col_size() >= chars as f32 * glyph + pad,
+                "{v}: {out:?} does not fit {} px",
+                file_col_size()
+            );
+        }
+        assert_eq!(windterm_size(u64::MAX), "16.0 EB");
+        assert_eq!(windterm_size(1 << 50), "1.0 PB");
+    }
+
+    #[test]
     fn file_name_column_adapts_to_half_width() {
         // 28 chars at 13 px * 0.62 = 225.68 -> 226, + 2 * 6 padding,
         // + 14 px icon + 6 px gap.
