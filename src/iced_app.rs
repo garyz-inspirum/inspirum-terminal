@@ -1380,14 +1380,19 @@ fn display_leaf(value: &str) -> String {
 }
 
 /// Name takes what the visible half leaves after Size and Date Modified,
-/// within this range; below the minimum the table scrolls horizontally.
-const FILE_COL_NAME_MIN: f32 = 180.0;
+/// between [`file_col_name_min`] and this maximum; below the minimum the
+/// table scrolls horizontally (Date Modified leaves the half first).
 const FILE_COL_NAME_MAX: f32 = 420.0;
 const FILE_COL_TYPE: f32 = 132.0;
 const FILE_COL_PERMS: f32 = 106.0;
 const FILE_COL_OWNER: f32 = 62.0;
 const FILE_COL_GROUP: f32 = 80.0;
 const FILE_CELL_PAD: u16 = 6;
+/// Row icon size and the gap between it and the file name.
+const FILE_NAME_ICON: f32 = 14.0;
+const FILE_NAME_GAP: f32 = 6.0;
+/// Characters of file name the Name column always shows unclipped.
+const FILE_NAME_MIN_CHARS: usize = 28;
 /// Longest Date Modified value (local and remote formatters).
 const FILE_TIME_SAMPLE: &str = "2026/11/26 08:10:44";
 /// Longest [`windterm_size`] value: under 1 KB it prints whole bytes.
@@ -1407,8 +1412,18 @@ struct FileListingCells {
 /// Monospace cell width for `sample`: the ~0.62 em glyph estimate used for
 /// menu labels, rounded up, plus the cell's left and right padding.
 fn file_text_column_width(sample: &str) -> f32 {
-    (sample.chars().count() as f32 * theme::metrics::UI_TEXT * 0.62).ceil()
-        + 2.0 * f32::from(FILE_CELL_PAD)
+    file_text_width_chars(sample.chars().count())
+}
+
+/// Cell width for `chars` monospace characters plus the cell padding.
+fn file_text_width_chars(chars: usize) -> f32 {
+    (chars as f32 * theme::metrics::UI_TEXT * 0.62).ceil() + 2.0 * f32::from(FILE_CELL_PAD)
+}
+
+/// Smallest Name width: icon, gap, padding and [`FILE_NAME_MIN_CHARS`]
+/// characters (14 + 6 + 12 + ceil(28 * 13 * 0.62) = 258 px).
+fn file_col_name_min() -> f32 {
+    file_text_width_chars(FILE_NAME_MIN_CHARS) + FILE_NAME_ICON + FILE_NAME_GAP
 }
 
 fn file_col_time() -> f32 {
@@ -1423,7 +1438,7 @@ fn file_col_size() -> f32 {
 /// and Date Modified and the three 1 px dividers, clamped.
 fn file_col_name(view_width: f32) -> f32 {
     (view_width - file_col_size() - file_col_time() - 3.0)
-        .clamp(FILE_COL_NAME_MIN, FILE_COL_NAME_MAX)
+        .clamp(file_col_name_min(), FILE_COL_NAME_MAX)
 }
 
 /// Column identity, header label, content width (excluding the 1 px
@@ -1952,14 +1967,14 @@ fn file_listing_row<'a>(
     // The name stays one unbroken text in the main dock text colour: the
     // OCR-driven GUI acceptance tests click it.
     let name = row![
-        icons::icon(glyph, 14.0, color),
+        icons::icon(glyph, FILE_NAME_ICON, color),
         text(cells.name)
             .size(theme::metrics::UI_TEXT)
             .font(Font::MONOSPACE)
             .color(theme::palette().text_dock)
             .wrapping(text::Wrapping::None),
     ]
-    .spacing(6)
+    .spacing(FILE_NAME_GAP)
     .align_y(iced::Center);
     let mut name = Some(name);
     let mut values = [
@@ -15786,22 +15801,40 @@ mod tests {
 
     #[test]
     fn file_name_column_adapts_to_half_width() {
-        for half in [600.0_f32, 639.0, 760.0, 420.0] {
+        // 28 chars at 13 px * 0.62 = 225.68 -> 226, + 2 * 6 padding,
+        // + 14 px icon + 6 px gap.
+        assert_eq!(file_col_name_min(), 258.0);
+        let glyph = theme::metrics::UI_TEXT * 0.62;
+        let name_fit = FILE_NAME_ICON
+            + FILE_NAME_GAP
+            + 2.0 * f32::from(FILE_CELL_PAD)
+            + "444_GUI_DOWNLOAD_FIXTURE.bin".len() as f32 * glyph;
+        assert!(file_col_name_min() >= name_fit);
+        for (half, expected) in [
+            (479.0_f32, 258.0_f32),
+            (600.0, 338.0),
+            (639.0, 377.0),
+            (760.0, 420.0),
+            (420.0, 258.0),
+        ] {
             let columns = file_listing_columns(half);
             let name = columns[0].2;
-            let visible: f32 = columns[..3]
+            assert_eq!(name, expected, "{half}");
+            let name_size: f32 = columns[..2]
                 .iter()
                 .map(|(_, _, width, _)| width + 1.0)
                 .sum();
-            assert!(
-                (FILE_COL_NAME_MIN..=FILE_COL_NAME_MAX).contains(&name),
-                "{half}"
-            );
+            let visible = name_size + columns[2].2 + 1.0;
             if half >= 600.0 {
                 assert!(visible <= half, "{half}: {visible}");
             } else {
-                assert_eq!(name, FILE_COL_NAME_MIN, "{half}");
+                assert_eq!(name, file_col_name_min(), "{half}");
+                assert!(visible > half, "{half}: {visible}");
                 assert!(file_listing_table_width(half) > half, "{half}");
+            }
+            if half >= 479.0 {
+                // Name and Size stay fully inside the half.
+                assert!(name_size <= half, "{half}: {name_size}");
             }
             assert!(file_listing_table_width(half) >= half);
         }
@@ -15820,7 +15853,7 @@ mod tests {
         // Header and row both lay out from file_listing_columns(view_width)
         // and file_listing_table_width(view_width): the table width is the
         // sum of the header cells plus dividers, or the half if wider.
-        for half in [420.0_f32, 600.0, 639.0, 760.0] {
+        for half in [420.0_f32, 479.0, 600.0, 639.0, 760.0] {
             let header_widths: f32 = file_listing_columns(half)
                 .iter()
                 .map(|(_, _, width, _)| width + 1.0)
