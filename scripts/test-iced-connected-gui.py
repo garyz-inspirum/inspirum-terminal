@@ -3430,17 +3430,74 @@ def find_strip_residue(words, find_band) -> dict:
     }
 
 
-def name_rows_region(first_row_bounds, row_count, *, row_height=23, name_right=None):
+# Filer table geometry mirrored from src/iced_app.rs (grep the Rust names).
+# theme::metrics::UI_TEXT (13 px) * 0.62: monospace glyph-width estimate.
+FILER_GLYPH_PX = 13 * 0.62
+# FILE_CELL_PAD: padding on each side of every cell.
+FILER_FILE_CELL_PAD = 6
+# FILE_NAME_ICON + FILE_NAME_GAP: row icon and the gap before the file name.
+FILER_FILE_NAME_ICON = 14
+FILER_FILE_NAME_GAP = 6
+# FILE_NAME_MIN_CHARS: characters file_col_name_min() always fits.
+FILER_FILE_NAME_MIN_CHARS = 28
+# FILE_COL_NAME_MAX.
+FILER_FILE_COL_NAME_MAX = 420
+# FILE_SIZE_SAMPLE ("1023 Bytes") and FILE_TIME_SAMPLE ("2026/11/26 08:10:44").
+FILER_FILE_SIZE_SAMPLE_CHARS = 10
+FILER_FILE_TIME_SAMPLE_CHARS = 19
+# Pixels the Name band stops short of the 1 px Name divider. The crop's
+# right edge is exclusive, so ``half_left + name`` alone already excludes
+# the divider; 2 more absorb the +-1 px of filer_halves' heading-derived
+# divider estimate and Iced's subpixel rounding. A Name glyph box always
+# ends at least FILE_CELL_PAD (6) px before the divider, so the inset never
+# cuts a file name.
+FILER_NAME_DIVIDER_INSET = 2
+
+
+def _filer_text_width_chars(chars: int) -> int:
+    """Mirror of Rust ``file_text_width_chars``: glyphs rounded up + padding."""
+    return math.ceil(chars * FILER_GLYPH_PX) + 2 * FILER_FILE_CELL_PAD
+
+
+def filer_name_column_width(half_width: float) -> int:
+    """Name column width (px, excluding its divider) for a Filer half.
+
+    Mirrors Rust ``file_col_name(view_width)``: what the half leaves after
+    ``file_col_size()`` (93) and ``file_col_time()`` (166) and three 1 px
+    dividers, clamped to ``file_col_name_min()`` (258) ..
+    ``FILE_COL_NAME_MAX`` (420). Below the minimum the table scrolls
+    horizontally instead of shrinking Name.
+    """
+    size = _filer_text_width_chars(FILER_FILE_SIZE_SAMPLE_CHARS)
+    time_col = _filer_text_width_chars(FILER_FILE_TIME_SAMPLE_CHARS)
+    name_min = (
+        _filer_text_width_chars(FILER_FILE_NAME_MIN_CHARS)
+        + FILER_FILE_NAME_ICON + FILER_FILE_NAME_GAP
+    )
+    available = half_width - size - time_col - 3
+    return int(min(max(available, name_min), FILER_FILE_COL_NAME_MAX))
+
+
+def name_rows_region(
+    first_row_bounds, row_count, *, row_height=23, name_right=None,
+    half_left=None, half_width=None,
+):
     """Name-column data-row box derived from the located first data row.
 
     The band does not move when the listing reorders. ``left`` covers the
     file icon inset from the glyph box; ``bottom`` covers ``row_count``
-    rows of ``row_height``.
+    rows of ``row_height``. With ``half_left`` and ``half_width`` (the
+    Filer half's left edge and width, table not scrolled horizontally) the
+    right edge is also clamped to stop FILER_NAME_DIVIDER_INSET px short of
+    the Name divider, so the band never reaches Size at any window width.
     """
     first_left, first_top = first_row_bounds[0], first_row_bounds[1]
     left = max(0, first_left - 36)
     top = first_top - 6
     right = name_right if name_right is not None else first_left + 270
+    if half_left is not None and half_width is not None:
+        name_divider = half_left + filer_name_column_width(half_width)
+        right = min(right, name_divider - FILER_NAME_DIVIDER_INSET)
     bottom = first_top + row_count * row_height + 2
     return (left, top, right, bottom)
 
@@ -5652,10 +5709,18 @@ async def main() -> int:
                 # does not move the band, and the transfer status line is outside
                 # it, so a later read of 444 cannot land on "Download 444 …".
                 # Clamped to the remote half: the band's icon inset must not
-                # reach across the divider into the local half's clipped Size
-                # column. Name 641..932 is the only remote column read here;
-                # Size/Permissions/Owner/Group are off-screen to the right.
-                rows_region = name_rows_region(row_111, 3, name_right=remote_body[2])
+                # reach across the Filer divider into the local half's last
+                # visible column. Columns run Name, Size, Date Modified, Type,
+                # Permissions, Owner, Group, and Size and Date Modified are
+                # visible right after Name, so the band also stops just short
+                # of the remote Name divider (remote_body[0] +
+                # filer_name_column_width(remote half width); 641 + 377 at
+                # 1280 px) and cannot read Size at any window width.
+                rows_region = name_rows_region(
+                    row_111, 3, name_right=remote_body[2],
+                    half_left=remote_body[0],
+                    half_width=remote_body[2] - remote_body[0],
+                )
                 rows_region = (
                     max(rows_region[0], remote_body[0]), rows_region[1],
                     min(rows_region[2], row_111[0] + 270), rows_region[3],
