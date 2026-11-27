@@ -16,6 +16,8 @@ mod theme;
 mod tools;
 #[cfg(test)]
 mod tunnel_edit_lifecycle_tests;
+#[cfg(test)]
+mod tunnel_session_picker_tests;
 mod ui_state;
 
 use crate::{
@@ -30,8 +32,9 @@ use crate::{
 };
 use iced::futures::{SinkExt, Stream, StreamExt, channel::mpsc};
 use iced::widget::{
-    Column, button, canvas, center, column, container, mouse_area, opaque, operation, pane_grid,
-    progress_bar, responsive, row, scrollable, sensor, space, stack, text, text_editor, text_input,
+    Column, button, canvas, center, column, combo_box, container, mouse_area, opaque, operation,
+    pane_grid, progress_bar, responsive, row, scrollable, sensor, space, stack, text, text_editor,
+    text_input,
 };
 use iced::{
     Border, Color, Element, Fill, Font, Length, Subscription, Task, Theme, event, font, keyboard,
@@ -330,7 +333,16 @@ fn local_navigation_scroll(key: &keyboard::Key, modifiers: keyboard::Modifiers) 
 pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result {
     theme::init_from_env();
     iced::application(
-        move || App::boot(profiles_path.clone(), ssh_config.clone()),
+        // `resize_events` only reports later resizes (the initial size comes
+        // as `window::Event::Opened`), so ask for the real size at start-up.
+        move || {
+            (
+                App::boot(profiles_path.clone(), ssh_config.clone()),
+                iced::window::latest()
+                    .and_then(iced::window::size)
+                    .map(Message::WindowResized),
+            )
+        },
         App::update,
         App::view,
     )
@@ -2225,13 +2237,181 @@ const TUNNEL_SETTINGS_TITLE: &str = "Tunnel Settings";
 /// Interior heading, kept distinct from the window title for OCR acceptance.
 const TUNNEL_MANAGER_HEADING: &str = "Tunnel Manager";
 /// Creation guidance is shown once (editor empty state), not beside the list.
-const TUNNEL_CREATE_HINT: &str = "To create one, choose a session below the list and press +.";
-const TUNNEL_SESSION_PICKER_LABEL: &str = "Add to session";
+const TUNNEL_CREATE_HINT: &str = "To create one, press + and choose its session in the editor.";
+const TUNNEL_MOVE_RUNNING: &str = "Stop this forward before moving it to another session.";
+const TUNNEL_MOVE_TARGET_RUNNING: &str =
+    "Stop the target session's tunnel process before moving a forward into it.";
+const TUNNEL_MOVE_DUPLICATE: &str = "The target session already has this forward.";
+const TUNNEL_SESSION_PLACEHOLDER: &str = "Type to search sessions";
+/// Popup height cap of the session picker; it scrolls beyond this.
+const TUNNEL_SESSION_MENU_HEIGHT: f32 = 240.0;
+/// Text size of the session picker input and of its popup rows.
+const TUNNEL_SESSION_TEXT_SIZE: f32 = 13.0;
+/// Dropdown chevron drawn over the right end of the session picker input.
+const TUNNEL_SESSION_CHEVRON_SIZE: f32 = 12.0;
+/// Gap between the chevron and the field's right border.
+const TUNNEL_SESSION_CHEVRON_INSET: f32 = 5.0;
+/// Input padding: text keeps clear of the chevron; the vertical padding (and
+/// so the 23 px row height) matches the plain text inputs.
+const TUNNEL_SESSION_INPUT_PADDING: iced::Padding = iced::Padding {
+    top: 3.0,
+    right: 6.0 + TUNNEL_SESSION_CHEVRON_SIZE + TUNNEL_SESSION_CHEVRON_INSET,
+    bottom: 3.0,
+    left: 6.0,
+};
 
-/// The session picker heads an interactive choice, so it uses primary dock
-/// ink rather than gray help text.
-fn tunnel_session_picker_label_color(p: &theme::Palette) -> Color {
-    p.text_dock
+// The chevron sits inside the input's right padding, clear of the text.
+const _: () = assert!(
+    TUNNEL_SESSION_INPUT_PADDING.right
+        >= TUNNEL_SESSION_CHEVRON_SIZE + TUNNEL_SESSION_CHEVRON_INSET
+);
+
+/// Height of one popup row, computed as iced 0.14's `overlay::menu::List`
+/// does (layout, hit-testing and draw all use `text_line_height
+/// .to_absolute(text_size) + padding.y()`). The combo box passes its own
+/// `size` and `padding` to the menu and leaves the menu's line height at
+/// `LineHeight::default()`.
+fn tunnel_session_menu_row_height() -> f32 {
+    let line = iced::widget::text::LineHeight::default()
+        .to_absolute(iced::Pixels(TUNNEL_SESSION_TEXT_SIZE));
+    f32::from(line) + TUNNEL_SESSION_INPUT_PADDING.y()
+}
+
+/// Popup height for `matches` visible options: the list's own height (the
+/// menu adds no layout padding; its border is drawn inside the bounds), capped
+/// so longer lists scroll. With no match iced opens no popup at all.
+fn tunnel_session_menu_height(matches: usize) -> f32 {
+    (matches as f32 * tunnel_session_menu_row_height()).min(TUNNEL_SESSION_MENU_HEIGHT)
+}
+
+/// The same lowercase alphanumeric matcher iced's combo box builds per option.
+fn tunnel_session_matcher(label: &str) -> String {
+    label
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// Options iced's combo box shows for `query`: every non-alphanumeric run
+/// splits the lowercase query into parts, and each part must occur in the
+/// option's matcher (an empty query matches everything).
+fn tunnel_session_match_count(options: &[TunnelSessionOption], query: &str) -> usize {
+    let query = query.to_lowercase();
+    let parts: Vec<&str> = query.split(|c: char| !c.is_ascii_alphanumeric()).collect();
+    options
+        .iter()
+        .filter(|option| {
+            let matcher = tunnel_session_matcher(&option.label);
+            parts.iter().all(|part| matcher.contains(part))
+        })
+        .count()
+}
+
+/// Characters of the selected session shown in a `field` px value column:
+/// the chevron's reserve is taken from the text budget.
+fn tunnel_session_field_chars(field: f32) -> usize {
+    chars_fitting(
+        field - TUNNEL_SESSION_CHEVRON_SIZE - TUNNEL_SESSION_CHEVRON_INSET,
+        12.0,
+    )
+}
+
+/// Separator between folder segments and the session name in the picker.
+const TUNNEL_SESSION_PATH_SEPARATOR: &str = " / ";
+
+/// One saved session in the Tunnel Settings `Session / profile` picker. The
+/// label is the full folder path and name; the key is the stable profile key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TunnelSessionOption {
+    label: String,
+    key: String,
+}
+
+impl std::fmt::Display for TunnelSessionOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// `Prod / DB / pg-primary`: the folder string splits on `/` into
+/// subfolders; empty segments are dropped, and an empty folder shows the
+/// name alone.
+fn tunnel_session_display_path(session: &Session) -> String {
+    session
+        .folder
+        .split('/')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .chain(std::iter::once(session.name.as_str()))
+        .collect::<Vec<_>>()
+        .join(TUNNEL_SESSION_PATH_SEPARATOR)
+}
+
+/// Every saved session, sorted case-insensitively by display path. Names
+/// repeated in different folders differ by path; the rare identical path
+/// (for example folder `a/b` versus `a / b`) gets a numeric suffix so every
+/// option reads distinctly. Labels compare case-insensitively, like the
+/// picker search. Every literal path is reserved first, so a suffix skips
+/// any label already in use (a session literally named `web (2)` pushes the
+/// second `web` to `web (3)`); the first of each path keeps it unchanged.
+fn tunnel_session_options(profiles: &[Session]) -> Vec<TunnelSessionOption> {
+    let mut options: Vec<TunnelSessionOption> = profiles
+        .iter()
+        .map(|profile| TunnelSessionOption {
+            label: tunnel_session_display_path(profile),
+            key: session_profile_key(profile),
+        })
+        .collect();
+    options.sort_by(|left, right| {
+        left.label
+            .to_lowercase()
+            .cmp(&right.label.to_lowercase())
+            .then_with(|| left.label.cmp(&right.label))
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    let mut taken: HashSet<String> = options
+        .iter()
+        .map(|option| option.label.to_lowercase())
+        .collect();
+    let mut plain: HashSet<String> = HashSet::new();
+    for option in &mut options {
+        if plain.insert(option.label.to_lowercase()) {
+            continue;
+        }
+        let mut suffix = 2usize;
+        loop {
+            let candidate = format!("{} ({suffix})", option.label);
+            if taken.insert(candidate.to_lowercase()) {
+                option.label = candidate;
+                break;
+            }
+            suffix += 1;
+        }
+    }
+    options
+}
+
+/// Popup list of the session picker: the menu-bar drop-down surface
+/// (`list` fill, `text_dock` outline) with primary text, so it reads in both
+/// themes instead of the stock Iced palette.
+fn tunnel_session_menu_style(_: &Theme) -> iced::widget::overlay::menu::Style {
+    tunnel_session_menu_style_for(theme::palette())
+}
+
+fn tunnel_session_menu_style_for(p: &theme::Palette) -> iced::widget::overlay::menu::Style {
+    iced::widget::overlay::menu::Style {
+        background: p.list.into(),
+        border: Border {
+            color: p.text_dock,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        text_color: p.text_dock,
+        selected_text_color: p.text_dock,
+        selected_background: p.selected_row.into(),
+        shadow: iced::Shadow::default(),
+    }
 }
 
 /// One saved forward as shown in the quick menu. Snapshot taken on open and
@@ -3072,6 +3252,8 @@ enum Message {
     },
     ExternalEditorInput(String),
     ExternalEditorSave,
+    TunnelDraftSession(TunnelSessionOption),
+    TunnelSessionSearch(String),
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -4199,6 +4381,9 @@ struct TunnelEditState {
     profile_key: String,
     original: Option<(tunnels::ForwardKind, String)>,
     draft: tunnels::ForwardDraft,
+    /// Session chosen in the `Session / profile` picker. Equal to
+    /// `profile_key` unless a saved forward is being moved on Save.
+    target_key: String,
 }
 
 struct App {
@@ -4307,13 +4492,20 @@ struct App {
     external_edit_tick_scheduled: bool,
     /// Editor command setting; empty means the OS default application.
     external_editor: String,
+    /// Searchable `Session / profile` picker in Tunnel Settings; rebuilt with
+    /// the profile list and whenever the dialog opens.
+    tunnel_session_picker: combo_box::State<TunnelSessionOption>,
+    /// The picker's search text, mirrored from its `on_input` so the popup
+    /// can be sized to the options iced shows. iced keeps the text across
+    /// focus changes and clears it on a selection or a state rebuild; so
+    /// does this.
+    tunnel_session_search: String,
+    /// A restored layout still needs its one-time Filer side-dock widening;
+    /// done on the first real `WindowResized`, when the width is known.
+    pending_file_panel_fit: bool,
 }
 
-const FILES_PANELS: [dock::Panel; 3] = [
-    dock::Panel::Filer,
-    dock::Panel::Explorer,
-    dock::Panel::Transfer,
-];
+const FILES_PANELS: [dock::Panel; 2] = [dock::Panel::Filer, dock::Panel::Transfer];
 
 impl App {
     fn save_ui_state(&mut self) {
@@ -4381,6 +4573,10 @@ impl App {
                 None => message.clone(),
             });
         }
+        // Older builds could leave Filer in a 214/420 px side dock; it is
+        // widened once the real window width arrives (`WindowResized`).
+        let (docks, pending_file_panel_fit) =
+            dock::DockLayout::restore(saved_ui.docks.take(), &available_panels());
         Self {
             tools,
             profiles_path,
@@ -4405,13 +4601,7 @@ impl App {
             open_menu: None,
             dock_drag: None,
             window_size: iced::Size::new(1280.0, 800.0),
-            docks: {
-                let mut docks = saved_ui.docks.take().unwrap_or_default();
-                docks.sanitize();
-                docks.retain_available(&available_panels());
-                docks.add_missing(&available_panels());
-                docks
-            },
+            docks,
             ui_state_path,
             dock_menu: None,
             privacy_locked: false,
@@ -4463,7 +4653,21 @@ impl App {
             next_external_edit_id: 1,
             external_edit_tick_scheduled: false,
             external_editor: std::mem::take(&mut saved_ui.external_editor),
+            tunnel_session_picker: combo_box::State::new(Vec::new()),
+            tunnel_session_search: String::new(),
+            pending_file_panel_fit,
         }
+        .with_tunnel_session_picker()
+    }
+
+    fn with_tunnel_session_picker(mut self) -> Self {
+        self.rebuild_tunnel_session_picker();
+        self
+    }
+
+    fn rebuild_tunnel_session_picker(&mut self) {
+        self.tunnel_session_picker = combo_box::State::new(tunnel_session_options(&self.profiles));
+        self.tunnel_session_search.clear();
     }
 
     fn refresh_profile_matches(&mut self) {
@@ -4480,6 +4684,7 @@ impl App {
         self.selected_profile = None;
         self.selected_profile_key = None;
         self.session_click = None;
+        self.rebuild_tunnel_session_picker();
     }
 
     fn new_terminal_pane(&mut self, profile: Session) -> TerminalPane {
@@ -5056,11 +5261,7 @@ impl App {
             }
         } else if !self.tabs.is_empty() {
             // Filer last so it ends up the active panel of its area.
-            for panel in [
-                dock::Panel::Transfer,
-                dock::Panel::Explorer,
-                dock::Panel::Filer,
-            ] {
+            for panel in [dock::Panel::Transfer, dock::Panel::Filer] {
                 self.docks.show(panel);
             }
         }
@@ -6065,6 +6266,7 @@ impl App {
             }
             Message::Tunnels => {
                 self.refresh_tunnel_status();
+                self.rebuild_tunnel_session_picker();
                 self.dialog = Some(Dialog::Tunnels);
             }
             Message::TunnelRefresh => {
@@ -6164,6 +6366,7 @@ impl App {
                     return Task::none();
                 }
                 self.tunnel_edit = Some(TunnelEditState {
+                    target_key: key.clone(),
                     profile_key: key,
                     original: None,
                     draft: tunnels::ForwardDraft::default(),
@@ -6187,6 +6390,7 @@ impl App {
                     return Task::none();
                 };
                 self.tunnel_edit = Some(TunnelEditState {
+                    target_key: key.clone(),
                     profile_key: key,
                     original: Some((kind, spec)),
                     draft: tunnels::ForwardDraft::from_row(&row),
@@ -6262,6 +6466,50 @@ impl App {
                     return Task::none();
                 }
                 let mut profiles = self.profiles.clone();
+                if let Some((old_kind, old_spec)) = &edit.original
+                    && edit.target_key != edit.profile_key
+                {
+                    // Moving a saved forward: one profile-store write removes
+                    // it from the owner and adds it, label kept, to the target.
+                    if let Err(notice) = self.tunnel_move_allowed(&edit, *old_kind, old_spec, &spec)
+                    {
+                        self.tunnel_notice = notice.into();
+                        self.refresh_tunnel_status();
+                        return Task::none();
+                    }
+                    let source = profiles
+                        .iter()
+                        .position(|profile| session_profile_key(profile) == edit.profile_key);
+                    let target = profiles
+                        .iter()
+                        .position(|profile| session_profile_key(profile) == edit.target_key);
+                    let (Some(source), Some(target)) = (source, target) else {
+                        self.tunnel_notice = "Profile no longer exists.".into();
+                        return Task::none();
+                    };
+                    let target_name = profiles[target].name.clone();
+                    let result =
+                        tunnels::remove_forward(&mut profiles[source], *old_kind, old_spec)
+                            .and_then(|_| {
+                                tunnels::add_forward(
+                                    &mut profiles[target],
+                                    edit.draft.kind,
+                                    spec,
+                                    &edit.draft.label,
+                                )
+                            })
+                            .and_then(|_| save_sessions(&self.profiles_path, &profiles));
+                    if let Err(error) = result {
+                        self.tunnel_notice = format!("Cannot move tunnel: {error:#}");
+                        return Task::none();
+                    }
+                    self.profiles = profiles;
+                    self.refresh_profile_matches();
+                    self.tunnel_edit = None;
+                    self.tunnel_notice = format!("Tunnel moved to {target_name}.");
+                    self.refresh_tunnel_status();
+                    return Task::none();
+                }
                 let Some(profile) = profiles
                     .iter_mut()
                     .find(|profile| session_profile_key(profile) == edit.profile_key)
@@ -7881,7 +8129,9 @@ impl App {
                 let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.move_to(panel, area);
-                self.docks.widen_for_file_panel(panel, area);
+                self.docks
+                    .widen_for_file_panel(panel, area, self.window_size.width);
+                self.docks.fit_to_window(self.window_size.width);
                 if !self.docks.is_visible(dock::Panel::Sender) {
                     self.sender_focused = false;
                 }
@@ -7894,6 +8144,16 @@ impl App {
                 let was_open = self.files_open();
                 self.dock_menu = None;
                 self.docks.toggle(panel);
+                // Only showing the Filer in a side dock may widen it; other
+                // toggles keep the user's widths unless they no longer fit.
+                if panel == dock::Panel::Filer
+                    && self.docks.is_visible(panel)
+                    && let Some(area) = self.docks.area_of(panel)
+                {
+                    self.docks
+                        .widen_for_file_panel(panel, area, self.window_size.width);
+                }
+                self.docks.fit_to_window(self.window_size.width);
                 if !self.docks.is_visible(dock::Panel::Sender) {
                     self.sender_focused = false;
                 }
@@ -7914,7 +8174,18 @@ impl App {
                     return self.files_became_visible();
                 }
             }
-            Message::WindowResized(size) => self.window_size = size,
+            Message::WindowResized(size) => {
+                self.window_size = size;
+                // A minimised window reports 0x0; fitting to that would
+                // collapse both side docks for good.
+                if size.width >= 1.0 && size.height >= 1.0 {
+                    if std::mem::take(&mut self.pending_file_panel_fit) {
+                        self.docks.fit_file_panel(size.width);
+                    }
+                    // Not saved here: the next layout action saves it.
+                    self.docks.fit_to_window(size.width);
+                }
+            }
             Message::DockDragStart(area) => {
                 self.dock_menu = None;
                 if self.dialog.is_none() {
@@ -7952,6 +8223,8 @@ impl App {
                 });
                 self.docks.retain_available(&available_panels());
                 self.docks.add_missing(&available_panels());
+                self.docks.fit_file_panel(self.window_size.width);
+                self.docks.fit_to_window(self.window_size.width);
                 if !self.docks.is_visible(dock::Panel::Sender) {
                     self.sender_focused = false;
                 }
@@ -8167,6 +8440,28 @@ impl App {
             }
             Message::ExternalEditorInput(value) => self.external_editor_input(value),
             Message::ExternalEditorSave => return self.save_external_editor_setting(),
+            Message::TunnelSessionSearch(value) => self.tunnel_session_search = value,
+            Message::TunnelDraftSession(option) => {
+                // iced clears its search text on every selection.
+                self.tunnel_session_search.clear();
+                if !self
+                    .profiles
+                    .iter()
+                    .any(|profile| session_profile_key(profile) == option.key)
+                {
+                    self.tunnel_notice = "Profile no longer exists.".into();
+                    return Task::none();
+                }
+                if let Some(edit) = self.tunnel_edit.as_mut() {
+                    // A new draft has no live state yet, so it simply changes
+                    // owner. A saved forward keeps its owner until Save moves it.
+                    if edit.original.is_none() {
+                        edit.profile_key = option.key.clone();
+                    }
+                    edit.target_key = option.key;
+                    self.tunnel_notice.clear();
+                }
+            }
         }
         Task::none()
     }
@@ -9386,41 +9681,46 @@ impl App {
         .into()
     }
 
-    /// Filer dock panel (spec 5.2): remote path bar, table, actions, editor.
+    /// Filer dock panel (spec 5.2): local listing on the left, remote listing
+    /// on the right, each with its own heading and action row; the inline
+    /// remote editor spans the full width below while it is open.
     fn filer_panel(&self) -> Element<'_, Message> {
         if self.tabs.is_empty() {
             return self.files_unavailable();
         }
-        let (_, remote_panel) = self.file_listing_panels();
-        let actions = files_action_row(vec![
+        let (local_panel, remote_panel) = self.file_listing_panels();
+        let local_actions = files_action_row(vec![
+            action("Upload ->", Message::FilesRequestUpload).into(),
+            action("New local folder", Message::FilesRequestMkdirLocal).into(),
+            action("Rename local", Message::FilesRequestRenameLocal).into(),
+            action("Delete local", Message::FilesRequestDeleteLocal).into(),
+        ]);
+        let remote_actions = files_action_row(vec![
             action("<- Download", Message::FilesRequestDownload).into(),
             action("New remote folder", Message::FilesRequestMkdirRemote).into(),
             action("Rename remote", Message::FilesRequestRenameRemote).into(),
             action("Edit remote", Message::FilesRequestEditRemote).into(),
             action("Delete remote", Message::FilesRequestDeleteRemote).into(),
         ]);
-        column![remote_panel, actions, self.remote_editor_section()]
+        let local_half = column![files_side_heading("Local"), local_panel, local_actions]
+            .width(Length::FillPortion(1))
+            .height(Fill);
+        let remote_half = column![files_side_heading("Remote"), remote_panel, remote_actions]
+            .width(Length::FillPortion(1))
+            .height(Fill);
+        let divider = container(space::horizontal())
+            .width(1)
             .height(Fill)
-            .width(Fill)
-            .into()
-    }
-
-    /// Explorer dock panel: local path bar, table and local actions.
-    fn explorer_panel(&self) -> Element<'_, Message> {
-        if self.tabs.is_empty() {
-            return self.files_unavailable();
-        }
-        let (local_panel, _) = self.file_listing_panels();
-        let actions = files_action_row(vec![
-            action("Upload ->", Message::FilesRequestUpload).into(),
-            action("New local folder", Message::FilesRequestMkdirLocal).into(),
-            action("Rename local", Message::FilesRequestRenameLocal).into(),
-            action("Delete local", Message::FilesRequestDeleteLocal).into(),
-        ]);
-        column![local_panel, actions]
-            .height(Fill)
-            .width(Fill)
-            .into()
+            .style(split_divider_fill);
+        column![
+            row![local_half, divider, remote_half]
+                .width(Fill)
+                .height(Fill),
+            self.remote_editor_section(),
+        ]
+        .height(Fill)
+        .width(Fill)
+        .into()
     }
 
     /// Transfer dock panel (spec 5.3): one block per job with a progress bar.
@@ -9678,6 +9978,43 @@ impl App {
         pending
     }
 
+    /// Extra guards for moving a saved forward to another session, applied
+    /// after the edit guards. The live forward and any aggregate process on
+    /// either side must be stopped, and the target must not already hold the
+    /// same kind and spec.
+    fn tunnel_move_allowed(
+        &mut self,
+        edit: &TunnelEditState,
+        old_kind: tunnels::ForwardKind,
+        old_spec: &str,
+        spec: &str,
+    ) -> Result<(), &'static str> {
+        if self
+            .tunnels
+            .forward_status(&edit.profile_key, old_kind, old_spec)
+            .is_running()
+        {
+            return Err(TUNNEL_MOVE_RUNNING);
+        }
+        if self.tunnels.status(&edit.target_key).is_running() {
+            return Err(TUNNEL_MOVE_TARGET_RUNNING);
+        }
+        let Some(target) = self
+            .profiles
+            .iter()
+            .find(|profile| session_profile_key(profile) == edit.target_key)
+        else {
+            return Err("Profile no longer exists.");
+        };
+        if tunnels::rows_for(target)
+            .iter()
+            .any(|row| row.kind == edit.draft.kind && row.spec == spec)
+        {
+            return Err(TUNNEL_MOVE_DUPLICATE);
+        }
+        Ok(())
+    }
+
     fn refresh_tunnel_status(&mut self) {
         self.tunnel_status.clear();
         for profile in &self.profiles {
@@ -9902,6 +10239,59 @@ impl App {
         .into()
     }
 
+    /// Searchable session picker filling the editor value column. The closed
+    /// field shows the selection truncated to the column; the popup lists
+    /// full paths.
+    fn tunnel_session_picker_view(
+        &self,
+        target_key: &str,
+        field_chars: usize,
+    ) -> Element<'_, Message> {
+        let selected = self
+            .tunnel_session_picker
+            .options()
+            .iter()
+            .find(|option| option.key == target_key)
+            .map(|option| TunnelSessionOption {
+                label: truncate(&option.label, field_chars),
+                key: option.key.clone(),
+            });
+        let picker = combo_box(
+            &self.tunnel_session_picker,
+            TUNNEL_SESSION_PLACEHOLDER,
+            selected.as_ref(),
+            Message::TunnelDraftSession,
+        )
+        .input_style(flat_input)
+        .menu_style(tunnel_session_menu_style)
+        .on_input(Message::TunnelSessionSearch)
+        .size(TUNNEL_SESSION_TEXT_SIZE)
+        .padding(TUNNEL_SESSION_INPUT_PADDING)
+        .width(Fill)
+        .menu_height(tunnel_session_menu_height(tunnel_session_match_count(
+            self.tunnel_session_picker.options(),
+            &self.tunnel_session_search,
+        )));
+        // Dropdown affordance inside the field's right padding. The icon
+        // canvas neither captures events nor reports a mouse interaction, so
+        // the stack passes clicks on it to the input below: clicking the
+        // chevron focuses the input, which opens the list.
+        let chevron = container(icons::icon(
+            icons::Icon::ChevronDown,
+            TUNNEL_SESSION_CHEVRON_SIZE,
+            theme::palette().text,
+        ))
+        .padding(iced::Padding {
+            right: TUNNEL_SESSION_CHEVRON_INSET,
+            ..iced::Padding::ZERO
+        })
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::alignment::Horizontal::Right)
+        .align_y(iced::Center);
+        stack![picker, chevron].width(Fill).into()
+    }
+
     fn tunnels_view(&self) -> Element<'_, Message> {
         let ink = theme::palette().text_dock;
         let selected_key = self
@@ -9958,8 +10348,8 @@ impl App {
             tunnel_list = tunnel_list.push(text(TUNNEL_MENU_EMPTY).size(12).color(muted()));
         }
 
-        // + uses the current owner (or first session); the session buttons
-        // below it let users explicitly choose where a new forward is saved.
+        // + uses the current owner (or first session); the editor's
+        // `Session / profile` picker then chooses where it is saved.
         let add_key = selected_key
             .map(str::to_owned)
             .or_else(|| self.profiles.first().map(session_profile_key));
@@ -9977,27 +10367,10 @@ impl App {
         } else {
             button(text("−"))
         };
-        let mut session_picker = column![
-            text(TUNNEL_SESSION_PICKER_LABEL)
-                .size(11)
-                .color(tunnel_session_picker_label_color(theme::palette()))
-        ]
-        .spacing(3);
-        for profile in &self.profiles {
-            session_picker = session_picker.push(
-                action(
-                    truncate(&profile.name, 32),
-                    Message::TunnelAdd(session_profile_key(profile)),
-                )
-                .width(Fill)
-                .style(quiet),
-            );
-        }
         let list_panel = container(
             column![
                 scrollable(tunnel_list).height(350),
                 row![add.style(quiet), remove.style(quiet)].spacing(4),
-                session_picker,
             ]
             .spacing(8),
         )
@@ -10006,7 +10379,6 @@ impl App {
         .style(card);
 
         let editor: Element<'_, Message> = if let Some(edit) = &self.tunnel_edit {
-            let profile_name = owner.map_or("Session unavailable", |profile| profile.name.as_str());
             let status = self
                 .tunnel_status
                 .get(&edit.profile_key)
@@ -10072,10 +10444,9 @@ impl App {
             let label_width = tunnel_editor_label_width(tunnel_editor_panel_width(
                 tunnel_settings_dialog_width(self.window_size.width),
             ));
-            let field_chars = chars_fitting(
+            let field_chars = tunnel_session_field_chars(
                 tunnel_editor_panel_width(tunnel_settings_dialog_width(self.window_size.width))
                     - label_width,
-                12.0,
             );
             let grid = column![
                 row![
@@ -10090,10 +10461,7 @@ impl App {
                 row![tunnel_editor_label("Type", label_width, ink), kind_row],
                 row![
                     tunnel_editor_label("Session / profile", label_width, ink),
-                    text(truncate(profile_name, field_chars))
-                        .size(12)
-                        .color(ink)
-                        .wrapping(iced::widget::text::Wrapping::None),
+                    self.tunnel_session_picker_view(&edit.target_key, field_chars),
                 ],
                 row![
                     tunnel_editor_label("Listen Port", label_width, ink),
@@ -11411,6 +11779,10 @@ fn border_fill(_: &Theme) -> container::Style {
     fill_style(theme::palette().border)
 }
 
+fn split_divider_fill(_: &Theme) -> container::Style {
+    fill_style(theme::palette().split_divider())
+}
+
 fn accent_fill(_: &Theme) -> container::Style {
     fill_style(theme::palette().accent)
 }
@@ -11716,6 +12088,19 @@ fn files_path_bar<'a>(
     .into()
 }
 
+/// Small `Local` / `Remote` heading above each half of the Filer panel.
+fn files_side_heading(label: &'static str) -> Element<'static, Message> {
+    container(
+        text(label)
+            .size(12)
+            .color(theme::palette().section_heading())
+            .wrapping(text::Wrapping::None),
+    )
+    .padding([2, 6])
+    .width(Fill)
+    .into()
+}
+
 fn files_action_row(buttons: Vec<Element<'_, Message>>) -> Element<'_, Message> {
     scrollable(
         row(buttons)
@@ -11856,6 +12241,14 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn filer_split_divider_uses_strong_token_not_border() {
+        let style = split_divider_fill(&Theme::Light);
+        let expected = theme::palette().split_divider();
+        assert_eq!(style.background, Some(iced::Background::Color(expected)));
+        assert_ne!(expected, theme::palette().border);
+    }
 
     #[test]
     fn flat_input_uses_control_outline_not_divider_in_both_themes() {
@@ -12081,9 +12474,11 @@ mod tests {
         assert!(!TUNNEL_MENU_EMPTY.contains('+'));
         assert!(TUNNEL_CREATE_HINT.contains("press +"));
         for p in [super::theme::LIGHT, super::theme::DARK] {
-            let label = tunnel_session_picker_label_color(&p);
-            assert_eq!(label, p.text_dock);
-            assert_ne!(label, p.muted);
+            // The session picker popup uses primary ink on the menu surface.
+            let menu = tunnel_session_menu_style_for(&p);
+            assert_eq!(menu.text_color, p.text_dock);
+            assert_ne!(menu.text_color, p.muted);
+            assert_eq!(menu.background, iced::Background::from(p.list));
         }
     }
 
@@ -12136,6 +12531,30 @@ mod tests {
     }
 
     #[test]
+    fn windterm_preset_docks_filer_at_bottom_beside_transfer() {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-dock-preset-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.ui_state_path = None;
+        let _ = app.update(Message::DockPreset(true));
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Filer),
+            Some(dock::Area::Bottom)
+        );
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Transfer),
+            Some(dock::Area::Bottom)
+        );
+        assert!(app.docks.left.panels.is_empty());
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Session),
+            Some(dock::Area::Right)
+        );
+    }
+
+    #[test]
     fn dock_splitter_drag_resizes_right_dock() {
         let path = std::env::temp_dir().join(format!(
             "inspirum-iced-dock-drag-{}-nonexistent.json",
@@ -12152,6 +12571,186 @@ mod tests {
         assert!((app.docks.right_width - 500.0).abs() <= 1.0);
         let _ = app.update(Message::DockDragEnd);
         assert_eq!(app.dock_drag, None);
+    }
+
+    /// Layout saved by an older build: Filer alone in a 214 px left dock,
+    /// Session/Outline in a 214 px right dock.
+    const R153_DOCK_OLD_LAYOUT: &str = r#"{
+        "left": {"panels": ["filer"], "active": 0, "collapsed": false},
+        "right": {"panels": ["session", "outline"], "active": 0, "collapsed": false},
+        "bottom": {"panels": ["sender", "transfer", "shell"], "active": 0, "collapsed": false},
+        "hidden": [],
+        "left_width": 214.0,
+        "right_width": 214.0,
+        "bottom_ratio": 0.32
+    }"#;
+
+    fn r153_dock_app(name: &str) -> App {
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-iced-r153-dock-{name}-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.ui_state_path = None;
+        app
+    }
+
+    /// Centre workspace width as `dock_body` lays it out: each rendered
+    /// (non-empty) side dock takes its width plus its splitter.
+    fn r153_dock_centre(docks: &dock::DockLayout, window_width: f32) -> f32 {
+        let mut centre = window_width;
+        if !docks.left.panels.is_empty() {
+            centre -= docks.left_width + dock::SPLITTER_GRAB;
+        }
+        if !docks.right.panels.is_empty() {
+            centre -= docks.right_width + dock::SPLITTER_GRAB;
+        }
+        centre
+    }
+
+    #[test]
+    fn r153_dock_restore_then_resize_keeps_centre() {
+        let mut app = r153_dock_app("resize");
+        // What start-up did with a restored layout: fit for a 1280 px window.
+        let mut docks = dock::DockLayout::from_json(R153_DOCK_OLD_LAYOUT);
+        docks.retain_available(&available_panels());
+        docks.add_missing(&available_panels());
+        docks.fit_file_panel(1280.0);
+        app.docks = docks;
+        let _ = app.update(Message::WindowResized(iced::Size::new(1280.0, 800.0)));
+        let centre = r153_dock_centre(&app.docks, 1280.0);
+        assert!(
+            centre >= dock::MIN_CENTRE_WIDTH,
+            "1280: centre {centre} (left {}, right {})",
+            app.docks.left_width,
+            app.docks.right_width
+        );
+        let _ = app.update(Message::WindowResized(iced::Size::new(960.0, 640.0)));
+        let centre = r153_dock_centre(&app.docks, 960.0);
+        assert!(
+            centre >= dock::MIN_CENTRE_WIDTH,
+            "960: centre {centre} (left {}, right {})",
+            app.docks.left_width,
+            app.docks.right_width
+        );
+        assert!(app.docks.left_width >= dock::MIN_SIDE_WIDTH);
+        assert!(app.docks.right_width >= dock::MIN_SIDE_WIDTH);
+    }
+
+    #[test]
+    fn r153_dock_transfer_toggle_keeps_manual_filer_width() {
+        let mut app = r153_dock_app("toggle");
+        let _ = app.update(Message::DockMove(dock::Panel::Filer, dock::Area::Left));
+        let _ = app.update(Message::DockDragStart(dock::Area::Left));
+        let _ = app.update(Message::DockDragMove(iced::Point::new(300.0, 300.0)));
+        let _ = app.update(Message::DockDragEnd);
+        assert!((app.docks.left_width - 300.0).abs() <= 1.0);
+        let _ = app.update(Message::DockToggle(dock::Panel::Transfer));
+        assert!(
+            (app.docks.left_width - 300.0).abs() <= 1.0,
+            "after first Transfer toggle: left {}",
+            app.docks.left_width
+        );
+        let _ = app.update(Message::DockToggle(dock::Panel::Transfer));
+        assert!(
+            (app.docks.left_width - 300.0).abs() <= 1.0,
+            "after second Transfer toggle: left {}",
+            app.docks.left_width
+        );
+    }
+
+    #[test]
+    fn r153_dock_showing_filer_in_side_dock_widens_it() {
+        let mut app = r153_dock_app("show");
+        let _ = app.update(Message::DockMove(dock::Panel::Filer, dock::Area::Left));
+        app.docks
+            .set_width(dock::Area::Left, dock::DEFAULT_SIDE_WIDTH);
+        let _ = app.update(Message::DockToggle(dock::Panel::Filer));
+        assert_eq!(app.docks.area_of(dock::Panel::Filer), None);
+        assert_eq!(app.docks.left_width, dock::DEFAULT_SIDE_WIDTH);
+        let _ = app.update(Message::DockToggle(dock::Panel::Filer));
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Filer),
+            Some(dock::Area::Left)
+        );
+        assert!(app.docks.is_visible(dock::Panel::Filer));
+        assert!(
+            app.docks.left_width >= dock::FILE_PANEL_MIN_WIDTH,
+            "left {}",
+            app.docks.left_width
+        );
+        let centre = r153_dock_centre(&app.docks, app.window_size.width);
+        assert!(centre >= dock::MIN_CENTRE_WIDTH, "centre {centre}");
+    }
+
+    #[test]
+    fn r153_dock_load_fit_waits_for_real_window_width() {
+        let mut app = r153_dock_app("load");
+        let saved = dock::DockLayout::from_json(R153_DOCK_OLD_LAYOUT);
+        (app.docks, app.pending_file_panel_fit) =
+            dock::DockLayout::restore(Some(saved), &available_panels());
+        assert!(app.pending_file_panel_fit);
+        assert_eq!(app.docks.left_width, dock::DEFAULT_SIDE_WIDTH);
+        // A minimised window (0x0) neither consumes the fit nor shrinks.
+        let _ = app.update(Message::WindowResized(iced::Size::new(0.0, 0.0)));
+        assert!(app.pending_file_panel_fit);
+        assert_eq!(app.docks.left_width, dock::DEFAULT_SIDE_WIDTH);
+        let _ = app.update(Message::WindowResized(iced::Size::new(960.0, 640.0)));
+        assert!(!app.pending_file_panel_fit);
+        assert_eq!(
+            app.docks.area_of(dock::Panel::Filer),
+            Some(dock::Area::Left)
+        );
+        // 960 - (214 + 5) - 5 - 320.
+        assert_eq!(app.docks.left_width, 416.0);
+        assert_eq!(app.docks.right_width, dock::DEFAULT_SIDE_WIDTH);
+        assert_eq!(r153_dock_centre(&app.docks, 960.0), dock::MIN_CENTRE_WIDTH);
+        // Later resizes only shrink; a manual width is not re-widened.
+        app.docks.set_width(dock::Area::Left, 300.0);
+        let _ = app.update(Message::WindowResized(iced::Size::new(1280.0, 800.0)));
+        assert_eq!(app.docks.left_width, 300.0);
+    }
+
+    #[test]
+    fn r153_dock_manual_filer_width_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("ui-state.json");
+        let mut app = r153_dock_app("restart1");
+        app.ui_state_path = Some(state_path.clone());
+        let saved = dock::DockLayout::from_json(R153_DOCK_OLD_LAYOUT);
+        (app.docks, app.pending_file_panel_fit) =
+            dock::DockLayout::restore(Some(saved), &available_panels());
+        let _ = app.update(Message::WindowResized(iced::Size::new(1280.0, 800.0)));
+        assert_eq!(app.docks.left_width, 736.0, "old layout widened once");
+        let _ = app.update(Message::DockDragStart(dock::Area::Left));
+        let _ = app.update(Message::DockDragMove(iced::Point::new(300.0, 300.0)));
+        let _ = app.update(Message::DockDragEnd);
+        assert_eq!(app.docks.left_width, 300.0);
+
+        // Restart: same start-up restore from the file this build saved.
+        let mut next = r153_dock_app("restart2");
+        (next.docks, next.pending_file_panel_fit) =
+            dock::DockLayout::restore(ui_state::load(&state_path).docks, &available_panels());
+        assert!(!next.pending_file_panel_fit);
+        let _ = next.update(Message::WindowResized(iced::Size::new(1280.0, 800.0)));
+        assert_eq!(next.docks.left_width, 300.0);
+        assert_eq!(
+            next.docks.area_of(dock::Panel::Filer),
+            Some(dock::Area::Left)
+        );
+    }
+
+    #[test]
+    fn r153_dock_new_side_dock_shrinks_filer_to_fit() {
+        let mut app = r153_dock_app("move");
+        let _ = app.update(Message::DockMove(dock::Panel::Filer, dock::Area::Left));
+        assert_eq!(app.docks.left_width, dock::FILE_PANEL_MIN_WIDTH);
+        // Showing Session in the right dock adds a 214 px dock + splitter.
+        let _ = app.update(Message::DockMove(dock::Panel::Session, dock::Area::Right));
+        let width = app.window_size.width;
+        assert_eq!(r153_dock_centre(&app.docks, width), dock::MIN_CENTRE_WIDTH);
+        assert_eq!(app.docks.right_width, dock::DEFAULT_SIDE_WIDTH);
+        assert_eq!(app.docks.left_width, width - 219.0 - 5.0 - 320.0);
     }
 
     #[test]
@@ -13755,7 +14354,6 @@ mod tests {
                 dock::Panel::Session,
                 dock::Panel::Transfer,
                 dock::Panel::Filer,
-                dock::Panel::Explorer,
             ]
         );
         assert!(app.docks.is_visible(dock::Panel::Session));
@@ -13850,7 +14448,7 @@ mod tests {
             app.docks.is_visible(dock::Panel::Filer),
             "Filer opens last, active"
         );
-        assert!(app.docks.area_of(dock::Panel::Explorer).is_some());
+        assert_eq!(app.docks.area_of(dock::Panel::Explorer), None);
         assert!(app.docks.area_of(dock::Panel::Transfer).is_some());
         app.docks.move_to(dock::Panel::Filer, dock::Area::Right);
         assert_eq!(
@@ -13868,6 +14466,55 @@ mod tests {
         for panel in FILES_PANELS {
             assert_eq!(app.docks.area_of(panel), None);
         }
+    }
+
+    #[test]
+    fn merged_filer_panel_body_and_files_open() {
+        use iced::advanced::widget::Tree;
+
+        let path = std::env::temp_dir().join(format!(
+            "inspirum-merged-filer-{}-nonexistent.json",
+            std::process::id()
+        ));
+        let mut app = App::boot(path, None);
+        app.ui_state_path = None;
+        assert!(!available_panels().contains(&dock::Panel::Explorer));
+        {
+            // No tab: the "Open a session" placeholder, not the halves
+            // column. iced's Container is transparent in the widget tree
+            // (iced_widget 0.14.2 container.rs `children()` forwards to its
+            // content), so the placeholder text yields no child trees.
+            assert!(app.tabs.is_empty());
+            let body = app.dock_panel_body(dock::Panel::Filer);
+            assert!(Tree::new(&body).children.is_empty());
+        }
+        let profile = Session {
+            host: "example.invalid".into(),
+            name: "merged filer fixture".into(),
+            ..Session::default()
+        };
+        let pane = app.new_terminal_pane(profile.clone());
+        app.tabs.push(Workspace::new(profile, pane));
+        {
+            // Tab open, no remote editor: column [halves row]; the row holds
+            // local half, divider, remote half. The closed editor section is
+            // void, and iced's Column::push drops void children (iced_widget
+            // 0.14.2 column.rs:147), so it adds no child tree.
+            assert!(app.remote_editor.is_none());
+            let body = app.dock_panel_body(dock::Panel::Filer);
+            let tree = Tree::new(&body);
+            assert_eq!(tree.children.len(), 1);
+            assert_eq!(tree.children[0].children.len(), 3);
+        }
+
+        // Only Filer visible (Transfer closed): files are open.
+        app.docks.close(dock::Panel::Transfer);
+        app.docks.activate(dock::Panel::Filer);
+        assert!(app.docks.is_visible(dock::Panel::Filer));
+        assert!(!app.docks.is_visible(dock::Panel::Transfer));
+        assert!(app.files_open());
+        let _ = app.update(Message::DockActivate(dock::Panel::Session));
+        assert!(!app.files_open());
     }
 
     #[test]
@@ -16961,6 +17608,54 @@ mod tunnel_layout_tests {
         assert!(field > 250.0, "value col {field}px");
         for value in ["CI tunnel fixture", "Alpha forward", "127.0.0.1", "Running"] {
             assert!(value.chars().count() <= chars_fitting(field - 12.0, 13.0));
+        }
+    }
+
+    #[test]
+    fn session_picker_popup_shrinks_to_matching_options() {
+        // 13 px text at iced's default 1.3 line height plus 3 + 3 padding.
+        let row = tunnel_session_menu_row_height();
+        assert!((row - 22.9).abs() < 1e-4, "{row}");
+        let option = |label: &str| TunnelSessionOption {
+            label: label.into(),
+            key: label.into(),
+        };
+        let options: Vec<_> = ["CI tunnel fixture", "Prod / DB / pg-primary", "Prod / web"]
+            .into_iter()
+            .map(option)
+            .collect();
+        assert_eq!(tunnel_session_match_count(&options, ""), 3);
+        assert_eq!(tunnel_session_match_count(&options, "tunnel"), 1);
+        assert_eq!(tunnel_session_match_count(&options, "PROD db"), 1);
+        assert_eq!(tunnel_session_match_count(&options, "prod"), 2);
+        assert_eq!(tunnel_session_match_count(&options, "zzz"), 0);
+        assert!((tunnel_session_menu_height(1) - row).abs() < 1e-4);
+        assert!((tunnel_session_menu_height(3) - 3.0 * row).abs() < 1e-4);
+        // Eleven rows (251.9 px) hit the cap; the list scrolls from there.
+        assert!(tunnel_session_menu_height(10) < TUNNEL_SESSION_MENU_HEIGHT);
+        assert_eq!(tunnel_session_menu_height(11), TUNNEL_SESSION_MENU_HEIGHT);
+        assert_eq!(tunnel_session_menu_height(500), TUNNEL_SESSION_MENU_HEIGHT);
+        // No match: iced opens no popup, and no height is reserved.
+        assert_eq!(tunnel_session_menu_height(0), 0.0);
+    }
+
+    #[test]
+    fn session_picker_chevron_keeps_row_height_and_value_budget() {
+        // Same vertical padding as the plain text inputs: row height unchanged.
+        assert_eq!(TUNNEL_SESSION_INPUT_PADDING.top, 3.0);
+        assert_eq!(TUNNEL_SESSION_INPUT_PADDING.bottom, 3.0);
+        assert_eq!(TUNNEL_SESSION_INPUT_PADDING.left, 6.0);
+        for window in [960.0, 1280.0] {
+            let panel = tunnel_editor_panel_width(tunnel_settings_dialog_width(window));
+            let field = panel - tunnel_editor_label_width(panel);
+            let chars = tunnel_session_field_chars(field);
+            assert!(chars < chars_fitting(field, 12.0), "chevron reserve taken");
+            let name = "CI tunnel fixture";
+            assert_eq!(truncate(name, chars), name, "{field}px field");
+            // Text area left of the chevron still clears the minimum field.
+            let text_area =
+                field - TUNNEL_SESSION_INPUT_PADDING.left - TUNNEL_SESSION_INPUT_PADDING.right;
+            assert!(text_area >= TUNNEL_EDITOR_MIN_FIELD - 40.0, "{text_area}px");
         }
     }
 

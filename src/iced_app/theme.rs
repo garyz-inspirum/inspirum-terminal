@@ -88,6 +88,18 @@ impl Palette {
     pub fn input_focus_border(self) -> Color {
         self.selection_indicator
     }
+
+    /// In-panel section headings (Filer `Local` / `Remote`); `accent` is only
+    /// 2.84:1 on the light dock, so headings use the primary text colour.
+    pub fn section_heading(self) -> Color {
+        self.text
+    }
+
+    /// Divider that separates two halves of one panel; the shared `border`
+    /// token is too faint on the dock, so reuse the 3:1 control outline.
+    pub fn split_divider(self) -> Color {
+        self.control_outline
+    }
 }
 
 const fn hex(value: u32) -> Color {
@@ -323,6 +335,19 @@ mod tests {
             assert_ne!(p.input_border(), p.input_focus_border());
         }
         // Regression: the shared divider token is too faint for inputs.
+        assert!(contrast(LIGHT.border, LIGHT.dock) < 3.0);
+    }
+
+    #[test]
+    fn filer_split_heading_and_divider_are_readable_on_dock_in_both_themes() {
+        for p in [LIGHT, DARK] {
+            assert_eq!(p.section_heading(), p.text);
+            assert_eq!(p.split_divider(), p.input_border());
+            assert!(contrast(p.section_heading(), p.dock) >= 4.5, "heading");
+            assert!(contrast(p.split_divider(), p.dock) >= 3.0, "divider");
+        }
+        // Regression: the previous tokens fail on the light dock.
+        assert!(contrast(LIGHT.accent, LIGHT.dock) < 4.5);
         assert!(contrast(LIGHT.border, LIGHT.dock) < 3.0);
     }
 

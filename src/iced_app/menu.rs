@@ -93,7 +93,6 @@ impl Menu {
                 item("Sender", "", TogglePanel(DockPanel::Sender)),
                 item("Transfer", "", TogglePanel(DockPanel::Transfer)),
                 item("Filer", "", TogglePanel(DockPanel::Filer)),
-                item("Explorer", "", TogglePanel(DockPanel::Explorer)),
                 item("Shell", "", ToggleShell),
             ],
             Menu::Mode => vec![

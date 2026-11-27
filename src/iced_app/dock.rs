@@ -10,8 +10,9 @@ pub(super) const MIN_SIDE_WIDTH: f32 = 140.0;
 pub(super) const MAX_SIDE_WIDTH: f32 = 900.0;
 /// The centre workspace keeps at least this width when a side dock is dragged.
 pub(super) const MIN_CENTRE_WIDTH: f32 = 320.0;
-/// File tables (Filer/Explorer) are unusable in a narrower side dock.
-pub(super) const FILE_PANEL_MIN_WIDTH: f32 = 420.0;
+/// A side dock hosting the Filer (local and remote tables side by side, each
+/// half ~380 px) is widened to this, limited by the room the window leaves.
+pub(super) const FILE_PANEL_MIN_WIDTH: f32 = 760.0;
 /// Width of the invisible splitter grab zone around the 1px border line.
 pub(super) const SPLITTER_GRAB: f32 = 5.0;
 pub(super) const DEFAULT_BOTTOM_RATIO: f32 = 0.32;
@@ -26,18 +27,21 @@ pub(super) enum Panel {
     Outline,
     Transfer,
     Filer,
+    /// Legacy: merged into `Filer` (local half). Kept so saved layouts that
+    /// name it still deserialize; `DockLayout::sanitize` removes it.
     Explorer,
     Shell,
 }
 
 impl Panel {
-    pub(super) const ALL: [Panel; 7] = [
+    /// Every current panel. `Explorer` is deliberately absent: it was merged
+    /// into `Filer` and only survives so old `ui-state.json` files parse.
+    pub(super) const ALL: [Panel; 6] = [
         Panel::Sender,
         Panel::Session,
         Panel::Outline,
         Panel::Transfer,
         Panel::Filer,
-        Panel::Explorer,
         Panel::Shell,
     ];
 
@@ -137,6 +141,12 @@ pub(super) struct DockLayout {
     pub left_width: f32,
     pub right_width: f32,
     pub bottom_ratio: f32,
+    /// True once the one-time load fit of a Filer side dock has run (or the
+    /// layout came from a preset). Layouts from older builds lack the field
+    /// and read as false, so they are widened once; layouts saved by this
+    /// build keep a Filer width the user chose.
+    #[serde(default)]
+    pub file_panel_fitted: bool,
 }
 
 impl Default for DockLayout {
@@ -161,11 +171,15 @@ impl DockLayout {
                 AreaState::default(),
                 AreaState::with(Panel::ALL.to_vec(), Panel::Session),
             ),
+            // Filer shows local and remote tables side by side and needs
+            // ~760 px, more than a side dock can spare at the 960 px minimum
+            // window beside Session; it docks at the bottom next to Transfer.
+            // No panel remains for the left dock, so it stays empty (hidden).
             Preset::WindTermDefault => (
-                AreaState::with(vec![Panel::Filer, Panel::Explorer], Panel::Filer),
+                AreaState::default(),
                 AreaState::with(vec![Panel::Session, Panel::Outline], Panel::Session),
                 AreaState::with(
-                    vec![Panel::Sender, Panel::Transfer, Panel::Shell],
+                    vec![Panel::Sender, Panel::Transfer, Panel::Filer, Panel::Shell],
                     Panel::Sender,
                 ),
             ),
@@ -178,6 +192,7 @@ impl DockLayout {
             left_width: DEFAULT_SIDE_WIDTH,
             right_width: DEFAULT_SIDE_WIDTH,
             bottom_ratio: DEFAULT_BOTTOM_RATIO,
+            file_panel_fitted: true,
         }
     }
 
@@ -277,19 +292,109 @@ impl DockLayout {
         }
     }
 
-    /// Ensure a side dock receiving a file panel is wide enough for its table.
-    pub(super) fn widen_for_file_panel(&mut self, panel: Panel, area: Area) {
-        if !matches!(panel, Panel::Filer | Panel::Explorer) {
+    /// A side dock is rendered (with its splitter) whenever it holds a
+    /// panel; side docks ignore `collapsed` (see `dock_view::dock_body`).
+    fn side_rendered(&self, area: Area) -> bool {
+        area != Area::Bottom && !self.area(area).panels.is_empty()
+    }
+
+    fn side_width(&self, area: Area) -> f32 {
+        match area {
+            Area::Left => self.left_width,
+            Area::Right => self.right_width,
+            Area::Bottom => 0.0,
+        }
+    }
+
+    /// Horizontal space a side dock takes in the window: its width plus its
+    /// `SPLITTER_GRAB` splitter when rendered, else nothing.
+    fn side_extent(&self, area: Area) -> f32 {
+        if self.side_rendered(area) {
+            self.side_width(area) + SPLITTER_GRAB
+        } else {
+            0.0
+        }
+    }
+
+    /// The room rule shared by widening, splitter drags and window fits:
+    /// the widest `area` may be so that `area` + its splitter + the other
+    /// rendered side dock + its splitter + `MIN_CENTRE_WIDTH` fits
+    /// `window_width`. Never below `MIN_SIDE_WIDTH`.
+    fn side_room(&self, area: Area, window_width: f32) -> f32 {
+        let other = if area == Area::Left {
+            Area::Right
+        } else {
+            Area::Left
+        };
+        (window_width - SPLITTER_GRAB - self.side_extent(other) - MIN_CENTRE_WIDTH)
+            .max(MIN_SIDE_WIDTH)
+    }
+
+    /// Ensure a side dock receiving the Filer is wide enough for both halves:
+    /// `FILE_PANEL_MIN_WIDTH`, but never squeezing the centre workspace below
+    /// `MIN_CENTRE_WIDTH` (both splitters counted, see `side_room`) in a
+    /// `window_width` wide window. Never narrows.
+    pub(super) fn widen_for_file_panel(&mut self, panel: Panel, area: Area, window_width: f32) {
+        if panel != Panel::Filer || area == Area::Bottom {
             return;
         }
-        match area {
-            Area::Left if self.left_width < FILE_PANEL_MIN_WIDTH => {
-                self.set_width(Area::Left, FILE_PANEL_MIN_WIDTH)
+        let current = self.side_width(area);
+        let target = FILE_PANEL_MIN_WIDTH.min(self.side_room(area, window_width));
+        if current < target {
+            self.set_width(area, target);
+        }
+    }
+
+    /// Self-correct a Filer sitting in a side dock narrower than usable
+    /// (e.g. a layout saved by an older build at 214 px): widen it with the
+    /// same rule as `widen_for_file_panel`. No-op when Filer is in the bottom
+    /// dock or closed. Marks the layout `file_panel_fitted`.
+    pub(super) fn fit_file_panel(&mut self, window_width: f32) {
+        self.file_panel_fitted = true;
+        if let Some(area) = self.area_of(Panel::Filer) {
+            self.widen_for_file_panel(Panel::Filer, area, window_width);
+        }
+    }
+
+    /// Shrink the rendered side docks so the centre workspace keeps
+    /// `MIN_CENTRE_WIDTH` in a `window_width` wide window (splitters
+    /// counted). Never widens and never goes below `MIN_SIDE_WIDTH`.
+    ///
+    /// Rule: with one side dock rendered, that dock gives up the excess.
+    /// With both, the wider dock first shrinks toward the narrower one (so a
+    /// widened Filer dock gives way before a default-width Session dock);
+    /// any remaining excess is split evenly between the two. A window too
+    /// small for that leaves both at `MIN_SIDE_WIDTH`.
+    pub(super) fn fit_to_window(&mut self, window_width: f32) {
+        let used = self.side_extent(Area::Left) + self.side_extent(Area::Right);
+        let mut excess = used + MIN_CENTRE_WIDTH - window_width;
+        // NaN (unknown window width) also skips.
+        if excess.is_nan() || excess <= 0.0 {
+            return;
+        }
+        match (
+            self.side_rendered(Area::Left),
+            self.side_rendered(Area::Right),
+        ) {
+            (true, true) => {
+                let (wide, narrow) = if self.left_width >= self.right_width {
+                    (&mut self.left_width, &mut self.right_width)
+                } else {
+                    (&mut self.right_width, &mut self.left_width)
+                };
+                let cut = excess.min(*wide - narrow.max(MIN_SIDE_WIDTH)).max(0.0);
+                *wide -= cut;
+                excess -= cut;
+                if excess > 0.0 {
+                    // Both are equal now; share what is left.
+                    let each = (*wide - excess / 2.0).max(MIN_SIDE_WIDTH);
+                    *wide = each.min(*wide);
+                    *narrow = each.min(*narrow);
+                }
             }
-            Area::Right if self.right_width < FILE_PANEL_MIN_WIDTH => {
-                self.set_width(Area::Right, FILE_PANEL_MIN_WIDTH)
-            }
-            _ => {}
+            (true, false) => self.left_width = (self.left_width - excess).max(MIN_SIDE_WIDTH),
+            (false, true) => self.right_width = (self.right_width - excess).max(MIN_SIDE_WIDTH),
+            (false, false) => {}
         }
     }
 
@@ -304,18 +409,7 @@ impl DockLayout {
                 } else {
                     window.width - position.x
                 };
-                let other = if area == Area::Left {
-                    if self.right.panels.is_empty() {
-                        0.0
-                    } else {
-                        self.right_width
-                    }
-                } else if self.left.panels.is_empty() {
-                    0.0
-                } else {
-                    self.left_width
-                };
-                let room = (window.width - other - MIN_CENTRE_WIDTH).max(MIN_SIDE_WIDTH);
+                let room = self.side_room(area, window.width);
                 self.set_width(area, wanted.min(room));
             }
             Area::Bottom => {
@@ -340,7 +434,7 @@ impl DockLayout {
 
     /// Drop panels that are not available (e.g. Outline without a data source).
     pub(super) fn retain_available(&mut self, available: &[Panel]) {
-        for panel in Panel::ALL {
+        for panel in Panel::ALL.into_iter().chain([Panel::Explorer]) {
             if !available.contains(&panel) {
                 for area in Area::ALL {
                     self.area_mut(area).remove(panel);
@@ -367,8 +461,52 @@ impl DockLayout {
         }
     }
 
+    /// Replace the legacy `Explorer` panel (merged into `Filer`). When
+    /// Explorer was the visible file panel, or Filer is neither placed nor
+    /// closed, Filer takes Explorer's slot (and active tab); otherwise
+    /// Explorer is simply dropped. Closed-panel history forgets Explorer.
+    fn migrate_legacy_explorer(&mut self) {
+        let Some(explorer_area) = self.area_of(Panel::Explorer) else {
+            self.hidden.retain(|(panel, _)| *panel != Panel::Explorer);
+            return;
+        };
+        let filer_known = self.area_of(Panel::Filer).is_some()
+            || self.hidden.iter().any(|(panel, _)| *panel == Panel::Filer);
+        let take_slot =
+            (self.is_visible(Panel::Explorer) && !self.is_visible(Panel::Filer)) || !filer_known;
+        if take_slot {
+            for area in Area::ALL {
+                self.area_mut(area).remove(Panel::Filer);
+            }
+            self.hidden.retain(|(panel, _)| *panel != Panel::Filer);
+            let state = self.area_mut(explorer_area);
+            if let Some(index) = state.panels.iter().position(|p| *p == Panel::Explorer) {
+                state.panels[index] = Panel::Filer;
+            }
+        }
+        for area in Area::ALL {
+            self.area_mut(area).remove(Panel::Explorer);
+        }
+        self.hidden.retain(|(panel, _)| *panel != Panel::Explorer);
+    }
+
+    /// Start-up restore of a saved layout: sanitize it and match it to the
+    /// `available` panels. Returns the layout and whether the Filer still
+    /// needs the one-time load fit (`fit_file_panel` once the real window
+    /// width is known, followed by `fit_to_window`): only layouts saved by
+    /// an older build, which lack `file_panel_fitted`.
+    pub(super) fn restore(saved: Option<DockLayout>, available: &[Panel]) -> (DockLayout, bool) {
+        let mut docks = saved.unwrap_or_default();
+        docks.sanitize();
+        docks.retain_available(available);
+        docks.add_missing(available);
+        let pending = !docks.file_panel_fitted;
+        (docks, pending)
+    }
+
     /// Enforce invariants after deserialising untrusted input.
     pub(super) fn sanitize(&mut self) {
+        self.migrate_legacy_explorer();
         let mut seen: Vec<Panel> = Vec::new();
         for area in Area::ALL {
             let state = self.area_mut(area);
@@ -456,18 +594,64 @@ mod tests {
 
         let wt = DockLayout::preset(Preset::WindTermDefault);
         assert_invariants(&wt);
-        assert_eq!(wt.left.panels, vec![Panel::Filer, Panel::Explorer]);
+        assert!(wt.left.panels.is_empty(), "no left dock: Filer is too wide");
         assert_eq!(wt.right.panels, vec![Panel::Session, Panel::Outline]);
         assert_eq!(
             wt.bottom.panels,
-            vec![Panel::Sender, Panel::Transfer, Panel::Shell]
+            vec![Panel::Sender, Panel::Transfer, Panel::Filer, Panel::Shell]
         );
+        assert_eq!(wt.active_panel(Area::Bottom), Some(Panel::Sender));
+    }
+
+    #[test]
+    fn windterm_preset_keeps_filer_usable_at_minimum_window() {
+        // 960 px is the configured window min_size width.
+        let mut wt = DockLayout::preset(Preset::WindTermDefault);
+        wt.fit_file_panel(960.0);
+        assert_eq!(wt.area_of(Panel::Filer), Some(Area::Bottom));
+        // Only the right dock is shown: the terminal keeps 960 - 214 px.
+        assert!(wt.left.panels.is_empty());
+        assert!(960.0 - wt.right_width >= MIN_CENTRE_WIDTH);
+        assert_eq!(wt, DockLayout::preset(Preset::WindTermDefault));
+    }
+
+    #[test]
+    fn dock_saved_narrow_side_filer_is_widened_on_load() {
+        // Layout saved by an older WindTerm-default preset: Filer alone in
+        // a 214 px left dock, Session/Outline in a 214 px right dock.
+        let json = r#"{
+            "left": {"panels": ["filer"], "active": 0, "collapsed": false},
+            "right": {"panels": ["session", "outline"], "active": 0, "collapsed": false},
+            "bottom": {"panels": ["sender", "transfer", "shell"], "active": 0, "collapsed": false},
+            "hidden": [],
+            "left_width": 214.0,
+            "right_width": 214.0,
+            "bottom_ratio": 0.32
+        }"#;
+        let mut restored = DockLayout::from_json(json);
+        restored.fit_file_panel(1280.0);
+        assert_invariants(&restored);
+        assert_eq!(restored.area_of(Panel::Filer), Some(Area::Left));
+        // Same clamp as Move to Left: 1280 - (214 + 5) - 5 - 320.
+        assert_eq!(restored.left_width, 736.0);
+        assert_eq!(restored.right_width, 214.0);
+        // A 420 px right-dock Filer with an empty left dock reaches 760.
+        let json = r#"{"right": {"panels": ["filer"]}, "right_width": 420.0}"#;
+        let mut restored = DockLayout::from_json(json);
+        restored.fit_file_panel(1280.0);
+        assert_eq!(restored.area_of(Panel::Filer), Some(Area::Right));
+        assert_eq!(restored.right_width, FILE_PANEL_MIN_WIDTH);
+        // Filer in the bottom dock leaves side widths untouched.
+        let mut bottom = DockLayout::default();
+        bottom.fit_file_panel(1280.0);
+        assert_eq!(bottom, DockLayout::default());
     }
 
     #[test]
     fn dock_panel_titles_and_markers() {
         assert_eq!(Panel::Sender.title(), "Sender");
-        assert_eq!(Panel::Explorer.title(), "Explorer");
+        assert_eq!(Panel::Filer.title(), "Filer");
+        assert!(!Panel::ALL.contains(&Panel::Explorer));
         assert_eq!(Panel::Shell.marker(), marker::SHELL);
     }
 
@@ -480,7 +664,10 @@ mod tests {
         assert_eq!(layout.active_panel(Area::Left), Some(Panel::Shell));
         layout.move_to(Panel::Shell, Area::Left);
         assert_invariants(&layout);
-        assert_eq!(layout.left.panels.len(), 3);
+        assert_eq!(layout.left.panels, vec![Panel::Shell]);
+        layout.move_to(Panel::Filer, Area::Left);
+        assert_invariants(&layout);
+        assert_eq!(layout.left.panels, vec![Panel::Shell, Panel::Filer]);
     }
 
     #[test]
@@ -489,7 +676,7 @@ mod tests {
         layout.activate(Panel::Shell);
         layout.close(Panel::Shell);
         assert_invariants(&layout);
-        assert_eq!(layout.active_panel(Area::Bottom), Some(Panel::Explorer));
+        assert_eq!(layout.active_panel(Area::Bottom), Some(Panel::Filer));
         layout.activate(Panel::Session);
         layout.close(Panel::Session);
         assert_eq!(layout.active_panel(Area::Bottom), Some(Panel::Outline));
@@ -548,14 +735,161 @@ mod tests {
     fn file_panel_widens_side_dock() {
         let mut layout = DockLayout::default();
         layout.set_width(Area::Right, 214.0);
-        layout.widen_for_file_panel(Panel::Filer, Area::Right);
+        layout.widen_for_file_panel(Panel::Filer, Area::Right, 1280.0);
         assert_eq!(layout.right_width, FILE_PANEL_MIN_WIDTH);
-        layout.set_width(Area::Left, 500.0);
-        layout.widen_for_file_panel(Panel::Explorer, Area::Left);
-        assert_eq!(layout.left_width, 500.0);
+        layout.set_width(Area::Left, 800.0);
+        layout.widen_for_file_panel(Panel::Filer, Area::Left, 1280.0);
+        assert_eq!(layout.left_width, 800.0, "never narrows");
         layout.set_width(Area::Left, 200.0);
-        layout.widen_for_file_panel(Panel::Sender, Area::Left);
+        layout.widen_for_file_panel(Panel::Sender, Area::Left, 1280.0);
         assert_eq!(layout.left_width, 200.0);
+    }
+
+    #[test]
+    fn file_panel_widening_is_clamped_to_window() {
+        let mut layout = DockLayout::preset(Preset::WindTermDefault);
+        layout.set_width(Area::Left, 214.0);
+        layout.set_width(Area::Right, 214.0);
+        // Right dock holds Session/Outline: 1280 - (214 + 5) - 5 - 320 = 736
+        // (both splitters count).
+        layout.widen_for_file_panel(Panel::Filer, Area::Left, 1280.0);
+        assert_eq!(layout.left_width, 736.0);
+        // A tiny window never goes below the side-dock minimum.
+        layout.set_width(Area::Left, 150.0);
+        layout.widen_for_file_panel(Panel::Filer, Area::Left, 500.0);
+        assert_eq!(layout.left_width, 150.0);
+    }
+
+    /// Layout saved by an older build: Filer alone in a 214 px left dock,
+    /// Session/Outline in a 214 px right dock (no `file_panel_fitted`).
+    const R153_DOCK_OLD_LAYOUT: &str = r#"{
+        "left": {"panels": ["filer"], "active": 0, "collapsed": false},
+        "right": {"panels": ["session", "outline"], "active": 0, "collapsed": false},
+        "bottom": {"panels": ["sender", "transfer", "shell"], "active": 0, "collapsed": false},
+        "hidden": [],
+        "left_width": 214.0,
+        "right_width": 214.0,
+        "bottom_ratio": 0.32
+    }"#;
+
+    /// Centre workspace width as `dock_view::dock_body` lays it out: every
+    /// rendered (non-empty) side dock takes its width plus its splitter.
+    fn r153_dock_centre(layout: &DockLayout, window_width: f32) -> f32 {
+        let mut centre = window_width;
+        if !layout.left.panels.is_empty() {
+            centre -= layout.left_width + SPLITTER_GRAB;
+        }
+        if !layout.right.panels.is_empty() {
+            centre -= layout.right_width + SPLITTER_GRAB;
+        }
+        centre
+    }
+
+    #[test]
+    fn r153_dock_load_fit_keeps_centre_at_minimum_window() {
+        let mut restored = DockLayout::from_json(R153_DOCK_OLD_LAYOUT);
+        restored.fit_file_panel(960.0);
+        assert_invariants(&restored);
+        assert_eq!(restored.area_of(Panel::Filer), Some(Area::Left));
+        let centre = r153_dock_centre(&restored, 960.0);
+        assert!(
+            centre >= MIN_CENTRE_WIDTH,
+            "centre {centre} (left {}, right {})",
+            restored.left_width,
+            restored.right_width
+        );
+        assert!(
+            restored.left_width > DEFAULT_SIDE_WIDTH,
+            "Filer still widened"
+        );
+        assert_eq!(restored.right_width, DEFAULT_SIDE_WIDTH);
+    }
+
+    #[test]
+    fn r153_dock_restore_then_resize_fits_window() {
+        let mut restored = DockLayout::from_json(R153_DOCK_OLD_LAYOUT);
+        restored.fit_file_panel(1280.0);
+        restored.fit_to_window(1280.0);
+        assert_eq!(restored.left_width, 736.0);
+        assert_eq!(r153_dock_centre(&restored, 1280.0), MIN_CENTRE_WIDTH);
+        // Shrinking the window takes the excess from the wider Filer dock.
+        restored.fit_to_window(960.0);
+        assert_invariants(&restored);
+        assert_eq!(restored.left_width, 416.0);
+        assert_eq!(restored.right_width, DEFAULT_SIDE_WIDTH);
+        assert!(r153_dock_centre(&restored, 960.0) >= MIN_CENTRE_WIDTH);
+        // Growing it again never widens.
+        let before = restored.clone();
+        restored.fit_to_window(1600.0);
+        assert_eq!(restored, before);
+    }
+
+    #[test]
+    fn r153_dock_fit_to_window_rules() {
+        // Wider dock first, down to the narrower one, then shared evenly.
+        let mut layout = DockLayout::from_json(R153_DOCK_OLD_LAYOUT);
+        layout.set_width(Area::Left, 500.0);
+        layout.set_width(Area::Right, 300.0);
+        // 500 + 300 + 10 + 320 = 1130; at 1000 the excess is 130.
+        layout.fit_to_window(1000.0);
+        assert_eq!((layout.left_width, layout.right_width), (370.0, 300.0));
+        // At 800 the excess is 200: 70 brings left to 300, then 65 each.
+        layout.fit_to_window(800.0);
+        assert_eq!((layout.left_width, layout.right_width), (235.0, 235.0));
+        assert_eq!(r153_dock_centre(&layout, 800.0), MIN_CENTRE_WIDTH);
+        // Too small for both: each stops at the side-dock minimum.
+        layout.fit_to_window(500.0);
+        assert_eq!(
+            (layout.left_width, layout.right_width),
+            (MIN_SIDE_WIDTH, MIN_SIDE_WIDTH)
+        );
+        // A single rendered dock gives up the whole excess; an empty dock's
+        // width is ignored.
+        let mut single = DockLayout::default();
+        single.move_to(Panel::Filer, Area::Right);
+        single.set_width(Area::Right, 800.0);
+        single.set_width(Area::Left, 900.0);
+        single.fit_to_window(960.0);
+        assert_eq!(single.right_width, 960.0 - SPLITTER_GRAB - MIN_CENTRE_WIDTH);
+        assert_eq!(single.left_width, 900.0);
+        // Bottom-only layouts are untouched.
+        let mut bottom = DockLayout::default();
+        bottom.fit_to_window(200.0);
+        assert_eq!(bottom, DockLayout::default());
+    }
+
+    #[test]
+    fn r153_dock_marker_fits_old_layout_once_and_keeps_manual_width() {
+        assert!(!R153_DOCK_OLD_LAYOUT.contains("file_panel_fitted"));
+        let (mut docks, pending) = DockLayout::restore(
+            Some(DockLayout::from_json(R153_DOCK_OLD_LAYOUT)),
+            &Panel::ALL,
+        );
+        assert!(pending, "older build: widen once");
+        docks.fit_file_panel(1280.0);
+        docks.fit_to_window(1280.0);
+        assert_eq!(docks.left_width, 736.0);
+        assert!(docks.file_panel_fitted);
+        // The user narrows the Filer; this build saves the marker with it.
+        docks.set_width(Area::Left, 300.0);
+        let json = docks.to_json();
+        assert!(json.contains("\"file_panel_fitted\":true"), "{json}");
+        let (restored, pending) =
+            DockLayout::restore(Some(DockLayout::from_json(&json)), &Panel::ALL);
+        assert!(!pending, "layout from this build is not refitted");
+        assert_eq!(restored.left_width, 300.0);
+        // Presets and the default layout need no load fit either.
+        assert!(!DockLayout::restore(None, &Panel::ALL).1);
+        assert!(DockLayout::preset(Preset::WindTermDefault).file_panel_fitted);
+    }
+
+    #[test]
+    fn r153_dock_drag_counts_both_splitters() {
+        let mut layout = DockLayout::from_json(R153_DOCK_OLD_LAYOUT);
+        let win = iced::Size::new(960.0, 640.0);
+        layout.drag_splitter(Area::Left, iced::Point::new(900.0, 100.0), win);
+        assert_eq!(layout.left_width, 960.0 - (214.0 + 5.0) - 5.0 - 320.0);
+        assert_eq!(r153_dock_centre(&layout, 960.0), MIN_CENTRE_WIDTH);
     }
 
     #[test]
@@ -608,6 +942,7 @@ mod tests {
             left_width: f32::NAN,
             right_width: 1.0,
             bottom_ratio: 5.0,
+            file_panel_fitted: false,
         };
         layout.sanitize();
         assert_invariants(&layout);
@@ -711,6 +1046,63 @@ mod tests {
         restored.add_missing(&Panel::ALL);
         assert_eq!(restored.area_of(Panel::Sender), Some(Area::Bottom));
         assert_eq!(restored.active_panel(Area::Bottom), Some(Panel::Session));
+    }
+
+    #[test]
+    fn dock_legacy_explorer_active_tab_is_replaced_by_filer() {
+        // Pre-merge snapshot: Explorer is the ACTIVE bottom tab, Filer sits
+        // in the left dock behind Session.
+        let json = r#"{
+            "left": {"panels": ["session", "filer"], "active": 0, "collapsed": false},
+            "right": {"panels": [], "active": 0, "collapsed": false},
+            "bottom": {"panels": ["sender", "transfer", "explorer", "shell"], "active": 2, "collapsed": false},
+            "hidden": [],
+            "left_width": 214.0,
+            "right_width": 214.0,
+            "bottom_ratio": 0.32
+        }"#;
+        let mut restored = DockLayout::from_json(json);
+        restored.retain_available(&Panel::ALL);
+        restored.add_missing(&Panel::ALL);
+        assert_invariants(&restored);
+        assert_eq!(restored.area_of(Panel::Explorer), None);
+        assert_eq!(restored.area_of(Panel::Filer), Some(Area::Bottom));
+        assert_eq!(restored.active_panel(Area::Bottom), Some(Panel::Filer));
+        assert!(restored.is_visible(Panel::Filer));
+        assert_eq!(restored.left.panels, vec![Panel::Session]);
+        assert_eq!(
+            restored.bottom.panels[..4],
+            [Panel::Sender, Panel::Transfer, Panel::Filer, Panel::Shell]
+        );
+    }
+
+    #[test]
+    fn dock_legacy_explorer_beside_visible_filer_is_dropped() {
+        let json = r#"{
+            "left": {"panels": ["filer", "explorer"], "active": 0},
+            "bottom": {"panels": ["sender", "explorer"], "active": 1},
+            "hidden": [["explorer", "right"]]
+        }"#;
+        let restored = DockLayout::from_json(json);
+        assert_invariants(&restored);
+        assert_eq!(restored.area_of(Panel::Explorer), None);
+        assert!(restored.hidden.is_empty());
+        assert_eq!(restored.left.panels, vec![Panel::Filer]);
+        assert_eq!(restored.bottom.panels, vec![Panel::Sender]);
+        assert_eq!(restored.active_panel(Area::Bottom), Some(Panel::Sender));
+        assert!(restored.is_visible(Panel::Filer));
+    }
+
+    #[test]
+    fn dock_legacy_explorer_without_filer_becomes_filer() {
+        let json = r#"{"right": {"panels": ["outline", "explorer"], "active": 1}}"#;
+        let restored = DockLayout::from_json(json);
+        assert_invariants(&restored);
+        assert_eq!(restored.right.panels, vec![Panel::Outline, Panel::Filer]);
+        assert_eq!(restored.active_panel(Area::Right), Some(Panel::Filer));
+        // The omitted bottom area defaults to all panels (inactive Filer);
+        // the visible Explorer slot wins, so Filer appears once, on the right.
+        assert_eq!(restored.area_of(Panel::Filer), Some(Area::Right));
     }
 
     #[test]

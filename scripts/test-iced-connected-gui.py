@@ -58,6 +58,7 @@ LOGGED_ECHO_LINES = (
     "echo:AFTER_EXIT_CANCEL",
     "echo:AFTER_TUNNEL_SETTINGS",
     "echo:AFTER_TUNNEL_TOGGLES",
+    "echo:AFTER_SESSION_DROPDOWN",
     "echo:AFTER_EXTERNAL_EDIT",
     "echo:IN_DUPLICATE_TAB",
     "echo:AFTER_DUPLICATE_TAB",
@@ -128,8 +129,11 @@ def extedit_menu_region(click_x: int, click_y: int, width: int, height: int):
     both sides vertically and up to 460 px to the right.
     """
     reach = EXTEDIT_MENU_ROWS * EXTEDIT_ROW_HEIGHT + 60
+    # Remote rows now sit in the Filer's right half (click x ~790 at 1280
+    # px), where a wide popup is clamped leftwards by the window edge: keep
+    # the box at least 470 px wide by pulling its left edge in from the right.
     return (
-        max(0, click_x - 10),
+        max(0, min(click_x - 10, width - 470)),
         max(0, click_y - reach),
         min(width, click_x + 460),
         min(height, click_y + reach),
@@ -612,7 +616,8 @@ async def monitored_shell(
                 return
             # Observe *any* PTY bytes while a chrome control owns focus,
             # including incomplete lines and a bare Escape. Never log input.
-            # Phase names: MENU, SENDER, GEAR, CONTEXT, FIND. The marker is
+            # Phase names: MENU, SENDER, GEAR, CONTEXT, FIND,
+            # SESSION_DROPDOWN. The marker is
             # UNEXPECTED_<PHASE>_PTY_INPUT, so FIND is
             # UNEXPECTED_FIND_PTY_INPUT.
             observe_pty_chunk(events, probe_state, chunk)
@@ -1288,24 +1293,45 @@ TOOLBAR_BOTTOM_Y = 90
 
 # Tunnel Settings dialog geometry (src/iced_app.rs): width is
 # clamp(window - 2*24, 600, 840), centred; 12 px padding; the 300 px list
-# card, a 12 px gap, then the editor card. Measured on the 1280x800 populated
-# dark frame (connected-tunnels-editor-selected.png): dialog x 220..1060,
-# list card 245..545, editor card 557..1035, "Listen Port" label x 569..650,
-# its input 719..1023 x 287..310 with digits at y 295..304, Destination Port
-# input y 357..380; OCR puts the "Tunnel Manager" heading top at y 151.
+# card, a 12 px gap, then the editor card. Measured with _read_png on the
+# 1280x800 populated dark frames: dialog x 220..1060, list card 245..545,
+# editor card from x 557, label column from x 569 (TUNNEL_EDITOR_LABEL_MAX
+# 150 wide, so inputs start at 719; 128 px at the narrowest dialog).
+#
+# Editor rows are found from their OCR-located LABEL, not from the heading:
+# the heading's OCR top moved 151 -> 188 when the `Session / profile` row
+# became a 23 px combo box (old plain-text row 261..273), and its distance
+# to the Listen Port input changed with it (+136 -> +144). Per row, input
+# box borders vs the label's located box (x0, y0, x1, y1), centre
+# cy = (y0 + y1) / 2:
+#   old layout (it11 frames): "Listen Port" (574,292,644,296) cy 294,
+#     input 287..309, Destination Host input 322..344;
+#   new layout (it12 frame):  "Listen Port" (574,336,644,340) cy 338,
+#     input 332..354, Session input above 297..319, Destination Host
+#     input 367..389.
+# Inputs are 23 px tall, centred cy+4..cy+5, rows 35 px apart in both.
 TUNNEL_DIALOG_MAX_W = 840
 TUNNEL_DIALOG_MIN_W = 600
 TUNNEL_DIALOG_MARGIN = 24
 # Editor card left edge relative to the dialog's left edge (557 - 220).
 TUNNEL_EDITOR_CARD_DX = 337
-# Listen Port input left edge (719 - 220) at the widest label column; the
-# label column can shrink to 128 px (22 px less) on narrow dialogs.
-TUNNEL_LISTEN_INPUT_DX = 499 - 22 - 6
-# Listen Port row relative to the heading's OCR top: digits at +144..+153.
-# The band stops above the Destination Host input (+171) and far above the
-# Destination Port digits (+216), so a form showing the port in another row
-# cannot satisfy it.
-TUNNEL_LISTEN_ROW_DY = (124, 170)
+# Card padding + widest label column (src/iced_app.rs TUNNEL_EDITOR_PADDING,
+# TUNNEL_EDITOR_LABEL_MAX): the label column spans card + 12 .. card + 162.
+TUNNEL_EDITOR_LABEL_COLUMN = (12, 162)
+# Value column start relative to the label's OCR left (574): 691, left of
+# the input at the narrowest label column (569 + 128 = 697) and right of
+# the longest label's ink (`Session / profile` ends at x 690, and it lies
+# in another row anyway).
+TUNNEL_VALUE_DX = 117
+# Row band relative to the label's vertical centre: cy-13 .. cy+23 brackets
+# the input (cy-6..cy+16 new, cy-7..cy+15 old) with >= 5 px to spare and
+# stops before both neighbours: new Session input bottom is cy-19 and
+# Destination Host input top cy+29; old Session text ends cy-21 and
+# Destination Host starts cy+28.
+TUNNEL_ROW_FROM_LABEL = (-13, 23)
+# Click point inside the input, relative to the label centre (input centre
+# cy+4 old, cy+5 new).
+TUNNEL_INPUT_CENTRE_DY = 5
 
 
 def tunnel_dialog_left(width: int) -> tuple[int, int]:
@@ -1344,38 +1370,310 @@ def tunnel_list_region(heading_bounds, width: int, height: int):
     return (left, 42, right, height)
 
 
-def listen_port_row_region(heading_bounds, width: int):
-    """Tight box around the Listen Port input, anchored to the located
-    "Tunnel Manager" heading. Only digits here prove the selected forward:
-    the editor card also shows the destination port (the shared echo
-    service), so the whole card would accept a port from the wrong row."""
+def tunnel_editor_label_region(heading_bounds, width: int, height: int):
+    """Search box for an editor field LABEL ("Listen Port", "Session /
+    profile", ...): the editor card's label column below the located
+    heading. Values start at the input column (x >= 719 at 1280), outside
+    the box, so a value can never be taken for a label."""
+    left, _dialog = tunnel_dialog_left(width)
+    card = left + TUNNEL_EDITOR_CARD_DX
+    return (card - 6, heading_bounds[1], card + TUNNEL_EDITOR_LABEL_COLUMN[1] - 2, height)
+
+
+def editor_value_row_region(label_bounds, width: int):
+    """Tight box around the input of the editor row whose label was located
+    at ``label_bounds``: value column only, one row tall (see
+    TUNNEL_ROW_FROM_LABEL), so the neighbouring rows' values stay out."""
     left, dialog = tunnel_dialog_left(width)
-    top = heading_bounds[1]
+    cy = (label_bounds[1] + label_bounds[3]) // 2
     return (
-        left + TUNNEL_LISTEN_INPUT_DX,
-        top + TUNNEL_LISTEN_ROW_DY[0],
+        label_bounds[0] + TUNNEL_VALUE_DX,
+        cy + TUNNEL_ROW_FROM_LABEL[0],
         min(width, left + dialog - 20),
-        top + TUNNEL_LISTEN_ROW_DY[1],
+        cy + TUNNEL_ROW_FROM_LABEL[1],
     )
 
 
-# Remove ("−") button under the 350 px list: x 285..313, y 544..567 on the
-# 1280x800 frame, i.e. centre (dialog left + 79, heading top + 405).
-TUNNEL_REMOVE_BUTTON_D = (79, 405)
-# Footer Save (primary fill, right-aligned): y 661..684 = heading top +510..
-# +533. Scanned for, not assumed: the band searched is +300..+620.
+def listen_port_row_region(listen_label_bounds, width: int):
+    """Tight box around the Listen Port input, anchored to the located
+    "Listen Port" label. Only digits here prove the selected forward: the
+    editor card also shows the destination port (the shared echo service),
+    so the whole card would accept a port from the wrong row."""
+    return editor_value_row_region(listen_label_bounds, width)
+
+
+# Top-to-bottom order of the editor rows the probes read (src/iced_app.rs
+# tunnel editor grid: Name, Type, Session / profile, Listen Port,
+# Destination Host, Destination Port, ...). The row bands are anchored to
+# whatever box the locator returns for each label, so without this check
+# a build with Listen Port and Destination Host swapped (label and input
+# moving together) still reads the right digits from the "Listen Port"
+# band and passes.
+TUNNEL_EDITOR_ROW_ORDER = ("Session / profile", "Listen Port", "Destination Host")
+# Minimum top-to-top distance between consecutive rows. Measured located
+# label tops: new layout 301 / 336 / 371 (35, 35), old plain-text session
+# row 264 / 292 / 327 (28, 35). Equal or overlapping boxes fail.
+TUNNEL_ROW_ORDER_MIN_GAP = 20
+# Top of a row's input relative to its label centre: cy-7 on the old
+# layout, cy-6 on the new one (see TUNNEL_ROW_FROM_LABEL); the higher one.
+TUNNEL_INPUT_TOP_FROM_LABEL = -7
+
+
+def require_editor_row_order(label_bounds_by_name: dict) -> None:
+    """Raise ``RuntimeError`` unless the located editor labels are stacked
+    ``Session / profile`` < ``Listen Port`` < ``Destination Host``.
+
+    ``label_bounds_by_name`` maps label text to its located box (x1, y1,
+    x2, y2). Each label's top must be at least TUNNEL_ROW_ORDER_MIN_GAP
+    below the previous one's top and below its bottom (overlap fails), and
+    the Listen Port digit band (``listen_port_row_region``: label centre +
+    TUNNEL_ROW_FROM_LABEL[1]) must end above the Destination Host input
+    (its label centre + TUNNEL_INPUT_TOP_FROM_LABEL), so the value read is
+    bound to the Listen Port row alone. Measured: band bottom 361 vs input
+    top 366 (new layout), 317 vs 322 (old)."""
+    missing = [name for name in TUNNEL_EDITOR_ROW_ORDER if label_bounds_by_name.get(name) is None]
+    if missing:
+        raise RuntimeError(f"editor row order: label(s) {missing} not located")
+    for upper, lower in zip(TUNNEL_EDITOR_ROW_ORDER, TUNNEL_EDITOR_ROW_ORDER[1:]):
+        a = label_bounds_by_name[upper]
+        b = label_bounds_by_name[lower]
+        if b[1] - a[1] < TUNNEL_ROW_ORDER_MIN_GAP or b[1] <= a[3]:
+            raise RuntimeError(
+                f"editor rows out of order: {upper!r} top y={a[1]} (bottom {a[3]}) must be "
+                f">= {TUNNEL_ROW_ORDER_MIN_GAP} px above {lower!r} top y={b[1]} and not overlap it"
+            )
+    listen = label_bounds_by_name["Listen Port"]
+    dest = label_bounds_by_name["Destination Host"]
+    band_bottom = (listen[1] + listen[3]) // 2 + TUNNEL_ROW_FROM_LABEL[1]
+    dest_input_top = (dest[1] + dest[3]) // 2 + TUNNEL_INPUT_TOP_FROM_LABEL
+    if band_bottom >= dest_input_top:
+        raise RuntimeError(
+            f"Listen Port digit band ends at y={band_bottom} (label y={listen[1]}), not above "
+            f"the Destination Host input top y={dest_input_top} (label y={dest[1]})"
+        )
+
+
+# Footer Save (primary fill, right-aligned): y 661..684 = heading top +510
+# on the old layout, 624..647 = +436 on the new one (combo-box layout, no
+# "Add to session" list). Scanned for, not assumed: band +300..+620.
 TUNNEL_SAVE_SCAN_DY = (300, 620)
 
 
-def listen_input_centre(heading_bounds, width: int) -> tuple[int, int]:
+def listen_input_centre(listen_label_bounds, width: int) -> tuple[int, int]:
     """Click target inside the Listen Port text input."""
-    x1, y1, x2, y2 = listen_port_row_region(heading_bounds, width)
-    return ((x1 + x2) // 2, (y1 + y2) // 2)
+    x1, _y1, x2, _y2 = listen_port_row_region(listen_label_bounds, width)
+    cy = (listen_label_bounds[1] + listen_label_bounds[3]) // 2
+    return ((x1 + x2) // 2, cy + TUNNEL_INPUT_CENTRE_DY)
 
 
-def tunnel_remove_centre(heading_bounds, width: int) -> tuple[int, int]:
+# Session / profile combo box, relative to the located label's centre:
+# input cy-7..cy+15 (run-4 1280x800 draft frame: label OCR box y 299..306,
+# cy 302, input 295..317). iced_widget 0.14.2 overlay/menu.rs puts the
+# open list directly under the input (more room below than above), so
+# the menu's 1 px top border is at cy+16; each option row is
+# 13 * 1.3 + padding 3 + 3 = 22.9 px with the text centred like the
+# field's (`f` ascender at row top + 4), so the first option's ink starts
+# at ~cy+20. The field's own text (the search query while focused) ends
+# at cy+7. The list region starts below the border, 3 px above the ink.
+TUNNEL_SESSION_MENU_TOP_DY = 17
+# src/iced_app.rs TUNNEL_SESSION_MENU_HEIGHT (+ 1 px borders, slack).
+TUNNEL_SESSION_MENU_SPAN = 250
+
+
+def session_menu_region(session_label_bounds, width: int, height: int):
+    """Box for the OPEN session list: value column, from just below the
+    input down one menu height. Excludes the field's own text (the search
+    query while focused) and the menu's top border; includes the first
+    option's ascenders with 3 px to spare (the old ``row bottom - 4`` top,
+    cy+19, left 1 px)."""
+    x1, _y1, x2, _y2 = editor_value_row_region(session_label_bounds, width)
+    cy = (session_label_bounds[1] + session_label_bounds[3]) // 2
+    top = cy + TUNNEL_SESSION_MENU_TOP_DY
+    return (x1, top, x2, min(height, top + TUNNEL_SESSION_MENU_SPAN))
+
+
+# The "+" / "−" pair under the tunnel list: two outlined boxes 4 px apart,
+# tops aligned (iced row, top-aligned), border luma 68 on the card's 25.
+# Measured with _read_png at 1280x800 (dark):
+#   enabled  (src/iced_app.rs `action`: size 13, padding [3, 10], quiet
+#            Active): 28x23, fill luma 30 (p.list), glyph luma 191.
+#            "+" x 253..280, "−" x 285..312; y 544..566 (old layout),
+#            581..603 (new layout).
+#   disabled (`button(text("−"))` without on_press: default size/padding,
+#            quiet Disabled): 28x27, SAME border luma 68, fill = card luma
+#            25 (p.dock), glyph luma 170 (p.muted). Nothing selected:
+#            "+" 253..280 x 577..599 (enabled), "−" 285..312 x 577..603.
+# The disabled box is 4 px taller, so the two boxes' bottoms differ; each
+# box closes on its own bottom run. Enabled vs disabled is read from the
+# fill: enabled is lighter than the card, disabled equals it.
+# GitHub Ubuntu runner (same layout, half-pixel offset): every outline is
+# anti-aliased over 2 px. "−" left side x 284,285 = luma 36,61 (34,60
+# when disabled), right side x 311,312 = 46,52 (43,51); "+" right side
+# x 279,280 = 38,60; the card between the boxes is
+# x 281..283 only. Top/bottom runs read 57..66 with ends 61/51 and 59/46,
+# corners 58/38 and 53/45; the rows just inside them 32/33 (enabled) or
+# 27/28 (disabled). The detected box therefore starts one column INSIDE
+# the side border (x1 = 286, first column of the top run >= 50) and the
+# old card sample x1-3..x1-2 = 283,284 read 25,36: median 36, so the
+# enabled fill (30) came out -6 and the disabled one (25) -9.
+# The card reference is now the strip x1-5..x1-3 (281..283 on both
+# renderings), required to be flat; the fill is the interior median, which
+# must also be the value of most interior pixels (glyph strokes ~180 and
+# the 32/33 inner rows cannot move it).
+TUNNEL_LIST_BUTTON_BORDER = (50, 100)
+TUNNEL_LIST_BUTTON_W = (18, 40)
+TUNNEL_LIST_BUTTON_H = (18, 28)
+TUNNEL_LIST_BUTTON_GAP = (1, 10)
+# Interior-minus-card luma: >= this is an enabled (p.list) fill, within
+# TUNNEL_LIST_BUTTON_FLAT of 0 the disabled (p.dock = card) fill; anything
+# else is neither rendering and raises.
+TUNNEL_LIST_BUTTON_ENABLED_DELTA = 3
+TUNNEL_LIST_BUTTON_FLAT = 1
+# Card reference columns, as offsets left of the box's x1: outside a
+# 2 px anti-aliased side border (x1-2, x1-1) with one column to spare, and
+# right of the "+" box's 2 px right border (x1-6, x1-7 for the "−").
+TUNNEL_LIST_BUTTON_CARD_DX = (5, 3)
+# Share of interior pixels that must lie within TUNNEL_LIST_BUTTON_FLAT of
+# the interior median for it to be the fill (not a glyph, gradient, hover).
+TUNNEL_LIST_BUTTON_FILL_SHARE = 0.6
+
+
+def _border_runs(row, channels, x1, x2):
+    lo, hi = TUNNEL_LIST_BUTTON_BORDER
+    runs, start = [], None
+    for x in range(x1, x2 + 1):
+        on = False
+        if x < x2:
+            r, g, b = row[x * channels], row[x * channels + 1], row[x * channels + 2]
+            on = lo <= (r * 299 + g * 587 + b * 114) // 1000 <= hi
+        if on and start is None:
+            start = x
+        elif not on and start is not None:
+            if TUNNEL_LIST_BUTTON_W[0] <= x - start <= TUNNEL_LIST_BUTTON_W[1]:
+                runs.append((start, x))
+            start = None
+    return runs
+
+
+def _luma_at(rows, channels, x, y):
+    row = rows[y]
+    return (row[x * channels] * 299 + row[x * channels + 1] * 587 + row[x * channels + 2] * 114) // 1000
+
+
+def tunnel_list_button_enabled(image, box) -> bool:
+    """Whether the outlined list button ``box`` is drawn enabled (quiet
+    Active: fill lighter than the card) or disabled (quiet Disabled: fill
+    equal to the card). Interior median vs a card strip left of the box,
+    clear of an anti-aliased (2 px) side border; raises when the strip is
+    not flat (it is not provably card), when the median is not the value of
+    most of the interior, or when the fill is neither (hovered, pressed,
+    another widget)."""
+    _w, _h, channels, rows = image
+    x1, y1, x2, y2 = box
+    ys = range(y1 + 3, y2 - 3)
+    inside = sorted(_luma_at(rows, channels, x, y) for y in ys for x in range(x1 + 3, x2 - 3))
+    far, near = TUNNEL_LIST_BUTTON_CARD_DX
+    card_xs = range(x1 - far, x1 - near + 1)
+    if not inside or card_xs.start < 0:
+        raise RuntimeError(f"list button {box} too small to read its fill")
+    card = sorted(_luma_at(rows, channels, x, y) for y in ys for x in card_xs)
+    if card[-1] - card[0] > TUNNEL_LIST_BUTTON_FLAT:
+        raise RuntimeError(
+            f"list button {box}: card reference x {card_xs.start}..{card_xs.stop - 1} "
+            f"spread {card[0]}..{card[-1]} is not flat; fill is neither enabled nor disabled"
+        )
+    fill = inside[len(inside) // 2]
+    share = sum(abs(v - fill) <= TUNNEL_LIST_BUTTON_FLAT for v in inside) / len(inside)
+    if share < TUNNEL_LIST_BUTTON_FILL_SHARE:
+        raise RuntimeError(
+            f"list button {box}: interior median {fill} covers only {share:.0%} of the "
+            f"interior; fill is neither enabled nor disabled"
+        )
+    delta = fill - card[len(card) // 2]
+    if delta >= TUNNEL_LIST_BUTTON_ENABLED_DELTA:
+        return True
+    if abs(delta) <= TUNNEL_LIST_BUTTON_FLAT:
+        return False
+    raise RuntimeError(f"list button {box}: fill luma {delta:+d} vs card is neither enabled nor disabled")
+
+
+def tunnel_list_button_states(path: Path, heading_bounds, width: int, *, image=None):
+    """``((plus_box, plus_enabled), (minus_box, minus_enabled))`` for the
+    "+" / "−" pair under the tunnel list, found from pixels inside the list
+    card below the located heading, or ``None``. A pair is two outlined
+    boxes side by side, tops on the same row, 1..10 px apart, each closed by
+    a bottom border run of its own width 18..28 px lower (enabled 23,
+    disabled 27). More than one pair raises: the target would be a guess."""
+    image = image or _read_png(path)
+    img_w, img_h, channels, rows = image
     left, _dialog = tunnel_dialog_left(width)
-    return (left + TUNNEL_REMOVE_BUTTON_D[0], heading_bounds[1] + TUNNEL_REMOVE_BUTTON_D[1])
+    x1 = max(0, left + 12)
+    x2 = min(img_w, left + TUNNEL_EDITOR_CARD_DX - 6)
+    pairs = []
+    runs_at = {}
+
+    def runs(y):
+        if y not in runs_at:
+            runs_at[y] = _border_runs(rows[y], channels, x1, x2)
+        return runs_at[y]
+
+    def bottom_of(run, y):
+        for y2 in range(y + TUNNEL_LIST_BUTTON_H[0], min(img_h, y + TUNNEL_LIST_BUTTON_H[1] + 1)):
+            if any(abs(c[0] - run[0]) <= 1 and abs(c[1] - run[1]) <= 1 for c in runs(y2)):
+                return y2
+        return None
+
+    for y in range(max(0, heading_bounds[3]), min(img_h, heading_bounds[1] + 560)):
+        top = runs(y)
+        for a, b in zip(top, top[1:]):
+            if not TUNNEL_LIST_BUTTON_GAP[0] <= b[0] - a[1] <= TUNNEL_LIST_BUTTON_GAP[1]:
+                continue
+            ya, yb = bottom_of(a, y), bottom_of(b, y)
+            if ya is not None and yb is not None:
+                pairs.append(((a[0], y, a[1] + 1, ya + 1), (b[0], y, b[1] + 1, yb + 1)))
+    if not pairs:
+        return None
+    if len(pairs) > 1:
+        raise RuntimeError(f"several +/- button pairs under the tunnel list in {path}: {pairs}")
+    plus, minus = pairs[0]
+    return ((plus, tunnel_list_button_enabled(image, plus)),
+            (minus, tunnel_list_button_enabled(image, minus)))
+
+
+def tunnel_list_buttons(path: Path, heading_bounds, width: int, *, image=None):
+    """``(plus_box, minus_box)`` of the "+" / "−" pair (either may be the
+    disabled rendering), or ``None``; see ``tunnel_list_button_states``."""
+    found = tunnel_list_button_states(path, heading_bounds, width, image=image)
+    return None if found is None else (found[0][0], found[1][0])
+
+
+def tunnel_remove_centre(path: Path, heading_bounds, width: int) -> tuple[int, int]:
+    """Centre of the "−" (remove) box. Requires it ENABLED: the product
+    builds it without on_press when no saved forward is selected, and a
+    click on that is a silent no-op."""
+    found = tunnel_list_button_states(path, heading_bounds, width)
+    if found is None:
+        raise RuntimeError(f"no +/- buttons under the tunnel list in {path}")
+    (_plus, _plus_on), (minus, minus_on) = found
+    if not minus_on:
+        raise RuntimeError(
+            f"remove (−) button {minus} is disabled (no saved forward selected) in {path}; "
+            f"clicking it would do nothing"
+        )
+    return center(minus)
+
+
+def tunnel_add_centre(path: Path, heading_bounds, width: int) -> tuple[int, int]:
+    """Centre of the "+" (add) box. "+" must be enabled; the "−" beside it
+    (which proves this is the list's +/- pair) may be either rendering:
+    with nothing selected it is disabled."""
+    found = tunnel_list_button_states(path, heading_bounds, width)
+    if found is None:
+        raise RuntimeError(f"no +/- buttons under the tunnel list in {path}")
+    (plus, plus_on), _minus = found
+    if not plus_on:
+        raise RuntimeError(f"add (+) button {plus} is disabled (no saved profile?) in {path}")
+    return center(plus)
 
 
 def primary_fill_run(path: Path, y: int, x1: int, x2: int, *, min_width: int = 30,
@@ -1878,123 +2176,127 @@ def _port_glyph_cells(path, row_region):
 # (asserted by the unit tests). Host digits with two sub-pixel phases or
 # two runs keep two instances. Source frame
 # (scripts/tests/fixtures/<name>#<glyph index>) is recorded per entry;
-# regenerate with ``build_port_templates``.
+# regenerate with ``build_port_templates``. Patches are cut from the
+# label-derived Listen Port band (``listen_port_row_region``; 691,281..317
+# on the old-layout fixture frames): ink is scaled from the band's median,
+# so patches cut from another band differ (the it11 heading-offset band
+# moved them by up to 3.3 per glyph); recut them when the band changes.
 _PORT_TEMPLATE_TABLE = (
     ('0', 'gh', 'connected-tunnels-edit-bravo-draft-50835-ci.png#1', (
         '0000000000',
-        '0015885200',
-        '0056227410',
+        '0015885100',
+        '0055227400',
         '0163047620',
-        '0253265520',
+        '0252265520',
         '0353542530',
-        '0256522530',
+        '0256522520',
         '0168303520',
-        '0056226410',
-        '0015885200',
+        '0056216410',
+        '0015885100',
         '0000000000',
     )),
     ('0', 'host', 'connected-tunnels-edit-bravo-draft-52045-host.png#2', (
         '0000000000',
         '0026996200',
-        '0058448510',
+        '0057448510',
         '0275105720',
-        '0383005730',
+        '0383005720',
         '0474666730',
-        '0383005730',
+        '0383005720',
         '0275105720',
-        '0058448510',
+        '0057448510',
         '0026996200',
         '0000000000',
     )),
     ('0', 'host', 'connected-tunnels-editor-selected-alpha-60989-host.png#1', (
         '0000000000',
         '0026996200',
-        '0058448510',
+        '0057448510',
         '0275105720',
-        '0383005730',
+        '0383005720',
         '0474666730',
-        '0383005730',
+        '0383005720',
         '0275105720',
-        '0058448510',
+        '0057448510',
         '0026996200',
         '0000000000',
     )),
     ('1', 'gh', 'connected-tunnels-edit-alpha-draft-47031-ci.png#4', (
         '0000000000',
-        '0013771000',
-        '0047571000',
-        '0001271000',
-        '0000371000',
-        '0000371000',
-        '0000371000',
-        '0000371000',
-        '0000371000',
+        '0003770000',
+        '0147570000',
+        '0000370000',
+        '0000370000',
+        '0000370000',
+        '0000370000',
+        '0000370000',
+        '0000370000',
         '0028898600',
         '0000000000',
     )),
     ('1', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#4', (
         '0000000000',
-        '0169973000',
-        '0001473000',
-        '0001473000',
-        '0001473000',
-        '0001473000',
-        '0001473000',
-        '0001473000',
-        '0001473000',
-        '0049999600',
+        '0169972000',
+        '0001472000',
+        '0001472000',
+        '0001472000',
+        '0001472000',
+        '0001472000',
+        '0001472000',
+        '0001472000',
+        '0049999500',
         '0000000000',
     )),
     ('2', 'gh', 'connected-tunnels-edit-bravo-draft-45257-ci.png#2', (
         '0000000000',
         '0037884100',
-        '0143136300',
+        '0143036300',
         '0000016400',
         '0000026300',
-        '0000156200',
-        '0001562000',
-        '0015620000',
+        '0000055100',
+        '0000562000',
+        '0005620000',
         '0156200000',
-        '0389999720',
+        '0389999620',
         '0000000000',
     )),
     ('2', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#2', (
         '0000000000',
-        '0048986100',
-        '0364258510',
+        '0048985100',
+        '0364258410',
         '0000007610',
-        '0000038510',
-        '0000167200',
+        '0000038410',
+        '0000177100',
         '0001672000',
         '0016720000',
         '0167200000',
-        '0389999720',
+        '0489999710',
         '0000000000',
     )),
     ('3', 'gh', 'connected-tunnels-edit-bravo-draft-50835-ci.png#3', (
         '0000000000',
-        '0158973100',
-        '0142047200',
-        '0000028200',
-        '0000156100',
-        '0017972000',
-        '0000138200',
-        '0000007400',
-        '0221038200',
-        '0378973100',
+        '0158972000',
+        '0141047100',
+        '0000028100',
+        '0000165100',
+        '0018972000',
+        '0000038200',
+        '0000007300',
+        '0210038200',
+        '0379973000',
         '0000000000',
     )),
     ('3', 'host', 'connected-tunnels-editor-selected-alpha.png#1', (
         '0000000000',
-        '0058985000',
-        '0274159300',
-        '0000009500',
-        '0000169300',
-        '0008995000',
-        '0000159400',
-        '0000008700',
-        '0563159500',
-        '0168986000',
+        '0158984000',
+        '0373268200',
+        '0000018400',
+        '0000268200',
+        '0018984000',
+        '0000158300',
+        '0000017600',
+        '1562258400',
+        '0268985000',
         '0000000000',
     )),
     ('4', 'gh', 'connected-tunnels-edit-bravo-draft-45257-ci.png#0', (
@@ -2003,63 +2305,63 @@ _PORT_TEMPLATE_TABLE = (
         '0001576000',
         '0003746000',
         '0016346000',
-        '0146146000',
+        '0145146000',
         '0271146000',
-        '0499999810',
+        '1499999810',
         '0000146000',
         '0000146000',
         '0000000000',
     )),
     ('4', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#0', (
         '0000000000',
-        '0000189100',
-        '0000689100',
-        '0003858100',
-        '0018458100',
-        '0067158100',
-        '0382058100',
-        '0599999910',
-        '0000058100',
-        '0000058100',
+        '0000288000',
+        '0001788000',
+        '0004858000',
+        '0018458000',
+        '0166058000',
+        '0482058000',
+        '0599999800',
+        '0000058000',
+        '0000058000',
         '0000000000',
     )),
     ('4', 'host', 'connected-tunnels-edit-bravo-draft-52045-host.png#3', (
         '0000000000',
-        '0000487200',
-        '0002786200',
-        '0006676200',
-        '0047266200',
-        '0274166200',
-        '0562066200',
-        '0699999820',
-        '0000066200',
-        '0000066200',
+        '0000486100',
+        '0002786100',
+        '0006576100',
+        '0047266100',
+        '0274166100',
+        '0661066100',
+        '0799999820',
+        '0000066100',
+        '0000066100',
         '0000000000',
     )),
     ('5', 'gh', 'connected-tunnels-edit-bravo-draft-45257-ci.png#1', (
         '0000000000',
         '0048998300',
         '0054100000',
-        '0054100000',
+        '0054000000',
         '0068984100',
-        '0011137410',
+        '0011037400',
         '0000005510',
         '0000005510',
-        '0121027400',
+        '0121027300',
         '0158874100',
         '0000000000',
     )),
     ('5', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#1', (
         '0000000000',
         '0069999300',
-        '0066200000',
-        '0066200000',
-        '0069986200',
+        '0065100000',
+        '0065100000',
+        '0069985100',
         '0000158510',
         '0000006720',
         '0000006720',
         '0364258510',
-        '0158986200',
+        '0158985100',
         '0000000000',
     )),
     ('6', 'gh', 'connected-tunnels-edit-alpha-draft-35649-ci.png#2', (
@@ -2068,141 +2370,141 @@ _PORT_TEMPLATE_TABLE = (
         '0017510000',
         '0146000000',
         '0156787300',
-        '0167213820',
-        '0164001640',
-        '0155001630',
-        '0038213710',
-        '0013887200',
+        '0167203710',
+        '0164001630',
+        '0154001630',
+        '0037203710',
+        '0003886200',
         '0000000000',
     )),
     ('6', 'host', 'connected-tunnels-editor-selected-alpha-60989-host.png#0', (
         '0000000000',
-        '0004898300',
-        '0048624510',
-        '0066200000',
-        '0277898410',
-        '0278436720',
-        '0276204830',
-        '0066204830',
-        '0058436720',
-        '0016898410',
+        '0004897300',
+        '0048524410',
+        '0066100000',
+        '0177898410',
+        '0278426720',
+        '0276104820',
+        '0066104820',
+        '0058426720',
+        '0016898310',
         '0000000000',
     )),
     ('6', 'host', 'connected-tunnels-editor-selected-bravo-41675-host.png#2', (
         '0000000000',
         '0014897300',
-        '0038634410',
-        '0166200000',
-        '0278898400',
-        '0278536730',
+        '0038624410',
+        '0156100000',
+        '0268798400',
+        '0278426730',
         '0276103740',
         '0266103740',
-        '0048536730',
-        '0025898400',
+        '0048426730',
+        '0015898400',
         '0000000000',
     )),
     ('7', 'gh', 'connected-tunnels-edit-bravo-draft-45257-ci.png#4', (
         '0000000000',
-        '0389999600',
-        '0000014600',
-        '0000025300',
-        '0000036100',
-        '0000254000',
-        '0000362000',
-        '0001550000',
-        '0003630000',
-        '0014600000',
+        '0489999400',
+        '0000015400',
+        '0000035200',
+        '0000055100',
+        '0000253000',
+        '0000451000',
+        '0002630000',
+        '0004520000',
+        '0016400000',
         '0000000000',
     )),
     ('7', 'host', 'connected-tunnels-edit-alpha-draft-45271-host.png#3', (
         '0000000000',
-        '0599999610',
-        '0000048300',
-        '0000067200',
-        '0000285100',
+        '0589999610',
+        '0000037300',
+        '0000057200',
+        '0000275100',
         '0000572000',
-        '0001761000',
+        '0001661000',
         '0004830000',
         '0006720000',
-        '0038510000',
+        '0027510000',
         '0000000000',
     )),
     ('8', 'gh', 'connected-tunnels-edit-bravo-draft-50835-ci.png#2', (
         '0000000000',
-        '0025885200',
-        '0156126500',
-        '0155014600',
-        '0036436300',
+        '0015885100',
+        '0146115500',
+        '0155004600',
+        '0026335300',
         '0015875100',
-        '0155125510',
+        '0145115500',
         '0253003620',
-        '0255115610',
+        '0155115610',
         '0026886200',
         '0000000000',
     )),
     ('8', 'host', 'connected-tunnels-editor-selected-alpha-60989-host.png#3', (
         '0000000000',
-        '0037997300',
-        '0267337610',
-        '0275015720',
-        '0157337510',
         '0027997300',
-        '0267336720',
-        '0374004730',
-        '0277337730',
+        '0267337610',
+        '0275004720',
+        '0157337510',
+        '0027997200',
+        '0267326720',
+        '0374003730',
+        '0277326730',
         '0037997300',
         '0000000000',
     )),
     ('8', 'host', 'connected-tunnels-editor-selected-bravo-58191-host.png#1', (
         '0000000000',
         '0037997200',
-        '0177337620',
-        '0275106720',
-        '0167337510',
-        '0037997200',
+        '0167337620',
+        '0275105720',
+        '0067337510',
+        '0027997200',
         '0276237620',
-        '0483005720',
-        '0376237720',
-        '0047997310',
+        '0373004730',
+        '0276227720',
+        '0037997300',
         '0000000000',
     )),
     ('9', 'gh', 'connected-tunnels-edit-alpha-draft-35649-ci.png#4', (
         '0000000000',
-        '0026885100',
-        '0165126500',
-        '0262003700',
-        '0272002600',
-        '0165126700',
-        '0026875700',
-        '0000014600',
+        '0026884000',
+        '0155126400',
+        '0261003600',
+        '0261003600',
+        '0264126600',
+        '0026875600',
+        '0000014500',
         '0000147200',
         '0039862000',
         '0000000000',
     )),
     ('9', 'host', 'connected-tunnels-editor-selected-alpha-60989-host.png#2', (
         '0000000000',
-        '0047986100',
+        '0047985100',
         '0286248410',
-        '0482006710',
-        '0482006720',
-        '0286248820',
-        '0048987720',
-        '0000006610',
-        '0054268300',
+        '0481007610',
+        '0481007710',
+        '0286248810',
+        '0048987710',
+        '0000007610',
+        '0053268300',
         '0037984100',
         '0000000000',
     )),
     ('9', 'host', 'connected-tunnels-editor-selected-bravo-58191-host.png#3', (
         '0000000000',
-        '0048985100',
-        '0376258300',
-        '0573016620',
-        '0573016720',
-        '0375258720',
+        '0047985100',
+        '0376258400',
+        '0473016620',
+        '0473016720',
+        '0376258720',
         '0048978620',
-        '0000027510',
-        '0054368300',
-        '0048984100',
+        '0000016510',
+        '0044368300',
+        '0037984100',
         '0000000000',
     )),
 )
@@ -2313,6 +2615,78 @@ def read_port_digits(path, row_region, templates=None):
         )
     bounds = (cells[0][0], cells[0][1], cells[-1][0] + _PORT_MAX_GLYPH_W, cells[0][1] + 9)
     return digits, bounds
+
+
+# An EMPTY Iced text_input draws its placeholder (iced_widget 0.14.2
+# text_input.rs draw: placeholder paragraph whenever the value is empty,
+# focused or not; the focused caret is an extra 1 px quad in the value
+# colour, erased by ``_port_ink_mask`` as a vertical rule). Dark palette,
+# src/iced_app/theme.rs: placeholder = field_help, value = field_label.
+# Measured run-4 host frame, 1280x800: placeholder fully covered pixels
+# luma 170 (rgb 170,170,170) in Listen Port / Destination Host /
+# Destination Port; typed values luma 191 (Session text, Bind 127.0.0.1,
+# listen digits 52241 on the selected-alpha frame).
+_PLACEHOLDER_LUMA = (150, 181)
+# Placeholder text width per glyph (13 px UI font): "Port" ink 726..754
+# (29 px), "Destination host" 726..848 (123 px) => ~7.7 px per char.
+_PLACEHOLDER_ADVANCE = 7.7
+_PLACEHOLDER_WIDTH_SLACK = 5
+
+
+def require_empty_port_field(path, row_region, *, placeholder="Port", read_digits=None):
+    """Prove a dark-theme input row is EMPTY: it shows ``placeholder`` and no
+    value. Passes only when
+
+    * the strict digit reader ``read_port_digits`` refuses the row (any
+      clear digit string fails, naming the digits);
+    * the remaining glyph ink is placeholder-coloured (peak luma within
+      ``_PLACEHOLDER_LUMA``; typed text of any kind peaks at 191); and
+    * the ink spans the placeholder's width (``len(placeholder)`` glyphs).
+
+    A completely blank row also fails: Iced never hides the placeholder of
+    an empty input, so no ink means no input there (wrong row, covered by
+    an overlay, not rendered). Returns the placeholder's ink bounds.
+    """
+    read_digits = read_digits or read_port_digits
+    name = Path(path).name
+    try:
+        digits, _box = read_digits(path, row_region)
+    except RuntimeError as exc:
+        refused = str(exc)
+    else:
+        if digits:
+            raise RuntimeError(f"row {row_region} of {name} is not empty: it holds digits {digits!r}")
+        raise RuntimeError(
+            f"row {row_region} of {name} is blank: no {placeholder!r} placeholder "
+            f"(an empty Iced input always draws it), so no empty input is there"
+        )
+    ink, (ox, oy) = _port_ink_mask(path, row_region)
+    _w, _h, channels, rows = _read_png(Path(path))
+    points = [(x, y) for y, line in enumerate(ink) for x, value in enumerate(line) if value > 0.5]
+    if not points:
+        raise RuntimeError(f"row {row_region} of {name}: digit reader refused but no glyph ink ({refused})")
+    peak = 0
+    for x, y in points:
+        px = rows[oy + y][(ox + x) * channels:(ox + x) * channels + 3]
+        peak = max(peak, (px[0] * 299 + px[1] * 587 + px[2] * 114) // 1000)
+    xs = [ox + x for x, _y in points]
+    ys = [oy + y for _x, y in points]
+    bounds = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
+    lo, hi = _PLACEHOLDER_LUMA
+    if not lo <= peak <= hi:
+        raise RuntimeError(
+            f"row {row_region} of {name} holds value-coloured text, not the {placeholder!r} "
+            f"placeholder: glyph peak luma {peak} outside {lo}..{hi} at {bounds} "
+            f"(digit reader: {refused})"
+        )
+    expected = len(placeholder) * _PLACEHOLDER_ADVANCE
+    width = bounds[2] - bounds[0]
+    if abs(width - expected) > _PLACEHOLDER_WIDTH_SLACK:
+        raise RuntimeError(
+            f"row {row_region} of {name}: placeholder-coloured ink {bounds} is {width} px "
+            f"wide, {placeholder!r} is ~{expected:.0f} px"
+        )
+    return bounds
 
 
 def _bounds_inside(bounds, region):
@@ -2438,6 +2812,176 @@ def _region_band_label(path: Path, tesseract: str, label: str, region):
     return None
 
 
+# Selected list rows (Tunnel Manager, Sessions, Filer) are painted with a
+# flat fill. On the CI dark frame the selected "Alpha forward" row is luma 58
+# with ~190 text on a luma 25 dialog: the whole-region crop OCR reads the
+# unselected rows but not the filled one, and _visible_bands (global
+# threshold 90, whole window width) merges its title, subtitle and the
+# editor rows beside it into one 26 px band, so only the late inverted
+# stage could read it and click_label's 15 s window ran out first.
+SELECTED_FILL_MIN_DELTA = 16   # fill vs. region background luma
+SELECTED_FILL_MIN_WIDTH = 120  # px of fill on one row
+SELECTED_FILL_HEIGHT = (12, 120)
+SELECTED_TEXT_DELTA = 48       # glyph pixel vs. fill luma
+SELECTED_TEXT_MIN_PIXELS = 4   # per row; a 1-2 px icon stroke is not text
+SELECTED_MAX_LINES = 8
+
+
+def _region_luma(rows, channels, region, width, height):
+    x1, y1, x2, y2 = region
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
+    grid = []
+    for y in range(y1, y2):
+        row = rows[y]
+        grid.append(bytes(
+            (row[x * channels] + row[x * channels + 1] + row[x * channels + 2]) // 3
+            for x in range(x1, x2)
+        ))
+    return (x1, y1), grid
+
+
+def selected_fill_rects(rows, channels, region, width, height):
+    """Flat fills (selected rows) inside ``region``: ``[(x1, y1, x2, y2, luma)]``.
+
+    A fill row has at least ``SELECTED_FILL_MIN_WIDTH`` pixels within 2 luma
+    of one value that is ``SELECTED_FILL_MIN_DELTA`` away from the region's
+    dominant background; consecutive fill rows of the same luma form one
+    rectangle. Glyphs are sparse, so a row through text still counts.
+    Window coordinates; inclusive bounds.
+    """
+    (ox, oy), grid = _region_luma(rows, channels, region, width, height)
+    if not grid or not grid[0]:
+        return []
+    total = [0] * 256
+    for line in grid:
+        for lum in line:
+            total[lum] += 1
+    background = max(range(256), key=lambda lum: (total[lum], -lum))
+    per_row = []
+    for line in grid:
+        counts = [0] * 260
+        for lum in line:
+            counts[lum + 2] += 1
+        best, best_count = None, 0
+        for value in range(256):
+            if not counts[value + 2] or abs(value - background) < SELECTED_FILL_MIN_DELTA:
+                continue
+            near = sum(counts[value:value + 5])
+            if near > best_count:
+                best, best_count = value, near
+        if best is not None and best_count >= SELECTED_FILL_MIN_WIDTH:
+            # The widest run of fill pixels (glyph gaps <= 12 px), so stray
+            # antialiased pixels of a neighbouring card never widen it.
+            xs = [x for x, lum in enumerate(line) if abs(lum - best) <= 2]
+            runs, run_start = [], xs[0]
+            for previous, x in zip(xs, xs[1:]):
+                if x - previous > 12:
+                    runs.append((run_start, previous))
+                    run_start = x
+            runs.append((run_start, xs[-1]))
+            left, right = max(runs, key=lambda run: run[1] - run[0])
+            if right - left + 1 >= SELECTED_FILL_MIN_WIDTH:
+                per_row.append((best, left, right))
+            else:
+                per_row.append(None)
+        else:
+            per_row.append(None)
+    rects = []
+    start = 0
+    while start < len(per_row):
+        if per_row[start] is None:
+            start += 1
+            continue
+        value, left, right = per_row[start]
+        end = start
+        while (end + 1 < len(per_row) and per_row[end + 1] is not None
+               and abs(per_row[end + 1][0] - value) <= 3):
+            end += 1
+            left = min(left, per_row[end][1])
+            right = max(right, per_row[end][2])
+        tall = end - start + 1
+        if SELECTED_FILL_HEIGHT[0] <= tall <= SELECTED_FILL_HEIGHT[1]:
+            rects.append((ox + left, oy + start, ox + right, oy + end, value))
+        start = end + 1
+    return rects
+
+
+def _fill_text_lines(rows, channels, rect):
+    """Text lines inside one fill: ``[(x1, y1, x2, y2)]`` of glyph pixels."""
+    x1, y1, x2, y2, fill = rect
+    lines, active, top = [], False, 0
+    span = []
+    for y in range(y1 + 1, y2 + 1):
+        row = rows[y]
+        lit = [x for x in range(x1 + 2, x2 - 1)
+               if abs((row[x * channels] + row[x * channels + 1]
+                       + row[x * channels + 2]) // 3 - fill) >= SELECTED_TEXT_DELTA]
+        text = len(lit) >= SELECTED_TEXT_MIN_PIXELS and y < y2
+        if text:
+            if not active:
+                active, top, span = True, y, [lit[0], lit[-1]]
+            span = [min(span[0], lit[0]), max(span[1], lit[-1])]
+        elif active:
+            active = False
+            if y - top >= 5:
+                lines.append((span[0], top, span[1], y - 1))
+    return lines
+
+
+def _fill_line_crop(rows, channels, box, fill, scale, dest: Path) -> None:
+    """Write ``box`` upscaled as dark glyphs on white, relative to ``fill``."""
+    left, top, right, bot = box
+    deltas = []
+    for y in range(top, bot + 1):
+        row = rows[y]
+        deltas.append([
+            abs((row[x * channels] + row[x * channels + 1] + row[x * channels + 2]) // 3 - fill)
+            for x in range(left, right + 1)
+        ])
+    peak = max(1, max(max(line) for line in deltas))
+    out_rows = []
+    for line in deltas:
+        grey = bytearray()
+        for delta in line:
+            lum = 255 - min(255, delta * 255 // peak)
+            grey += bytes((lum, lum, lum)) * scale
+        out_rows.append(bytes(grey) * scale)
+    _write_png(dest, (right - left + 1) * scale, (bot - top + 1) * scale, b"".join(out_rows))
+
+
+def _selected_row_label(path: Path, tesseract: str, label: str, region):
+    """Find ``label`` on a selected (flat-filled) row inside ``region``.
+
+    Each text line inside each fill is cropped to its own glyphs, rendered
+    dark-on-white against the fill's luma (not the window threshold) and
+    read as one line. Returns a box wholly inside ``region``, or None (no
+    fill, or the label is not on one). No fill means no OCR at all.
+    """
+    width, height, channels, rows = _read_png(path)
+    lines = []
+    for rect in selected_fill_rects(rows, channels, region, width, height):
+        lines.extend((box, rect[4]) for box in _fill_text_lines(rows, channels, rect))
+    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    try:
+        for (lx1, ly1, lx2, ly2), fill in lines[:SELECTED_MAX_LINES]:
+            box = (max(0, lx1 - 6), max(0, ly1 - 3),
+                   min(width - 1, lx2 + 6), min(height - 1, ly2 + 3))
+            _fill_line_crop(rows, channels, box, fill, 4, temporary)
+            words = [word for word in _scaled_words(
+                _ocr_tsv(tesseract, temporary, "7"), (box[0], box[1]), 4,
+            ) if _word_inside(word, region)]
+            bounds = match_visible_label(words, label)
+            if bounds is None:
+                bounds = match_visible_segment([words], label)
+            bounds = _bounds_inside(bounds, region)
+            if bounds is not None:
+                return bounds
+    finally:
+        temporary.unlink(missing_ok=True)
+    return None
+
+
 def locate_visible_label(
     path: Path,
     label: str,
@@ -2477,6 +3021,14 @@ def locate_visible_label(
             bounds = _bounds_inside(bounds, region)
             if bounds is not None:
                 break
+            if psm == "6" and not invert:
+                # A label on a selected row's fill: read each line of each
+                # fill against the fill itself (cheap, no OCR without a
+                # fill). Right after the first pass, so labels that pass
+                # already finds keep their box.
+                bounds = _selected_row_label(path, tesseract, label, region)
+                if bounds is not None:
+                    break
         # Full-width upscale still drops the trailing token of a 13 px name.
         # Row bands inside the region recover it; never a box outside region.
         if bounds is None:
@@ -3084,8 +3636,38 @@ def window_size(window: str, env: dict[str, str]) -> tuple[int, int]:
     return int(fields["WIDTH"]), int(fields["HEIGHT"])
 
 
+async def locate_editor_label(window: str, path: Path, label: str, heading_bounds, *,
+                              env: dict[str, str], timeout: float = 15):
+    """Bounds of a Tunnel Manager editor field label ("Listen Port", ...)
+    inside the editor's label column under the located heading. Row bands
+    (``editor_value_row_region``) are derived from it, so a row added or
+    resized above the field moves the band with it."""
+    w, h = window_size(window, env)
+    return await locate_rendered_label(
+        window, path, label, env=env, timeout=timeout,
+        region=tunnel_editor_label_region(heading_bounds, w, h),
+    )
+
+
+async def require_located_editor_row_order(window: str, path_stem: Path, heading_bounds,
+                                           listen_label, *, env: dict[str, str]):
+    """Locate the ``Session / profile`` and ``Destination Host`` labels of
+    the open editor (same locator and region as the Listen Port label) and
+    ``require_editor_row_order`` on all three. Call once per dialog opening,
+    right after the Listen Port label is located; returns the boxes."""
+    boxes = {"Listen Port": tuple(listen_label)}
+    for name, suffix in (("Session / profile", "session"), ("Destination Host", "desthost")):
+        boxes[name] = tuple(await locate_editor_label(
+            window, path_stem.with_name(f"{path_stem.name}-order-{suffix}.png"),
+            name, heading_bounds, env=env,
+        ))
+    require_editor_row_order(boxes)
+    print(f"tunnel editor row order ok: {boxes}", flush=True)
+    return boxes
+
+
 def dock_strip_region(width: int, height: int):
-    """Bottom dock tab strip (Session/Transfer/Filer/Explorer) search box.
+    """Bottom dock tab strip (Sender/Session/Transfer/Filer) search box.
 
     The bottom dock occupies roughly the lower 30% of the window; its strip
     sits at y~538..567 for an 800px window. Search a generous band so OCR of
@@ -3094,7 +3676,54 @@ def dock_strip_region(width: int, height: int):
     return (0, int(height * .62), width, int(height * .76))
 
 
-SIDE_FILE_DOCK_WIDTH = 420
+# src/iced_app/dock.rs: a side dock receiving the Filer is widened to
+# FILE_PANEL_MIN_WIDTH (760), clamped to window width - other side dock -
+# MIN_CENTRE_WIDTH (320). The BottomTabs preset has no other side dock, so
+# at 1280 px the right dock is min(760, 1280 - 320) = 760 px.
+FILE_PANEL_MIN_WIDTH = 760
+MIN_CENTRE_WIDTH = 320
+
+
+def side_file_dock_width(width: int, other_side: int = 0) -> int:
+    """Expected width of a side dock that just received the Filer."""
+    return min(FILE_PANEL_MIN_WIDTH, width - other_side - MIN_CENTRE_WIDTH)
+
+
+SIDE_FILE_DOCK_WIDTH = side_file_dock_width(1280)
+# Max distance between the Filer divider (located Remote heading left - 11) and
+# the midpoint of the dock body it splits.
+FILER_DIVIDER_TOLERANCE = 24
+
+
+def filer_halves(shot: Path, area):
+    """Split a Filer dock body into (local_box, remote_box, divider_x, remote_heading).
+
+    The merged Filer shows Local on the left and Remote on the right of one
+    panel with a 1px divider. Measured at 1280x800 (bottom dock): heading
+    'Remote' at (646,570,691,584), divider x 640. The heading is searched in
+    the top third of ``area`` only, so the action row's 'New remote folder'
+    / 'Rename remote' cannot match. Raises when the divider is not within
+    FILER_DIVIDER_TOLERANCE of the area's midpoint: a stacked or one-sided
+    layout must fail here rather than produce a meaningless half.
+    """
+    left, top, right, bottom = area
+    heading_band = (left, top, right, top + (bottom - top) // 3)
+    heading = locate_visible_label(shot, "Remote", region=heading_band)
+    # Rendered heading starts 6 px right of the divider (646 vs 640); the
+    # locator returns interior bounds inset ~5 px more (replayed: 651).
+    divider = heading[0] - 11
+    midpoint = (left + right) // 2
+    if abs(divider - midpoint) > FILER_DIVIDER_TOLERANCE:
+        raise RuntimeError(
+            f"Filer divider x={divider} (Remote heading {heading}) is not within "
+            f"{FILER_DIVIDER_TOLERANCE} px of the dock midpoint {midpoint} of {area}"
+        )
+    local_heading = locate_visible_label(shot, "Local", region=(left, top, divider, heading_band[3]))
+    if abs(local_heading[1] - heading[1]) > 6:
+        raise RuntimeError(
+            f"Local heading {local_heading} and Remote heading {heading} are not on one row"
+        )
+    return (left, top, divider, bottom), (divider + 1, top, right, bottom), divider, heading
 
 
 def dock_body_region(
@@ -3103,14 +3732,14 @@ def dock_body_region(
     """Dock body (file rows, Upload/Download, Transfer queue rows).
 
     Bottom dock: full width, lower third above the status bar. Right dock:
-    a file panel moved into a side dock widens it to 420px, so search
-    x = width - 420 - 4 .. width, from below the 32px menu bar down to the
+    a Filer moved into a side dock widens it to SIDE_FILE_DOCK_WIDTH (760 at
+    1280 px), so search x = width - 760 - 4 .. width, from below the 32px menu bar down to the
     top of the bottom dock (``bottom_top``, from the OCR-located bottom
     strip when available, else 0.66 * height).
     """
     if right:
         lower = bottom_top if bottom_top is not None else int(height * .66)
-        return (width - SIDE_FILE_DOCK_WIDTH - 4, 32, width, lower)
+        return (width - side_file_dock_width(width) - 4, 32, width, lower)
     return (0, int(height * .66), width, height - 22)
 
 
@@ -3151,17 +3780,23 @@ async def wait_for(predicate, label: str, *, timeout: float = 22) -> None:
 async def click_filer_refresh(
     window: str, env: dict[str, str], shot_path: Path, *,
     path_bar_y: int, completed, label: str, attempt_timeout: float = 6,
-) -> None:
-    """Click the Filer path bar's text-less refresh icon until ``completed``.
+) -> int:
+    """Click the Filer path bar's text-less refresh icon until ``completed``;
+    return how many clicks were issued (1..3, see
+    ``require_refresh_listing_count``).
 
-    Switching between the Explorer and Filer dock tabs does NOT reload the
-    remote listing (panels only re-list when going hidden -> visible), so the
-    refresh icon must be clicked. Measured at 1280x800 with a bottom dock:
-    tab labels y~552, path bar y=567..598; at its right end 'Up' ~(1185,584),
-    refresh icon (1222,584) with a ~22x22 hit box, 'Go' (1256,584) spanning
-    x 1238..1274. So the icon is at x = width - 58, y = tab-label y + 32. The
-    path bar's right end stays at the window's right edge for a right dock
-    (strip y~46, so path bar y~78). Retry at x-8 then x+8 before raising.
+    Panels only re-list when going hidden -> visible; re-clicking the
+    already-active Filer tab does not reload either half (asserted by the
+    caller: remote by the SFTP_LIST_READY count, local by a new local file
+    staying absent until refresh), so the refresh icon must be clicked.
+    ``completed`` here only watches the REMOTE listing. Measured at 1280x800 with a
+    bottom dock: tab labels y~553, 'Remote' heading y 570..584, remote path
+    bar y 590..619; at its right end Up/refresh/Go span x 1167..1274, 'Go'
+    ending at 1274, refresh icon ~(1222, 604) with a ~22x22 hit box. So the
+    icon is at x = width - 58 and the caller passes the path bar y derived
+    from the located Remote heading (heading centre + 27). The remote half's
+    path bar ends at the window's right edge for a right dock too. Retry at
+    x-8 then x+8 before raising.
     """
     width, _ = window_size(window, env)
     base_x = width - 58
@@ -3176,10 +3811,40 @@ async def click_filer_refresh(
         last = index == len(offsets) - 1
         try:
             await wait_for(completed, label, timeout=22 if last else attempt_timeout)
-            return
+            return index + 1
         except RuntimeError:
             if last:
                 raise
+    raise AssertionError("unreachable")
+
+
+def require_refresh_listing_count(before: int, after: int, clicks: int) -> None:
+    """Remote listings started by ``click_filer_refresh`` must match its clicks.
+
+    Counting rule (``SFTP_LIST_READY`` fires once per server-side scandir,
+    i.e. per remote directory listing): each issued click can start at most
+    one listing, and a retry click is only issued after the previous one
+    showed no completed listing within ``attempt_timeout``. So:
+
+    * one click -> exactly ``before + 1`` (a second listing is a product
+      double reload, never a test artefact);
+    * ``clicks`` > 1 -> ``before + 1 <= after <= before + clicks``: a click
+      that missed the icon starts none, while a slow first listing that
+      completes after a retry click that did hit the icon legitimately
+      yields two. Requiring exactly one there would flake.
+
+    Raises ``RuntimeError`` with both counts otherwise.
+    """
+    if clicks < 1:
+        raise RuntimeError(f"refresh issued no click (clicks={clicks})")
+    started = after - before
+    allowed = (1, 1) if clicks == 1 else (1, clicks)
+    if not allowed[0] <= started <= allowed[1]:
+        raise RuntimeError(
+            f"refresh started {started} remote listing(s) for {clicks} click(s): "
+            f"SFTP_LIST_READY {before} -> {after}, expected "
+            + (f"exactly {before + 1}" if clicks == 1 else f"{before + 1}..{before + clicks}")
+        )
 
 
 async def click_transfer(
@@ -3681,10 +4346,24 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
                 await asyncio.sleep(1)
                 selected = tour_dir / f"tour-05f-tunnel-manager-alpha-{tag}.png"
                 shot(selected.name)
+                listen_label = await asyncio.to_thread(
+                    light_locate, selected, "Listen Port",
+                    region=tunnel_editor_label_region(heading, min_w, min_h),
+                )
+                # Same row-order gate as the dark connected probes, on the
+                # same frame with the same light locator.
+                order_boxes = {"Listen Port": tuple(listen_label)}
+                for order_label in ("Session / profile", "Destination Host"):
+                    order_boxes[order_label] = tuple(await asyncio.to_thread(
+                        light_locate, selected, order_label,
+                        region=tunnel_editor_label_region(heading, min_w, min_h),
+                    ))
+                require_editor_row_order(order_boxes)
+                print(f"tour: {tag} editor row order ok: {order_boxes}", flush=True)
                 port_box = await asyncio.to_thread(
                     require_editor_selection, selected, forward_ports[0], forward_ports[1],
                     editor_form_region(min_w, min_h),
-                    row_region=listen_port_row_region(heading, min_w),
+                    row_region=listen_port_row_region(listen_label, min_w),
                     locate=light_locate,
                     # No light-theme digit templates exist (read_port_digits
                     # raises on a light row): keep the light locator here.
@@ -3774,8 +4453,11 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
     await step("filer", s08)
 
     # Bottom dock tab centres (Sender 6-88, Session 92-182, Transfer 186-283,
-    # Filer ~287-361, Explorer ~365-463).
-    for x, name in ((414, "tour-09-explorer.png"), (234, "tour-10-transfer.png"),
+    # Filer 287-361; measured on the merged-Filer build at 1280x800). The
+    # Explorer tab was merged into Filer (its local half is already in
+    # tour-08-filer.png), so tour-09-explorer.png is retired; the other
+    # shot names stay stable and tour-09 is intentionally absent.
+    for x, name in ((234, "tour-10-transfer.png"),
                     (47, "tour-11-sender.png"), (137, "tour-12-session.png"),
                     (324, None)):
         async def tab(x=x, name=name):
@@ -4732,24 +5414,52 @@ async def main() -> int:
                 strip = dock_strip_region(width, height)
                 body = dock_body_region(width, height)
 
-                # Toggling Files activates the Filer (REMOTE) tab of the bottom
-                # dock. The remote fixture row must be visibly targetable.
+                # Toggling Files activates the merged Filer tab of the bottom
+                # dock: Local on the left half, Remote on the right half of one
+                # panel, both listed on show. Split the dock body at the
+                # divider located from the 'Remote' heading (asserted to sit at
+                # the body's midpoint) and search every label that can exist
+                # on both sides (rows, Name, Go, Up, '1 item') in its half only.
                 bottom = destination / "connected-files-bottom-dock.png"
-                remote_row = await asyncio.to_thread(locate_visible_label, bottom, download_name, region=body,
+                local_body, remote_body, filer_divider, remote_heading = await asyncio.to_thread(
+                    filer_halves, bottom, body,
+                )
+                print(
+                    f"Filer halves: divider x={filer_divider} local={local_body} "
+                    f"remote={remote_body} Remote heading {remote_heading}",
+                    flush=True,
+                )
+                filer_tab_active = await asyncio.to_thread(
+                    locate_visible_label, bottom, "Filer", region=strip,
+                )
+                for gone_tab in ("Explorer",):
+                    try:
+                        stale = await asyncio.to_thread(
+                            locate_visible_label, bottom, gone_tab, region=strip, budget=4,
+                        )
+                    except RuntimeError:
+                        continue
+                    raise RuntimeError(
+                        f"bottom dock strip still shows the removed {gone_tab!r} tab at {stale} "
+                        f"(Filer tab {filer_tab_active})"
+                    )
+                # The remote fixture row must be visibly targetable in the
+                # remote half.
+                remote_row = await asyncio.to_thread(
+                    locate_visible_label, bottom, download_name, region=remote_body,
                 )
                 if remote_row[3] <= remote_row[1]:
                     raise RuntimeError("bottom-dock remote file row is not visibly targetable")
 
-                # Explorer tab = LOCAL listing with the 'Upload ->' action.
+                # Local half = LOCAL listing with the 'Upload ->' action. No tab
+                # switch: the same Filer frame carries both listings.
                 explorer_shot = destination / "connected-files-explorer.png"
-                await click_label(window, explorer_shot, "Explorer", env, region=strip, settle=.8)
                 local_row = await locate_rendered_label(
                     window, explorer_shot, upload_name, env=env,
-                    region=body, timeout=40,
+                    region=local_body, timeout=40,
                 )
                 upload_action = await asyncio.to_thread(
-                    locate_visible_label, explorer_shot, "Upload",
-                    region=(0, int(height * .62), width, height - 22),
+                    locate_visible_label, explorer_shot, "Upload", region=local_body,
                 )
                 if local_row[3] <= local_row[1]:
                     raise RuntimeError("bottom-dock local file row is not visibly targetable")
@@ -4771,19 +5481,18 @@ async def main() -> int:
                 await asyncio.sleep(.7)
                 screenshot(window, destination / "connected-files-uploaded.png", env)
 
-                # Back to the Filer tab (REMOTE). The remote fixture name sorts
-                # first, so the first row is deterministic even after the
-                # upload refresh. Activate '<- Download' and verify the exact
-                # binary payload landed in the Explorer's local directory.
+                # Remote half. The remote fixture name sorts first, so the
+                # first row is deterministic even after the upload refresh.
+                # Activate '<- Download' and verify the exact binary payload
+                # landed in the local half's directory.
                 filer_shot = destination / "connected-files-filer.png"
-                await click_label(window, filer_shot, "Filer", env, region=strip, settle=.8)
+                screenshot(window, filer_shot, env)
                 remote_row = await locate_rendered_label(
                     window, filer_shot, download_name, env=env,
-                    region=body, timeout=40,
+                    region=remote_body, timeout=40,
                 )
                 download_action = await asyncio.to_thread(
-                    locate_visible_label, filer_shot, "Download",
-                    region=(0, int(height * .62), width, height - 22),
+                    locate_visible_label, filer_shot, "Download", region=remote_body,
                 )
                 downloaded = local_root / download_name
                 if downloaded.exists():
@@ -4809,26 +5518,74 @@ async def main() -> int:
                     raise RuntimeError("click-driven GUI upload failed exact-byte integrity")
                 if downloaded.read_bytes() != download_bytes:
                     raise RuntimeError("click-driven GUI download failed exact-byte integrity")
+                # The download must also show up in the LOCAL half (the panel
+                # re-lists its local side after a completed download), never
+                # only on the remote side where 444 already was.
+                await locate_rendered_label(
+                    window, destination / "connected-files-downloaded-local.png",
+                    download_name, env=env, region=local_body, timeout=20,
+                )
 
                 # Two completed transfers must not consume the listings. Select
                 # another visibly rendered, distinct remote file through the
                 # production row control; its selection styling is the oracle.
-                # The text 'Refresh' button is gone (icon only) and switching
-                # Explorer <-> Filer tabs does not reload the listing; activate
-                # Filer, then click its path-bar refresh icon (see helper).
+                # The text 'Refresh' button is gone (icon only). With one merged
+                # Filer panel the old Explorer<->Filer switch is gone; the
+                # remaining no-reload claim is that re-clicking the already
+                # active Filer tab re-lists NEITHER half, then the path-bar
+                # refresh icon must re-list both.
+                # * Remote: SFTP_LIST_READY (one per server scandir) must not
+                #   move on the tab click; refresh must start exactly the one
+                #   listing that shows 111 (require_refresh_listing_count).
+                # * Local: the fixture event cannot see a local re-list, so a
+                #   new local file is written next to the remote one. It must
+                #   NOT be rendered in the local half after the tab click
+                #   (one require_label_absent, the step's only absence proof)
+                #   and MUST be rendered there after refresh: src/iced_app.rs
+                #   Message::FilesRefresh -> reload_files() re-lists local and
+                #   remote, and nothing re-lists local on a timer or file
+                #   watcher. The positive read also proves the locator can
+                #   see that name in that region, so the absence is not a
+                #   locator blind spot.
                 # Prefixes 111 < 444 < 999 are distinct and OCR-safe (no 0/O);
                 # the third file sorts first, so it stays visible at 960x640.
+                # The local probe sorts first in the local half (local root
+                # holds only 444 and 999, no directories).
                 third_name = "111_GUI_THIRD_FIXTURE.bin"
                 third_bytes = b"GUI_THIRD_FIXTURE" + bytes(range(32))
                 (remote_root / third_name).write_bytes(third_bytes)
+                local_probe_name = "111_GUI_LOCAL_FIXTURE.bin"
+                (local_root / local_probe_name).write_bytes(b"GUI_LOCAL_FIXTURE" + bytes(range(32)))
                 listings_before = events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY")
                 filer_tab = await click_label(
                     window, destination / "connected-files-refresh-back.png",
                     "Filer", env, region=strip, settle=.3,
                 )
-                await click_filer_refresh(
+                await asyncio.sleep(1.5 * TIME_SCALE)
+                listings_after_tab = events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY")
+                if listings_after_tab != listings_before:
+                    raise RuntimeError(
+                        "re-clicking the active Filer tab started an SFTP listing: "
+                        f"SFTP_LIST_READY {listings_before} -> {listings_after_tab} "
+                        f"(tab {filer_tab})"
+                    )
+                # Same settle as the remote count: a local re-list is one
+                # blocking readdir of a 3-file directory plus a repaint.
+                tab_local_shot = destination / "connected-files-refresh-back-local.png"
+                await asyncio.to_thread(screenshot, window, tab_local_shot, env)
+                try:
+                    await asyncio.to_thread(
+                        require_label_absent, tab_local_shot, local_probe_name, region=local_body,
+                    )
+                except LabelVisible as exc:
+                    raise RuntimeError(
+                        "re-clicking the active Filer tab re-listed the LOCAL half: new local "
+                        f"file {local_probe_name} visible at {exc.bounds} in {tab_local_shot} "
+                        f"(tab {filer_tab})"
+                    ) from exc
+                refresh_clicks = await click_filer_refresh(
                     window, env, destination / "connected-files-refresh-clicked.png",
-                    path_bar_y=center(filer_tab)[1] + 32,
+                    path_bar_y=center(remote_heading)[1] + 27,
                     completed=lambda: events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY") > listings_before,
                     label="remote listing refresh after creating distinct fixture",
                 )
@@ -4837,8 +5594,38 @@ async def main() -> int:
                 # until the distinct filename is actually visible.
                 third_row = await locate_rendered_label(
                     window, destination / "connected-files-third-visible.png",
-                    third_name, env=env, region=body, timeout=40,
+                    third_name, env=env, region=remote_body, timeout=40,
                 )
+                # Refresh must start exactly the one remote listing (rule in
+                # require_refresh_listing_count). Let any listing still in
+                # flight land first, so a late one is charged here and not to
+                # the header-click check below: after a retry click, wait (up
+                # to 22 s, the last attempt's budget) for one listing per
+                # click; otherwise settle like the tab-click check.
+                if refresh_clicks > 1:
+                    try:
+                        await wait_for(
+                            lambda: events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY")
+                            >= listings_before + refresh_clicks,
+                            "one listing per refresh click", timeout=22 * TIME_SCALE,
+                        )
+                    except RuntimeError:
+                        pass  # a click that missed the icon starts none
+                else:
+                    await asyncio.sleep(1.5 * TIME_SCALE)
+                listings_after_refresh = events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY")
+                require_refresh_listing_count(listings_before, listings_after_refresh, refresh_clicks)
+                print(f"filer refresh: {refresh_clicks} click(s), SFTP_LIST_READY "
+                      f"{listings_before} -> {listings_after_refresh}", flush=True)
+                # Refresh re-lists the local half too: the probe file written
+                # before the tab click is now rendered there.
+                local_probe_row = await locate_rendered_label(
+                    window, destination / "connected-files-refresh-local-visible.png",
+                    local_probe_name, env=env, region=local_body, timeout=40,
+                )
+                print(f"filer refresh: local half re-listed only on refresh "
+                      f"({local_probe_name} absent after tab click, at {local_probe_row} after refresh)",
+                      flush=True)
                 command(
                     "xdotool", "mousemove", "--window", window,
                     *map(str, center(third_row)), "click", "1", env=env,
@@ -4855,15 +5642,24 @@ async def main() -> int:
                 # Default is name ascending (directories first, then name; this
                 # fixture has no directories), so 111 is above 444. A second
                 # click must restore that order: the 960x640 step needs 111
-                # first. Header clicks must not start another SFTP listing.
+                # first. Header clicks must not start another SFTP listing
+                # (baseline read below, after the refresh count settled).
                 row_111 = await locate_rendered_label(
                     window, destination / "connected-files-sort-before.png",
-                    third_name, env=env, region=body, timeout=20,
+                    third_name, env=env, region=remote_body, timeout=20,
                 )
                 # Name-column data rows, fixed to the first file row. Reordering
                 # does not move the band, and the transfer status line is outside
                 # it, so a later read of 444 cannot land on "Download 444 …".
-                rows_region = name_rows_region(row_111, 3)
+                # Clamped to the remote half: the band's icon inset must not
+                # reach across the divider into the local half's clipped Size
+                # column. Name 641..932 is the only remote column read here;
+                # Size/Permissions/Owner/Group are off-screen to the right.
+                rows_region = name_rows_region(row_111, 3, name_right=remote_body[2])
+                rows_region = (
+                    max(rows_region[0], remote_body[0]), rows_region[1],
+                    min(rows_region[2], row_111[0] + 270), rows_region[3],
+                )
                 default_order = await asyncio.to_thread(
                     name_order_tops,
                     destination / "connected-files-sort-before.png",
@@ -4888,7 +5684,7 @@ async def main() -> int:
                 # include the path bar or the filename. It stays put when the
                 # rows reorder, so both clicks use this same band.
                 name_header = (
-                    max(0, row_111[0] - 36),
+                    max(remote_body[0], row_111[0] - 36),
                     max(0, row_111[1] - 36),
                     row_111[0] + 48,
                     row_111[1] - 2,
@@ -4948,11 +5744,16 @@ async def main() -> int:
                 # 6*24+2 px for a remote file), so a click near the bottom
                 # opens upward rather than down from the pointer.
                 # No-pause gesture is the regression case for a popup anchored
-                # at a stale pointer. Park at the top right of the terminal
-                # pane, far from the bottom-dock row on the x axis, let that
-                # become the last known pointer, then move and right-press in
-                # one command with no sleep between motion and the press.
-                parked_x, parked_y = 1100, 200
+                # at a stale pointer. Park in the top LEFT of the terminal
+                # pane: the remote row now sits in the right half (name from
+                # x ~663, centre ~790), so the old (1100, 200) park lies inside
+                # the pointer box on x and only 215 px away on y. Derive the
+                # park from the divider: 440 px left of it is >=300 px left
+                # of any box anchored at a remote-half click (box left =
+                # click_x - 10 >= divider - 9). Let that become the last
+                # known pointer, then move and right-press in one command
+                # with no sleep between motion and the press.
+                parked_x, parked_y = max(40, filer_divider - 440), 200
                 command(
                     "xdotool", "mousemove", "--window", window,
                     str(parked_x), str(parked_y), env=env,
@@ -4963,7 +5764,7 @@ async def main() -> int:
                     destination / "connected-files-context-row.png",
                     download_name,
                     env=env,
-                    region=body,
+                    region=remote_body,
                     timeout=20,
                 )
                 click_x, click_y = center(context_row)
@@ -5028,7 +5829,7 @@ async def main() -> int:
                     await asyncio.sleep(.3)
                 # "Rename" is the first OCR token of action-row "Rename remote",
                 # and locate_visible_label cannot require "Rename" not followed
-                # by " remote". That button (x 292-384, y ~760) overlaps a
+                # by " remote". That button (x 918-1039, y ~761) overlaps a
                 # 202x147 menu anchored at this pointer, so a y-cut would also
                 # drop a Rename row that sits anywhere in the menu. Require
                 # Refresh and New Folder in the full pointer box instead:
@@ -5172,7 +5973,7 @@ async def main() -> int:
                         try:
                             restored_row = await asyncio.to_thread(
                                 locate_visible_label,
-                                closed_shot, download_name, region=body,
+                                closed_shot, download_name, region=remote_body,
                             )
                             row_restored = all(
                                 abs(restored_row[edge] - context_row[edge]) <= 6
@@ -5201,7 +6002,7 @@ async def main() -> int:
                         restore_failed.append(
                             f"file row bounds {restored_row} not within 6 px of "
                             f"context_row {context_row} on every edge "
-                            f"(region {body})"
+                            f"(region {remote_body})"
                         )
                     if restore_failed:
                         raise RuntimeError(
@@ -5931,7 +6732,7 @@ async def main() -> int:
                 )
                 await locate_rendered_label(
                     window, destination / "connected-files-filer-again.png",
-                    third_name, env=env, region=body, timeout=40,
+                    third_name, env=env, region=remote_body, timeout=40,
                 )
 
                 # Minimum-size acceptance is interaction, not a screenshot-only
@@ -5947,10 +6748,16 @@ async def main() -> int:
                         f"geometry was {minimum_geometry!r}"
                     )
                 screenshot(window, destination / "connected-files-min-window.png", env)
+                # Both halves must still split the 960 px dock at its middle;
+                # 111 is a remote row, so it must be in the remote half.
+                _min_local, min_remote, min_divider, _min_heading = await asyncio.to_thread(
+                    filer_halves, destination / "connected-files-min-window.png",
+                    dock_body_region(960, 640),
+                )
                 minimum_row = await asyncio.to_thread(
                     locate_visible_label,
                     destination / "connected-files-min-window.png", third_name,
-                    region=dock_body_region(960, 640),
+                    region=min_remote,
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
@@ -5987,15 +6794,26 @@ async def main() -> int:
                     destination / "connected-files-side-dock.png", env,
                 ) < 3000:
                     raise RuntimeError("Move to Right did not visibly re-dock Filer")
-                # The bottom dock (Sender/Session/Transfer/Explorer) stays
-                # below the right dock; its strip top bounds the side dock.
+                # The bottom dock (Sender/Session/Transfer) stays below the
+                # right dock; its strip top bounds the side dock. The side
+                # dock receiving Filer is side_file_dock_width(width) (760 at
+                # 1280: dock.rs FILE_PANEL_MIN_WIDTH, clamped to width - 320)
+                # and still shows Local | Remote side by side, each ~380 px.
                 bottom_top = max(32 + 100, filer_tab[1] - 8)
                 side_region = dock_body_region(
                     width, height, right=True, bottom_top=bottom_top,
                 )
-                side_row = await locate_rendered_label(
+                side_width = side_file_dock_width(width)
+                await locate_rendered_label(
                     window, destination / "connected-files-side-dock.png", third_name, env=env,
                     region=side_region, timeout=40,
+                )
+                _side_local, side_remote, side_divider, _side_heading = await asyncio.to_thread(
+                    filer_halves, destination / "connected-files-side-dock.png", side_region,
+                )
+                side_row = await asyncio.to_thread(
+                    locate_visible_label, destination / "connected-files-side-dock.png",
+                    third_name, region=side_remote,
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
@@ -6005,10 +6823,14 @@ async def main() -> int:
                 screenshot(window, destination / "connected-files-side-selected.png", env)
 
                 # The dock splitter is a 5px grab column centred at
-                # x = width - dock_width - 3. Drag it 200px left: the dock
-                # widens to ~620px and the file row moves with its edge.
+                # x = width - dock_width - 3. Widening by 200 is impossible
+                # now (760 + 200 > width - 320 = 960 clamp), so drag it 200px
+                # RIGHT: the dock narrows to side_width - 200 (560 at 1280,
+                # above MIN_SIDE_WIDTH 140), the divider moves to the new
+                # midpoint and the remote row moves with it.
+                narrowed = side_width - 200
                 await drag_horizontal(
-                    window, env, width - SIDE_FILE_DOCK_WIDTH - 3, width - 620, 300,
+                    window, env, width - side_width - 3, width - narrowed, 300,
                 )
                 screenshot(window, destination / "connected-files-side-resized.png", env)
                 resized_pixels = diff(
@@ -6019,22 +6841,33 @@ async def main() -> int:
                     raise RuntimeError(
                         "dock splitter dragging did not resize the dock: "
                         f"{resized_pixels} pixels changed after dragging x "
-                        f"{width - SIDE_FILE_DOCK_WIDTH - 3} -> {width - 620}"
+                        f"{width - side_width - 3} -> {width - narrowed}"
                     )
+                resized_area = (width - narrowed - 4, 32, width, bottom_top)
                 resized_row = await locate_rendered_label(
                     window, destination / "connected-files-side-resized.png",
-                    third_name, env=env,
-                    region=(width - 660, 32, width, bottom_top), timeout=20,
+                    third_name, env=env, region=resized_area, timeout=20,
                 )
-                if not (width - 640 <= resized_row[0] <= width - 560):
+                # filer_halves asserts the divider sits at the midpoint of
+                # the NARROWED dock (expected width - narrowed / 2), which
+                # moved by ~100 px from side_divider.
+                _rs_local, resized_remote, resized_divider, _rs_heading = await asyncio.to_thread(
+                    filer_halves, destination / "connected-files-side-resized.png", resized_area,
+                )
+                if not (
+                    abs(resized_divider - (side_divider + 100)) <= 12
+                    and _bounds_inside(resized_row, resized_remote) is not None
+                    and 8 <= resized_row[0] - resized_divider <= 60
+                ):
                     raise RuntimeError(
                         "dock splitter drag did not move the side dock edge: "
-                        f"file row left edge {resized_row[0]}, expected "
-                        f"{width - 640}..{width - 560}"
+                        f"divider {side_divider} -> {resized_divider} (expected "
+                        f"{side_divider + 100} +-12), file row {resized_row} vs remote "
+                        f"half {resized_remote} (row left 8..60 px right of the divider)"
                     )
-                # Drag back so later steps see the 420px side dock.
+                # Drag back so later steps see the full side dock.
                 await drag_horizontal(
-                    window, env, width - 620 - 3, width - SIDE_FILE_DOCK_WIDTH, 300,
+                    window, env, width - narrowed - 3, width - side_width, 300,
                 )
                 screenshot(window, destination / "connected-files-side-restored.png", env)
 
@@ -6046,7 +6879,7 @@ async def main() -> int:
                     side_tab = await asyncio.to_thread(
                         locate_visible_label,
                         destination / "connected-files-side-restored.png",
-                        "Filer", region=(width - 430, 32, width, 62),
+                        "Filer", region=(width - side_file_dock_width(width) - 10, 32, width, 62),
                     )
                     gear_y = center(side_tab)[1]
                 except RuntimeError:
@@ -6063,12 +6896,21 @@ async def main() -> int:
                 )
                 screenshot(window, destination / "connected-files-redocked-bottom.png", env)
                 # Move to Bottom appends Filer as the LAST bottom tab (Sender,
-                # Session, Transfer, Explorer, Filer) and activates it; locate
-                # the row in the dock body, never by Filer's old tab position.
-                redocked_row = await locate_rendered_label(
+                # Session, Transfer, Filer) and activates it; locate the row in
+                # the remote half of the dock body, never by Filer's old tab
+                # position.
+                await locate_rendered_label(
                     window, destination / "connected-files-redocked-bottom.png",
                     third_name, env=env,
                     region=dock_body_region(width, height), timeout=40,
+                )
+                _rd_local, redocked_remote, _rd_divider, _rd_heading = await asyncio.to_thread(
+                    filer_halves, destination / "connected-files-redocked-bottom.png",
+                    dock_body_region(width, height),
+                )
+                redocked_row = await asyncio.to_thread(
+                    locate_visible_label, destination / "connected-files-redocked-bottom.png",
+                    third_name, region=redocked_remote,
                 )
                 command(
                     "xdotool", "mousemove", "--window", window,
@@ -6092,7 +6934,7 @@ async def main() -> int:
                     extedit_row_shot = destination / "connected-extedit-row.png"
                     extedit_row = await locate_rendered_label(
                         window, extedit_row_shot, download_name, env=env,
-                        region=dock_body_region(width, height), timeout=20,
+                        region=redocked_remote, timeout=20,
                     )
                     ex_x, ex_y = center(extedit_row)
                     ex_region = extedit_menu_region(ex_x, ex_y, width, height)
@@ -6571,8 +7413,8 @@ async def main() -> int:
                     # form with the sibling's port absent (no-op click fails).
                     ed_w, ed_h = window_size(window, env)
                     form_region = editor_form_region(ed_w, ed_h)
-                    listen_row = listen_port_row_region(heading_bounds, ed_w)
                     list_region = tunnel_list_region(heading_bounds, ed_w, ed_h)
+                    listen_row = None
                     for idx, (label, name) in enumerate(
                         zip(POPULATED_LABELS, ("alpha", "bravo"))
                     ):
@@ -6580,6 +7422,23 @@ async def main() -> int:
                             window, destination / f"connected-tunnels-editor-pre-{name}.png",
                             label, env, region=list_region, timeout=15, settle=.8,
                         )
+                        if listen_row is None:
+                            # The editor (and its labels) exists once a row
+                            # is selected; the band comes from the label.
+                            listen_label = await locate_editor_label(
+                                window, destination / "connected-tunnels-editor-listen-label.png",
+                                "Listen Port", heading_bounds, env=env,
+                            )
+                            listen_row = listen_port_row_region(listen_label, ed_w)
+                            print(f"tunnel editor: Listen Port label {listen_label} -> row {listen_row}",
+                                  flush=True)
+                            # The rows must be Session / profile, Listen
+                            # Port, Destination Host top to bottom; the band
+                            # above follows the label wherever it sits.
+                            await require_located_editor_row_order(
+                                window, destination / "connected-tunnels-editor", heading_bounds,
+                                listen_label, env=env,
+                            )
                         shot = destination / f"connected-tunnels-editor-selected-{name}.png"
                         deadline = time.monotonic() + 15 * TIME_SCALE
                         while True:
@@ -6664,13 +7523,42 @@ async def main() -> int:
                         command("xdotool", "mousemove", "--window", window,
                                 *map(str, center(footer)), "click", "1", env=env)
                         await asyncio.sleep(.6)
+                        # A new opening may lay the dialog out a few px
+                        # differently (disabled "−"/Save are 4 px taller
+                        # than enabled ones; the dialog is centred), and
+                        # its heading box may still equal an earlier
+                        # opening's: never reuse a label located in another.
+                        listen_labels.clear()
                         return await locate_rendered_label(
                             window, destination / f"connected-tunnels-{tag}-manager.png",
                             "Tunnel Manager", env=env, timeout=15,
                         )
 
+                    listen_labels: dict[tuple, tuple] = {}
+
+                    async def listen_label_for(heading, tag: str):
+                        """Located "Listen Port" label for this opening of the
+                        manager (cached per heading box: the rows above it
+                        do not change while the dialog stays open)."""
+                        key = tuple(heading)
+                        if key not in listen_labels:
+                            label = await locate_editor_label(
+                                window, destination / f"connected-tunnels-{tag}-listen-label.png",
+                                "Listen Port", heading, env=env,
+                            )
+                            print(f"tunnel {tag}: Listen Port label {label}", flush=True)
+                            # Once per opening, before the label is cached:
+                            # the rows must be in product order.
+                            await require_located_editor_row_order(
+                                window, destination / f"connected-tunnels-{tag}", heading,
+                                label, env=env,
+                            )
+                            listen_labels[key] = label
+                        return listen_labels[key]
+
                     async def require_form(port, sibling, heading, tag):
                         w, h = window_size(window, env)
+                        listen_label = await listen_label_for(heading, tag)
                         shot = destination / f"connected-tunnels-{tag}.png"
                         deadline = time.monotonic() + 15 * TIME_SCALE
                         while True:
@@ -6679,7 +7567,7 @@ async def main() -> int:
                                 return await asyncio.to_thread(
                                     require_editor_selection, shot, port, sibling,
                                     editor_form_region(w, h),
-                                    row_region=listen_port_row_region(heading, w),
+                                    row_region=listen_port_row_region(listen_label, w),
                                 )
                             except RuntimeError:
                                 if time.monotonic() >= deadline:
@@ -6698,7 +7586,7 @@ async def main() -> int:
 
                     async def type_listen_port(heading, value: int) -> None:
                         w, _h = window_size(window, env)
-                        x, y = listen_input_centre(heading, w)
+                        x, y = listen_input_centre(await listen_label_for(heading, "type-listen"), w)
                         command("xdotool", "mousemove", "--window", window,
                                 str(x), str(y), "click", "1", env=env)
                         await asyncio.sleep(.3)
@@ -6724,7 +7612,9 @@ async def main() -> int:
 
                     async def press_remove(heading, tag: str) -> None:
                         w, _h = window_size(window, env)
-                        x, y = tunnel_remove_centre(heading, w)
+                        shot = destination / f"connected-tunnels-{tag}-remove.png"
+                        await asyncio.to_thread(screenshot, window, shot, env)
+                        x, y = await asyncio.to_thread(tunnel_remove_centre, shot, heading, w)
                         print(f"tunnel {tag}: remove button -> ({x},{y})", flush=True)
                         command("xdotool", "mousemove", "--window", window,
                                 str(x), str(y), "click", "1", env=env)
@@ -7080,6 +7970,247 @@ async def main() -> int:
                         print("PASS profile edit: popup switch stopped Alpha after idle "
                               "sibling edits", flush=True)
 
+                    async def session_dropdown_probe() -> None:
+                        """Tunnel Settings `Session / profile` combo box.
+
+                        Runs after profile_edit_probe (nothing running,
+                        Tunnel Manager closed). With no forward selected, +
+                        opens an empty draft owned by the FIRST saved
+                        profile (src/iced_app.rs tunnels_view: add_key =
+                        selected owner, else profiles.first()). Typing a
+                        fragment that matches only the other fixture profile
+                        filters the list to that one option; Return picks
+                        the hovered (first, only) option (iced_widget 0.14.2
+                        combo_box: Enter selects ``hovered_option``, reset to
+                        0 on every edit). Save must store the forward under
+                        the CHOSEN profile on disk, the default's forwards
+                        unchanged; no keystroke may reach a terminal.
+                        The forward is left saved and never started: no later
+                        step opens the Tunnels popup or a session of that
+                        profile (DUPTAB duplicates 'CI connected fixture').
+                        """
+                        names = saved_profile_names(profiles)
+                        fixture_names = ("CI connected fixture", "CI tunnel fixture")
+                        if not set(fixture_names) <= set(names):
+                            raise RuntimeError(f"dropdown probe: unexpected saved profiles {names}")
+                        default = names[0]
+                        chosen = next(n for n in fixture_names if n != default)
+                        # The fragment's every search part must occur in the
+                        # chosen option only (case-insensitive substring).
+                        fragment = "tunnel" if chosen == "CI tunnel fixture" else "connected"
+                        if fragment in default.lower() or fragment not in chosen.lower():
+                            raise RuntimeError(f"dropdown fragment {fragment!r} does not single out {chosen!r}")
+                        before = {name: saved_local_forwards(profiles, name) for name in names}
+                        marker = "UNEXPECTED_SESSION_DROPDOWN_PTY_INPUT"
+                        leaked_before = events.path.read_text(encoding="utf-8").count(marker)
+
+                        heading = await open_manager("dropdown")
+                        w, h = window_size(window, env)
+                        form = editor_form_region(w, h)
+                        # Default owner rule needs "nothing selected": the
+                        # previous probe ended with Bravo removed (edit
+                        # cleared) and never touched the manager since.
+                        await locate_rendered_label(
+                            window, destination / "connected-tunnels-dropdown-empty.png",
+                            "Select a tunnel", env=env, region=form, timeout=15,
+                        )
+                        plus_shot = destination / "connected-tunnels-dropdown-plus.png"
+                        await asyncio.to_thread(screenshot, window, plus_shot, env)
+                        x, y = await asyncio.to_thread(tunnel_add_centre, plus_shot, heading, w)
+                        print(f"tunnel dropdown: + button -> ({x},{y})", flush=True)
+                        command("xdotool", "mousemove", "--window", window,
+                                str(x), str(y), "click", "1", env=env)
+                        await asyncio.sleep(.8)
+
+                        # New empty draft: the CLOSED Session field shows
+                        # the default (combo_box draws the selection only
+                        # while unfocused, so read it before the click);
+                        # Listen Port is empty, i.e. shows its "Port"
+                        # placeholder and no digits.
+                        session_label = await locate_editor_label(
+                            window, destination / "connected-tunnels-dropdown-draft.png",
+                            "Session / profile", heading, env=env,
+                        )
+                        session_row = editor_value_row_region(session_label, w)
+                        draft_shot = destination / "connected-tunnels-dropdown-draft-default.png"
+                        await locate_rendered_label(
+                            window, draft_shot, default, env=env, region=session_row, timeout=12,
+                        )
+                        listen_label = await listen_label_for(heading, "dropdown")
+                        listen_row = listen_port_row_region(listen_label, w)
+                        try:
+                            placeholder = await asyncio.to_thread(
+                                require_empty_port_field, draft_shot, listen_row,
+                            )
+                        except RuntimeError as exc:
+                            raise RuntimeError(f"+ did not open an empty draft: {exc}") from exc
+                        print(f"tunnel dropdown: + draft defaults to {default!r}; Session row {session_row}; "
+                              f"Listen Port empty (placeholder at {placeholder})", flush=True)
+
+                        # Arm the PTY guard from the first click into the
+                        # combo box until after Save.
+                        probe_state["phase"] = "SESSION_DROPDOWN"
+                        cy = (session_label[1] + session_label[3]) // 2
+                        command("xdotool", "mousemove", "--window", window,
+                                str((session_row[0] + session_row[2]) // 2),
+                                str(cy + TUNNEL_INPUT_CENTRE_DY), "click", "1", env=env)
+                        await asyncio.sleep(.5)
+                        command("xdotool", "type", "--clearmodifiers", "--delay", "40",
+                                fragment, env=env)
+                        await asyncio.sleep(.8)
+                        # The open list hangs directly below the field
+                        # (iced menu.rs: more room below than above), one
+                        # 22.9 px row per match, at most
+                        # TUNNEL_SESSION_MENU_HEIGHT (240 px).
+                        menu = session_menu_region(session_label, w, h)
+                        menu_shot = destination / "connected-tunnels-session-dropdown.png"
+                        option = await locate_rendered_label(
+                            window, menu_shot, chosen, env=env, region=menu, timeout=15,
+                        )
+                        try:
+                            await asyncio.to_thread(
+                                require_label_absent, menu_shot, default, region=menu,
+                            )
+                        except LabelVisible as exc:
+                            raise RuntimeError(
+                                f"dropdown filter {fragment!r} still lists the default {default!r} "
+                                f"at {exc.bounds} in {menu_shot}"
+                            ) from exc
+                        print(f"tunnel dropdown: typed {fragment!r}; list shows only {chosen!r} at {option}",
+                              flush=True)
+                        command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                        await asyncio.sleep(.8)
+                        picked_shot = destination / "connected-tunnels-dropdown-picked.png"
+                        await locate_rendered_label(
+                            window, picked_shot, chosen, env=env, region=session_row, timeout=12,
+                        )
+                        try:
+                            await asyncio.to_thread(
+                                require_label_absent, picked_shot, default, region=session_row,
+                            )
+                        except LabelVisible as exc:
+                            raise RuntimeError(
+                                f"after Return the Session field still shows {default!r} at "
+                                f"{exc.bounds} in {picked_shot}"
+                            ) from exc
+                        # combo_box unfocuses on a selection, which closes
+                        # the list: the option row must be gone too.
+                        try:
+                            await asyncio.to_thread(
+                                require_label_absent, picked_shot, chosen, region=menu,
+                            )
+                        except LabelVisible as exc:
+                            raise RuntimeError(
+                                f"after Return the session list is still open ({chosen!r} at "
+                                f"{exc.bounds} below the field in {picked_shot})"
+                            ) from exc
+
+                        # Fill the draft like the Bravo add: free loopback
+                        # listen port -> the fixture echo service.
+                        new_port = free_loopback_port({echo_port, port_a, port_b})
+                        await type_listen_port(heading, new_port)
+                        for label_text, value, empty_text in (
+                                ("Destination Host", "127.0.0.1", "Destination host"),
+                                ("Destination Port", str(echo_port), "Port")):
+                            label_shot = (destination
+                                          / f"connected-tunnels-dropdown-{label_text.split()[1].lower()}-label.png")
+                            field = await locate_editor_label(
+                                window, label_shot, label_text, heading, env=env,
+                            )
+                            row = editor_value_row_region(field, w)
+                            # A new draft leaves both destination fields
+                            # empty (placeholder shown), so typing below
+                            # is what fills them; ctrl+a is then a no-op.
+                            try:
+                                await asyncio.to_thread(
+                                    require_empty_port_field, label_shot, row, placeholder=empty_text,
+                                )
+                            except RuntimeError as exc:
+                                raise RuntimeError(f"new draft {label_text} is not empty: {exc}") from exc
+                            fy = (field[1] + field[3]) // 2 + TUNNEL_INPUT_CENTRE_DY
+                            command("xdotool", "mousemove", "--window", window,
+                                    str((row[0] + row[2]) // 2), str(fy), "click", "1", env=env)
+                            await asyncio.sleep(.3)
+                            command("xdotool", "key", "--clearmodifiers", "ctrl+a", env=env)
+                            command("xdotool", "type", "--clearmodifiers", "--delay", "40",
+                                    value, env=env)
+                            await asyncio.sleep(.5)
+                        await require_form(new_port, port_a, heading, "dropdown-filled")
+                        filled = destination / "connected-tunnels-dropdown-filled.png"
+                        dest_label = await locate_editor_label(
+                            window, destination / "connected-tunnels-dropdown-dest-check.png",
+                            "Destination Port", heading, env=env,
+                        )
+                        dest_digits, _box = await asyncio.to_thread(
+                            read_port_digits, filled, editor_value_row_region(dest_label, w),
+                        )
+                        if dest_digits != str(echo_port):
+                            raise RuntimeError(
+                                f"Destination Port reads {dest_digits!r}, typed {echo_port} ({filled})"
+                            )
+                        save_box = await press_save(heading, "dropdown")
+                        await require_notice("saved", save_box, "dropdown")
+
+                        after = {name: saved_local_forwards(profiles, name) for name in names}
+                        if saved_profile_names(profiles) != names:
+                            raise RuntimeError(f"dropdown Save changed profiles: {saved_profile_names(profiles)}")
+                        if after[chosen] != before[chosen] + [spec(new_port)]:
+                            raise RuntimeError(
+                                f"dropdown forward not stored under chosen {chosen!r}: "
+                                f"{before[chosen]} -> {after[chosen]}"
+                            )
+                        for name in names:
+                            if name != chosen and after[name] != before[name]:
+                                raise RuntimeError(
+                                    f"dropdown Save changed {name!r} (default {default!r}): "
+                                    f"{before[name]} -> {after[name]}"
+                                )
+                        await forward_refused(new_port, "saved dropdown forward must stay idle")
+                        leaked = events.path.read_text(encoding="utf-8").count(marker)
+                        probe_state["phase"] = None
+                        if leaked != leaked_before:
+                            raise RuntimeError(
+                                f"typing into the session dropdown reached a terminal "
+                                f"({marker} {leaked_before} -> {leaked})"
+                            )
+
+                        command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+                        await asyncio.sleep(.6)
+                        closed = destination / "connected-tunnels-dropdown-closed.png"
+                        await asyncio.to_thread(screenshot, window, closed, env)
+                        dlg_left, dlg_w = tunnel_dialog_left(w)
+                        try:
+                            await asyncio.to_thread(
+                                require_label_absent, closed, "Tunnel Manager",
+                                region=(dlg_left, 42, dlg_left + dlg_w, h),
+                            )
+                        except LabelVisible as exc:
+                            raise RuntimeError(f"Escape did not close the Tunnel Manager ({closed})") from exc
+                        term_x, term_y = (w * 3) // 4, 280
+                        if not (0 <= term_x < w and 0 <= term_y < h and abs(term_x - w // 2) >= 100):
+                            raise RuntimeError(f"terminal refocus click ({term_x}, {term_y}) invalid for {w}x{h}")
+                        command("xdotool", "windowfocus", window, "mousemove", "--window", window,
+                                str(term_x), str(term_y), "click", "1", env=env)
+                        await asyncio.sleep(.3)
+                        command("xdotool", "type", "--clearmodifiers", "--delay", "25",
+                                "echo:AFTER_SESSION_DROPDOWN", env=env)
+                        command("xdotool", "key", "--clearmodifiers", "Return", env=env)
+                        try:
+                            await wait_for(
+                                lambda: "NATIVE_ECHO:AFTER_SESSION_DROPDOWN" in events.path.read_text(encoding="utf-8").splitlines(),
+                                "shell echo after the session dropdown probe",
+                            )
+                        except RuntimeError:
+                            await asyncio.to_thread(
+                                screenshot, window,
+                                destination / "connected-tunnels-dropdown-echo-timeout.png", env,
+                            )
+                            raise
+                        print(f"PASS tunnel session dropdown: + defaulted to {default!r}; typing "
+                              f"{fragment!r} listed only {chosen!r}; Return picked it; Save stored "
+                              f"{spec(new_port)} under {chosen!r} only; no PTY input; shell answered "
+                              f"AFTER_SESSION_DROPDOWN", flush=True)
+
                     allow_before = events.path.read_text(encoding="utf-8").count("LOCAL_FORWARD_ALLOW")
                     await click_label(
                         window, destination / "connected-tunnels-button-2.png", "Tunnels", env,
@@ -7138,6 +8269,7 @@ async def main() -> int:
                           "(echo + refusal through fixture SSH)", flush=True)
                     await running_edit_delete_probe()
                     await profile_edit_probe()
+                    await session_dropdown_probe()
 
                 if DUPTAB:
                     # Last interactive step before the event-log snapshot: the
@@ -7297,6 +8429,8 @@ async def main() -> int:
                     )
                 ):
                     raise RuntimeError("Session menu, Sender or dock gear keyboard input leaked to SSH")
+                if "UNEXPECTED_SESSION_DROPDOWN_PTY_INPUT" in event_log:
+                    raise RuntimeError("Tunnel Settings session dropdown input leaked to SSH")
                 if event_log.count("AUTH_ACCEPT:native-smoke") < 3:
                     raise RuntimeError(
                         "three sessions (main, auxiliary, split) were not authenticated"

@@ -90,8 +90,10 @@ the #64 interaction-mode/SSH correctness acceptance.
 
 ### Dockable file explorer beside the terminal
 
-The remote and local file browsers are the **Filer** and **Explorer** dock
-panels, and the transfer queue is the **Transfer** panel. Each panel's gear
+The local and remote file browsers are the two halves of the **Filer** dock
+panel (Local on the left, Remote on the right), and the transfer queue is the
+**Transfer** panel. Until 2026-11-26 the local side was a separate
+**Explorer** panel; it was merged into the Filer at the owner's request. Each panel's gear
 menu moves it to the Left, Right or Bottom dock area (there are no separate
 Dock right / Dock bottom buttons). Dock areas are resizable with their
 splitters.
@@ -116,14 +118,14 @@ authentication policies; opening it does not change sync-input targets.
 terminal. If it is the last pane, the tab's existing close confirmation
 continues to apply. Reconnect preserves the auxiliary-shell role. The
 four-pane workspace limit applies, and the privacy curtain prevents shell
-creation/teardown. The Filer/Explorer dock panels remain separate. This is a practical
+creation/teardown. The Filer and Transfer dock panels remain separate from it. This is a practical
 auxiliary shell workflow in the existing draggable split grid, **not** a
 second independently dockable file-explorer tree. Native Mac click latency
 and keyboard/IME acceptance remain tracked in #78.
 
 ### Transfer files without losing the terminal
 
-The Filer (remote) and Explorer (local) dock panels and the Transfer panel sit in the dock areas, by default as bottom tabs; the remote side shows the exact session and path. Queued transfers retain their original session ID even when the active tab changes. Progress and errors are real, not decorative status values. Upload/download, conflict/resume, destructive operations and editor save retain existing confirmation and integrity logic.
+The Filer dock panel (Local and Remote halves) and the Transfer panel sit in the dock areas, by default as bottom tabs; the remote side shows the exact session and path. Queued transfers retain their original session ID even when the active tab changes. Progress and errors are real, not decorative status values. Upload/download, conflict/resume, destructive operations and editor save retain existing confirmation and integrity logic.
 
 ### Find a command or a less-common feature
 
@@ -139,7 +141,7 @@ Superseded by [windterm-ui-spec.md](windterm-ui-spec.md) (issue #140). In summar
 
 - A menu bar (Session, Edit, View, Mode, Window, Help) replaces the earlier top action bar; native window chrome is retained.
 - The current centre workspace holds a flat session tab strip and terminal panes; pane headers appear only on split tabs. The session toolbar and breadcrumb in the linked design target are not present after PR #145; their actions live in the menus.
-- Session, Sender, Transfer, Filer (remote files) and Explorer (local files) are dock panels in Left, Right and Bottom dock areas with tab strips, a gear menu (Move to Left/Right/Bottom, Close) and drag-resizable splitters. The default preset places all panels as bottom tabs.
+- Session, Sender, Transfer and Filer (local and remote files side by side) are dock panels in Left, Right and Bottom dock areas with tab strips, a gear menu (Move to Left/Right/Bottom, Close) and drag-resizable splitters. The default preset places all panels as bottom tabs.
 - A status bar shows mode, terminal size, `ssh`, running counts and local date-time.
 - Dock layout and theme are persisted in `ui-state.json` next to the profiles file.
 
@@ -171,7 +173,7 @@ This is a migration map, not a claim that every mapped feature has been implemen
 | History search, marks, timestamps, folding | Terminal search/navigation tools | Correct retained-buffer behaviour and bounded work |
 | Appearance and pointer/copy settings | Preferences with profile overrides | Independent terminal settings and safe paste policy |
 | Command palette, snippets, completion | Palette and sender tools | Separate app actions from remote text; no auto-execute |
-| Local/remote browser, SFTP/SCP and transfer queue | Filer, Explorer and Transfer dock panels | Path safety, overwrite/conflict, resume, integrity and cleanup |
+| Local/remote browser, SFTP/SCP and transfer queue | Filer (Local and Remote halves) and Transfer dock panels | Path safety, overwrite/conflict, resume, integrity and cleanup |
 | Remote editor | Editor tab associated with the correct session/file | Temporary copy, conflict detection, explicit overwrite and cleanup |
 | Diagnostics, support export and logging | Help/support and session tools | Redaction, bounded storage and logging off by default |
 
