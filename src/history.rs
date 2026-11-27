@@ -8,8 +8,23 @@ pub struct HistoryLine {
     pub id: u64,
     /// Logical line: soft-wrapped grid rows joined (see `terminal_core::LogicalLine`).
     pub text: String,
-    /// Where this line sits in the grid, for mapping a hit back to a scroll target.
-    pub location: LogicalLine,
+    /// Zero-based grid row (from the oldest retained row) of the first row of this line.
+    pub first_row: usize,
+    /// Char offsets into `text` at which each wrapped grid row starts; begins with `0`.
+    /// Together with `first_row` this is all a jump needs; the text is stored only once.
+    pub segment_starts: Vec<usize>,
+}
+
+impl HistoryLine {
+    /// Grid row containing the char at `char_offset` (zero-based) of `text`.
+    pub fn row_for_char(&self, char_offset: usize) -> usize {
+        let segment = self
+            .segment_starts
+            .iter()
+            .rposition(|start| *start <= char_offset)
+            .unwrap_or(0);
+        self.first_row + segment
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -173,7 +188,7 @@ impl HistoryState {
             Vec::new()
         };
         let mut next = Vec::with_capacity(snapshot.len());
-        for (index, location) in snapshot.into_iter().enumerate() {
+        for (index, logical) in snapshot.into_iter().enumerate() {
             let id = match reused.get(index) {
                 Some(id) => *id,
                 None => {
@@ -181,10 +196,16 @@ impl HistoryState {
                     self.next_line_id
                 }
             };
+            let LogicalLine {
+                text,
+                first_row,
+                segment_starts,
+            } = logical;
             next.push(HistoryLine {
                 id,
-                text: location.text.clone(),
-                location,
+                text,
+                first_row,
+                segment_starts,
             });
         }
         if let Some(max_id) = next.iter().map(|line| line.id).max() {
@@ -336,7 +357,7 @@ impl HistoryState {
                     line_id: line.id,
                     line_number: index + 1,
                     column: hit.column,
-                    grid_row: line.location.row_for_char(hit.column - 1),
+                    grid_row: line.row_for_char(hit.column - 1),
                     preview: hit.preview,
                 });
             }
@@ -576,5 +597,26 @@ mod tests {
         state.set_query("ghi");
         assert_eq!(state.selected_hit().unwrap().grid_row, 2);
         assert_eq!(state.selected_hit().unwrap().line_number, 2);
+    }
+
+    #[test]
+    fn history_line_holds_its_text_once() {
+        // Compile-level guarantee: destructuring lists every field, so a second String
+        // (e.g. a nested `LogicalLine`) would fail to compile here.
+        let mut state = HistoryState::default();
+        state.update_lines(vec![LogicalLine {
+            text: "abcdefgh".into(),
+            first_row: 3,
+            segment_starts: vec![0, 4],
+        }]);
+        let HistoryLine {
+            id: _,
+            text,
+            first_row,
+            segment_starts,
+        } = state.lines()[0].clone();
+        assert_eq!(text, "abcdefgh");
+        assert_eq!((first_row, segment_starts), (3, vec![0, 4]));
+        assert_eq!(state.lines()[0].row_for_char(5), 4);
     }
 }
