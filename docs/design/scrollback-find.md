@@ -66,7 +66,7 @@ Sizes:
   (vte ansi.rs:1128-1132, 60-64, 1047). The crate test asserts
   `size_of::<Cell>() <= 24` (cell.rs:301-307). [src + calc]
 - `Row<Cell>` = `Vec` (24) + `occ` (8) = 32 bytes (alacritty/grid/row.rs:17-25). Storage
-  asserts 4 words (grid/storage.rs `swap` debug_assert). Every row is allocated at full
+  asserts 4 words (grid/storage.rs:154). Every row is allocated at full
   width, `Row::new(columns)` (row.rs:37-49). [src]
 - **One grid row at 150 columns = 150×24 + 32 = 3,632 bytes**, plus allocator overhead.
   [calc]
