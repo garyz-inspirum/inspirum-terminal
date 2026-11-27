@@ -5082,9 +5082,9 @@ impl App {
                 if pane.id != id {
                     continue;
                 }
-                let terminal = pane.terminal.as_mut()?;
-                terminal.sync();
-                let selection = terminal.selectable_content();
+                // selectable_content reads the selection under the term lock;
+                // a prior sync() only cloned the whole grid and discarded it.
+                let selection = pane.terminal.as_ref()?.selectable_content();
                 return (!selection.is_empty()).then_some(selection);
             }
         }
@@ -7979,6 +7979,10 @@ impl App {
                 if wakeup || exited {
                     self.queue_terminal_refresh(id, exited);
                 }
+                if wakeup {
+                    let generation = self.tools.history_output_generation.entry(id).or_default();
+                    *generation = generation.wrapping_add(1);
+                }
                 if exited {
                     self.status = format!("Terminal {id} exited.");
                 }
@@ -8009,8 +8013,14 @@ impl App {
                         self.refresh_workspace_displays(index);
                     }
                 }
-                self.refresh_visible_history();
-                return self.capture_session_logs();
+                // Trailing edge of the history throttle: a deferred snapshot
+                // re-arms the 12 ms frame-bridge timer until the interval passes.
+                let history_pending = self.refresh_visible_history(std::time::Instant::now());
+                let logs = self.capture_session_logs();
+                if history_pending {
+                    return Task::batch([logs, self.schedule_terminal_frame()]);
+                }
+                return logs;
             }
             Message::TerminalResized(id, size) => self.resize_terminal(id, size),
             Message::Event(iced::Event::Window(iced::window::Event::FileDropped(path))) => {
@@ -17523,6 +17533,67 @@ mod tests {
             1
         );
         assert!(app.find_focused, "typing and Next keep Find focus");
+    }
+
+    #[test]
+    fn history_frames_without_output_do_not_resnapshot() {
+        let (mut app, _id) = app_with_focused_pane("history-idle");
+        app.find_open = true;
+        let t0 = std::time::Instant::now();
+        assert!(!app.refresh_visible_history(t0));
+        assert_eq!(app.tools.history_refresh_count, 1);
+        for frame in 1..=50u64 {
+            let now = t0 + std::time::Duration::from_millis(frame * 12);
+            assert!(!app.refresh_visible_history(now));
+        }
+        assert_eq!(
+            app.tools.history_refresh_count, 1,
+            "idle frames re-read history"
+        );
+    }
+
+    #[test]
+    fn history_burst_within_throttle_window_refreshes_at_most_twice() {
+        let (mut app, id) = app_with_focused_pane("history-burst");
+        app.find_open = true;
+        let t0 = std::time::Instant::now();
+        let _ = app.refresh_visible_history(t0);
+        let before = app.tools.history_refresh_count;
+        let mut pending = false;
+        for frame in 1..=20u64 {
+            let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::Wakeup));
+            pending =
+                app.refresh_visible_history(t0 + std::time::Duration::from_millis(frame * 10));
+        }
+        assert!(pending, "the last burst frame must owe a trailing refresh");
+        // Trailing refresh once the window has passed captures the final state.
+        assert!(!app.refresh_visible_history(t0 + std::time::Duration::from_millis(500)));
+        let taken = app.tools.history_refresh_count - before;
+        assert!((1..=2).contains(&taken), "burst took {taken} snapshots");
+        assert!(!app.refresh_visible_history(t0 + std::time::Duration::from_millis(600)));
+        assert_eq!(app.tools.history_refresh_count - before, taken);
+    }
+
+    #[test]
+    fn find_query_after_output_forces_a_fresh_snapshot_despite_throttle() {
+        let (mut app, id) = app_with_focused_pane("history-query-fresh");
+        app.find_open = true;
+        app.tools.history_owner = Some(id);
+        let t0 = std::time::Instant::now();
+        let _ = app.refresh_visible_history(t0);
+        let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::Wakeup));
+        // Inside the throttle window the frame path defers...
+        assert!(app.refresh_visible_history(t0 + std::time::Duration::from_millis(1)));
+        let before = app.tools.history_refresh_count;
+        // ...but a query must snapshot the new output before searching.
+        let _ = app.update(Message::FindQuery("x".into()));
+        assert_eq!(app.tools.history_refresh_count, before + 1);
+        let _ = app.update(Message::FindNext);
+        assert_eq!(
+            app.tools.history_refresh_count,
+            before + 1,
+            "no output since"
+        );
     }
 
     #[test]
