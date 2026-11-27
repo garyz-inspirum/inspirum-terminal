@@ -1149,8 +1149,12 @@ fn format_local_time(time: Option<std::time::SystemTime>) -> String {
 }
 
 /// WindTerm-style size: `1 Byte`, `18 Bytes`, `8.0 KB`, `139.3 MB`, `5.1 GB`.
+/// Units promote all the way to EB, so every value stays below 1024 of its
+/// unit (at most `1024.0 KB` after rounding) and `u64::MAX` is `16.0 EB`.
 fn windterm_size(bytes: u64) -> String {
-    const UNITS: [(u64, &str); 4] = [
+    const UNITS: [(u64, &str); 6] = [
+        (1 << 60, "EB"),
+        (1 << 50, "PB"),
         (1 << 40, "TB"),
         (1 << 30, "GB"),
         (1 << 20, "MB"),
@@ -1395,7 +1399,10 @@ const FILE_NAME_GAP: f32 = 6.0;
 const FILE_NAME_MIN_CHARS: usize = 28;
 /// Longest Date Modified value (local and remote formatters).
 const FILE_TIME_SAMPLE: &str = "2026/11/26 08:10:44";
-/// Longest [`windterm_size`] value: under 1 KB it prints whole bytes.
+/// Longest [`windterm_size`] value. Under 1 KB it prints whole bytes (up to
+/// 10 chars); above that units promote up to EB, so the number never needs
+/// more than four integer digits (`1024.0 KB`, 9 chars) and u64 tops out at
+/// `16.0 EB`.
 const FILE_SIZE_SAMPLE: &str = "1023 Bytes";
 
 struct FileListingCells {
