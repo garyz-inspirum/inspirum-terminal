@@ -60,9 +60,14 @@ pub struct HistoryState {
     next_line_id: u64,
     query: String,
     hits: Vec<HistoryHit>,
+    /// Exact number of matches across all retained lines; `hits` stops at `HIT_LIST_CAP`.
+    total_hits: usize,
     selected_hit: usize,
     truncated_lines: u64,
 }
+
+/// Most hits kept in the selectable list; matches beyond it are counted, not listed.
+pub const HIT_LIST_CAP: usize = 500;
 
 /// How many trailing rows of the previous snapshot may have changed in place.
 ///
@@ -132,6 +137,11 @@ impl HistoryState {
 
     pub fn hits(&self) -> &[HistoryHit] {
         &self.hits
+    }
+
+    /// Exact number of matches across all retained lines (may exceed `hits().len()`).
+    pub fn total_hits(&self) -> usize {
+        self.total_hits
     }
 
     pub fn selected_hit(&self) -> Option<&HistoryHit> {
@@ -342,16 +352,27 @@ impl HistoryState {
     /// gone, select the nearest later hit (the first hit when its line rolled off the top).
     fn refresh_search(&mut self, anchor: Option<(u64, usize)>) {
         self.hits.clear();
+        self.total_hits = 0;
         let Some(query) = TextQuery::new(&self.query) else {
             self.selected_hit = 0;
             return;
         };
 
         // Search each retained logical row separately so stable line IDs survive viewport movement.
+        // Every match is counted; only the first `HIT_LIST_CAP` are listed.
         let mut local = Vec::new();
         for (index, line) in self.lines.iter().enumerate() {
+            self.total_hits += query.count_in_line(&line.text);
+            if self.hits.len() >= HIT_LIST_CAP {
+                continue;
+            }
             local.clear();
-            query.find_in_line(&line.text, index + 1, 500 - self.hits.len(), &mut local);
+            query.find_in_line(
+                &line.text,
+                index + 1,
+                HIT_LIST_CAP - self.hits.len(),
+                &mut local,
+            );
             for hit in local.drain(..) {
                 self.hits.push(HistoryHit {
                     line_id: line.id,
@@ -360,9 +381,6 @@ impl HistoryState {
                     grid_row: line.row_for_char(hit.column - 1),
                     preview: hit.preview,
                 });
-            }
-            if self.hits.len() >= 500 {
-                break;
             }
         }
         if self.hits.is_empty() {
@@ -618,5 +636,28 @@ mod tests {
         assert_eq!(text, "abcdefgh");
         assert_eq!((first_row, segment_starts), (3, vec![0, 4]));
         assert_eq!(state.lines()[0].row_for_char(5), 4);
+    }
+
+    #[test]
+    fn total_hits_counts_past_the_listed_cap() {
+        let mut state = HistoryState::default();
+        state.update_snapshot((0..300).map(|_| "aa xx aa".to_owned()).collect());
+        state.set_query("aa");
+        assert_eq!(state.total_hits(), 600);
+        assert_eq!(state.hits().len(), HIT_LIST_CAP);
+        state.select_previous_hit();
+        assert_eq!(
+            state.selected_hit_index(),
+            HIT_LIST_CAP - 1,
+            "wraps within the list"
+        );
+        state.select_next_hit();
+        assert_eq!(state.selected_hit_index(), 0);
+        state.set_query("AA XX");
+        assert_eq!((state.total_hits(), state.hits().len()), (300, 300));
+        state.set_query("zz");
+        assert_eq!((state.total_hits(), state.hits().len()), (0, 0));
+        state.set_query("");
+        assert_eq!(state.total_hits(), 0);
     }
 }

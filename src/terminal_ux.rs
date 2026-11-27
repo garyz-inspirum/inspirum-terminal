@@ -113,6 +113,27 @@ impl TextQuery {
         })
     }
 
+    /// Number of non-overlapping matches in `line`, without allocating per match (an
+    /// ASCII query on an ASCII line allocates nothing; otherwise one lowercase copy per line).
+    pub fn count_in_line(&self, line: &str) -> usize {
+        if self.ascii && line.is_ascii() {
+            let needle = self.lower.as_bytes();
+            let bytes = line.as_bytes();
+            let mut count = 0;
+            let mut start = 0;
+            while start + needle.len() <= bytes.len() {
+                if bytes[start..start + needle.len()].eq_ignore_ascii_case(needle) {
+                    count += 1;
+                    start += needle.len();
+                } else {
+                    start += 1;
+                }
+            }
+            return count;
+        }
+        line.to_lowercase().matches(self.lower.as_str()).count()
+    }
+
     /// Append hits in `line` (reported as line number `line_number`) until `hits` holds
     /// `limit` entries.
     pub fn find_in_line(
