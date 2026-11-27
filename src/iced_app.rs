@@ -5023,9 +5023,9 @@ impl App {
                 if pane.id != id {
                     continue;
                 }
-                let terminal = pane.terminal.as_mut()?;
-                terminal.sync();
-                let selection = terminal.selectable_content();
+                // selectable_content reads the selection under the term lock;
+                // a prior sync() only cloned the whole grid and discarded it.
+                let selection = pane.terminal.as_ref()?.selectable_content();
                 return (!selection.is_empty()).then_some(selection);
             }
         }
