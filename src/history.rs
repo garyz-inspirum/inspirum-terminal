@@ -500,14 +500,15 @@ mod tests {
     #[test]
     fn large_scrollback_search_is_bounded_and_deterministic() {
         let mut state = HistoryState::default();
-        let mut lines: Vec<String> = (0..50_000)
-            .map(|n| format!("line-{n:05} ordinary"))
-            .collect();
-        lines[49_999] = "line-49999 NEEDLE".into();
+        // A full pane: the scrollback limit plus a screen.
+        let rows = terminal_core::SCROLLBACK_LINES + 50;
+        let mut lines: Vec<String> = (0..rows).map(|n| format!("line-{n:05} ordinary")).collect();
+        lines[rows - 1] = "last NEEDLE".into();
         state.update_snapshot(lines);
         state.set_query("needle");
         assert_eq!(state.hits().len(), 1);
-        assert_eq!(state.hits()[0].line_number, 50_000);
+        assert_eq!(state.total_hits(), 1);
+        assert_eq!(state.hits()[0].line_number, rows);
     }
 
     #[test]

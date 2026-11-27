@@ -328,7 +328,7 @@ impl TerminalBackend {
             ..tty::Options::default()
         };
         let config = term::Config {
-            scrolling_history: 10_000,
+            scrolling_history: SCROLLBACK_LINES,
             ..term::Config::default()
         };
         let terminal_size = TerminalSize::default();
@@ -1163,6 +1163,13 @@ pub fn probe_drag_selection_steps(
         selected,
     }
 }
+
+/// Grid rows of scrollback kept per pane (above the screen).
+///
+/// Memory: alacritty cells are 24 bytes and every row is allocated at full width, so at 150
+/// columns a line costs about 3.6 KB and a full pane about 182 MB (50,000 x 3,632 B).
+/// alacritty grows history lazily, so a pane only pays for the rows it has actually used.
+pub const SCROLLBACK_LINES: usize = 50_000;
 
 /// One logical line of retained history: soft-wrapped grid rows joined into one string.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
