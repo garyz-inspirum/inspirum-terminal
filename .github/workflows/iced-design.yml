@@ -212,7 +212,9 @@ jobs:
           # CI, in this one run (not a second pass): auto-start must launch only
           # the opted-in Alpha and skip an opted-in forward whose ssh_config host
           # adds another LocalForward.
-          INSPIRUM_GUI_POPULATED=1 INSPIRUM_GUI_AUTOSTART=1 python3 -B scripts/test-iced-connected-gui.py \
+          # Both the existing CLI-config gate and Tools -> Profiles saved-path
+          # ordinary relaunch are required in this single connected job.
+          INSPIRUM_GUI_POPULATED=1 INSPIRUM_GUI_AUTOSTART=1 INSPIRUM_GUI_SAVED_SSH_CONFIG=1 python3 -B scripts/test-iced-connected-gui.py \
             target/release/inspirum-terminal preview-artifacts/connected
       - name: Prepare preview artifact
         if: always()
