@@ -248,6 +248,9 @@ pub(super) struct State {
     /// Number of history snapshots taken (test hook for the frame path).
     #[cfg(test)]
     pub history_refresh_count: u64,
+    /// Test seam: snapshot source for panes without a live terminal.
+    #[cfg(test)]
+    pub history_test_source: BTreeMap<u64, terminal_core::HistorySnapshot>,
 }
 impl State {
     pub fn load(path: &std::path::Path) -> Self {
@@ -330,6 +333,8 @@ impl State {
             history_snapshot_seen: BTreeMap::new(),
             #[cfg(test)]
             history_refresh_count: 0,
+            #[cfg(test)]
+            history_test_source: BTreeMap::new(),
         }
     }
 }
@@ -456,13 +461,20 @@ impl App {
             {
                 self.tools.history_refresh_count += 1;
             }
-            if let Some(terminal) = &pane.terminal {
+            let snapshot = pane
+                .terminal
+                .as_ref()
+                .map(|terminal| terminal.history_lines());
+            #[cfg(test)]
+            let snapshot =
+                snapshot.or_else(|| self.tools.history_test_source.get(&pane.id).cloned());
+            if let Some(snapshot) = snapshot {
                 self.tools.history_owner = Some(pane.id);
                 self.tools
                     .histories
                     .entry(pane.id)
                     .or_default()
-                    .update_lines(terminal.history_lines());
+                    .update_lines(snapshot);
             }
         }
     }
