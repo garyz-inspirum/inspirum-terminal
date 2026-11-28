@@ -91,10 +91,23 @@ pub fn find_text(haystack: &str, needle: &str, limit: usize) -> Vec<SearchHit> {
 
 /// A case-insensitive literal query, lowercased once per search.
 ///
-/// Matches are non-overlapping, scanned left to right (after a match the scan resumes after
-/// its end), `column` is the 1-based char index of the match start. ASCII query against an
-/// ASCII line compares bytes with ASCII case folding and allocates nothing per line; any
-/// non-ASCII on either side uses Unicode `to_lowercase`.
+/// Invariants:
+/// - The query and each line are folded the same way (`str::to_lowercase`), and matching is
+///   done on the folded text.
+/// - Matches are non-overlapping, scanned left to right over the folded text (after a match
+///   the scan resumes after its end).
+/// - `count_in_line` and `find_in_line` (unlimited) agree on the number of matches per line.
+/// - `column` is the 1-based char index in the ORIGINAL line of the char whose fold produced
+///   the match's first folded char. Folding can add chars ('İ' -> "i\u{307}"), so folded
+///   offsets are mapped back; a match starting inside an expansion (query begins with
+///   U+0307) reports the expanding char. Callers use `column - 1` against original-text
+///   char offsets (soft-wrap segment starts).
+/// - Folded text is only sliced at offsets returned by `str::find` (match boundaries), and
+///   the original line is only walked by `chars()`, so no slice can split a char.
+///
+/// ASCII query against an ASCII line compares bytes with ASCII case folding and allocates
+/// nothing per line (there folded and original offsets coincide); any non-ASCII on either
+/// side uses Unicode `to_lowercase` (e.g. ASCII "k" still finds KELVIN SIGN U+212A).
 pub struct TextQuery {
     lower: String,
     ascii: bool,
@@ -168,15 +181,30 @@ impl TextQuery {
             return;
         }
         let line_lower = line.to_lowercase();
+        // Implicit folded-byte -> original-char map, walked forward once: hits arrive in
+        // increasing folded byte order, so the cursor never rewinds (O(line) for all hits).
+        let mut originals = line.chars();
+        // Chars of `line` consumed so far, and the folded byte where the next one starts.
+        let mut consumed = 0;
+        let mut folded_end = 0;
         let mut start = 0;
         while start <= line_lower.len() {
             let Some(found) = line_lower[start..].find(&self.lower) else {
                 break;
             };
             let byte_column = start + found;
+            // Consume until the last consumed char's fold covers `byte_column`; that char
+            // (index `consumed - 1`) produced the match's first folded char.
+            while folded_end <= byte_column {
+                let Some(original) = originals.next() else {
+                    break;
+                };
+                folded_end += folded_len(original);
+                consumed += 1;
+            }
             hits.push(SearchHit {
                 line: line_number,
-                column: line_lower[..byte_column].chars().count() + 1,
+                column: consumed.max(1),
                 preview: preview_of(line),
             });
             if hits.len() >= limit {
@@ -185,6 +213,12 @@ impl TextQuery {
             start = byte_column + self.lower.len();
         }
     }
+}
+
+/// UTF-8 length of `c` in `str::to_lowercase` output. `char::to_lowercase` differs from the
+/// string form only for final sigma ('Σ' -> 'ς' vs 'σ'), and both are 2 bytes.
+fn folded_len(c: char) -> usize {
+    c.to_lowercase().map(char::len_utf8).sum()
 }
 
 fn preview_of(line: &str) -> String {
@@ -305,6 +339,109 @@ mod tests {
         let unicode = find_text("Ångström 東京", "ång", 5);
         assert_eq!(unicode.len(), 1);
         assert_eq!(unicode[0].column, 1);
+    }
+
+    /// Every hit column for `query` in `line`, unlimited.
+    fn hit_columns(line: &str, query: &str) -> Vec<usize> {
+        let Some(query) = TextQuery::new(query) else {
+            return Vec::new();
+        };
+        let mut hits = Vec::new();
+        query.find_in_line(line, 1, usize::MAX, &mut hits);
+        hits.iter().map(|hit| hit.column).collect()
+    }
+
+    #[test]
+    fn folded_offset_reviewer_case_reports_original_column() {
+        // 'İ' lowercases to "i\u{307}" (two chars); `X` is still the 2nd original char.
+        assert_eq!(hit_columns("İXYZ", "x"), vec![2]);
+        assert_eq!(hit_columns("İXYZ", "yz"), vec![3]);
+    }
+
+    #[test]
+    fn folded_offset_survives_several_expansions_and_multiple_hits() {
+        assert_eq!(hit_columns("İİİ needle", "needle"), vec![5]);
+        assert_eq!(hit_columns("İİİ NEEDLE", "Needle"), vec![5]);
+        // a b ' ' İ ' ' a b
+        assert_eq!(hit_columns("ab İ ab", "AB"), vec![1, 6]);
+        assert_eq!(hit_columns("İabİİabİ", "ab"), vec![2, 6]);
+    }
+
+    #[test]
+    fn folded_offset_for_queries_touching_the_expansion() {
+        // Query "i" matches the first folded char of 'İ'.
+        assert_eq!(hit_columns("İ", "i"), vec![1]);
+        assert_eq!(hit_columns("aİbİ", "I"), vec![2, 4]);
+        // A match beginning inside the expansion maps to the char that produced it.
+        assert_eq!(hit_columns("İ", "\u{307}"), vec![1]);
+        assert_eq!(hit_columns("aİX", "\u{307}x"), vec![2]);
+        // The query is folded the same way as the line.
+        assert_eq!(hit_columns("aİXİx", "İx"), vec![2, 4]);
+        assert_eq!(hit_columns("i\u{307}x", "İX"), vec![1]);
+        assert_eq!(hit_columns("ix", "İx"), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn folded_offset_cjk_combining_and_emoji_columns() {
+        assert_eq!(hit_columns("東京 network 東京", "東京"), vec![1, 12]);
+        assert_eq!(hit_columns("東京 İ 東京", "東京"), vec![1, 6]);
+        assert_eq!(
+            hit_columns("Cafe\u{301} CAFE\u{301}", "cafe\u{301}"),
+            vec![1, 7]
+        );
+        assert_eq!(hit_columns("e\u{301}İcafe\u{301}", "CAFE\u{301}"), vec![4]);
+        assert_eq!(hit_columns("status 🚀 ready", "READY"), vec![10]);
+        assert_eq!(hit_columns("🚀İ🚀 Ready", "ready"), vec![5]);
+    }
+
+    #[test]
+    fn folded_offset_count_agrees_with_find() {
+        let cases: &[(&str, &str)] = &[
+            ("İXYZ", "x"),
+            ("İİİ needle", "needle"),
+            ("ab İ ab", "ab"),
+            ("İabİİabİ", "ab"),
+            ("İ", "i"),
+            ("İ", "\u{307}"),
+            ("aİXİx", "İx"),
+            ("i\u{307}x", "İX"),
+            ("ix", "İx"),
+            ("東京 İ 東京", "東京"),
+            ("e\u{301}İcafe\u{301}", "CAFE\u{301}"),
+            ("🚀İ🚀 Ready", "ready"),
+            ("aaaa", "aa"),
+            ("İİİİ", "İİ"),
+            ("plain ascii", "ÀB"),
+            ("\u{212A}elvin kelvin", "K"),
+            ("kelvin KELVIN", "\u{212A}"),
+        ];
+        for (line, needle) in cases {
+            let query = TextQuery::new(needle).unwrap();
+            assert_eq!(
+                query.count_in_line(line),
+                hit_columns(line, needle).len(),
+                "{line:?} / {needle:?}"
+            );
+        }
+        assert_eq!(hit_columns("İİİİ", "İİ"), vec![1, 3]);
+    }
+
+    #[test]
+    fn folded_offset_selects_the_correct_soft_wrapped_row() {
+        // "İXYZ" soft-wrapped into rows "İX" and "YZ": segment starts are char offsets.
+        let segment_starts = [0usize, 2];
+        let segment_for = |char_offset: usize| {
+            segment_starts
+                .iter()
+                .rposition(|start| *start <= char_offset)
+                .unwrap_or(0)
+        };
+        let x = hit_columns("İXYZ", "x");
+        assert_eq!(x.len(), 1);
+        assert_eq!(segment_for(x[0] - 1), 0);
+        let y = hit_columns("İXYZ", "y");
+        assert_eq!(y.len(), 1);
+        assert_eq!(segment_for(y[0] - 1), 1);
     }
 
     #[test]
