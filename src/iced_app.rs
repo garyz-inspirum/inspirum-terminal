@@ -2868,6 +2868,8 @@ type AutoStartLaunch<'a> = dyn FnMut(
 #[derive(Debug, Default)]
 struct AutoStartPass {
     queue: std::collections::VecDeque<AutoStartCandidate>,
+    snapshot: Option<terminal::ConfigSnapshot>,
+    config_error: Option<tunnels::ConfigSkip>,
     /// ssh was spawned and survived the launcher's brief early-exit check.
     /// That does not prove the listener is accepting connections, so the
     /// summary reports these as requested, not started.
@@ -4651,11 +4653,10 @@ to 127.0.0.1 or [::1] (an empty bind or a host name such as localhost is not acc
 off automatic start.";
 const TUNNEL_AUTO_START_REMOTE: &str = "Remote tunnels cannot auto-start: the SSH server can \
 override their bind address. Start remote tunnels manually, or turn off automatic start.";
-const TUNNEL_AUTO_START_NO_SSH_CONFIG: &str = "Not active: the app was started without \
---ssh-config, so this tunnel will not auto-start. Start it manually.";
+const TUNNEL_AUTO_START_NO_SSH_CONFIG: &str = "Not active: no --ssh-config or saved SSH config is set, so this tunnel will not auto-start. Start it manually.";
 
-/// Editor note under the auto-start checkbox: the start-up pass skips every
-/// opted-in tunnel when the app was launched without `--ssh-config`.
+/// Editor note under the auto-start checkbox when neither a CLI nor a saved
+/// SSH config is available for unattended launches.
 fn tunnel_auto_start_inactive_note(ssh_config: Option<&std::path::Path>) -> Option<&'static str> {
     ssh_config
         .is_none()
@@ -4864,7 +4865,30 @@ impl App {
                 theme::ChromeTheme::parse(&saved_ui.theme).unwrap_or(theme::ChromeTheme::Light),
             );
         }
+        let mut auto_start = auto_start;
         let mut tools = tools::State::load(&profiles_path);
+        if let Some(pass) = auto_start.as_mut() {
+            let config = ssh_config.as_deref().or_else(|| {
+                tools
+                    .startup
+                    .ssh_config
+                    .as_deref()
+                    .map(std::path::Path::new)
+            });
+            if let Some(config) = config {
+                match tunnels::snapshot_config(config) {
+                    Ok(snapshot) => pass.snapshot = Some(snapshot),
+                    Err(error) => {
+                        pass.config_error = Some(
+                            error
+                                .downcast_ref::<tunnels::ConfigSkip>()
+                                .copied()
+                                .unwrap_or(tunnels::ConfigSkip::Unreadable),
+                        )
+                    }
+                }
+            }
+        }
         for message in &tools.load_errors {
             tools.errors.record(message);
             load_error = Some(match load_error {
@@ -5016,8 +5040,9 @@ impl App {
             self.auto_start_fake = Some(fake);
             return task;
         }
-        self.auto_start_step(&mut |manager, session, kind, spec, config| {
-            manager.start_forward_exact(session, kind, spec, config)
+        self.auto_start_step(&mut |manager, session, kind, spec, config| match config {
+            Some(snapshot) => manager.start_forward_snapshot(session, kind, spec, snapshot),
+            None => Err(tunnels::ConfigSkip::NoExplicitConfig.into()),
         })
     }
 
@@ -5068,13 +5093,24 @@ impl App {
                     pass.already_running += 1;
                 }
             } else {
-                let result = launch(
-                    &mut self.tunnels,
-                    &session,
-                    kind,
-                    &spec,
-                    self.ssh_config.as_deref(),
-                );
+                let result = if let Some(error) = self
+                    .auto_start
+                    .as_ref()
+                    .and_then(|pass| pass.config_error.as_ref())
+                {
+                    Err((*error).into())
+                } else {
+                    launch(
+                        &mut self.tunnels,
+                        &session,
+                        kind,
+                        &spec,
+                        self.auto_start
+                            .as_ref()
+                            .and_then(|pass| pass.snapshot.as_ref())
+                            .map(terminal::ConfigSnapshot::path),
+                    )
+                };
                 if let Some(pass) = self.auto_start.as_mut() {
                     match result {
                         Ok(tunnels::Status::Running { .. }) => pass.requested += 1,
@@ -11020,10 +11056,16 @@ impl App {
                 SessionTunnelOp::Unavailable(reason) => text(reason).size(11).color(muted()).into(),
                 SessionTunnelOp::Stop | SessionTunnelOp::Start => column![].into(),
             };
-            // Without --ssh-config the start-up pass skips opted-in tunnels;
-            // say so under the help. With it, the editor is unchanged.
+            // Without a CLI or saved SSH config, the start-up pass skips opted-in
+            // tunnels; say so under the help.
             let auto_start_help: Element<'_, Message> =
-                match tunnel_auto_start_inactive_note(self.ssh_config.as_deref()) {
+                match tunnel_auto_start_inactive_note(self.ssh_config.as_deref().or_else(|| {
+                    self.tools
+                        .startup
+                        .ssh_config
+                        .as_deref()
+                        .map(std::path::Path::new)
+                })) {
                     Some(note) => column![
                         text(TUNNEL_AUTO_START_HELP).size(11).color(muted()),
                         text(note).size(12).color(danger()),
@@ -18716,6 +18758,56 @@ mod tunnel_layout_tests {
             .iter()
             .map(|(_, _, spec)| spec.clone())
             .collect()
+    }
+
+    #[test]
+    fn startup_snapshot_is_shared_by_all_candidates_and_cli_override_never_falls_back() {
+        let (dir, path, _) = auto_start_boot_library();
+        let config = dir.path().join("saved");
+        std::fs::write(&config, "Host *\n").unwrap();
+        let settings = crate::startup::StartupSettings {
+            ssh_config: Some(config.to_str().unwrap().into()),
+            ..Default::default()
+        };
+        crate::startup::save_settings(&crate::startup::settings_path(&path), &settings).unwrap();
+        let (mut app, _) = App::startup(path.clone(), None);
+        let frozen = app
+            .auto_start
+            .as_ref()
+            .unwrap()
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .path()
+            .to_owned();
+        std::fs::write(&config, "Match all\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&frozen).unwrap(), "Host *\n");
+        app.auto_start_fake = Some(AutoStartFake::default());
+        drain_auto_start(&mut app);
+        assert!(!frozen.exists());
+        let (app, _) = App::startup(path, Some(dir.path().join("missing-cli")));
+        assert!(app.auto_start.as_ref().unwrap().snapshot.is_none());
+        assert!(app.auto_start.as_ref().unwrap().config_error.is_some());
+    }
+
+    #[test]
+    fn saved_config_is_selected_only_without_cli_and_manual_remains_unset() {
+        let (dir, path, _) = auto_start_boot_library();
+        let config = dir.path().join("config");
+        std::fs::write(&config, "Host *\n").unwrap();
+        let settings = crate::startup::StartupSettings {
+            ssh_config: Some(config.to_str().unwrap().into()),
+            ..Default::default()
+        };
+        crate::startup::save_settings(&crate::startup::settings_path(&path), &settings).unwrap();
+        let (app, _) = App::startup(path.clone(), None);
+        assert!(app.ssh_config.is_none());
+        assert!(app.auto_start.as_ref().unwrap().snapshot.is_some());
+        let cli = dir.path().join("cli");
+        std::fs::write(&cli, "Host *\n").unwrap();
+        let (app, _) = App::startup(path, Some(cli.clone()));
+        assert_eq!(app.ssh_config, Some(cli));
+        assert!(app.auto_start.as_ref().unwrap().snapshot.is_some());
     }
 
     #[test]
