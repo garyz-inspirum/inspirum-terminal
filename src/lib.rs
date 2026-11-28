@@ -45,6 +45,14 @@ pub struct TunnelLabel {
     pub kind: TunnelKind,
     pub spec: String,
     pub label: String,
+    /// Opt-in: start this saved forward when Inspirum Terminal opens.
+    /// Absent in older profiles (defaults to off) and omitted when off.
+    #[serde(skip_serializing_if = "is_false")]
+    pub auto_start: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Default for TunnelLabel {
@@ -53,6 +61,7 @@ impl Default for TunnelLabel {
             kind: TunnelKind::Local,
             spec: String::new(),
             label: String::new(),
+            auto_start: false,
         }
     }
 }

@@ -324,6 +324,57 @@ The supplied WindTerm screenshots distinguish **daily operation** from **editing
   rather than a required input. Selecting a tunnel reveals its actual owner
   profile; save/delete retain current validation and persistence. The settings
   dialog should remain usable with a long list and at minimum window size.
+- **Auto-start (opt-in, per saved forward):** `Automatically start when app
+  opens` requests the forward once when Inspirum opens (never at OS login),
+  without a risk prompt, so it is limited to forwards whose listener the
+  client can pin to loopback: **Local or Dynamic with an explicit numeric
+  `127.0.0.1:` or `[::1]:` bind** and a decimal port. An omitted bind
+  (client `GatewayPorts` may widen it), `localhost` (resolved via
+  `/etc/hosts`), and every **Remote** forward (the server's `GatewayPorts`
+  can override the requested bind) are refused at save and skipped at start
+  if forged in profile JSON; these stay manual, with unchanged manual
+  acknowledgement rules. The checkbox is disabled for Remote except to clear
+  an existing opt-in. The start-up summary says *launch requested*, not
+  *started*: a surviving ssh process after the launcher's early-exit check
+  does not prove a listening socket; failures and skips are still listed in
+  the status bar and tunnel popup notice. The SSH config file for unattended
+  launches is the one saved in Tools → Profiles (`SSH config file for tunnel
+  auto-start`); `--ssh-config <file>` overrides it for that run without
+  changing it, with no fallback to the saved file when the CLI file is
+  unusable. The saved path affects unattended tunnels only. With neither,
+  opted-in tunnels are skipped before any `ssh` runs ("Auto-start skipped: no
+  SSH config file is selected. Choose one in Tools → Profiles, or start this
+  tunnel manually."). Saving a path checks the file; a saved file that later
+  goes missing keeps the startup settings intact (behavior and path, still
+  editable and clearable) and only skips the unattended tunnels. When at least
+  one forward is opted in, each start-up pass reads the file once into one
+  private owner-only copy shared by that pass's launches; with no opted-in
+  forward nothing is read or copied. `ssh -G -F <copy>` (no connection) and
+  each tunnel read only that copy, so values are kept exactly as written
+  (quoted paths included) and later edits to the file reach neither. The copy
+  is deleted when its last holder lets go: the pass and every tunnel process
+  launched from it each hold it, so it lasts until the pass has finished and
+  every such tunnel has been stopped or reaped after exiting (or dropped with
+  the app's tunnel manager), and is never deleted before a spawned ssh could
+  have read it. A tunnel is
+  skipped and can still be started manually when the file uses `Include` or
+  `Match` anywhere ("Auto-start skipped: this tunnel's OpenSSH configuration
+  uses Include or Match. Start it manually."), is missing or not a regular
+  file ("Auto-start skipped: the SSH config file is missing or is not a
+  regular file. Start it manually."), is unreadable, larger than 1 MiB or not
+  UTF-8 ("Auto-start skipped: the SSH configuration file could not be read as
+  UTF-8 text. Start it manually."), enables `CanonicalizeHostname`, has an
+  effective **ProxyJump** (from the profile or a `Host` stanza: "Auto-start
+  skipped: this tunnel uses ProxyJump. Start it manually."), or contributes
+  any other forward (or a `Tunnel` device, or changes or clears the selected
+  one). When the startup settings file itself cannot be read (unparsable,
+  unknown fields, an invalid saved path, unreadable), every opted-in tunnel is
+  skipped even with `--ssh-config` ("Auto-start skipped: the startup settings
+  file could not be read. Repair or remove it, or start this tunnel
+  manually.") and the file is never overwritten. Because `-F` replaces
+  OpenSSH's default files, a system-wide `ssh_config` is not part of an
+  unattended launch. Manual starts are unchanged: no `ssh -G`, `--ssh-config`
+  or OpenSSH's defaults as is, never the saved file.
 - Do not hard-code names from the supplied screenshots; these are the user's
   personal saved entries, not fixtures or app defaults. Do not copy WindTerm
   icons or source. Match the two-surface workflow, row alignment, density,

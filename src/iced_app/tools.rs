@@ -125,6 +125,11 @@ pub(super) enum Action {
     StartupNone,
     StartupProfile(String),
     StartupWorkspace,
+    ConfigDraft,
+    ConfigInput(String),
+    ConfigSave,
+    ConfigClear,
+    ConfigCancel,
     SaveWorkspace,
     LoadWorkspace,
     RestoreWorkspace,
@@ -199,6 +204,8 @@ pub(super) struct State {
     pub workspace_reconnect: bool,
     pub startup: StartupSettings,
     pub startup_pending: bool,
+    pub config_draft: Option<String>,
+    pub startup_load_failed: bool,
     pub tab_query: String,
     pub selected_tabs: BTreeSet<u64>,
     pub tab_labels: BTreeMap<u64, TabVisualLabel>,
@@ -255,7 +262,9 @@ pub(super) struct State {
 impl State {
     pub fn load(path: &std::path::Path) -> Self {
         let mut load_errors = Vec::new();
+        let mut startup_load_failed = false;
         let startup = startup::load_settings(&startup::settings_path(path)).unwrap_or_else(|e| {
+            startup_load_failed = true;
             load_errors.push(format!("Could not load startup preferences: {e:#}"));
             StartupSettings::default()
         });
@@ -289,6 +298,8 @@ impl State {
             workspace_reconnect,
             startup,
             startup_pending: true,
+            config_draft: None,
+            startup_load_failed,
             tab_query: String::new(),
             selected_tabs: BTreeSet::new(),
             tab_labels: BTreeMap::new(),
@@ -795,7 +806,15 @@ impl App {
                     },
                     _ => StartupBehavior::None,
                 };
-                let settings = StartupSettings { behavior };
+                if self.tools.startup_load_failed {
+                    self.status =
+                        "Cannot overwrite invalid startup settings; repair the file first.".into();
+                    return Task::none();
+                }
+                let settings = StartupSettings {
+                    behavior,
+                    ..self.tools.startup.clone()
+                };
                 let path = startup::settings_path(&self.profiles_path);
                 match startup::save_settings(&path, &settings) {
                     Ok(()) => {
@@ -803,6 +822,44 @@ impl App {
                         self.status = "Startup preference saved for the next launch.".into();
                     }
                     Err(e) => self.status = format!("{e:#}"),
+                }
+            }
+            Action::ConfigDraft => {
+                self.tools.config_draft =
+                    Some(self.tools.startup.ssh_config.clone().unwrap_or_default());
+            }
+            Action::ConfigInput(value) => self.tools.config_draft = Some(value),
+            Action::ConfigCancel => self.tools.config_draft = None,
+            Action::ConfigSave | Action::ConfigClear => {
+                if self.tools.startup_load_failed {
+                    self.status =
+                        "Cannot overwrite invalid startup settings; repair the file first.".into();
+                    return Task::none();
+                }
+                let value = if matches!(action, Action::ConfigClear) {
+                    None
+                } else {
+                    Some(self.tools.config_draft.clone().unwrap_or_default())
+                };
+                let settings = StartupSettings {
+                    ssh_config: value,
+                    ..self.tools.startup.clone()
+                };
+                let path = startup::settings_path(&self.profiles_path);
+                // Only a new path is read; Clear works even when the saved
+                // file is gone.
+                let saved = if settings.ssh_config.is_some() {
+                    startup::save_settings_checking_config(&path, &settings)
+                } else {
+                    startup::save_settings(&path, &settings)
+                };
+                match saved {
+                    Ok(()) => {
+                        self.tools.startup = settings;
+                        self.tools.config_draft = None;
+                        self.status = "SSH config preference saved for the next launch.".into();
+                    }
+                    Err(e) => self.status = format!("Cannot save SSH config path: {e:#}"),
                 }
             }
             Action::WorkspaceReconnect(v) => self.tools.workspace_reconnect = v,
@@ -1480,6 +1537,23 @@ impl App {
                 act("Replace from file…", Action::ReplaceProfiles)
             ]
             .spacing(6),
+            text("SSH config file for tunnel auto-start").size(13),
+            text(format!("Source: {}", if self.ssh_config.is_some() {
+                "CLI"
+            } else if self.tools.startup.ssh_config.is_some() {
+                "saved file"
+            } else { "none" })).size(12),
+            text(format!("Saved file: {}", self.tools.startup.ssh_config.as_deref().unwrap_or("none"))).size(12),
+            if let Some(draft) = &self.tools.config_draft {
+                column![
+                    text("SSH config file for tunnel auto-start").size(13),
+                    text_input("Absolute SSH config file path", draft).on_input(|v| Message::Tool(Action::ConfigInput(v))).size(13),
+                    row![act("Save", Action::ConfigSave), act("Clear", Action::ConfigClear), act("Cancel", Action::ConfigCancel)].spacing(6),
+                    text("Saved path applies only to unattended tunnel auto-start; manual SSH uses --ssh-config or OpenSSH defaults.").size(12)
+                ].spacing(5)
+            } else {
+                column![act("Set SSH config for auto-start…", Action::ConfigDraft)]
+            },
             text(format!("Startup: {:?}", self.tools.startup.behavior)).size(12),
             row![
                 act("Start with no session", Action::StartupNone),
@@ -2007,6 +2081,126 @@ mod tests {
         assert!(app.tabs[1].panes.iter().all(|(_, p)| p.terminal.is_none()));
     }
     #[test]
+    fn config_draft_cancel_clear_and_corrupt_file_guard() {
+        let (mut app, dir) = app();
+        let config = dir.path().join("ssh-config");
+        std::fs::write(&config, "Host *\n").unwrap();
+        let _ = app.tool_update(Action::ConfigDraft);
+        let _ = app.tool_update(Action::ConfigInput(config.display().to_string()));
+        let _ = app.tool_update(Action::ConfigCancel);
+        assert!(app.tools.startup.ssh_config.is_none());
+        let _ = app.tool_update(Action::StartupProfile("prod".into()));
+        let _ = app.tool_update(Action::ConfigDraft);
+        let _ = app.tool_update(Action::ConfigInput(config.display().to_string()));
+        let _ = app.tool_update(Action::ConfigSave);
+        assert_eq!(app.tools.startup.ssh_config.as_deref(), config.to_str());
+        assert_eq!(
+            app.tools.startup.behavior,
+            StartupBehavior::Profile {
+                profile: "prod".into()
+            }
+        );
+        let _ = app.tool_update(Action::StartupNone);
+        assert_eq!(
+            startup::load_settings(&startup::settings_path(&app.profiles_path))
+                .unwrap()
+                .ssh_config
+                .as_deref(),
+            config.to_str()
+        );
+        let _ = app.tool_update(Action::ConfigClear);
+        assert!(app.tools.startup.ssh_config.is_none());
+        let path = startup::settings_path(&app.profiles_path);
+        std::fs::write(&path, "{broken").unwrap();
+        let mut app = App::boot(app.profiles_path.clone(), None);
+        assert!(app.tools.startup_load_failed);
+        let _ = app.tool_update(Action::StartupNone);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
+        let _ = app.tool_update(Action::ConfigDraft);
+        let _ = app.tool_update(Action::ConfigInput(config.display().to_string()));
+        let _ = app.tool_update(Action::ConfigSave);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
+        let _ = app.tool_update(Action::ConfigClear);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
+        let _ = app.tool_update(Action::StartupProfile("other".into()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
+    }
+
+    /// Restart regression: the saved SSH file disappears between runs. The
+    /// record still loads, behavior and path stay, and Tools can change the
+    /// behavior, Clear the path or Save a checked replacement.
+    #[test]
+    fn missing_saved_ssh_config_keeps_settings_and_tools_can_clear_or_replace() {
+        let (mut app, dir) = app();
+        let config = dir.path().join("ssh-config");
+        std::fs::write(&config, "Host *\n").unwrap();
+        let _ = app.tool_update(Action::StartupProfile("prod".into()));
+        let _ = app.tool_update(Action::ConfigDraft);
+        let _ = app.tool_update(Action::ConfigInput(config.display().to_string()));
+        let _ = app.tool_update(Action::ConfigSave);
+        let prod = StartupBehavior::Profile {
+            profile: "prod".into(),
+        };
+        let path = startup::settings_path(&app.profiles_path);
+        std::fs::remove_file(&config).unwrap();
+
+        let mut app = App::boot(app.profiles_path.clone(), None);
+        assert!(!app.tools.startup_load_failed);
+        assert_eq!(app.tools.startup.behavior, prod);
+        assert_eq!(app.tools.startup.ssh_config.as_deref(), config.to_str());
+
+        let _ = app.tool_update(Action::StartupProfile("other".into()));
+        let other = StartupBehavior::Profile {
+            profile: "other".into(),
+        };
+        let loaded = startup::load_settings(&path).unwrap();
+        assert_eq!(loaded.behavior, other, "{}", app.status);
+        assert_eq!(loaded.ssh_config.as_deref(), config.to_str());
+
+        // Saving another missing file is still refused.
+        let _ = app.tool_update(Action::ConfigDraft);
+        let _ = app.tool_update(Action::ConfigInput(
+            dir.path().join("also-missing").display().to_string(),
+        ));
+        let _ = app.tool_update(Action::ConfigSave);
+        assert!(app.tools.config_draft.is_some());
+        assert_eq!(
+            startup::load_settings(&path).unwrap().ssh_config.as_deref(),
+            config.to_str()
+        );
+
+        let _ = app.tool_update(Action::ConfigClear);
+        assert!(app.tools.startup.ssh_config.is_none(), "{}", app.status);
+        let loaded = startup::load_settings(&path).unwrap();
+        assert_eq!(loaded.ssh_config, None);
+        assert_eq!(loaded.behavior, other);
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("ssh_config")
+        );
+
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, "Host *\n").unwrap();
+        let _ = app.tool_update(Action::ConfigDraft);
+        let _ = app.tool_update(Action::ConfigInput(replacement.display().to_string()));
+        let _ = app.tool_update(Action::ConfigSave);
+        let loaded = startup::load_settings(&path).unwrap();
+        assert_eq!(loaded.ssh_config.as_deref(), replacement.to_str());
+        assert_eq!(loaded.behavior, other);
+    }
+
+    #[test]
+    fn config_save_does_not_treat_blank_draft_as_clear() {
+        let (mut app, _dir) = app();
+        let _ = app.tool_update(Action::ConfigDraft);
+        let _ = app.tool_update(Action::ConfigInput("  ".into()));
+        let _ = app.tool_update(Action::ConfigSave);
+        assert!(app.tools.config_draft.is_some());
+        assert!(!startup::settings_path(&app.profiles_path).exists());
+    }
+
+    #[test]
     fn loading_startup_workspace_never_connects_and_restore_requires_opt_in() {
         let (mut app, dir) = app();
         let path = dir.path().join("workspace.json");
@@ -2021,6 +2215,7 @@ mod tests {
                 behavior: StartupBehavior::Workspace {
                     path: path.display().to_string(),
                 },
+                ssh_config: None,
             },
         )
         .unwrap();

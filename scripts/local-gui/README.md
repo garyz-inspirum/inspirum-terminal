@@ -16,6 +16,19 @@ Pinned Python packages: `asyncssh==2.24.0`, `Pillow==13.0.0`.
 
 Modes: `smoke`, `connected`, `all` (= smoke + connected), `tour`. Artifacts (logs, screenshots) land in the `/out` mount.
 
+CI runs the connected acceptance with `INSPIRUM_GUI_POPULATED=1 INSPIRUM_GUI_AUTOSTART=1
+INSPIRUM_GUI_SAVED_SSH_CONFIG=1`: the existing CLI-config auto-start gate remains, followed
+by Tools → Profiles Save, process quit, ordinary relaunch without `--ssh-config`, fixture
+TCP echo/refusal, Cancel/relaunch and Clear/relaunch. The saved-path gate clicks
+`Set SSH config for auto-start…` in Tools → Profiles, locates the draft input
+by its `Absolute SSH config file path` placeholder (or the prefilled saved path),
+and targets Save/Clear/Cancel only in that section. It checks the `ssh_config`
+field in `<profiles-filename>.startup.json` beside the profiles file; this is
+not `ui-state.json`. It is not a separate CI pass.
+`connected` here runs without those flags unless passed: add `-e INSPIRUM_GUI_POPULATED=1
+-e INSPIRUM_GUI_AUTOSTART=1 -e INSPIRUM_GUI_SAVED_SSH_CONFIG=1` to `docker run` to mirror
+CI. The saved-path mode requires populated auto-start and cannot be combined with `tour`.
+
 `tour` (`it-remote.sh gui tour`) re-runs the connected fixture with `INSPIRUM_GUI_TOUR=1` and the default LIGHT theme,
 writing best-effort screenshots `tour-01-start.png` … `tour-14-tools.png` (no `tour-09`: the Explorer tab was merged into Filer) to `/out/tour` (log: `/out/tour.log`).
 Only the window and a real SSH session are asserted; other steps warn and continue (fixed 1280x800 coordinates).

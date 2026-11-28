@@ -5,9 +5,12 @@ use std::{
     io::Read,
     path::Path,
     process::{Child, Command, Stdio},
-    sync::{Arc, mpsc::Sender},
+    sync::{
+        Arc,
+        mpsc::{self, Sender},
+    },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const SSH_HELP: &str = "OpenSSH client unavailable. Install OpenSSH Client (Windows Settings > Optional features), macOS command-line tools, or your Linux openssh-clients package; ensure ssh is on PATH and restart Inspirum.";
@@ -474,6 +477,11 @@ pub fn sftp_launch_args(session: &Session, config: Option<&Path>) -> Result<Vec<
 
 pub struct TunnelProcess {
     child: Child,
+    /// Configuration snapshot the child reads. A start-up pass shares one
+    /// snapshot between its launches; the file is removed when the last
+    /// holder drops, never before this child is stopped (fields drop after
+    /// `Drop::drop` has killed and reaped it).
+    _snapshot: Option<Arc<ConfigSnapshot>>,
 }
 
 impl TunnelProcess {
@@ -526,9 +534,214 @@ pub fn tunnel_launch_args(session: &Session, config: Option<&Path>) -> Result<Ve
     Ok(args)
 }
 
-pub fn start_tunnels(session: &Session, config: Option<&Path>) -> Result<TunnelProcess> {
+/// Forwards OpenSSH would set up for one invocation, as printed by `ssh -G`:
+/// the raw value after each keyword, command-line and configured alike.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EffectiveForwards {
+    pub local: Vec<String>,
+    pub remote: Vec<String>,
+    pub dynamic: Vec<String>,
+    /// `Tunnel` is anything other than `false`/`no` (a tun/tap device).
+    pub tunnel_device: bool,
+    /// Effective `ProxyJump` (absent, empty and `none` mean no jump host).
+    pub proxy_jump: Option<String>,
+    /// `CanonicalizeHostname` is anything other than `false`/`no`.
+    pub canonicalize_hostname: bool,
+}
+
+fn is_off(value: &str) -> bool {
+    value.eq_ignore_ascii_case("false") || value.eq_ignore_ascii_case("no")
+}
+
+/// Collect the forwarding lines of `ssh -G` output (keywords match
+/// case-insensitively; values are kept verbatim).
+pub fn parse_effective_forwards(output: &str) -> EffectiveForwards {
+    let mut forwards = EffectiveForwards::default();
+    for line in output.lines() {
+        let line = line.trim();
+        let (key, value) = match line.split_once(char::is_whitespace) {
+            Some((key, value)) => (key, value.trim()),
+            None => (line, ""),
+        };
+        match key.to_ascii_lowercase().as_str() {
+            "localforward" => forwards.local.push(value.to_owned()),
+            "remoteforward" => forwards.remote.push(value.to_owned()),
+            "dynamicforward" => forwards.dynamic.push(value.to_owned()),
+            "proxyjump" if !value.is_empty() && !value.eq_ignore_ascii_case("none") => {
+                forwards.proxy_jump = Some(value.to_owned());
+            }
+            "tunnel" => forwards.tunnel_device = !is_off(value),
+            "canonicalizehostname" => forwards.canonicalize_hostname = !is_off(value),
+            _ => {}
+        }
+    }
+    forwards
+}
+
+/// Upper bound for an `ssh -G` query run during app start-up: a user
+/// `Match exec` must not hang the app.
+const SSH_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn drain_pipe(pipe: Option<impl Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
+    let (sender, receiver) = mpsc::channel();
+    match pipe {
+        Some(mut pipe) => {
+            thread::spawn(move || {
+                let mut buffer = Vec::new();
+                let _ = pipe.read_to_end(&mut buffer);
+                let _ = sender.send(buffer);
+            });
+        }
+        None => {
+            let _ = sender.send(Vec::new());
+        }
+    }
+    receiver
+}
+
+/// Run `command` with stdin closed, killing it if it outlives `timeout`.
+fn output_within(
+    mut command: Command,
+    timeout: Duration,
+    what: &str,
+) -> Result<std::process::Output> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("start {what}"))?;
+    let stdout = drain_pipe(child.stdout.take());
+    let stderr = drain_pipe(child.stderr.take());
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("{what} did not finish within {} seconds", timeout.as_secs());
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    // A grandchild (for example a `Match exec` helper) may hold a pipe open.
+    let grace = || {
+        deadline
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(200))
+    };
+    let stdout = stdout
+        .recv_timeout(grace())
+        .with_context(|| format!("{what} kept its output open past the time limit"))?;
+    let stderr = stderr.recv_timeout(grace()).unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// `ssh -G` stdout for a tunnel argv: `args` with `-G` inserted before the
+/// `--` terminator, so `-F`, every `-o` and the forward flags are evaluated
+/// as the launch would evaluate them. Opens no connection; bounded by a
+/// 5 second limit so a user `Match exec` cannot hang start-up.
+pub fn query_effective_config(args: &[String]) -> Result<String> {
+    let mut args = args.to_vec();
+    let terminator = args
+        .iter()
+        .position(|arg| arg == "--")
+        .context("internal SSH argv is missing option terminator")?;
+    args.insert(terminator, "-G".into());
     check_openssh(Path::new("ssh"))?;
-    let args = tunnel_launch_args(session, config)?;
+    let mut command = Command::new("ssh");
+    command.args(args);
+    let output = output_within(command, SSH_QUERY_TIMEOUT, "ssh -G forwarding query")?;
+    ensure!(
+        output.status.success(),
+        "ssh -G failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    String::from_utf8(output.stdout).context("ssh -G output was not UTF-8")
+}
+
+/// Ask OpenSSH which forwards the real tunnel launch would set up (the
+/// exact [`tunnel_launch_args`] argv, queried with `ssh -G`).
+pub fn effective_forwards(session: &Session, config: Option<&Path>) -> Result<EffectiveForwards> {
+    let text = query_effective_config(&tunnel_launch_args(session, config)?)?;
+    Ok(parse_effective_forwards(&text))
+}
+
+/// A private copy of the user's SSH configuration (owner-only on unix),
+/// written once from bytes read before any `ssh` runs and deleted on drop.
+/// The unattended preflight and the launch both read this copy, so a later
+/// change to the source file cannot reach either of them.
+#[derive(Debug)]
+pub struct ConfigSnapshot {
+    path: tempfile::TempPath,
+}
+
+impl ConfigSnapshot {
+    pub fn write(dir: &Path, bytes: &[u8]) -> Result<Self> {
+        let mut file = tempfile::Builder::new()
+            .prefix("inspirum-tunnel-")
+            .suffix(".ssh_config")
+            .tempfile_in(dir)
+            .context("create SSH configuration snapshot")?;
+        std::io::Write::write_all(&mut file, bytes).context("write SSH configuration snapshot")?;
+        file.as_file()
+            .sync_all()
+            .context("write SSH configuration snapshot")?;
+        Ok(Self {
+            path: file.into_temp_path(),
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Tunnel argv reading only `snapshot` (`-F` replaces the user's
+/// configuration: OpenSSH then reads neither `~/.ssh/config` nor the system
+/// file).
+pub fn tunnel_launch_args_snapshot(session: &Session, snapshot: &Path) -> Result<Vec<String>> {
+    tunnel_launch_args(session, Some(snapshot))
+}
+
+/// Which configuration a tunnel spawn reads.
+pub enum TunnelConfig<'a> {
+    /// The app's `--ssh-config` (or OpenSSH's defaults when `None`).
+    User(Option<&'a Path>),
+    /// A private configuration snapshot, kept alive with the process.
+    Snapshot(Arc<ConfigSnapshot>),
+}
+
+impl TunnelConfig<'_> {
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Self::User(config) => *config,
+            Self::Snapshot(snapshot) => Some(snapshot.path()),
+        }
+    }
+
+    /// The argv a spawn with this configuration runs.
+    pub fn launch_args(&self, session: &Session) -> Result<Vec<String>> {
+        match self {
+            Self::User(config) => tunnel_launch_args(session, *config),
+            Self::Snapshot(snapshot) => tunnel_launch_args_snapshot(session, snapshot.path()),
+        }
+    }
+}
+
+pub fn start_tunnels(session: &Session, config: Option<&Path>) -> Result<TunnelProcess> {
+    spawn_tunnel(session, TunnelConfig::User(config))
+}
+
+/// Spawn a forwarding-only `ssh -N` reading `config`.
+pub fn spawn_tunnel(session: &Session, config: TunnelConfig<'_>) -> Result<TunnelProcess> {
+    check_openssh(Path::new("ssh"))?;
+    let args = config.launch_args(session)?;
     let mut child = Command::new("ssh")
         .args(args)
         .stdin(Stdio::null())
@@ -553,7 +766,11 @@ pub fn start_tunnels(session: &Session, config: Option<&Path>) -> Result<TunnelP
             }
         );
     }
-    Ok(TunnelProcess { child })
+    let _snapshot = match config {
+        TunnelConfig::User(_) => None,
+        TunnelConfig::Snapshot(snapshot) => Some(snapshot),
+    };
+    Ok(TunnelProcess { child, _snapshot })
 }
 
 pub fn connect(

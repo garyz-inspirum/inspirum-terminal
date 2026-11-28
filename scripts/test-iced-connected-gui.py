@@ -31,6 +31,13 @@ import time
 import asyncssh
 
 
+def _temp_png() -> Path:
+    """Create a PNG scratch path without retaining mkstemp's descriptor."""
+    fd, name = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    return Path(name)
+
+
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "scripts/test-native-ssh-smoke.py"
 spec = importlib.util.spec_from_file_location("native_gui_ssh_fixture", SOURCE)
@@ -182,11 +189,33 @@ class MonitoredServer(fixture.NativeServer):
 # Must not suppress any other echo.
 TOUR_WITHHOLD_ECHO = os.environ.get("INSPIRUM_GUI_TOUR_WITHHOLD_ECHO") == "1"
 FIND_INJECT_PTY_BYTE = os.environ.get("INSPIRUM_GUI_FIND_INJECT_PTY_BYTE") == "1"
-# Opt-in: the saved profile carries two labelled loopback -L forwards to a
-# fixture echo service, and the connected run toggles each one from the
-# Tunnels quick menu. Default mode keeps the empty-tunnel profile.
+# Env-enabled (CI always sets it): the saved profile carries two labelled
+# loopback -L forwards to a fixture echo service, and the connected run
+# toggles each one from the Tunnels quick menu. Default mode keeps the
+# empty-tunnel profile.
 POPULATED = os.environ.get("INSPIRUM_GUI_POPULATED") == "1"
 POPULATED_LABELS = ("Alpha forward", "Bravo forward")
+# On top of POPULATED (CI's connected job sets both, so this check is
+# required there; local runs enable it via env): Alpha's saved metadata carries
+# ``auto_start: true`` (Bravo stays opted out). Before any Tunnels click the
+# run requires Alpha's listener to echo and Bravo's to refuse, then stops
+# Alpha with the real popup toggle so the populated flow below starts from
+# "both stopped" exactly as without this mode.
+AUTOSTART = os.environ.get("INSPIRUM_GUI_AUTOSTART") == "1"
+# Additional mandatory CI phase: use Tools -> Profiles to persist the SSH
+# config, then prove ordinary (no --ssh-config) process launches honour it.
+SAVED_SSH_CONFIG = os.environ.get("INSPIRUM_GUI_SAVED_SSH_CONFIG") == "1"
+# Auto-start mode also saves a THIRD profile (last in the library, so the
+# rows above keep their order) whose host is an ssh_config alias that adds a
+# LocalForward of its own. Its one saved forward (Charlie) is opted in, but
+# OpenSSH would bring up the inherited listener with it, so unattended start
+# must skip it: neither Charlie's nor the inherited port may ever listen.
+AUTOSTART_INHERIT_PROFILE = "CI inherited-forward fixture"
+AUTOSTART_INHERIT_HOST = "native-smoke-inherit"
+AUTOSTART_INHERIT_LABEL = "Charlie forward"
+# Checkbox label in the Tunnel Settings form (src/iced_app.rs
+# TUNNEL_AUTO_START_LABEL).
+AUTOSTART_CHECKBOX_LABEL = "Automatically start when app opens"
 # Opt-in gate: at a 600 px local Filer half with an overflowing listing, the
 # Date Modified text must clear the vertical scrollbar thumb (PR #154 review).
 # Off by default; when off the connected run is unchanged.
@@ -293,21 +322,42 @@ def toggler_target(path: Path, label_box, window_width: int):
     return target, source
 
 
-def populated_profile_ssh(ports, echo_port: int) -> dict:
-    """``ssh`` block for the populated profile (schema: src/lib.rs SshOptions)."""
+def populated_profile_ssh(ports, echo_port: int, *, auto_start=()) -> dict:
+    """``ssh`` block for the populated profile (schema: src/lib.rs SshOptions).
+
+    ``auto_start`` names the POPULATED_LABELS whose metadata row opts in to
+    auto-start; every other row omits the field (the product's default off,
+    which is also how it serialises off).
+    """
     specs = [f"127.0.0.1:{port}:127.0.0.1:{echo_port}" for port in ports]
     if len(set(specs)) != len(specs):
         raise RuntimeError("populated forwards must be distinct")
+    unknown = set(auto_start) - set(POPULATED_LABELS)
+    if unknown:
+        raise RuntimeError(f"auto_start names unknown forwards: {sorted(unknown)}")
+    labels = []
+    for spec, label in zip(specs, POPULATED_LABELS):
+        row = {"kind": "local", "spec": spec, "label": label}
+        if label in auto_start:
+            row["auto_start"] = True
+        labels.append(row)
+    return {"local_forwards": specs, "tunnel_labels": labels}
+
+
+def inherit_profile_ssh(charlie_port: int, echo_port: int) -> dict:
+    """``ssh`` block of the auto-start inherited-forward profile: one opted-in
+    loopback forward (Charlie), same row shape as ``populated_profile_ssh``."""
+    spec = f"127.0.0.1:{charlie_port}:127.0.0.1:{echo_port}"
     return {
-        "local_forwards": specs,
+        "local_forwards": [spec],
         "tunnel_labels": [
-            {"kind": "local", "spec": spec, "label": label}
-            for spec, label in zip(specs, POPULATED_LABELS)
+            {"kind": "local", "spec": spec, "label": AUTOSTART_INHERIT_LABEL, "auto_start": True},
         ],
     }
 
 
-def fixture_profiles(forward_ports, echo_port) -> list[dict]:
+def fixture_profiles(forward_ports, echo_port, *, populated=None, autostart=None,
+                     charlie_port=None) -> list[dict]:
     """Saved profiles for the connected run.
 
     The first profile is always the plain terminal target ('CI connected
@@ -315,8 +365,20 @@ def fixture_profiles(forward_ports, echo_port) -> list[dict]:
     auxiliary shells, each its own SSH process, which would collide on any
     ``-L`` listener. Populated mode therefore puts the labelled forwards on a
     SECOND profile with the same SSH target; the Tunnels quick menu lists
-    saved forwards from every profile.
+    saved forwards from every profile. Auto-start mode opts in Alpha, and
+    appends a THIRD profile (AUTOSTART_INHERIT_PROFILE, last so the earlier
+    rows keep their order) whose opted-in Charlie forward must be skipped
+    because its ssh_config host adds another LocalForward.
     """
+    populated = POPULATED if populated is None else populated
+    autostart = AUTOSTART if autostart is None else autostart
+    if autostart and not populated:
+        raise RuntimeError("INSPIRUM_GUI_AUTOSTART=1 requires INSPIRUM_GUI_POPULATED=1")
+    if autostart:
+        if charlie_port is None:
+            raise RuntimeError("auto-start fixture needs charlie_port")
+        if charlie_port in (*forward_ports, echo_port):
+            raise RuntimeError(f"charlie_port {charlie_port} collides with {forward_ports}/{echo_port}")
     base = {
         "host": "native-smoke",
         "user": "native-smoke",
@@ -324,12 +386,61 @@ def fixture_profiles(forward_ports, echo_port) -> list[dict]:
         "strict": True,
     }
     out = [{"name": "CI connected fixture", **base}]
-    if POPULATED:
+    if populated:
         out.append({
             "name": "CI tunnel fixture", **base,
-            "ssh": populated_profile_ssh(forward_ports, echo_port),
+            "ssh": populated_profile_ssh(
+                forward_ports, echo_port,
+                auto_start=POPULATED_LABELS[:1] if autostart else (),
+            ),
+        })
+    if autostart:
+        out.append({
+            "name": AUTOSTART_INHERIT_PROFILE, **base, "host": AUTOSTART_INHERIT_HOST,
+            "ssh": inherit_profile_ssh(charlie_port, echo_port),
         })
     return out
+
+
+def inherited_forward_stanza(config_text: str, inherited_port: int, echo_port: int) -> str:
+    """``Host native-smoke-inherit`` stanza for the auto-start regression.
+
+    A verbatim copy of the ``Host native-smoke`` stanza's settings (so the
+    alias reaches the same fixture server with the same key and known-hosts
+    files) plus one LocalForward that exists ONLY in ssh_config. The fixture
+    server allows direct-tcpip to the echo port from any session, so on a
+    build that launches this host the inherited listener really echoes.
+    """
+    lines = config_text.splitlines()
+    try:
+        start = lines.index("Host native-smoke")
+    except ValueError:
+        raise RuntimeError("ssh_config has no 'Host native-smoke' stanza to copy") from None
+    body = []
+    for line in lines[start + 1:]:
+        if line.strip().lower().startswith(("host ", "match ")):
+            break
+        if line.strip():
+            body.append(line)
+    if not any(line.strip().startswith("HostName ") for line in body):
+        raise RuntimeError(f"native-smoke stanza has no HostName: {body}")
+    if any(line.strip().lower().startswith(("localforward", "remoteforward", "dynamicforward"))
+           for line in body):
+        raise RuntimeError(f"native-smoke stanza already forwards: {body}")
+    return "\n".join([
+        f"Host {AUTOSTART_INHERIT_HOST}",
+        *body,
+        f" LocalForward 127.0.0.1:{inherited_port} 127.0.0.1:{echo_port}",
+        "",
+    ])
+
+
+def append_inherited_forward_host(path: Path, inherited_port: int, echo_port: int) -> None:
+    """Append ``inherited_forward_stanza`` to the written ssh_config."""
+    text = path.read_text(encoding="utf-8")
+    sep = "" if text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
+    path.write_text(text + sep + inherited_forward_stanza(text, inherited_port, echo_port),
+                    encoding="utf-8")
 
 
 async def forward_echo(port: int, message: bytes, *, timeout: float = 15) -> None:
@@ -379,9 +490,71 @@ async def forward_refused(port: int, context: str, *, timeout: float = 8) -> Non
             last = type(error).__name__
         else:
             writer.close()
+            try:
+                await writer.wait_closed()
+            except OSError:
+                pass
             last = "connected"
         await asyncio.sleep(.25)
     raise RuntimeError(f"{context}: listener {port} did not refuse ({last})")
+
+
+async def forward_stays_refused(port: int, context: str, *, seconds: float) -> None:
+    """Require that NOTHING accepts on loopback ``port`` for ``seconds``.
+
+    Polls a TCP connect; the moment one succeeds it raises RuntimeError
+    naming the port (``context`` says which forward it is). A refusal or any
+    other connect error is "not listening" and polling continues until the
+    window ends. Truth is the TCP listener, never product status text.
+    """
+    start = time.monotonic()
+    deadline = start + seconds
+    while True:
+        try:
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", port), 2,
+            )
+        except (OSError, asyncio.TimeoutError):
+            pass
+        else:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"{context} (port {port} accepted a connection "
+                f"{time.monotonic() - start:.1f}s into the {seconds:g}s window)"
+            )
+        if time.monotonic() >= deadline:
+            return
+        await asyncio.sleep(min(.25, max(0.0, deadline - time.monotonic())))
+
+
+async def require_inherited_forwards_refused(charlie_port: int, inherited_port: int, *,
+                                             seconds: float) -> None:
+    """Both the skipped opted-in forward and the ssh_config-only forward stay
+    closed for the whole window (polled concurrently; first opener fails)."""
+    tasks = [
+        asyncio.create_task(forward_stays_refused(
+            inherited_port,
+            f"UNEXPECTED_INHERITED_FORWARD: ssh_config LocalForward {inherited_port} "
+            f"is listening after app launch",
+            seconds=seconds,
+        )),
+        asyncio.create_task(forward_stays_refused(
+            charlie_port,
+            f"UNEXPECTED_INHERITED_FORWARD: opted-in Charlie {charlie_port} is listening "
+            f"after app launch although its ssh_config host adds a forward",
+            seconds=seconds,
+        )),
+    ]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def observe_pty_chunk(events, probe_state: dict[str, str | None], chunk: str) -> None:
@@ -1266,7 +1439,7 @@ def visible_segment_rows(path: Path, tesseract: str, *, invert: bool = False):
     width, height, channels, rows = _read_png(path)
     thresh = _text_threshold(width, height, channels, rows)
     segments = []
-    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    temporary = _temp_png()
     try:
         for y1, y2 in _visible_bands(width, height, channels, rows, thresh):
             for x1, x2 in _band_segments(width, rows, channels, thresh, y1, y2, 24):
@@ -1308,7 +1481,7 @@ def visible_pixel_rows(path: Path, tesseract: str, *, clusters: bool = False):
     width, height, channels, rows = _read_png(path)
     thresh = _text_threshold(width, height, channels, rows)
     words = []
-    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    temporary = _temp_png()
     try:
         for y1, y2 in _visible_bands(width, height, channels, rows, thresh):
             pad = 3
@@ -1376,7 +1549,7 @@ def _region_crop_upscaled(path: Path, region, scale: int, dest: Path, *, invert:
 def region_upscaled_rows(path: Path, tesseract: str, region, *, psm: str = "6",
                          scale: int = 3, invert: bool = False):
     """OCR an upscaled crop of ``region``; word boxes in window coordinates."""
-    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    temporary = _temp_png()
     try:
         origin = _region_crop_upscaled(path, region, scale, temporary, invert=invert)
         tsv = _ocr_tsv(tesseract, temporary, psm)
@@ -1635,7 +1808,18 @@ def session_menu_region(session_label_bounds, width: int, height: int):
 # renderings), required to be flat; the fill is the interior median, which
 # must also be the value of most interior pixels (glyph strokes ~180 and
 # the 32/33 inner rows cannot move it).
+# Runner, head 937f4fc (fixed-height editor row): the dialog ALSO sits half
+# a pixel lower, so each horizontal border is split over two rows: top
+# y 534/535 = luma 48/49 (ends 43/53, 38/56), bottom 556/557 = 53/44 (ends
+# 56/40, 57/34); no top row reaches 50 across the box. A split border is a
+# column where BOTH rows lie in TUNNEL_LIST_BUTTON_SPLIT_ROW and their sum
+# is >= TUNNEL_LIST_BUTTON_SPLIT_SUM: the border's coverage shared by two
+# rows (measured 91..101). A crisp frame never matches: the crisp row's
+# neighbours are card 25 / fill 30 (41 at single corner columns), below
+# the per-row floor; card+card 50 and fill+fill 60 fail the sum.
 TUNNEL_LIST_BUTTON_BORDER = (50, 100)
+TUNNEL_LIST_BUTTON_SPLIT_ROW = (36, 100)
+TUNNEL_LIST_BUTTON_SPLIT_SUM = 85
 TUNNEL_LIST_BUTTON_W = (18, 40)
 TUNNEL_LIST_BUTTON_H = (18, 28)
 TUNNEL_LIST_BUTTON_GAP = (1, 10)
@@ -1653,14 +1837,25 @@ TUNNEL_LIST_BUTTON_CARD_DX = (5, 3)
 TUNNEL_LIST_BUTTON_FILL_SHARE = 0.6
 
 
-def _border_runs(row, channels, x1, x2):
+def _border_runs(row, channels, x1, x2, below=None):
+    """Runs ``(start, end)`` of 18..40 border columns in ``row``; with
+    ``below`` (the next pixel row) a column counts when the border is split
+    over the two rows (see TUNNEL_LIST_BUTTON_SPLIT_*) instead."""
     lo, hi = TUNNEL_LIST_BUTTON_BORDER
+    split_lo, split_hi = TUNNEL_LIST_BUTTON_SPLIT_ROW
     runs, start = [], None
     for x in range(x1, x2 + 1):
         on = False
         if x < x2:
             r, g, b = row[x * channels], row[x * channels + 1], row[x * channels + 2]
-            on = lo <= (r * 299 + g * 587 + b * 114) // 1000 <= hi
+            luma = (r * 299 + g * 587 + b * 114) // 1000
+            if below is None:
+                on = lo <= luma <= hi
+            else:
+                r, g, b = below[x * channels], below[x * channels + 1], below[x * channels + 2]
+                luma2 = (r * 299 + g * 587 + b * 114) // 1000
+                on = (split_lo <= luma <= split_hi and split_lo <= luma2 <= split_hi
+                      and luma + luma2 >= TUNNEL_LIST_BUTTON_SPLIT_SUM)
         if on and start is None:
             start = x
         elif not on and start is not None:
@@ -1728,15 +1923,34 @@ def tunnel_list_button_states(path: Path, heading_bounds, width: int, *, image=N
     runs_at = {}
 
     def runs(y):
+        # Crisp runs on row y and split runs over rows y, y+1, merged where
+        # they overlap (one border drawn both ways); the third field is the
+        # number of rows the border covers, so a box closes on its last row.
         if y not in runs_at:
-            runs_at[y] = _border_runs(rows[y], channels, x1, x2)
+            found = [(a, b, 1) for a, b in _border_runs(rows[y], channels, x1, x2)]
+            if y + 1 < img_h:
+                found += [(a, b, 2) for a, b in
+                          _border_runs(rows[y], channels, x1, x2, below=rows[y + 1])]
+            merged = []
+            for a, b, depth in sorted(found):
+                if merged and a < merged[-1][1]:
+                    pa, pb, pd = merged[-1]
+                    merged[-1] = (pa, max(pb, b), max(pd, depth))
+                else:
+                    merged.append((a, b, depth))
+            runs_at[y] = merged
         return runs_at[y]
 
     def bottom_of(run, y):
         for y2 in range(y + TUNNEL_LIST_BUTTON_H[0], min(img_h, y + TUNNEL_LIST_BUTTON_H[1] + 1)):
-            if any(abs(c[0] - run[0]) <= 1 and abs(c[1] - run[1]) <= 1 for c in runs(y2)):
-                return y2
+            for c in runs(y2):
+                if abs(c[0] - run[0]) <= 1 and abs(c[1] - run[1]) <= 1:
+                    return y2 + c[2] - 1
         return None
+
+    def overlaps(p, q):
+        return all(a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+                   for a, b in zip(p, q))
 
     for y in range(max(0, heading_bounds[3]), min(img_h, heading_bounds[1] + 560)):
         top = runs(y)
@@ -1745,7 +1959,11 @@ def tunnel_list_button_states(path: Path, heading_bounds, width: int, *, image=N
                 continue
             ya, yb = bottom_of(a, y), bottom_of(b, y)
             if ya is not None and yb is not None:
-                pairs.append(((a[0], y, a[1] + 1, ya + 1), (b[0], y, b[1] + 1, yb + 1)))
+                pair = ((a[0], y, a[1] + 1, ya + 1), (b[0], y, b[1] + 1, yb + 1))
+                # The lower row of a split top border can also read as a
+                # crisp top one row down: same two boxes, not a second pair.
+                if not any(abs(pair[0][1] - p[0][1]) <= 1 and overlaps(pair, p) for p in pairs):
+                    pairs.append(pair)
     if not pairs:
         return None
     if len(pairs) > 1:
@@ -1836,9 +2054,132 @@ def tunnel_save_button(path: Path, heading_bounds, width: int):
 
 
 def tunnel_notice_region(save_box, width: int):
-    """Footer notice text, left of Cancel/Save on the Save row."""
+    """Footer notice text, left of Cancel/Save on the Save row.
+
+    ``save_box`` comes from the frame BEFORE the Save click while the notice
+    is read AFTER it (editor deselected), so this relies on the centred
+    dialog keeping one height in both states: src/iced_app.rs fixes the
+    list + editor row at TUNNEL_EDITOR_ROW_HEIGHT and gives the disabled
+    Save the enabled one's size. The same holds for the ``heading`` that
+    the edit probe locates once and reuses across select/Save/remove."""
     left, _dialog = tunnel_dialog_left(width)
     return (left + 6, save_box[1] - 12, max(left + 7, save_box[0] - 80), save_box[3] + 12)
+
+
+# 960x640 auto-start probe (INSPIRUM_GUI_AUTOSTART=1). Typing this bind into
+# opted-in Alpha's "Bind address" and pressing Save is refused with
+# src/iced_app.rs TUNNEL_AUTO_START_UNSAFE: "Cannot auto-start this tunnel.
+# Set the bind address to 127.0.0.1 or [::1] (an empty bind or a host name
+# such as localhost is not accepted), or turn off automatic start." (~180
+# chars at 12 px: two lines left of Cancel/Save in the 840 px dialog).
+AUTOSTART_MIN_NOTICE_BIND = "0.0.0.0"
+# Words of that notice found nowhere else in the dialog (the auto-start help
+# text says "can auto-start", "bind address", "Automatically"; the matcher
+# is case-sensitive and whole-token). Expected: Cannot/empty on line 1,
+# localhost/accepted on line 2.
+AUTOSTART_MIN_NOTICE_WORDS = ("Cannot", "empty", "localhost", "accepted")
+AUTOSTART_MIN_NOTICE_MIN_WORDS = 2
+# Bounded wheel-down steps (xdotool click 5) when a control is off-screen.
+MIN_WINDOW_WHEEL_STEPS = 8
+# A footer button is reachable only when its whole fill is on screen: the
+# 1280x800 Save fill measures 22 rows (671..693); a viewport-clipped one is
+# shorter.
+TUNNEL_FOOTER_BUTTON_MIN_H = 18
+# Two located words are on different wrapped lines when their tops differ by
+# at least this (12 px text, ~16 px line pitch; same-line jitter <= 3 px).
+NOTICE_LINE_MIN_DY = 8
+
+
+def tunnel_dialog_region(width: int, height: int):
+    """Full-height box of the centred Tunnel Settings dialog (x from
+    ``tunnel_dialog_left``; the dialog is centred vertically and can be as
+    tall as the window at 960x640, so y spans the window)."""
+    left, dialog = tunnel_dialog_left(width)
+    return (left, 0, min(width, left + dialog), height)
+
+
+def footer_save_box(path: Path, width: int, height: int, *, image=None):
+    """Box of the footer Save fill found anywhere in the dialog's height, or
+    ``None``. Unlike ``tunnel_save_button`` no heading is needed, so it also
+    works once the outer dialog has scrolled the heading away. Same run
+    rules (right half of the dialog, ending within 60 px of its right edge,
+    at most 120 px wide, >= 8 rows): the primary "Local" kind toggle and the
+    checked auto-start box sit further left. With several row groups the
+    lowest wins (Save is the last row of the dialog)."""
+    image = image or _read_png(path)
+    left, dialog = tunnel_dialog_left(width)
+    right = left + dialog
+    groups: list[list] = []
+    for y in range(0, min(height, image[1])):
+        run = primary_fill_run(path, y, left + dialog // 2, right, image=image)
+        if not (run and run[1] >= right - 60 and run[1] - run[0] <= 120):
+            continue
+        if groups and y - groups[-1][-1][0] <= 2:
+            groups[-1].append((y, run))
+        else:
+            groups.append([(y, run)])
+    groups = [g for g in groups if len(g) >= 8]
+    if not groups:
+        return None
+    hits = groups[-1]
+    ys = [y for y, _run in hits]
+    return (min(r[0] for _y, r in hits), min(ys), max(r[1] for _y, r in hits), max(ys) + 1)
+
+
+def footer_cancel_region(save_box, width: int):
+    """Search box for the quiet "Cancel" button: same footer row as the
+    located Save fill, from the dialog's middle to Save's left edge."""
+    left, dialog = tunnel_dialog_left(width)
+    return (left + dialog // 2, max(0, save_box[1] - 12), save_box[0], save_box[3] + 12)
+
+
+def footer_notice_region(save_box, width: int, height: int):
+    """Search box for a (wrapped) footer notice: left of Cancel on the Save
+    row, tall enough for three 16 px lines centred on it."""
+    left, _dialog = tunnel_dialog_left(width)
+    return (left + 6, max(0, save_box[1] - 36), max(left + 7, save_box[0] - 80),
+            min(height, save_box[3] + 36))
+
+
+def footer_cancel_button(cancel_text_box, save_box):
+    """Button box of the quiet Cancel from its located text interior and the
+    Save fill on the same footer row (one row, centred, same height). At
+    1280x800 text 923..961 sits in the button 909..976."""
+    return (cancel_text_box[0] - FOOTER_CANCEL_TEXT_PAD, save_box[1],
+            cancel_text_box[2] + FOOTER_CANCEL_TEXT_PAD, save_box[3])
+
+
+FOOTER_CANCEL_TEXT_PAD = 14
+
+
+def box_reachable(box, frame, *, min_h: int = 0) -> bool:
+    """``box`` lies wholly inside ``frame`` (x0, y0, x1, y1) and is at least
+    ``min_h`` tall (a viewport-clipped control is shorter)."""
+    if box is None:
+        return False
+    return (frame[0] <= box[0] < box[2] <= frame[2] and frame[1] <= box[1] < box[3] <= frame[3]
+            and box[3] - box[1] >= min_h)
+
+
+def distinct_text_lines(boxes, *, min_dy: int = NOTICE_LINE_MIN_DY) -> int:
+    """Number of text lines the located word ``boxes`` occupy."""
+    tops: list[int] = []
+    for box in sorted(boxes, key=lambda b: b[1]):
+        if not tops or box[1] - tops[-1] >= min_dy:
+            tops.append(box[1])
+    return len(tops)
+
+
+def file_sha256(path: Path) -> str:
+    import hashlib
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def require_file_unchanged(path: Path, before: str, context: str) -> None:
+    """Raise unless ``path`` still hashes to ``before`` (sha256 hex)."""
+    after = file_sha256(path)
+    if after != before:
+        raise RuntimeError(f"{context}: {path.name} changed (sha256 {before[:12]} -> {after[:12]})")
 
 
 def saved_local_forwards(profiles_path: Path, profile_name: str) -> list[str]:
@@ -2870,7 +3211,7 @@ def _inverted_segment_search(path: Path, tesseract: str, label: str, region, dea
         rx1, ry1, rx2, ry2 = 0, TOOLBAR_BOTTOM_Y, width, height
     thresh = _text_threshold(width, height, channels, rows)
     segments = []
-    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    temporary = _temp_png()
     try:
         for y1, y2 in _visible_bands(width, height, channels, rows, thresh):
             if y2 < ry1 or y1 > ry2:
@@ -3105,7 +3446,7 @@ def _selected_row_label(path: Path, tesseract: str, label: str, region):
     lines = []
     for rect in selected_fill_rects(rows, channels, region, width, height):
         lines.extend((box, rect[4]) for box in _fill_text_lines(rows, channels, rect))
-    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    temporary = _temp_png()
     try:
         for (lx1, ly1, lx2, ly2), fill in lines[:SELECTED_MAX_LINES]:
             box = (max(0, lx1 - 6), max(0, ly1 - 3),
@@ -3448,7 +3789,7 @@ def _map_strip_box(word, origin, region):
 
 
 def _ocr_strip_pass(image, tesseract, psm):
-    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    temporary = _temp_png()
     try:
         image.save(temporary)
         tsv = _ocr_tsv(tesseract, temporary, psm)
@@ -3521,7 +3862,8 @@ def read_strip_words(shot_path, region):
         raise RuntimeError(
             "Find strip OCR requires Pillow (pip install Pillow==13.0.0; see scripts/local-gui/Dockerfile)"
         ) from exc
-    image = Image.open(shot_path).convert("RGB")
+    with Image.open(shot_path) as source:
+        image = source.convert("RGB")
     width, height = image.size
     x1, y1, x2, y2 = (int(edge) for edge in region)
     x1 = max(0, min(width - 1, x1))
@@ -3708,7 +4050,8 @@ def _rgb_image(shot):
             "gutter probe requires Pillow (pip install Pillow==13.0.0; see scripts/local-gui/Dockerfile)"
         ) from exc
     if isinstance(shot, (str, Path)):
-        return Image.open(shot).convert("RGB")
+        with Image.open(shot) as source:
+            return source.convert("RGB")
     return shot.convert("RGB")
 
 
@@ -3866,9 +4209,7 @@ def _gutter_probe_smooth_ocr(shot, tesseract, region, *, scale: int = 3, pad: in
     grey = ImageOps.invert(image.crop(box).convert("L"))
     big = grey.resize((grey.width * scale, grey.height * scale), Image.Resampling.LANCZOS)
     big = ImageOps.expand(big, border=pad, fill=255)
-    handle, name = tempfile.mkstemp(suffix=".png")
-    os.close(handle)
-    temporary = Path(name)
+    temporary = _temp_png()
     try:
         big.save(temporary)
         result = subprocess.run(
@@ -4239,7 +4580,13 @@ async def locate_rendered_label(
     # time out during banner exchange while we are looking at the screen.
     deadline = time.monotonic() + timeout
     while True:
-        await asyncio.to_thread(screenshot, window, path, env)
+        try:
+            await asyncio.to_thread(screenshot, window, path, env)
+        except RuntimeError as error:
+            if not str(error).startswith("empty GUI screenshot:") or time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(.5)
+            continue
         try:
             return await asyncio.to_thread(
                 locate_visible_label, path, label, region=region,
@@ -5259,6 +5606,744 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
     return 0
 
 
+async def autostart_precheck(window: str, destination: Path, env: dict[str, str], events,
+                             forward_ports, profiles: Path, *, inherit_ports,
+                             ssh_config: Path) -> None:
+    """INSPIRUM_GUI_AUTOSTART=1: prove app launch started Alpha and only Alpha.
+
+    Runs right after the first frame, before any Tunnels click, toggle or
+    session open. Truth is the loopback listener and the fixture's
+    LOCAL_FORWARD_ALLOW event, never a screenshot. ``inherit_ports`` is
+    ``(charlie_port, inherited_port)``: Charlie is opted in on the third
+    profile, whose ssh_config host adds the inherited LocalForward, so
+    neither may ever listen. Ends with Alpha stopped by the real popup toggle
+    so the populated flow keeps "both initially stopped". Every step is
+    required; nothing here is best-effort.
+    """
+    port_a, port_b = forward_ports
+    port_c, port_inherited = inherit_ports
+    label_a, label_b = POPULATED_LABELS
+    with profiles.open(encoding="utf-8") as handle:
+        library = json.load(handle)
+    saved = {p["name"]: p for p in library}
+    flags = {
+        row["label"]: bool(row.get("auto_start"))
+        for row in saved["CI tunnel fixture"]["ssh"]["tunnel_labels"]
+    }
+    if flags != {label_a: True, label_b: False}:
+        raise RuntimeError(f"auto-start fixture metadata wrong on disk: {flags}")
+    # The inherited-forward profile is last (library order = launch order),
+    # targets the ssh_config alias and opts in exactly Charlie.
+    inherit = library[-1] if library else {}
+    inherit_rows = [
+        (row["label"], row["spec"], bool(row.get("auto_start")))
+        for row in inherit.get("ssh", {}).get("tunnel_labels", [])
+    ]
+    charlie_spec = f"127.0.0.1:{port_c}:127.0.0.1:"
+    if (inherit.get("name") != AUTOSTART_INHERIT_PROFILE
+            or inherit.get("host") != AUTOSTART_INHERIT_HOST
+            or len(inherit_rows) != 1
+            or inherit_rows[0][0] != AUTOSTART_INHERIT_LABEL
+            or not inherit_rows[0][1].startswith(charlie_spec)
+            or inherit_rows[0][2] is not True
+            or inherit["ssh"].get("local_forwards") != [inherit_rows[0][1]]):
+        raise RuntimeError(f"inherited-forward fixture profile wrong on disk: {inherit}")
+    config_text = ssh_config.read_text(encoding="utf-8")
+    if (f"Host {AUTOSTART_INHERIT_HOST}" not in config_text
+            or f" LocalForward 127.0.0.1:{port_inherited} " not in config_text):
+        raise RuntimeError(f"ssh_config lacks the {AUTOSTART_INHERIT_HOST} LocalForward stanza")
+    # 1. Launch alone (no click) brings Alpha up through the fixture SSH
+    # server. Startup spawns ssh and authenticates, so allow a generous
+    # TIME_SCALE'd window instead of the per-toggle 15 s.
+    await forward_echo(port_a, b"GUI_AUTOSTART_ALPHA_0", timeout=45 * TIME_SCALE)
+    if "LOCAL_FORWARD_ALLOW" not in events.path.read_text(encoding="utf-8"):
+        raise RuntimeError("auto-started Alpha echoed without a fixture LOCAL_FORWARD_ALLOW")
+    # 2. Opted-out Bravo stays stopped.
+    await forward_refused(port_b, "opted-out Bravo after app launch")
+    if events.path.read_text(encoding="utf-8").splitlines().count("SESSION_STARTED"):
+        raise RuntimeError("auto-start opened a shell session; it must only forward")
+    print(f"PASS auto-start: Alpha {port_a} echoed at launch, Bravo {port_b} refused",
+          flush=True)
+    # 2b. Opted-in Charlie must be SKIPPED: its ssh_config host adds the
+    # inherited LocalForward, so launching it would open a listener the user
+    # never selected. The pass launches in library order and Charlie's
+    # profile is last, so Alpha's echo above means Charlie's turn has come;
+    # the settle window then covers a slow ssh start.
+    await require_inherited_forwards_refused(
+        port_c, port_inherited, seconds=5 * TIME_SCALE,
+    )
+    print(f"PASS auto-start: Charlie {port_c} and inherited {port_inherited} refused "
+          f"(ssh_config adds a forward)", flush=True)
+
+    # 3. Evidence: popup with Alpha on / Bravo off; all three rows (Charlie
+    # listed, skipped) located inside the popup region, above its footer.
+    tun_width, tun_height = window_size(window, env)
+    button_region = (max(0, tun_width - 220), 0, tun_width, 42)
+    tunnels_bounds = await click_label(
+        window, destination / "connected-autostart-tunnels-button.png", "Tunnels", env,
+        region=button_region, timeout=15,
+    )
+    popup_region = (
+        max(0, tun_width - 440), tunnels_bounds[1],
+        tun_width, min(tun_height, tunnels_bounds[3] + 420),
+    )
+    popup_shot = destination / "connected-autostart-popup-alpha-on.png"
+    footer = await locate_rendered_label(
+        window, popup_shot, "Tunnel Settings...", env=env, region=popup_region, timeout=15,
+    )
+    for label in (*POPULATED_LABELS, AUTOSTART_INHERIT_LABEL):
+        box = await asyncio.to_thread(locate_visible_label, popup_shot, label,
+                                      region=popup_region)
+        if not (_bounds_inside(box, popup_region) and box[3] <= footer[1]):
+            raise RuntimeError(f"{label} row {box} not inside auto-start popup list")
+    # 4. Tunnel Settings editor with the checkbox, Alpha selected.
+    command("xdotool", "mousemove", "--window", window,
+            *map(str, center(footer)), "click", "1", env=env)
+    await asyncio.sleep(.6)
+    heading = await locate_rendered_label(
+        window, destination / "connected-autostart-manager.png", "Tunnel Manager",
+        env=env, timeout=15,
+    )
+    ed_w, ed_h = window_size(window, env)
+    await click_label(
+        window, destination / "connected-autostart-editor-pre-alpha.png", label_a, env,
+        region=tunnel_list_region(heading, ed_w, ed_h), timeout=15, settle=.8,
+    )
+    # The Listen Port band is derived from its located label (the editor
+    # exists once a row is selected), as in the populated flow.
+    listen_label = await locate_editor_label(
+        window, destination / "connected-autostart-editor-listen-label.png",
+        "Listen Port", heading, env=env,
+    )
+    listen_row = listen_port_row_region(listen_label, ed_w)
+    editor_shot = destination / "connected-autostart-editor-alpha.png"
+    deadline = time.monotonic() + 15 * TIME_SCALE
+    while True:
+        await asyncio.to_thread(screenshot, window, editor_shot, env)
+        try:
+            await asyncio.to_thread(
+                require_editor_selection, editor_shot, port_a, port_b,
+                editor_form_region(ed_w, ed_h),
+                row_region=listen_row,
+            )
+            break
+        except RuntimeError:
+            if time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(.5)
+    # The checkbox label is evidence only: its checked state has no OCR
+    # oracle yet, and the listener checks above are the acceptance.
+    try:
+        box = await asyncio.to_thread(
+            locate_visible_label, editor_shot, AUTOSTART_CHECKBOX_LABEL,
+            region=editor_form_region(ed_w, ed_h),
+        )
+        print(f"auto-start: checkbox label at {box} in {editor_shot.name}", flush=True)
+    except RuntimeError as error:
+        print(f"NOTE auto-start: checkbox label not OCR-located in {editor_shot.name}: "
+              f"{error}", flush=True)
+    command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+    await asyncio.sleep(.6)
+    # Browsing the editor must not have changed the running set.
+    await forward_echo(port_a, b"GUI_AUTOSTART_ALPHA_1")
+    await forward_refused(port_b, "Bravo after viewing Tunnel Settings")
+
+    # 5. Restore the baseline with the real popup toggle on Alpha's row.
+    await click_label(
+        window, destination / "connected-autostart-tunnels-button-2.png", "Tunnels", env,
+        region=button_region, timeout=15,
+    )
+    shot = destination / "connected-autostart-stop-a-before.png"
+    box = await locate_rendered_label(window, shot, label_a, env=env,
+                                      region=popup_region, timeout=15)
+    (x, y), source = await asyncio.to_thread(toggler_target, shot, box, tun_width)
+    print(f"auto-start: stop Alpha row {box} -> ({x},{y}) via {source}", flush=True)
+    command("xdotool", "mousemove", "--window", window, str(x), str(y), "click", "1", env=env)
+    await asyncio.sleep(1)
+    await forward_refused(port_a, "auto-started Alpha after popup stop")
+    await forward_refused(port_b, "Bravo after Alpha popup stop")
+    await forward_refused(port_c, "UNEXPECTED_INHERITED_FORWARD: skipped Charlie at end of "
+                          "auto-start precheck")
+    await forward_refused(port_inherited, "UNEXPECTED_INHERITED_FORWARD: ssh_config "
+                          "LocalForward at end of auto-start precheck")
+    await asyncio.to_thread(
+        screenshot, window, destination / "connected-autostart-popup-stopped.png", env,
+    )
+    command("xdotool", "key", "--clearmodifiers", "Escape", env=env)
+    await asyncio.sleep(.6)
+    print("PASS auto-start: popup toggle stopped Alpha; both forwards stopped", flush=True)
+
+
+async def autostart_min_window_probe(window: str, destination: Path, env: dict[str, str],
+                                     forward_ports, profiles: Path, *, inherit_ports) -> None:
+    """INSPIRUM_GUI_AUTOSTART=1, right after ``autostart_precheck`` (every
+    forward stopped, no session open): at the 960x640 minimum window the
+    Tunnel Settings dialog keeps Save, Cancel and the auto-start checkbox
+    reachable while a wrapped validation notice grows its footer.
+
+    Gesture: select opted-in Alpha, type AUTOSTART_MIN_NOTICE_BIND into
+    "Bind address", press Save -> TUNNEL_AUTO_START_UNSAFE (two lines).
+    The outer dialog AND the editor card scroll, so a fixed-height row alone
+    proves nothing: each control must be located with its whole box on
+    screen, wheel-scrolling inside the dialog (bounded) when it is not; an
+    unreachable control is a product defect and fails the run. Leaves via
+    Cancel: profile file byte-identical, every listener still refused, the
+    original window size restored.
+    """
+    port_a, port_b = forward_ports
+    label_a, _label_b = POPULATED_LABELS
+    original = window_size(window, env)
+    before_hash = file_sha256(profiles)
+    command("xdotool", "windowsize", window, str(MIN_WINDOW[0]), str(MIN_WINDOW[1]), env=env)
+    await asyncio.sleep(.7)
+    w, h = window_size(window, env)
+    tag = require_min_window((w, h))
+    frame = (0, 0, w, h)
+    dialog = tunnel_dialog_region(w, h)
+    print(f"auto-start min: window {original[0]}x{original[1]} -> {tag}; dialog region {dialog}",
+          flush=True)
+    wheel_steps = 0
+
+    async def wheel(x: int, y: int, what: str) -> None:
+        nonlocal wheel_steps
+        command("xdotool", "mousemove", "--window", window, str(x), str(y),
+                "click", "5", env=env)
+        wheel_steps += 1
+        await asyncio.sleep(.5)
+        print(f"auto-start min: wheel step {wheel_steps} at ({x},{y}) for {what}", flush=True)
+
+    # Over the dialog body's left padding (list card starts 25 px in), so
+    # the OUTER scrollable gets the wheel, not the list or editor card.
+    body_x = dialog[0] + 16
+
+    async def footer(shot: Path, scrolled: Path, what: str):
+        """(frame path, save box, cancel button box, cancel text box) with
+        both buttons wholly on screen; wheel-scrolls the dialog if not."""
+        await asyncio.to_thread(screenshot, window, shot, env)
+        path, steps = shot, 0
+        while True:
+            save = await asyncio.to_thread(footer_save_box, path, w, h)
+            cancel_text = cancel = None
+            if save is not None:
+                try:
+                    cancel_text = await asyncio.to_thread(
+                        locate_visible_label, path, "Cancel", region=footer_cancel_region(save, w),
+                    )
+                    cancel = footer_cancel_button(cancel_text, save)
+                except RuntimeError:
+                    cancel_text = None
+            if (box_reachable(save, frame, min_h=TUNNEL_FOOTER_BUTTON_MIN_H)
+                    and _bounds_inside(save, dialog)
+                    and cancel is not None and box_reachable(cancel, frame)
+                    and _bounds_inside(cancel_text, dialog)):
+                print(f"auto-start min: {what}: Save {save}, Cancel {cancel} (text {cancel_text}) "
+                      f"in {path.name} after {steps} wheel step(s)", flush=True)
+                return path, save, cancel, cancel_text
+            if steps >= MIN_WINDOW_WHEEL_STEPS:
+                raise RuntimeError(
+                    f"PRODUCT: {tag} Tunnel Settings {what}: Save/Cancel not wholly reachable "
+                    f"after {steps} wheel steps (Save fill {save}, Cancel text {cancel_text}, "
+                    f"Cancel button {cancel}, frame {frame}, dialog {dialog}, last {path})"
+                )
+            await wheel(body_x, (save[1] + save[3]) // 2 if save else h // 2, what)
+            steps += 1
+            path = scrolled
+            await asyncio.to_thread(screenshot, window, path, env)
+
+    # 1. Tunnels -> Tunnel Settings..., select Alpha (regions from labels).
+    button_region = (max(0, w - 220), 0, w, 42)
+    tunnels_bounds = await click_label(
+        window, destination / "connected-autostart-min-tunnels-button.png", "Tunnels", env,
+        region=button_region, timeout=15,
+    )
+    popup_region = (max(0, w - 440), tunnels_bounds[1], w, min(h, tunnels_bounds[3] + 420))
+    settings = await locate_rendered_label(
+        window, destination / "connected-autostart-min-popup.png", "Tunnel Settings...",
+        env=env, region=popup_region, timeout=15,
+    )
+    command("xdotool", "mousemove", "--window", window,
+            *map(str, center(settings)), "click", "1", env=env)
+    await asyncio.sleep(.6)
+    heading = await locate_rendered_label(
+        window, destination / "connected-autostart-min-manager.png", "Tunnel Manager",
+        env=env, region=dialog, timeout=15,
+    )
+    await click_label(
+        window, destination / "connected-autostart-min-pre-alpha.png", label_a, env,
+        region=tunnel_list_region(heading, w, h), timeout=15, settle=.8,
+    )
+    listen_label = await locate_editor_label(
+        window, destination / "connected-autostart-min-listen-label.png", "Listen Port",
+        heading, env=env,
+    )
+    selected_shot = destination / "connected-autostart-min-alpha.png"
+    deadline = time.monotonic() + 15 * TIME_SCALE
+    while True:
+        await asyncio.to_thread(screenshot, window, selected_shot, env)
+        try:
+            await asyncio.to_thread(
+                require_editor_selection, selected_shot, port_a, port_b,
+                editor_form_region(w, h), row_region=listen_port_row_region(listen_label, w),
+            )
+            break
+        except RuntimeError:
+            if time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(.5)
+
+    # 2. Make Save reject: a non-loopback bind on the opted-in forward.
+    bind_label = await locate_editor_label(
+        window, destination / "connected-autostart-min-bind-label.png", "Bind address",
+        heading, env=env,
+    )
+    bind_row = editor_value_row_region(bind_label, w)
+    bx = (bind_row[0] + bind_row[2]) // 2
+    by = (bind_label[1] + bind_label[3]) // 2 + TUNNEL_INPUT_CENTRE_DY
+    print(f"auto-start min: Bind address label {bind_label} -> input ({bx},{by})", flush=True)
+    command("xdotool", "mousemove", "--window", window, str(bx), str(by), "click", "1", env=env)
+    await asyncio.sleep(.3)
+    command("xdotool", "key", "--clearmodifiers", "ctrl+a", env=env)
+    command("xdotool", "type", "--clearmodifiers", "--delay", "40",
+            AUTOSTART_MIN_NOTICE_BIND, env=env)
+    await asyncio.sleep(.5)
+    _path, save, _cancel, _text = await footer(
+        destination / "connected-autostart-min-presave.png",
+        destination / "connected-autostart-min-presave-scrolled.png", "before Save",
+    )
+    command("xdotool", "mousemove", "--window", window,
+            *map(str, center(save)), "click", "1", env=env)
+    await asyncio.sleep(1)
+    require_file_unchanged(profiles, before_hash, "refused auto-start Save at 960x640")
+
+    # 3. (b) Save + Cancel wholly on screen with the wrapped notice.
+    notice_path, save, cancel, _cancel_text = await footer(
+        destination / "connected-autostart-min-notice.png",
+        destination / "connected-autostart-min-notice-scrolled.png", "with notice",
+    )
+    footer_steps = wheel_steps
+    # (a) The notice itself: >= 2 of its distinctive words, inside the
+    # dialog, on >= 2 lines (it wrapped).
+    words = {}
+    for region in (footer_notice_region(save, w, h), dialog):
+        for word in AUTOSTART_MIN_NOTICE_WORDS:
+            if word in words:
+                continue
+            try:
+                box = await asyncio.to_thread(locate_visible_label, notice_path, word,
+                                              region=region)
+            except RuntimeError:
+                continue
+            if _bounds_inside(box, dialog):
+                words[word] = box
+        if len(words) >= AUTOSTART_MIN_NOTICE_MIN_WORDS and distinct_text_lines(words.values()) >= 2:
+            break
+    print(f"auto-start min: notice words {words} in {notice_path.name}", flush=True)
+    if len(words) < AUTOSTART_MIN_NOTICE_MIN_WORDS:
+        raise RuntimeError(
+            f"auto-start Save refusal notice not located at {tag}: words {words} of "
+            f"{AUTOSTART_MIN_NOTICE_WORDS} in {notice_path} (footer region "
+            f"{footer_notice_region(save, w, h)}, dialog {dialog})"
+        )
+    if distinct_text_lines(words.values()) < 2:
+        raise RuntimeError(
+            f"auto-start notice did not wrap at {tag} (all located words on one line: {words}); "
+            f"the probe needs a wrapped notice"
+        )
+
+    # (c) The auto-start checkbox label wholly on screen (editor card).
+    form = editor_form_region(w, h)
+    checkbox = None
+    path = notice_path
+    for step in range(MIN_WINDOW_WHEEL_STEPS + 1):
+        if step:
+            await wheel((form[0] + form[2]) // 2, min(h - 40, max(form[1] + 40, by)),
+                        "auto-start checkbox")
+            path = destination / "connected-autostart-min-checkbox-scrolled.png"
+            await asyncio.to_thread(screenshot, window, path, env)
+        try:
+            checkbox = await asyncio.to_thread(
+                locate_visible_label, path, AUTOSTART_CHECKBOX_LABEL, region=form,
+            )
+        except RuntimeError:
+            checkbox = None
+        if checkbox is not None and box_reachable(checkbox, frame) and _bounds_inside(checkbox, dialog):
+            print(f"auto-start min: checkbox label {checkbox} in {path.name} after {step} "
+                  f"wheel step(s)", flush=True)
+            break
+    else:
+        raise RuntimeError(
+            f"PRODUCT: {tag} auto-start checkbox {AUTOSTART_CHECKBOX_LABEL!r} not reachable "
+            f"after {MIN_WINDOW_WHEEL_STEPS} wheel steps over the editor card {form} "
+            f"(last box {checkbox}, last frame {path})"
+        )
+
+    # 4. Leave without saving: the located Cancel (re-located: a wheel over
+    # the editor may have moved the outer dialog too).
+    cancel_path, _save, cancel, _text = await footer(
+        destination / "connected-autostart-min-cancel.png",
+        destination / "connected-autostart-min-cancel-scrolled.png", "before Cancel",
+    )
+    command("xdotool", "mousemove", "--window", window,
+            *map(str, center(cancel)), "click", "1", env=env)
+    await asyncio.sleep(.8)
+    closed = destination / "connected-autostart-min-closed.png"
+    await asyncio.to_thread(screenshot, window, closed, env)
+    changed = await asyncio.to_thread(band_changed_pixels, cancel_path, closed, dialog)
+    print(f"auto-start min: Cancel changed {changed} dialog pixels", flush=True)
+    try:
+        await asyncio.to_thread(require_label_absent, closed, "Tunnel Manager", region=dialog)
+    except LabelVisible as exc:
+        raise RuntimeError(f"Cancel left Tunnel Settings open at {tag} ({closed})") from exc
+    if changed < 10000:
+        raise RuntimeError(f"Cancel did not visibly close Tunnel Settings ({changed} px, {closed})")
+    require_file_unchanged(profiles, before_hash, "auto-start 960x640 probe after Cancel")
+    await forward_refused(port_a, "Alpha after the 960x640 auto-start probe")
+    await forward_refused(port_b, "Bravo after the 960x640 auto-start probe")
+    for port in inherit_ports:
+        await forward_refused(port, "UNEXPECTED_INHERITED_FORWARD: after the 960x640 probe")
+
+    command("xdotool", "windowsize", window, str(original[0]), str(original[1]), env=env)
+    await asyncio.sleep(.7)
+    restored = window_size(window, env)
+    if restored != original:
+        raise RuntimeError(f"window not restored after 960x640 probe: {restored} != {original}")
+    print(f"PASS auto-start: 960x640 Save/Cancel and auto-start checkbox reachable with wrapped "
+          f"notice (wheel steps: {wheel_steps}; footer {footer_steps})", flush=True)
+
+
+def saved_ssh_config_path(profiles: Path) -> Path:
+    """Mirror startup::settings_path for the fixture's profiles filename."""
+    return profiles.with_name(f"{profiles.name}.startup.json")
+
+
+def require_saved_ssh_config(profiles: Path, expected: str | None) -> None:
+    """Read the startup sidecar, not an in-memory draft or unrelated UI state."""
+    path = saved_ssh_config_path(profiles)
+    if not path.exists():
+        if expected is None:
+            return
+        raise RuntimeError(f"saved SSH config missing: {path}")
+    state = json.loads(path.read_text(encoding="utf-8"))
+    actual = state.get("ssh_config")
+    if actual != expected:
+        raise RuntimeError(f"saved SSH config: expected {expected!r}, got {actual!r} in {path}")
+
+
+SAVED_SSH_CONFIG_LABEL = "SSH config file for tunnel auto-start"
+
+
+def saved_ssh_config_field(path: Path, label, region):
+    """Interior of the text input directly below the field ``label`` box.
+
+    The saved draft is a random absolute path (``/home/runner/work/_temp/
+    iced-connected-fixture-XXXXXXXX/ssh_config`` on CI) which tesseract
+    mangles, so the input is found from its pixels: a block of 16..40 rows
+    whose non-background run spans most of the panel, starting at most 20 px
+    under the label and left-aligned with it. The panel background is read
+    from the label's own rows. The Saved file summary and the Save/Clear/
+    Cancel row are text or short buttons on that background and never
+    qualify. The interior is the span filled with the input colour (excludes
+    the border and the adjacent scrollbar). Refuses otherwise.
+    """
+    from collections import Counter
+    from PIL import Image
+
+    def refuse(problem: str):
+        return RuntimeError(
+            f"SSH config input not found under {SAVED_SSH_CONFIG_LABEL!r} label {tuple(label)} "
+            f"in {path}: {problem}"
+        )
+
+    with Image.open(path) as source:
+        image = source.convert("RGB")
+    width, height = image.size
+    x1 = max(0, int(region[0]))
+    x2 = min(width, int(region[2]))
+    y1 = max(0, int(label[3]) + 1)
+    y2 = min(height, int(region[3]), int(label[3]) + 48)
+    if x2 - x1 < 100 or y2 - y1 < 16:
+        raise refuse("band too small")
+    pixels = image.load()
+    assert pixels is not None
+    background = Counter(
+        pixels[x, y] for y in range(max(0, int(label[1])), y1) for x in range(x1, x2)
+    ).most_common(1)[0][0]
+
+    def differs(colour) -> bool:
+        return max(abs(int(a) - int(b)) for a, b in zip(colour, background)) >= 3
+
+    def longest_run(y: int):
+        best, start = (0, 0, 0), None
+        for x in range(x1, x2 + 1):
+            if x < x2 and differs(pixels[x, y]):
+                if start is None:
+                    start = x
+            elif start is not None:
+                if x - start > best[0]:
+                    best = (x - start, start, x - 1)
+                start = None
+        return best
+
+    wide = (x2 - x1) // 2
+    rows = []
+    for y in range(y1, y2):
+        run = longest_run(y)
+        if run[0] >= wide:
+            rows.append((y, run))
+        elif rows:
+            break  # first contiguous block only
+    if not rows:
+        raise refuse("no wide input block")
+    if not 16 <= len(rows) <= 40:
+        raise refuse(f"block height {len(rows)}")
+    top, bottom = rows[0][0], rows[-1][0]
+    if top - label[3] > 20:
+        raise refuse(f"block starts {top - label[3]} px below the label")
+    if bottom >= y2 - 1:
+        raise refuse("block runs past the band")
+    left = min(run[1] for _, run in rows)
+    right = max(run[2] for _, run in rows)
+    fill = Counter(
+        pixels[x, y] for y in range(top + 2, bottom - 1) for x in range(left, right + 1)
+    ).most_common(1)[0][0]
+    if not differs(fill):
+        raise refuse("block fill matches the panel background")
+    span = range(top, bottom + 1)
+    columns = [x for x in range(left, right + 1)
+               if sum(pixels[x, y] == fill for y in span) * 2 >= len(span)]
+    lines = [y for y in span
+             if sum(pixels[x, y] == fill for x in range(left, right + 1)) * 2 >= right - left + 1]
+    if not columns or not lines:
+        raise refuse("no input fill")
+    field = (columns[0], lines[0], columns[-1], lines[-1])
+    if abs(field[0] - label[0]) > 24:
+        raise refuse(f"input left edge {field[0]} not under label x={label[0]}")
+    if field[2] - field[0] < wide or field[3] - field[1] < 10:
+        raise refuse(f"input interior {field} too small")
+    return field
+
+
+async def locate_saved_ssh_config_field(window: str, path: Path, env: dict[str, str],
+                                        label_band, region, *, timeout: float = 20):
+    """Screenshot until the field label and the input under it are both drawn."""
+    deadline = time.monotonic() + timeout * TIME_SCALE
+    while True:
+        remaining = max(0.0, (deadline - time.monotonic()) / TIME_SCALE)
+        label = await locate_rendered_label(
+            window, path, SAVED_SSH_CONFIG_LABEL, env=env, region=label_band,
+            timeout=remaining,
+        )
+        try:
+            return await asyncio.to_thread(saved_ssh_config_field, path, label, region)
+        except RuntimeError:
+            if time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(.5)
+
+
+async def open_saved_ssh_config_editor(window: str, destination: Path, tag: str,
+                                       ssh_config: Path, env: dict[str, str], region):
+    """Locate the actual saved-file row, then target only its editor below.
+
+    Profiles is already visible before entry. One OCR frame per section label
+    is enough here: an absent label should fail with its OCR diagnostics, not
+    spin across screenshots until tesseract runs out of file descriptors.
+    """
+    heading = await locate_rendered_label(
+        window, destination / f"saved-{tag}-heading.png",
+        "SSH config file for tunnel auto-start", env=env, region=region, timeout=0,
+    )
+    saved_row = (region[0], heading[3] + 1, region[2],
+                 min(region[3], heading[3] + 70))
+    saved = await locate_rendered_label(
+        window, destination / f"saved-{tag}-current.png",
+        "Saved file:", env=env, region=saved_row, timeout=0,
+    )
+    # The Set control is directly below Saved file, not the Startup row.
+    set_row = (region[0], saved[3] + 1, region[2],
+               min(region[3], saved[3] + 42))
+    await click_label(window, destination / f"saved-{tag}-set.png",
+                      "Set SSH config for auto-start...", env,
+                      region=set_row, timeout=20)
+    section = (region[0], saved[3] + 1, region[2],
+               min(region[3], saved[3] + 134))
+    if tag == "save":
+        # Empty draft renders the placeholder inside the input.
+        field = await locate_rendered_label(
+            window, destination / f"saved-{tag}-field.png",
+            "Absolute SSH config file path", env=env, region=section, timeout=20,
+        )
+    else:
+        # A saved draft renders the random absolute path, which OCR mangles
+        # on CI. Ground the click in the input's pixels under its label; the
+        # saved value itself is proven by the sidecar after each action.
+        label_band = (section[0], section[1], section[2],
+                      min(section[3], saved[3] + 40))
+        field = await locate_saved_ssh_config_field(
+            window, destination / f"saved-{tag}-field.png", env,
+            label_band, section, timeout=20,
+        )
+    # ``ssh_config`` is deliberately not OCR-matched for cancel/clear.
+    # The pixel interior ends at the input border: Save/Clear/Cancel are the
+    # next 24 px row; stop above the explanatory note under them.
+    reach = 48 if tag == "save" else 34
+    actions = (section[0], field[3] + 1, section[2], min(section[3], field[3] + reach))
+    await locate_rendered_label(window, destination / f"saved-{tag}-actions.png",
+                                "Cancel", env=env, region=actions, timeout=20)
+    return actions, field
+
+
+async def saved_ssh_config_probe(binary: Path, profiles: Path, ssh_config: Path,
+                                 local_root: Path, destination: Path, env: dict[str, str],
+                                 app_log: Path, forward_ports, inherit_ports, events) -> None:
+    """Tools -> Profiles Save/Clear/Cancel across genuine process relaunches.
+
+    All listeners are observed through the native fixture, not a GUI badge.
+    No relaunch has --ssh-config; the initial editor launch does, so the
+    draft input can be filled by a user.
+    """
+    port_a, port_b = forward_ports
+    port_c, port_inherited = inherit_ports
+    if not local_root.is_dir():
+        raise RuntimeError(f"saved GUI local working directory missing: {local_root}")
+    started_before = events.path.read_text(encoding="utf-8").splitlines().count("SESSION_STARTED")
+    app = None
+    window = ""
+
+    async def launch(*, cli: bool, tag: str):
+        nonlocal app, window
+        argv = [str(binary), "--ui", "iced", "--profiles", str(profiles)]
+        if cli:
+            argv.extend(("--ssh-config", str(ssh_config)))
+        elif "--ssh-config" in argv:
+            raise RuntimeError("ordinary relaunch unexpectedly inherited --ssh-config")
+        with app_log.open("a", encoding="utf-8") as output:
+            app = subprocess.Popen(argv, stdout=output, stderr=subprocess.STDOUT,
+                                   cwd=local_root, env=env)
+        window = ""
+        for _ in range(int(100 * TIME_SCALE)):
+            if app.poll() is not None:
+                raise RuntimeError(f"{tag}: app exited early; {app_log.read_text()[-1200:]}")
+            result = subprocess.run(
+                ["xdotool", "search", "--onlyvisible", "--name", "^Inspirum Terminal$"],
+                env=env, capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                window = result.stdout.splitlines()[0]
+                break
+            await asyncio.sleep(.25)
+        if not window:
+            raise RuntimeError(f"{tag}: Iced window did not appear")
+        command("xdotool", "windowfocus", window, env=env)
+        await locate_rendered_label(window, destination / f"saved-{tag}-ready.png",
+                                    "Tunnels", env=env, timeout=20,
+                                    region=(window_size(window, env)[0] - 220, 0,
+                                            window_size(window, env)[0], 42))
+        print(f"saved SSH config {tag}: argv={argv} pid={app.pid}", flush=True)
+
+    async def close(tag: str):
+        nonlocal app
+        if app is None or app.poll() is not None:
+            raise RuntimeError(f"{tag}: app already exited before close")
+        await asyncio.to_thread(request_window_close, window, env)
+        try:
+            await asyncio.wait_for(asyncio.to_thread(app.wait), 20 * TIME_SCALE)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(f"{tag}: WM_DELETE_WINDOW did not quit the process") from exc
+        if app.returncode != 0:
+            raise RuntimeError(f"{tag}: process exited {app.returncode}")
+        app = None
+        await forward_refused(port_a, f"{tag} after quit")
+
+    async def panel(tag: str):
+        command("xdotool", "key", "--clearmodifiers", "ctrl+comma", env=env)
+        await asyncio.sleep(.5)
+        command("xdotool", "key", "--clearmodifiers", "ctrl+1", env=env)
+        w, h = window_size(window, env)
+        region = (max(0, (w - 880) // 2), 34, min(w, (w + 880) // 2), h - 22)
+        await locate_rendered_label(window, destination / f"saved-{tag}-profiles.png",
+                                    "Profiles", env=env, region=region)
+        return await open_saved_ssh_config_editor(
+            window, destination, tag, ssh_config, env, region,
+        )
+
+    async def edit_path(tag: str, value: str):
+        actions, field = await panel(tag)
+        command("xdotool", "mousemove", "--window", window,
+                *map(str, center(field)), "click", "1", env=env)
+        command("xdotool", "key", "--clearmodifiers", "ctrl+a", env=env)
+        if value:
+            command("xdotool", "type", "--clearmodifiers", "--delay", "5", value, env=env)
+        await asyncio.to_thread(screenshot, window, destination / f"saved-{tag}-draft.png", env)
+        return actions
+
+    async def action(tag: str, label: str, region):
+        # All three product buttons use the quiet style (not a primary fill).
+        # The region is the row immediately below this SSH-config input.
+        before = destination / f"saved-{tag}-{label.lower()}-before.png"
+        await click_label(window, before, label, env, region=region,
+                          timeout=20, settle=.7)
+        await asyncio.to_thread(screenshot, window,
+                                destination / f"saved-{tag}-{label.lower()}-after.png", env)
+
+    async def startup_oracle(tag: str, *, enabled: bool):
+        if enabled:
+            await forward_echo(port_a, f"GUI_SAVED_{tag}_ALPHA".encode(), timeout=45 * TIME_SCALE)
+            if "LOCAL_FORWARD_ALLOW" not in events.path.read_text(encoding="utf-8"):
+                raise RuntimeError(f"{tag}: Alpha echo did not traverse fixture SSH")
+        else:
+            await forward_stays_refused(port_a, f"{tag}: cleared Alpha auto-started",
+                                        seconds=5 * TIME_SCALE)
+        await forward_stays_refused(port_b, f"{tag}: opted-out Bravo started",
+                                    seconds=3 * TIME_SCALE)
+        await require_inherited_forwards_refused(port_c, port_inherited,
+                                                 seconds=5 * TIME_SCALE)
+        if events.path.read_text(encoding="utf-8").splitlines().count("SESSION_STARTED") != started_before:
+            raise RuntimeError(f"{tag}: auto-start opened a shell session")
+
+    try:
+        # Initial editor launch does not establish persistence: the actual Save
+        # gesture and the next launch without a CLI flag are the acceptance.
+        await launch(cli=True, tag="editor")
+        await startup_oracle("editor", enabled=True)
+        require_saved_ssh_config(profiles, None)
+        region = await edit_path("save", str(ssh_config))
+        await action("save", "Save", region)
+        require_saved_ssh_config(profiles, str(ssh_config))
+        await close("saved")
+
+        await launch(cli=False, tag="ordinary-saved")
+        await startup_oracle("ordinary-saved", enabled=True)
+        # Cancel an edited draft; the saved path must survive another process.
+        region = await edit_path("cancel", str(profiles.parent / "discarded_config"))
+        await action("cancel", "Cancel", region)
+        require_saved_ssh_config(profiles, str(ssh_config))
+        await close("cancel")
+        await launch(cli=False, tag="ordinary-cancel")
+        await startup_oracle("ordinary-cancel", enabled=True)
+        region, _field = await panel("clear")
+        await action("clear", "Clear", region)
+        require_saved_ssh_config(profiles, None)
+        await close("clear")
+        await launch(cli=False, tag="ordinary-cleared")
+        await startup_oracle("ordinary-cleared", enabled=False)
+        await close("cleared")
+        (destination / "saved-ssh-config-acceptance.txt").write_text(
+            "PASS Tools -> Profiles Save persisted SSH config; ordinary process without --ssh-config "
+            "echoed opted-in Alpha before a click; Bravo, Charlie and inherited LocalForward "
+            "remained closed. Cancel retained the saved path across relaunch. Clear removed it "
+            "and the next ordinary launch skipped auto-start.\n", encoding="utf-8",
+        )
+    finally:
+        if app is not None and app.poll() is None:
+            app.terminate()
+            try:
+                await asyncio.wait_for(asyncio.to_thread(app.wait), 8)
+            except asyncio.TimeoutError:
+                app.kill()
+                await asyncio.to_thread(app.wait)
+
+
 def _event_count(events, marker: str) -> int:
     return sum(1 for line in events.path.read_text(encoding="utf-8").splitlines()
                if line == marker)
@@ -5447,6 +6532,10 @@ async def main() -> int:
     if len(sys.argv) != 3:
         raise SystemExit("usage: test-iced-connected-gui.py BINARY ARTIFACT_DIRECTORY")
 
+    if AUTOSTART and (TOUR or not POPULATED):
+        raise SystemExit("INSPIRUM_GUI_AUTOSTART=1 needs INSPIRUM_GUI_POPULATED=1 and no tour")
+    if SAVED_SSH_CONFIG and (not AUTOSTART or not POPULATED or TOUR):
+        raise SystemExit("INSPIRUM_GUI_SAVED_SSH_CONFIG=1 needs populated auto-start without tour")
     binary = Path(sys.argv[1]).resolve(strict=True)
     destination = Path(sys.argv[2]).resolve()
     destination.mkdir(parents=True, exist_ok=True)
@@ -5478,6 +6567,14 @@ async def main() -> int:
             echo_port = int(echo_server.sockets[0].getsockname()[1])
             first_port = free_loopback_port({echo_port})
             forward_ports = (first_port, free_loopback_port({echo_port, first_port}))
+        # Auto-start only: Charlie (opted-in saved forward on the third
+        # profile) and the forward its ssh_config host adds on its own.
+        inherit_ports: tuple[int, ...] = ()
+        if AUTOSTART:
+            charlie_port = free_loopback_port({echo_port, *forward_ports})
+            inherit_ports = (
+                charlie_port, free_loopback_port({echo_port, *forward_ports, charlie_port}),
+            )
         server = await asyncssh.create_server(
             lambda: MonitoredServer(trusted, events, echo_port=echo_port),
             "127.0.0.1", 0, server_host_keys=[str(host)], encoding="utf-8",
@@ -5502,9 +6599,15 @@ async def main() -> int:
             ssh_config, port=port, identity=client,
             known_hosts=known, global_known_hosts=global_known,
         )
+        if AUTOSTART:
+            append_inherited_forward_host(ssh_config, inherit_ports[1], echo_port)
         profiles = root / "profiles.json"
         profiles.write_text(
-            json.dumps(fixture_profiles(forward_ports, echo_port)), encoding="utf-8",
+            json.dumps(fixture_profiles(
+                forward_ports, echo_port,
+                charlie_port=inherit_ports[0] if inherit_ports else None,
+            )),
+            encoding="utf-8",
         )
         extedit_editor = root / "fake-editor.py"
         extedit_argv_log = root / "fake-editor-argv.log"
@@ -5592,6 +6695,17 @@ async def main() -> int:
                         if first_frame_deadline - time.monotonic() < 1:
                             raise
                         await asyncio.sleep(1)
+
+                if AUTOSTART:
+                    await autostart_precheck(
+                        window, destination, env, events, forward_ports, profiles,
+                        inherit_ports=inherit_ports, ssh_config=ssh_config,
+                    )
+                    # Both forwards stopped, no session open yet.
+                    await autostart_min_window_probe(
+                        window, destination, env, forward_ports, profiles,
+                        inherit_ports=inherit_ports,
+                    )
 
                 # Saved sessions are listed in the bottom Session dock panel
                 # (Filter row, 'Sessions' group row, then one flat 23px row per
@@ -9501,6 +10615,21 @@ async def main() -> int:
                     encoding="utf-8",
                 )
                 print("PASS production Iced GUI: connected split, click-driven SFTP upload/download, draft, focus/privacy, alternate-screen and PTY isolation", flush=True)
+            if SAVED_SSH_CONFIG:
+                # The original output handle is closed and its process exited.
+                if app is None or app.poll() != 0:
+                    raise RuntimeError("original GUI must exit successfully before saved-path relaunch")
+                app = None
+                # Connected edits replace/remove Bravo; restore only the
+                # disposable profiles, never the setting being tested.
+                profiles.write_text(json.dumps(fixture_profiles(
+                    forward_ports, echo_port,
+                    charlie_port=inherit_ports[0] if inherit_ports else None,
+                )), encoding="utf-8")
+                await saved_ssh_config_probe(
+                    binary, profiles, ssh_config, local_root, destination, env, app_log,
+                    forward_ports, inherit_ports, events,
+                )
         finally:
             if app is not None and app.poll() is None:
                 app.terminate()
