@@ -31,6 +31,13 @@ import time
 import asyncssh
 
 
+def _temp_png() -> Path:
+    """Create a PNG scratch path without retaining mkstemp's descriptor."""
+    fd, name = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    return Path(name)
+
+
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "scripts/test-native-ssh-smoke.py"
 spec = importlib.util.spec_from_file_location("native_gui_ssh_fixture", SOURCE)
@@ -482,6 +489,10 @@ async def forward_refused(port: int, context: str, *, timeout: float = 8) -> Non
             last = type(error).__name__
         else:
             writer.close()
+            try:
+                await writer.wait_closed()
+            except OSError:
+                pass
             last = "connected"
         await asyncio.sleep(.25)
     raise RuntimeError(f"{context}: listener {port} did not refuse ({last})")
@@ -1317,7 +1328,7 @@ def visible_segment_rows(path: Path, tesseract: str, *, invert: bool = False):
     width, height, channels, rows = _read_png(path)
     thresh = _text_threshold(width, height, channels, rows)
     segments = []
-    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    temporary = _temp_png()
     try:
         for y1, y2 in _visible_bands(width, height, channels, rows, thresh):
             for x1, x2 in _band_segments(width, rows, channels, thresh, y1, y2, 24):
@@ -1359,7 +1370,7 @@ def visible_pixel_rows(path: Path, tesseract: str, *, clusters: bool = False):
     width, height, channels, rows = _read_png(path)
     thresh = _text_threshold(width, height, channels, rows)
     words = []
-    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    temporary = _temp_png()
     try:
         for y1, y2 in _visible_bands(width, height, channels, rows, thresh):
             pad = 3
@@ -1427,7 +1438,7 @@ def _region_crop_upscaled(path: Path, region, scale: int, dest: Path, *, invert:
 def region_upscaled_rows(path: Path, tesseract: str, region, *, psm: str = "6",
                          scale: int = 3, invert: bool = False):
     """OCR an upscaled crop of ``region``; word boxes in window coordinates."""
-    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    temporary = _temp_png()
     try:
         origin = _region_crop_upscaled(path, region, scale, temporary, invert=invert)
         tsv = _ocr_tsv(tesseract, temporary, psm)
@@ -3016,7 +3027,7 @@ def _inverted_segment_search(path: Path, tesseract: str, label: str, region, dea
         rx1, ry1, rx2, ry2 = 0, TOOLBAR_BOTTOM_Y, width, height
     thresh = _text_threshold(width, height, channels, rows)
     segments = []
-    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    temporary = _temp_png()
     try:
         for y1, y2 in _visible_bands(width, height, channels, rows, thresh):
             if y2 < ry1 or y1 > ry2:
@@ -3251,7 +3262,7 @@ def _selected_row_label(path: Path, tesseract: str, label: str, region):
     lines = []
     for rect in selected_fill_rects(rows, channels, region, width, height):
         lines.extend((box, rect[4]) for box in _fill_text_lines(rows, channels, rect))
-    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    temporary = _temp_png()
     try:
         for (lx1, ly1, lx2, ly2), fill in lines[:SELECTED_MAX_LINES]:
             box = (max(0, lx1 - 6), max(0, ly1 - 3),
@@ -3594,7 +3605,7 @@ def _map_strip_box(word, origin, region):
 
 
 def _ocr_strip_pass(image, tesseract, psm):
-    temporary = Path(tempfile.mkstemp(suffix=".png")[1])
+    temporary = _temp_png()
     try:
         image.save(temporary)
         tsv = _ocr_tsv(tesseract, temporary, psm)
@@ -3667,7 +3678,8 @@ def read_strip_words(shot_path, region):
         raise RuntimeError(
             "Find strip OCR requires Pillow (pip install Pillow==13.0.0; see scripts/local-gui/Dockerfile)"
         ) from exc
-    image = Image.open(shot_path).convert("RGB")
+    with Image.open(shot_path) as source:
+        image = source.convert("RGB")
     width, height = image.size
     x1, y1, x2, y2 = (int(edge) for edge in region)
     x1 = max(0, min(width - 1, x1))
@@ -3854,7 +3866,8 @@ def _rgb_image(shot):
             "gutter probe requires Pillow (pip install Pillow==13.0.0; see scripts/local-gui/Dockerfile)"
         ) from exc
     if isinstance(shot, (str, Path)):
-        return Image.open(shot).convert("RGB")
+        with Image.open(shot) as source:
+            return source.convert("RGB")
     return shot.convert("RGB")
 
 
@@ -4012,9 +4025,7 @@ def _gutter_probe_smooth_ocr(shot, tesseract, region, *, scale: int = 3, pad: in
     grey = ImageOps.invert(image.crop(box).convert("L"))
     big = grey.resize((grey.width * scale, grey.height * scale), Image.Resampling.LANCZOS)
     big = ImageOps.expand(big, border=pad, fill=255)
-    handle, name = tempfile.mkstemp(suffix=".png")
-    os.close(handle)
-    temporary = Path(name)
+    temporary = _temp_png()
     try:
         big.save(temporary)
         result = subprocess.run(
