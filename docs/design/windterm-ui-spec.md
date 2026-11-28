@@ -337,24 +337,25 @@ The supplied WindTerm screenshots distinguish **daily operation** from **editing
   an existing opt-in. The start-up summary says *launch requested*, not
   *started*: a surviving ssh process after the launcher's early-exit check
   does not prove a listening socket; failures and skips are still listed in
-  the status bar and tunnel popup notice. Before each unattended launch the
-  app asks OpenSSH (`ssh -G`, no connection) which forwards the launch would
-  really set up; if the host's OpenSSH configuration contributes any other
-  forward (or a `Tunnel` device, or changes or clears the selected one), the
-  forward is skipped at start-up and can still be started manually. That
-  one evaluation is then frozen into a private, owner-only configuration
-  file without `Host`/`Match`/`Include` (forward keywords dropped; the
-  selected forward stays on the command line), re-checked with `ssh -G`, and
-  the tunnel is spawned reading only that file (`-F`), so a second
-  evaluation by the real process (for example a `Match exec` answering
-  differently) cannot add forwards. The file is removed when the tunnel
-  stops. Tunnels with an effective **ProxyJump** (from the profile or from a
-  `Host` stanza) are skipped at start-up ("Auto-start skipped: this tunnel
-  uses ProxyJump. Start it manually."), because the frozen file describes
-  the destination, not the jump host; they can be started manually. If the
-  resolved configuration does not re-parse (for example a `SetEnv` value
-  with spaces), the launch fails closed and is listed as failed. Manual
-  starts are unchanged: no `ssh -G`, the user's configuration as is.
+  the status bar and tunnel popup notice. Auto-start requires the app to be
+  started with `--ssh-config <file>`; without it, opted-in tunnels are
+  skipped at start-up ("Auto-start skipped: no explicit SSH configuration
+  was provided. Start this tunnel manually.") before any `ssh` runs, and can
+  be started manually. With it, each unattended launch reads that one file
+  once, at start-up, into a private owner-only copy that is removed when the
+  tunnel stops; `ssh -G -F <copy>` (no connection) and the tunnel itself
+  both read only that copy, so values are kept exactly as written (quoted
+  paths included) and later edits to the file reach neither. The tunnel is
+  skipped and can still be started manually when the file uses `Include` or
+  `Match` anywhere ("Auto-start skipped: this tunnel's OpenSSH configuration
+  uses Include or Match. Start it manually."), is missing, unreadable or not
+  UTF-8, enables `CanonicalizeHostname`, has an effective **ProxyJump** (from
+  the profile or a `Host` stanza: "Auto-start skipped: this tunnel uses
+  ProxyJump. Start it manually."), or contributes any other forward (or a
+  `Tunnel` device, or changes or clears the selected one). Because
+  `--ssh-config` replaces OpenSSH's default files, a system-wide
+  `ssh_config` is not part of an unattended launch. Manual starts are
+  unchanged: no `ssh -G`, the user's configuration as is.
 - Do not hard-code names from the supplied screenshots; these are the user's
   personal saved entries, not fixtures or app defaults. Do not copy WindTerm
   icons or source. Match the two-surface workflow, row alignment, density,

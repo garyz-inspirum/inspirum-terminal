@@ -2791,8 +2791,13 @@ struct AutoStartPass {
     /// The host's OpenSSH configuration adds or changes forwards
     /// (`tunnels::InheritedForwards`), so only a manual start is allowed.
     skipped_config: Vec<String>,
-    /// Effective ProxyJump (`tunnels::ProxyJumpSkipped`): manual start only.
-    skipped_proxy_jump: Vec<String>,
+    /// Skipped for a reason with its own notice (`tunnels::ProxyJumpSkipped`,
+    /// `tunnels::ConfigSkip` other than `NoExplicitConfig`): one
+    /// `"{name}: {notice}"` sentence each. Manual start only.
+    skipped_manual: Vec<String>,
+    /// `tunnels::ConfigSkip::NoExplicitConfig` (the app runs without
+    /// `--ssh-config`): names listed under one shared notice.
+    skipped_no_config: Vec<String>,
 }
 
 /// Opted-in forwards of every saved profile, in library order, each once.
@@ -2870,9 +2875,14 @@ start manually ({})",
     if !parts.is_empty() {
         sentences.push(format!("Auto-start: {}.", parts.join("; ")));
     }
-    for name in &pass.skipped_proxy_jump {
-        sentences.push(format!("{name}: {}", tunnels::ProxyJumpSkipped));
+    if !pass.skipped_no_config.is_empty() {
+        sentences.push(format!(
+            "{}: {}",
+            pass.skipped_no_config.join(", "),
+            tunnels::ConfigSkip::NoExplicitConfig
+        ));
     }
+    sentences.extend(pass.skipped_manual.iter().cloned());
     sentences.join(" ")
 }
 
@@ -4984,9 +4994,15 @@ impl App {
                         Err(error)
                             if error.downcast_ref::<tunnels::ProxyJumpSkipped>().is_some() =>
                         {
-                            pass.skipped_proxy_jump.push(name)
+                            pass.skipped_manual.push(format!("{name}: {error}"))
                         }
-                        Err(error) => pass.failed.push(format!("{name}: {error:#}")),
+                        Err(error) => match error.downcast_ref::<tunnels::ConfigSkip>() {
+                            Some(tunnels::ConfigSkip::NoExplicitConfig) => {
+                                pass.skipped_no_config.push(name)
+                            }
+                            Some(skip) => pass.skipped_manual.push(format!("{name}: {skip}")),
+                            None => pass.failed.push(format!("{name}: {error:#}")),
+                        },
                     }
                 }
             }
