@@ -171,6 +171,8 @@ PANEL = (200, 34, 1080, 778)
 INPUT = (213, 674, 1056, 701)
 SAVED_ROW_BOTTOM = 645
 BUTTONS_TOP = 706
+BUTTONS_BOTTOM = 729
+NOTE_TOP = 736
 # OCR boxes locate_visible_label returned on the real frames (tesseract 4.1.1).
 OCR = {
     CI_FRAME: {"heading": (218, 586, 496, 592), "saved": (218, 634, 285, 638),
@@ -248,6 +250,24 @@ class SavedFieldPixelLocator(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "visible label not found"):
             module.locate_visible_label(CI_FRAME, CI_PATH, region=(200, 639, 1080, 772))
 
+    @unittest.skipUnless(os.environ.get("INSPIRUM_SLOW_OCR_TESTS") == "1" and shutil.which("tesseract"),
+                         "slow real-OCR evidence; set INSPIRUM_SLOW_OCR_TESTS=1")
+    def test_real_ocr_label_band_then_pixel_field(self):
+        # Same bands open_saved_ssh_config_editor derives from Saved file.
+        for frame in (CI_FRAME, LOCAL_FRAME):
+            with self.subTest(frame=frame.name):
+                saved = OCR[frame]["saved"]
+                section = (PANEL[0], saved[3] + 1, PANEL[2], min(PANEL[3], saved[3] + 134))
+                band = (section[0], section[1], section[2], min(section[3], saved[3] + 40))
+                label = module.locate_visible_label(frame, module.SAVED_SSH_CONFIG_LABEL, region=band)
+                field = module.saved_ssh_config_field(frame, label, section)
+                self.assertTrue(inside(module.center(field), INPUT), (label, field))
+                actions = (section[0], field[3] + 1, section[2], min(section[3], field[3] + 34))
+                for button in ("Cancel", "Clear"):
+                    box = module.locate_visible_label(frame, button, region=actions)
+                    self.assertGreaterEqual(box[1], BUTTONS_TOP - 2, (button, box))
+                    self.assertLessEqual(box[3], BUTTONS_BOTTOM + 2, (button, box))
+
 
 class SavedGuiSavedFieldSection(unittest.IsolatedAsyncioTestCase):
     async def _open(self, frame, tag, *, drop=()):
@@ -301,7 +321,8 @@ class SavedGuiSavedFieldSection(unittest.IsolatedAsyncioTestCase):
                     # Buttons stay constrained to the row directly below the field.
                     self.assertGreater(actions[1], field[3])
                     self.assertLessEqual(actions[1], INPUT[3] + 6)
-                    self.assertLessEqual(actions[3] - actions[1], 48)
+                    self.assertGreaterEqual(actions[3], BUTTONS_BOTTOM)
+                    self.assertLess(actions[3], NOTE_TOP)  # Saved path applies only ...
                     self.assertTrue(inside(module.center(OCR[frame]["cancel"]), actions))
 
     async def test_missing_field_label_refuses(self):
