@@ -18719,6 +18719,24 @@ mod tunnel_layout_tests {
     }
 
     #[test]
+    fn saved_config_is_selected_only_without_cli_and_manual_remains_unset() {
+        let (dir, path, _) = auto_start_boot_library();
+        let config = dir.path().join("config");
+        std::fs::write(&config, "Host *\n").unwrap();
+        let mut settings = crate::startup::StartupSettings::default();
+        settings.ssh_config = Some(config.to_str().unwrap().into());
+        crate::startup::save_settings(&crate::startup::settings_path(&path), &settings).unwrap();
+        let (app, _) = App::startup(path.clone(), None);
+        assert!(app.ssh_config.is_none());
+        assert!(app.auto_start.as_ref().unwrap().snapshot.is_some());
+        let cli = dir.path().join("cli");
+        std::fs::write(&cli, "Host *\n").unwrap();
+        let (app, _) = App::startup(path, Some(cli.clone()));
+        assert_eq!(app.ssh_config, Some(cli));
+        assert!(app.auto_start.as_ref().unwrap().snapshot.is_some());
+    }
+
+    #[test]
     fn startup_queues_only_opted_in_forwards_once() {
         let (_dir, path, key) = auto_start_boot_library();
         let (mut app, _task) = App::startup(path, None);

@@ -140,6 +140,50 @@ mod tests {
     }
 
     #[test]
+    fn saved_config_round_trip_and_behavior_updates_preserve_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        fs::write(&config, "Host *\n  ForwardAgent no\n").unwrap();
+        let path = dir.path().join("startup.json");
+        let mut settings = StartupSettings::default();
+        settings.ssh_config = Some(config.to_str().unwrap().into());
+        save_settings(&path, &settings).unwrap();
+        settings.behavior = StartupBehavior::Profile { profile: "prod".into() };
+        save_settings(&path, &settings).unwrap();
+        assert_eq!(load_settings(&path).unwrap(), settings);
+    }
+
+    #[test]
+    fn saved_config_rejects_non_regular_and_relative_paths_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("startup.json");
+        let settings = StartupSettings { ssh_config: Some("relative".into()), ..Default::default() };
+        assert!(save_settings(&path, &settings).is_err());
+        assert!(!path.exists());
+        let settings = StartupSettings { ssh_config: Some(dir.path().to_str().unwrap().into()), ..Default::default() };
+        assert!(save_settings(&path, &settings).is_err());
+        #[cfg(unix)] {
+            use std::os::unix::fs::symlink;
+            let config = dir.path().join("config");
+            fs::write(&config, "Host *\n").unwrap();
+            let link = dir.path().join("link");
+            symlink(&config, &link).unwrap();
+            let settings = StartupSettings { ssh_config: Some(link.to_str().unwrap().into()), ..Default::default() };
+            save_settings(&path, &settings).unwrap();
+            assert_eq!(load_settings(&path).unwrap(), settings);
+        }
+    }
+
+    #[test]
+    fn corrupt_startup_settings_do_not_overwrite_saved_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("startup.json");
+        fs::write(&path, b"{broken").unwrap();
+        assert!(load_settings(&path).is_err());
+        assert_eq!(fs::read(path).unwrap(), b"{broken");
+    }
+
+    #[test]
     fn workspace_startup_is_only_a_path_choice() {
         let settings = StartupSettings {
             behavior: StartupBehavior::Workspace {
