@@ -6029,6 +6029,118 @@ def require_saved_ssh_config(profiles: Path, expected: str | None) -> None:
         raise RuntimeError(f"saved SSH config: expected {expected!r}, got {actual!r} in {path}")
 
 
+SAVED_SSH_CONFIG_LABEL = "SSH config file for tunnel auto-start"
+
+
+def saved_ssh_config_field(path: Path, label, region):
+    """Interior of the text input directly below the field ``label`` box.
+
+    The saved draft is a random absolute path (``/home/runner/work/_temp/
+    iced-connected-fixture-XXXXXXXX/ssh_config`` on CI) which tesseract
+    mangles, so the input is found from its pixels: a block of 16..40 rows
+    whose non-background run spans most of the panel, starting at most 20 px
+    under the label and left-aligned with it. The panel background is read
+    from the label's own rows. The Saved file summary and the Save/Clear/
+    Cancel row are text or short buttons on that background and never
+    qualify. The interior is the span filled with the input colour (excludes
+    the border and the adjacent scrollbar). Refuses otherwise.
+    """
+    from collections import Counter
+    from PIL import Image
+
+    def refuse(problem: str):
+        return RuntimeError(
+            f"SSH config input not found under {SAVED_SSH_CONFIG_LABEL!r} label {tuple(label)} "
+            f"in {path}: {problem}"
+        )
+
+    with Image.open(path) as source:
+        image = source.convert("RGB")
+    width, height = image.size
+    x1 = max(0, int(region[0]))
+    x2 = min(width, int(region[2]))
+    y1 = max(0, int(label[3]) + 1)
+    y2 = min(height, int(region[3]), int(label[3]) + 48)
+    if x2 - x1 < 100 or y2 - y1 < 16:
+        raise refuse("band too small")
+    pixels = image.load()
+    assert pixels is not None
+    background = Counter(
+        pixels[x, y] for y in range(max(0, int(label[1])), y1) for x in range(x1, x2)
+    ).most_common(1)[0][0]
+
+    def differs(colour) -> bool:
+        return max(abs(int(a) - int(b)) for a, b in zip(colour, background)) >= 3
+
+    def longest_run(y: int):
+        best, start = (0, 0, 0), None
+        for x in range(x1, x2 + 1):
+            if x < x2 and differs(pixels[x, y]):
+                if start is None:
+                    start = x
+            elif start is not None:
+                if x - start > best[0]:
+                    best = (x - start, start, x - 1)
+                start = None
+        return best
+
+    wide = (x2 - x1) // 2
+    rows = []
+    for y in range(y1, y2):
+        run = longest_run(y)
+        if run[0] >= wide:
+            rows.append((y, run))
+        elif rows:
+            break  # first contiguous block only
+    if not rows:
+        raise refuse("no wide input block")
+    if not 16 <= len(rows) <= 40:
+        raise refuse(f"block height {len(rows)}")
+    top, bottom = rows[0][0], rows[-1][0]
+    if top - label[3] > 20:
+        raise refuse(f"block starts {top - label[3]} px below the label")
+    if bottom >= y2 - 1:
+        raise refuse("block runs past the band")
+    left = min(run[1] for _, run in rows)
+    right = max(run[2] for _, run in rows)
+    fill = Counter(
+        pixels[x, y] for y in range(top + 2, bottom - 1) for x in range(left, right + 1)
+    ).most_common(1)[0][0]
+    if not differs(fill):
+        raise refuse("block fill matches the panel background")
+    span = range(top, bottom + 1)
+    columns = [x for x in range(left, right + 1)
+               if sum(pixels[x, y] == fill for y in span) * 2 >= len(span)]
+    lines = [y for y in span
+             if sum(pixels[x, y] == fill for x in range(left, right + 1)) * 2 >= right - left + 1]
+    if not columns or not lines:
+        raise refuse("no input fill")
+    field = (columns[0], lines[0], columns[-1], lines[-1])
+    if abs(field[0] - label[0]) > 24:
+        raise refuse(f"input left edge {field[0]} not under label x={label[0]}")
+    if field[2] - field[0] < wide or field[3] - field[1] < 10:
+        raise refuse(f"input interior {field} too small")
+    return field
+
+
+async def locate_saved_ssh_config_field(window: str, path: Path, env: dict[str, str],
+                                        label_band, region, *, timeout: float = 20):
+    """Screenshot until the field label and the input under it are both drawn."""
+    deadline = time.monotonic() + timeout * TIME_SCALE
+    while True:
+        remaining = max(0.0, (deadline - time.monotonic()) / TIME_SCALE)
+        label = await locate_rendered_label(
+            window, path, SAVED_SSH_CONFIG_LABEL, env=env, region=label_band,
+            timeout=remaining,
+        )
+        try:
+            return await asyncio.to_thread(saved_ssh_config_field, path, label, region)
+        except RuntimeError:
+            if time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(.5)
+
+
 async def open_saved_ssh_config_editor(window: str, destination: Path, tag: str,
                                        ssh_config: Path, env: dict[str, str], region):
     """Locate the actual saved-file row, then target only its editor below.
@@ -6055,13 +6167,27 @@ async def open_saved_ssh_config_editor(window: str, destination: Path, tag: str,
                       region=set_row, timeout=20)
     section = (region[0], saved[3] + 1, region[2],
                min(region[3], saved[3] + 134))
-    # Empty draft renders the placeholder; saved draft renders its path.
-    field = await locate_rendered_label(
-        window, destination / f"saved-{tag}-field.png",
-        "Absolute SSH config file path" if tag == "save" else str(ssh_config),
-        env=env, region=section, timeout=20,
-    )
-    actions = (section[0], field[3] + 1, section[2], min(section[3], field[3] + 48))
+    if tag == "save":
+        # Empty draft renders the placeholder inside the input.
+        field = await locate_rendered_label(
+            window, destination / f"saved-{tag}-field.png",
+            "Absolute SSH config file path", env=env, region=section, timeout=20,
+        )
+    else:
+        # A saved draft renders the random absolute path, which OCR mangles
+        # on CI. Ground the click in the input's pixels under its label; the
+        # saved value itself is proven by the sidecar after each action.
+        label_band = (section[0], section[1], section[2],
+                      min(section[3], saved[3] + 40))
+        field = await locate_saved_ssh_config_field(
+            window, destination / f"saved-{tag}-field.png", env,
+            label_band, section, timeout=20,
+        )
+    # ``ssh_config`` is deliberately not OCR-matched for cancel/clear.
+    # The pixel interior ends at the input border: Save/Clear/Cancel are the
+    # next 24 px row; stop above the explanatory note under them.
+    reach = 48 if tag == "save" else 34
+    actions = (section[0], field[3] + 1, section[2], min(section[3], field[3] + reach))
     await locate_rendered_label(window, destination / f"saved-{tag}-actions.png",
                                 "Cancel", env=env, region=actions, timeout=20)
     return actions, field

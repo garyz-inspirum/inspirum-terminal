@@ -2,7 +2,9 @@
 import ast
 import importlib.util
 import json
+import os
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -155,3 +157,174 @@ class SavedGuiFirstFrame(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(RuntimeError, "empty GUI screenshot"):
                     await module.locate_rendered_label("window", frame, "Tunnels", env={}, timeout=0)
             capture.assert_called_once()
+
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+CI_FRAME = FIXTURES / "ci3-saved-cancel-field.png"
+LOCAL_FRAME = FIXTURES / "local3-saved-cancel-field.png"
+CI_PATH = "/home/runner/work/_temp/iced-connected-fixture-5bpw841n/ssh_config"
+LOCAL_PATH = "/tmp/iced-connected-fixture-m9ldf5zx/ssh_config"
+PANEL = (200, 34, 1080, 778)
+# Measured on both 1280x800 frames: the Tools -> Profiles text input sits
+# directly below the repeated "SSH config file for tunnel auto-start" field
+# label; Save/Clear/Cancel are the row under it, Saved file is above.
+INPUT = (213, 674, 1056, 701)
+SAVED_ROW_BOTTOM = 645
+BUTTONS_TOP = 706
+BUTTONS_BOTTOM = 729
+NOTE_TOP = 736
+# OCR boxes locate_visible_label returned on the real frames (tesseract 4.1.1).
+OCR = {
+    CI_FRAME: {"heading": (218, 586, 496, 592), "saved": (218, 634, 285, 638),
+               "label": (218, 658, 496, 665), "cancel": (350, 715, 387, 719)},
+    LOCAL_FRAME: {"heading": (218, 585, 498, 592), "saved": (218, 634, 286, 638),
+                  "label": (218, 657, 498, 665), "cancel": (350, 714, 387, 719)},
+}
+
+
+def inside(point, box):
+    return box[0] <= point[0] <= box[2] and box[1] <= point[1] <= box[3]
+
+
+class SavedFieldPixelLocator(unittest.TestCase):
+    """The saved draft is a random absolute path; never OCR it exactly."""
+
+    def test_fixture_is_the_real_ci_frame(self):
+        from PIL import Image
+        with Image.open(CI_FRAME) as image:
+            self.assertEqual(image.size, (1280, 800))
+        self.assertLess(CI_FRAME.stat().st_size, 120_000)
+
+    def test_field_click_lands_inside_input_on_ci_and_local(self):
+        for frame in (CI_FRAME, LOCAL_FRAME):
+            with self.subTest(frame=frame.name):
+                field = module.saved_ssh_config_field(frame, OCR[frame]["label"], PANEL)
+                point = module.center(field)
+                self.assertTrue(inside(point, INPUT), (field, point))
+                # Interior only: inside the border, never the Saved file
+                # summary above it nor the Save/Clear/Cancel row below.
+                self.assertGreater(field[0], INPUT[0] - 1)
+                self.assertLess(field[2], INPUT[2] + 1)
+                self.assertGreaterEqual(field[1], INPUT[1])
+                self.assertLessEqual(field[3], INPUT[3])
+                self.assertGreater(field[1], SAVED_ROW_BOTTOM)
+                self.assertLess(field[3], BUTTONS_TOP)
+                self.assertGreater(field[2] - field[0], 700)
+
+    def _erased(self, frame, box, tmp):
+        from PIL import Image, ImageDraw
+        out = Path(tmp) / f"erased-{frame.name}"
+        with Image.open(frame) as source:
+            image = source.convert("RGB")
+        ImageDraw.Draw(image).rectangle(box, fill=image.getpixel((205, 650)))
+        image.save(out)
+        return out
+
+    def test_refuses_when_input_is_erased(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for frame in (CI_FRAME, LOCAL_FRAME):
+                with self.subTest(frame=frame.name):
+                    erased = self._erased(frame, (INPUT[0] - 1, INPUT[1] - 1, INPUT[2] + 1, INPUT[3] + 1), tmp)
+                    with self.assertRaisesRegex(RuntimeError, "SSH config input"):
+                        module.saved_ssh_config_field(erased, OCR[frame]["label"], PANEL)
+
+    def test_saved_file_summary_is_never_a_field(self):
+        # Anchored on the heading instead of the field label, the only rows
+        # below are Source/Saved file text: no input, so refuse.
+        for frame in (CI_FRAME, LOCAL_FRAME):
+            with self.subTest(frame=frame.name):
+                with self.assertRaisesRegex(RuntimeError, "SSH config input"):
+                    module.saved_ssh_config_field(frame, OCR[frame]["heading"], PANEL)
+
+    def test_refuses_input_not_aligned_under_label(self):
+        # The field label must sit directly above the input's left edge.
+        label = OCR[CI_FRAME]["label"]
+        shifted = (label[0] + 300, label[1], label[2] + 300, label[3])
+        with self.assertRaisesRegex(RuntimeError, "SSH config input"):
+            module.saved_ssh_config_field(CI_FRAME, shifted, PANEL)
+
+    @unittest.skipUnless(os.environ.get("INSPIRUM_SLOW_OCR_TESTS") == "1" and shutil.which("tesseract"),
+                         "slow real-OCR evidence; set INSPIRUM_SLOW_OCR_TESTS=1")
+    def test_exact_random_path_ocr_misses_on_real_ci_frame(self):
+        # The pre-fix oracle: exact absolute path in the field region.
+        with self.assertRaisesRegex(RuntimeError, "visible label not found"):
+            module.locate_visible_label(CI_FRAME, CI_PATH, region=(200, 639, 1080, 772))
+
+    @unittest.skipUnless(os.environ.get("INSPIRUM_SLOW_OCR_TESTS") == "1" and shutil.which("tesseract"),
+                         "slow real-OCR evidence; set INSPIRUM_SLOW_OCR_TESTS=1")
+    def test_real_ocr_label_band_then_pixel_field(self):
+        # Same bands open_saved_ssh_config_editor derives from Saved file.
+        for frame in (CI_FRAME, LOCAL_FRAME):
+            with self.subTest(frame=frame.name):
+                saved = OCR[frame]["saved"]
+                section = (PANEL[0], saved[3] + 1, PANEL[2], min(PANEL[3], saved[3] + 134))
+                band = (section[0], section[1], section[2], min(section[3], saved[3] + 40))
+                label = module.locate_visible_label(frame, module.SAVED_SSH_CONFIG_LABEL, region=band)
+                field = module.saved_ssh_config_field(frame, label, section)
+                self.assertTrue(inside(module.center(field), INPUT), (label, field))
+                actions = (section[0], field[3] + 1, section[2], min(section[3], field[3] + 34))
+                for button in ("Cancel", "Clear"):
+                    box = module.locate_visible_label(frame, button, region=actions)
+                    self.assertGreaterEqual(box[1], BUTTONS_TOP - 2, (button, box))
+                    self.assertLessEqual(box[3], BUTTONS_BOTTOM + 2, (button, box))
+
+
+class SavedGuiSavedFieldSection(unittest.IsolatedAsyncioTestCase):
+    async def _open(self, frame, tag, *, drop=()):
+        boxes = OCR[frame]
+        names = {
+            "SSH config file for tunnel auto-start": None,
+            "Saved file:": boxes["saved"],
+            "Cancel": boxes["cancel"],
+        }
+        seen = []
+
+        async def locate(_window, path, label, *, env, region, timeout=22):
+            seen.append((label, region, Path(path).name))
+            if label in drop and not Path(path).name.endswith("-heading.png"):
+                raise RuntimeError(f"visible label not found in screenshot: {label}")
+            if label == "SSH config file for tunnel auto-start":
+                # Heading before Set, field label after; both are bounded.
+                box = boxes["heading"] if Path(path).name.endswith("-heading.png") else boxes["label"]
+                shutil.copyfile(frame, path)
+            elif label in names:
+                box = names[label]
+            else:
+                raise AssertionError(f"unexpected OCR lookup (random path?): {label}")
+            for i in (0, 1):
+                self.assertLessEqual(region[i], box[i])
+                self.assertGreaterEqual(region[i + 2], box[i + 2])
+            return box
+
+        async def click(*_args, **_kwargs):
+            return None
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(module, "locate_rendered_label", side_effect=locate), \
+             mock.patch.object(module, "click_label", side_effect=click):
+            result = await module.open_saved_ssh_config_editor(
+                "window", Path(tmp), tag, Path(CI_PATH if frame == CI_FRAME else LOCAL_PATH),
+                {}, PANEL,
+            )
+        return result, seen
+
+    async def test_cancel_and_clear_target_input_without_exact_path_ocr(self):
+        for frame in (CI_FRAME, LOCAL_FRAME):
+            for tag in ("cancel", "clear"):
+                with self.subTest(frame=frame.name, tag=tag):
+                    (actions, field), seen = await self._open(frame, tag)
+                    self.assertTrue(inside(module.center(field), INPUT))
+                    labels = [label for label, _, _ in seen]
+                    self.assertNotIn(CI_PATH, labels)
+                    self.assertNotIn(LOCAL_PATH, labels)
+                    self.assertEqual(labels[-1], "Cancel")
+                    # Buttons stay constrained to the row directly below the field.
+                    self.assertGreater(actions[1], field[3])
+                    self.assertLessEqual(actions[1], INPUT[3] + 6)
+                    self.assertGreaterEqual(actions[3], BUTTONS_BOTTOM)
+                    self.assertLess(actions[3], NOTE_TOP)  # Saved path applies only ...
+                    self.assertTrue(inside(module.center(OCR[frame]["cancel"]), actions))
+
+    async def test_missing_field_label_refuses(self):
+        with self.assertRaises(RuntimeError):
+            await self._open(CI_FRAME, "cancel", drop=("SSH config file for tunnel auto-start",))
