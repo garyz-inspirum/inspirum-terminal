@@ -74,6 +74,32 @@ class DialogGeometryTest(unittest.TestCase):
         self.assertTrue(label[3] + 12 <= y <= label[3] + 36, y)
 
 
+class DialogScrollTest(unittest.TestCase):
+    def test_failing_ci_frame_drags_thumb_to_bottom_of_dialog(self):
+        shot = Path("/mnt/data/atlas/it14-fe89d61-ci/connected/connected-profile-rename-before-submit.png")
+        if not shot.is_file():
+            self.skipTest("CI screenshot artifact unavailable")
+        start, end = module.connection_scroll_drag(shot, module.connection_dialog_region(W, H))
+        self.assertEqual(start, (922, 243))
+        self.assertEqual(end[0], start[0])
+        self.assertGreater(end[1], 700)
+        self.assertLess(end[1], H - 22)
+
+    def test_synthetic_thumb_drags_into_footer(self):
+        shot = frame([((917, 80, 927, 746), (55, 55, 55)),
+                      ((917, 123, 927, 363), (81, 81, 81))])
+        self.addCleanup(shot.unlink)
+        start, end = module.connection_scroll_drag(shot, module.connection_dialog_region(W, H))
+        self.assertEqual(start, (922, 243))
+        self.assertEqual(end, (922, 734))
+
+    def test_missing_thumb_fails_closed(self):
+        shot = frame([])
+        self.addCleanup(shot.unlink)
+        with self.assertRaisesRegex(RuntimeError, "scrollbar thumb"):
+            module.connection_scroll_drag(shot, module.connection_dialog_region(W, H))
+
+
 class DangerPixelsTest(unittest.TestCase):
     def setUp(self):
         self.region = module.connection_dialog_region(W, H)
@@ -196,6 +222,13 @@ class ProbeWiringTest(unittest.TestCase):
         self.assertIn("connection_submit_button", body)
         self.assertIn("profile_edit_refused", body)
         self.assertNotIn('"Return"', body)           # Submit is a click
+
+    def test_scroll_bottom_drags_visible_scrollbar_not_wheels_in_form(self):
+        body = function_source(self.src, "scroll_bottom")
+        self.assertIn("connection_scroll_drag", body)
+        self.assertIn('"mousedown", "1"', body)
+        self.assertIn('"mouseup", "1"', body)
+        self.assertNotIn('"click", "--repeat"', body)
 
     def test_switch_stops_alpha_after_refusals_before_sibling_edits(self):
         body = self.body()
