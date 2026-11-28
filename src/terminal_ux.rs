@@ -91,10 +91,23 @@ pub fn find_text(haystack: &str, needle: &str, limit: usize) -> Vec<SearchHit> {
 
 /// A case-insensitive literal query, lowercased once per search.
 ///
-/// Matches are non-overlapping, scanned left to right (after a match the scan resumes after
-/// its end), `column` is the 1-based char index of the match start. ASCII query against an
-/// ASCII line compares bytes with ASCII case folding and allocates nothing per line; any
-/// non-ASCII on either side uses Unicode `to_lowercase`.
+/// Invariants:
+/// - The query and each line are folded the same way (`str::to_lowercase`), and matching is
+///   done on the folded text.
+/// - Matches are non-overlapping, scanned left to right over the folded text (after a match
+///   the scan resumes after its end).
+/// - `count_in_line` and `find_in_line` (unlimited) agree on the number of matches per line.
+/// - `column` is the 1-based char index in the ORIGINAL line of the char whose fold produced
+///   the match's first folded char. Folding can add chars ('İ' -> "i\u{307}"), so folded
+///   offsets are mapped back; a match starting inside an expansion (query begins with
+///   U+0307) reports the expanding char. Callers use `column - 1` against original-text
+///   char offsets (soft-wrap segment starts).
+/// - Folded text is only sliced at offsets returned by `str::find` (match boundaries), and
+///   the original line is only walked by `chars()`, so no slice can split a char.
+///
+/// ASCII query against an ASCII line compares bytes with ASCII case folding and allocates
+/// nothing per line (there folded and original offsets coincide); any non-ASCII on either
+/// side uses Unicode `to_lowercase` (e.g. ASCII "k" still finds KELVIN SIGN U+212A).
 pub struct TextQuery {
     lower: String,
     ascii: bool,
@@ -168,15 +181,30 @@ impl TextQuery {
             return;
         }
         let line_lower = line.to_lowercase();
+        // Implicit folded-byte -> original-char map, walked forward once: hits arrive in
+        // increasing folded byte order, so the cursor never rewinds (O(line) for all hits).
+        let mut originals = line.chars();
+        // Chars of `line` consumed so far, and the folded byte where the next one starts.
+        let mut consumed = 0;
+        let mut folded_end = 0;
         let mut start = 0;
         while start <= line_lower.len() {
             let Some(found) = line_lower[start..].find(&self.lower) else {
                 break;
             };
             let byte_column = start + found;
+            // Consume until the last consumed char's fold covers `byte_column`; that char
+            // (index `consumed - 1`) produced the match's first folded char.
+            while folded_end <= byte_column {
+                let Some(original) = originals.next() else {
+                    break;
+                };
+                folded_end += folded_len(original);
+                consumed += 1;
+            }
             hits.push(SearchHit {
                 line: line_number,
-                column: line_lower[..byte_column].chars().count() + 1,
+                column: consumed.max(1),
                 preview: preview_of(line),
             });
             if hits.len() >= limit {
@@ -185,6 +213,12 @@ impl TextQuery {
             start = byte_column + self.lower.len();
         }
     }
+}
+
+/// UTF-8 length of `c` in `str::to_lowercase` output. `char::to_lowercase` differs from the
+/// string form only for final sigma ('Σ' -> 'ς' vs 'σ'), and both are 2 bytes.
+fn folded_len(c: char) -> usize {
+    c.to_lowercase().map(char::len_utf8).sum()
 }
 
 fn preview_of(line: &str) -> String {
