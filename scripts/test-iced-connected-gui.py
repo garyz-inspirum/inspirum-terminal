@@ -194,6 +194,9 @@ POPULATED_LABELS = ("Alpha forward", "Bravo forward")
 # Alpha with the real popup toggle so the populated flow below starts from
 # "both stopped" exactly as without this mode.
 AUTOSTART = os.environ.get("INSPIRUM_GUI_AUTOSTART") == "1"
+# Additional mandatory CI phase: use Tools -> Profiles to persist the SSH
+# config, then prove ordinary (no --ssh-config) process launches honour it.
+SAVED_SSH_CONFIG = os.environ.get("INSPIRUM_GUI_SAVED_SSH_CONFIG") == "1"
 # Auto-start mode also saves a THIRD profile (last in the library, so the
 # rows above keep their order) whose host is an ssh_config alias that adds a
 # LocalForward of its own. Its one saved forward (Charlie) is opted in, but
@@ -5807,6 +5810,194 @@ async def autostart_min_window_probe(window: str, destination: Path, env: dict[s
           f"notice (wheel steps: {wheel_steps}; footer {footer_steps})", flush=True)
 
 
+def require_saved_ssh_config(path: Path, expected: str | None) -> None:
+    """Read the actual ui-state.json beside the profiles, not an in-memory draft."""
+    if not path.exists():
+        if expected is None:
+            return
+        raise RuntimeError(f"saved SSH config missing: {path}")
+    state = json.loads(path.read_text(encoding="utf-8"))
+    actual = state.get("ssh_config_path")
+    if actual != expected and not (expected is None and actual in (None, "")):
+        raise RuntimeError(f"saved SSH config: expected {expected!r}, got {actual!r} in {path}")
+
+
+async def saved_ssh_config_probe(binary: Path, profiles: Path, ssh_config: Path,
+                                 destination: Path, env: dict[str, str], app_log: Path,
+                                 forward_ports, inherit_ports, events) -> None:
+    """Tools -> Profiles Save/Clear/Cancel across genuine process relaunches.
+
+    All listeners are observed through the native fixture, not a GUI badge.
+    No relaunch has --ssh-config; the initial editor launch does, so the
+    SSH config file for tunnel auto-start field can be filled by a user.
+    """
+    port_a, port_b = forward_ports
+    port_c, port_inherited = inherit_ports
+    state_path = profiles.with_name("ui-state.json")
+    started_before = events.path.read_text(encoding="utf-8").splitlines().count("SESSION_STARTED")
+    app = None
+    window = ""
+
+    async def launch(*, cli: bool, tag: str):
+        nonlocal app, window
+        argv = [str(binary), "--ui", "iced", "--profiles", str(profiles)]
+        if cli:
+            argv.extend(("--ssh-config", str(ssh_config)))
+        elif "--ssh-config" in argv:
+            raise RuntimeError("ordinary relaunch unexpectedly inherited --ssh-config")
+        with app_log.open("a", encoding="utf-8") as output:
+            app = subprocess.Popen(argv, stdout=output, stderr=subprocess.STDOUT,
+                                   cwd=profiles.parent / "local-files", env=env)
+        window = ""
+        for _ in range(int(100 * TIME_SCALE)):
+            if app.poll() is not None:
+                raise RuntimeError(f"{tag}: app exited early; {app_log.read_text()[-1200:]}")
+            result = subprocess.run(
+                ["xdotool", "search", "--onlyvisible", "--name", "^Inspirum Terminal$"],
+                env=env, capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                window = result.stdout.splitlines()[0]
+                break
+            await asyncio.sleep(.25)
+        if not window:
+            raise RuntimeError(f"{tag}: Iced window did not appear")
+        command("xdotool", "windowfocus", window, env=env)
+        await locate_rendered_label(window, destination / f"saved-{tag}-ready.png",
+                                    "Tunnels", env=env, timeout=20,
+                                    region=(window_size(window, env)[0] - 220, 0,
+                                            window_size(window, env)[0], 42))
+        print(f"saved SSH config {tag}: argv={argv} pid={app.pid}", flush=True)
+
+    async def close(tag: str):
+        nonlocal app
+        if app is None or app.poll() is not None:
+            raise RuntimeError(f"{tag}: app already exited before close")
+        await asyncio.to_thread(request_window_close, window, env)
+        try:
+            await asyncio.wait_for(asyncio.to_thread(app.wait), 20 * TIME_SCALE)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(f"{tag}: WM_DELETE_WINDOW did not quit the process") from exc
+        if app.returncode != 0:
+            raise RuntimeError(f"{tag}: process exited {app.returncode}")
+        app = None
+        await forward_refused(port_a, f"{tag} after quit")
+
+    async def panel(tag: str):
+        command("xdotool", "key", "--clearmodifiers", "ctrl+comma", env=env)
+        await asyncio.sleep(.5)
+        command("xdotool", "key", "--clearmodifiers", "ctrl+1", env=env)
+        w, h = window_size(window, env)
+        region = (max(0, (w - 880) // 2), 34, min(w, (w + 880) // 2), h - 22)
+        await locate_rendered_label(window, destination / f"saved-{tag}-profiles.png",
+                                    "Profiles", env=env, region=region)
+        label = await locate_rendered_label(
+            window, destination / f"saved-{tag}-field.png",
+            "SSH config file for tunnel auto-start", env=env, region=region,
+        )
+        return region, label
+
+    async def edit_path(tag: str, value: str):
+        region, label = await panel(tag)
+        # Iced form convention: text input immediately below its field label.
+        x = min(region[2] - 70, max(label[0] + 140, (label[0] + label[2]) // 2))
+        y = label[3] + 22
+        if not (region[0] <= x < region[2] and region[1] <= y < region[3]):
+            raise RuntimeError(f"{tag}: SSH config field {label} has no reachable input")
+        command("xdotool", "mousemove", "--window", window, str(x), str(y), "click", "1", env=env)
+        command("xdotool", "key", "--clearmodifiers", "ctrl+a", env=env)
+        if value:
+            command("xdotool", "type", "--clearmodifiers", "--delay", "5", value, env=env)
+        await asyncio.to_thread(screenshot, window, destination / f"saved-{tag}-draft.png", env)
+        return region
+
+    async def action(tag: str, label: str, region):
+        # Require the named button; a primary blue Save has dark text that
+        # light-text OCR may miss, so use its fill only on the same footer row
+        # as OCR-located Clear/Cancel, never an arbitrary blue toggle.
+        before = destination / f"saved-{tag}-{label.lower()}-before.png"
+        if label == "Save":
+            cancel = await locate_rendered_label(window, before, "Cancel", env=env,
+                                                 region=region, timeout=20)
+            await asyncio.to_thread(screenshot, window, before, env)
+            image = await asyncio.to_thread(_read_png, before)
+            candidates = []
+            for y in range(max(region[1], cancel[1] - 10), min(region[3], cancel[3] + 10)):
+                run = primary_fill_run(before, y, region[0], region[2],
+                                       min_width=25, image=image)
+                if run and 30 <= run[1] - run[0] <= 140:
+                    candidates.append((y, run))
+            if len(candidates) < 8:
+                raise RuntimeError(f"Save primary fill not found beside Cancel {cancel} in {before}")
+            box = (min(r[0] for _, r in candidates), min(y for y, _ in candidates),
+                   max(r[1] for _, r in candidates), max(y for y, _ in candidates) + 1)
+            command("xdotool", "mousemove", "--window", window,
+                    *map(str, center(box)), "click", "1", env=env)
+            await asyncio.sleep(.7)
+        else:
+            await click_label(window, before, label, env, region=region,
+                              timeout=20, settle=.7)
+        await asyncio.to_thread(screenshot, window,
+                                destination / f"saved-{tag}-{label.lower()}-after.png", env)
+
+    async def startup_oracle(tag: str, *, enabled: bool):
+        if enabled:
+            await forward_echo(port_a, f"GUI_SAVED_{tag}_ALPHA".encode(), timeout=45 * TIME_SCALE)
+            if "LOCAL_FORWARD_ALLOW" not in events.path.read_text(encoding="utf-8"):
+                raise RuntimeError(f"{tag}: Alpha echo did not traverse fixture SSH")
+        else:
+            await forward_stays_refused(port_a, f"{tag}: cleared Alpha auto-started",
+                                        seconds=5 * TIME_SCALE)
+        await forward_stays_refused(port_b, f"{tag}: opted-out Bravo started",
+                                    seconds=3 * TIME_SCALE)
+        await require_inherited_forwards_refused(port_c, port_inherited,
+                                                 seconds=5 * TIME_SCALE)
+        if events.path.read_text(encoding="utf-8").splitlines().count("SESSION_STARTED") != started_before:
+            raise RuntimeError(f"{tag}: auto-start opened a shell session")
+
+    try:
+        # Initial editor launch does not establish persistence: the actual Save
+        # gesture and the next launch without a CLI flag are the acceptance.
+        await launch(cli=True, tag="editor")
+        await startup_oracle("editor", enabled=True)
+        require_saved_ssh_config(state_path, None)
+        region = await edit_path("save", str(ssh_config))
+        await action("save", "Save", region)
+        require_saved_ssh_config(state_path, str(ssh_config))
+        await close("saved")
+
+        await launch(cli=False, tag="ordinary-saved")
+        await startup_oracle("ordinary-saved", enabled=True)
+        # Cancel an edited draft; the saved path must survive another process.
+        region = await edit_path("cancel", str(profiles.parent / "discarded_config"))
+        await action("cancel", "Cancel", region)
+        require_saved_ssh_config(state_path, str(ssh_config))
+        await close("cancel")
+        await launch(cli=False, tag="ordinary-cancel")
+        await startup_oracle("ordinary-cancel", enabled=True)
+        region, _field = await panel("clear")
+        await action("clear", "Clear", region)
+        require_saved_ssh_config(state_path, None)
+        await close("clear")
+        await launch(cli=False, tag="ordinary-cleared")
+        await startup_oracle("ordinary-cleared", enabled=False)
+        await close("cleared")
+        (destination / "saved-ssh-config-acceptance.txt").write_text(
+            "PASS Tools -> Profiles Save persisted SSH config; ordinary process without --ssh-config "
+            "echoed opted-in Alpha before a click; Bravo, Charlie and inherited LocalForward "
+            "remained closed. Cancel retained the saved path across relaunch. Clear removed it "
+            "and the next ordinary launch skipped auto-start.\n", encoding="utf-8",
+        )
+    finally:
+        if app is not None and app.poll() is None:
+            app.terminate()
+            try:
+                await asyncio.wait_for(asyncio.to_thread(app.wait), 8)
+            except asyncio.TimeoutError:
+                app.kill()
+                await asyncio.to_thread(app.wait)
+
+
 async def main() -> int:
     if sys.platform != "linux":
         raise RuntimeError("Linux-only native GUI fixture")
@@ -5815,6 +6006,8 @@ async def main() -> int:
 
     if AUTOSTART and (TOUR or not POPULATED):
         raise SystemExit("INSPIRUM_GUI_AUTOSTART=1 needs INSPIRUM_GUI_POPULATED=1 and no tour")
+    if SAVED_SSH_CONFIG and (not AUTOSTART or not POPULATED or TOUR):
+        raise SystemExit("INSPIRUM_GUI_SAVED_SSH_CONFIG=1 needs populated auto-start without tour")
     binary = Path(sys.argv[1]).resolve(strict=True)
     destination = Path(sys.argv[2]).resolve()
     destination.mkdir(parents=True, exist_ok=True)
@@ -9858,6 +10051,22 @@ async def main() -> int:
                     encoding="utf-8",
                 )
                 print("PASS production Iced GUI: connected split, click-driven SFTP upload/download, draft, focus/privacy, alternate-screen and PTY isolation", flush=True)
+                if SAVED_SSH_CONFIG:
+                    # Existing connected edits intentionally replace/remove
+                    # Bravo. Restore ONLY the generated profile fixture after
+                    # that process has exited, so the relaunch tests the same
+                    # original Alpha/Bravo/Charlie metadata, not its edits.
+                    profiles.write_text(json.dumps(fixture_profiles(
+                        forward_ports, echo_port,
+                        charlie_port=inherit_ports[0] if inherit_ports else None,
+                    )), encoding="utf-8")
+                    # The legacy --ssh-config run above is retained verbatim;
+                    # after it exits, a fresh process exercises the saved UI
+                    # and several ordinary relaunches against the same fixture.
+                    await saved_ssh_config_probe(
+                        binary, profiles, ssh_config, destination, env, app_log,
+                        forward_ports, inherit_ports, events,
+                    )
         finally:
             if app is not None and app.poll() is None:
                 app.terminate()
