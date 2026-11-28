@@ -248,6 +248,9 @@ pub(super) struct State {
     /// Number of history snapshots taken (test hook for the frame path).
     #[cfg(test)]
     pub history_refresh_count: u64,
+    /// Test seam: snapshot source for panes without a live terminal.
+    #[cfg(test)]
+    pub history_test_source: BTreeMap<u64, terminal_core::HistorySnapshot>,
 }
 impl State {
     pub fn load(path: &std::path::Path) -> Self {
@@ -330,8 +333,23 @@ impl State {
             history_snapshot_seen: BTreeMap::new(),
             #[cfg(test)]
             history_refresh_count: 0,
+            #[cfg(test)]
+            history_test_source: BTreeMap::new(),
         }
     }
+}
+impl State {
+    /// The pane's grid was reflowed or resized: snapshot coordinates taken
+    /// before this point are stale even if the child prints nothing.
+    pub(super) fn mark_history_layout_changed(&mut self, id: u64) {
+        let generation = self.history_output_generation.entry(id).or_default();
+        *generation = generation.wrapping_add(1);
+    }
+}
+/// Status shown when a snapshot cleared marks whose line identity was lost.
+pub(super) fn history_marks_cleared_status(count: u64) -> String {
+    let noun = if count == 1 { "mark" } else { "marks" };
+    format!("{count} history {noun} cleared: scrollback changed where lines repeat.")
 }
 impl Drop for State {
     fn drop(&mut self) {
@@ -456,13 +474,22 @@ impl App {
             {
                 self.tools.history_refresh_count += 1;
             }
-            if let Some(terminal) = &pane.terminal {
+            let snapshot = pane
+                .terminal
+                .as_ref()
+                .map(|terminal| terminal.history_lines());
+            #[cfg(test)]
+            let snapshot =
+                snapshot.or_else(|| self.tools.history_test_source.get(&pane.id).cloned());
+            if let Some(snapshot) = snapshot {
                 self.tools.history_owner = Some(pane.id);
-                self.tools
-                    .histories
-                    .entry(pane.id)
-                    .or_default()
-                    .update_lines(terminal.history_lines());
+                let state = self.tools.histories.entry(pane.id).or_default();
+                let dropped_before = state.dropped_marks();
+                state.update_lines(snapshot);
+                let dropped = state.dropped_marks().saturating_sub(dropped_before);
+                if dropped > 0 {
+                    self.status = history_marks_cleared_status(dropped);
+                }
             }
         }
     }
@@ -922,12 +949,26 @@ impl App {
                 return self.history_jump();
             }
             Action::HistorySelect(index) => {
-                if let Some(s) = self
+                // The listed index may predate an eviction or reflow: resolve
+                // the clicked match by identity against a fresh snapshot.
+                let Some((owner, line_id, column)) = self.tools.history_owner.and_then(|id| {
+                    self.tools
+                        .histories
+                        .get(&id)
+                        .and_then(|s| s.hits().get(index))
+                        .map(|hit| (id, hit.line_id, hit.column))
+                }) else {
+                    return Task::none();
+                };
+                self.history_refresh_if_stale(std::time::Instant::now(), false);
+                let found = self
                     .tools
-                    .history_owner
-                    .and_then(|id| self.tools.histories.get_mut(&id))
-                {
-                    s.select_hit(index);
+                    .histories
+                    .get_mut(&owner)
+                    .is_some_and(|s| s.select_hit_at(line_id, column));
+                if !found {
+                    self.status = "That match is no longer in the retained history.".into();
+                    return Task::none();
                 }
                 return self.history_jump();
             }

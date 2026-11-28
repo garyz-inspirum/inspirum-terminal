@@ -5282,6 +5282,7 @@ impl App {
                             mismatch.expected.1
                         );
                         pane.grid_mismatch_corrected = Some(mismatch);
+                        self.tools.mark_history_layout_changed(pane.id);
                         let (columns, lines) = mismatch.expected;
                         let cell = pane.cell_size;
                         terminal.process_command(terminal_core::BackendCommand::Resize(
@@ -5344,6 +5345,9 @@ impl App {
                 }
                 pane.terminal_grid_size = Some((columns, lines));
                 pane.cell_size = cell;
+                // The backend reflows on resize without necessarily emitting
+                // output, so history coordinates must be re-read.
+                self.tools.mark_history_layout_changed(pane.id);
                 if let Some(terminal) = pane.terminal.as_mut() {
                     terminal.process_command(terminal_core::BackendCommand::Resize(
                         terminal_core::Size::new(columns as f32 * cell.0, lines as f32 * cell.1),
@@ -17969,6 +17973,237 @@ mod tests {
             app.tools.history_refresh_count,
             before + 1,
             "no output since"
+        );
+    }
+
+    /// One unwrapped grid row per string, rows numbered from the oldest retained row.
+    fn stale_coords_snapshot(
+        rows: &[&str],
+        history_rows: usize,
+        capacity: usize,
+    ) -> terminal_core::HistorySnapshot {
+        terminal_core::HistorySnapshot {
+            lines: rows
+                .iter()
+                .enumerate()
+                .map(|(row, text)| terminal_core::LogicalLine {
+                    text: (*text).to_string(),
+                    first_row: row,
+                    segment_starts: vec![0],
+                })
+                .collect(),
+            history_rows,
+            capacity,
+            columns: 80,
+        }
+    }
+
+    fn stale_coords_selected(app: &App, id: u64) -> (u64, usize, usize) {
+        let hit = app
+            .tools
+            .histories
+            .get(&id)
+            .and_then(|state| state.selected_hit())
+            .expect("selected hit");
+        (hit.line_id, hit.column, hit.grid_row)
+    }
+
+    #[test]
+    fn quiet_resize_invalidates_stale_coords() {
+        let (mut app, id) = app_with_focused_pane("stale-coords-resize");
+        app.find_open = true;
+        let wide = iced::Size::new(800.0, 400.0);
+        let _ = app.update(Message::TerminalResized(id, wide));
+        let long = "a".repeat(60);
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(&[long.as_str(), "bbbb needle", "cccc"], 0, 100),
+        );
+        let _ = app.tool_update(tools::Action::HistoryQuery("needle".into()));
+        assert_eq!(stale_coords_selected(&app, id).2, 1);
+        let before = app.tools.history_refresh_count;
+
+        // Same grid and cell size: no reflow, nothing to invalidate.
+        let _ = app.update(Message::TerminalResized(id, wide));
+        let _ = app.history_refresh_if_stale(std::time::Instant::now(), false);
+        assert_eq!(
+            app.tools.history_refresh_count, before,
+            "an unchanged size must not invalidate the snapshot"
+        );
+
+        // A narrower grid rewraps the long first line onto two rows. The child
+        // stays quiet: no PtyEvent follows the resize.
+        app.tools.history_test_source.insert(
+            id,
+            terminal_core::HistorySnapshot {
+                lines: vec![
+                    terminal_core::LogicalLine {
+                        text: long,
+                        first_row: 0,
+                        segment_starts: vec![0, 40],
+                    },
+                    terminal_core::LogicalLine {
+                        text: "bbbb needle".into(),
+                        first_row: 2,
+                        segment_starts: vec![0],
+                    },
+                    terminal_core::LogicalLine {
+                        text: "cccc".into(),
+                        first_row: 3,
+                        segment_starts: vec![0],
+                    },
+                ],
+                history_rows: 0,
+                capacity: 100,
+                columns: 40,
+            },
+        );
+        let _ = app.update(Message::TerminalResized(id, iced::Size::new(400.0, 400.0)));
+        let _ = app.history_refresh_if_stale(std::time::Instant::now(), false);
+        assert_eq!(
+            app.tools.history_refresh_count,
+            before + 1,
+            "a reflow must make the old snapshot stale"
+        );
+        assert_eq!(
+            stale_coords_selected(&app, id).2,
+            2,
+            "the hit must use the post-reflow row"
+        );
+    }
+
+    #[test]
+    fn history_click_after_eviction_uses_fresh_stale_coords() {
+        let (mut app, id) = app_with_focused_pane("stale-coords-click");
+        app.find_open = true;
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(
+                &["l0", "l1 needle a", "l2", "l3 needle b", "l4", "l5"],
+                4,
+                4,
+            ),
+        );
+        let t0 = std::time::Instant::now();
+        assert!(!app.refresh_visible_history(t0));
+        let _ = app.tool_update(tools::Action::HistoryQuery("needle".into()));
+        let state = app.tools.histories.get(&id).expect("history");
+        assert_eq!(state.hits().len(), 2);
+        let clicked = state.hits()[1].clone();
+        assert_eq!(clicked.grid_row, 3);
+
+        // One row rolls off at capacity; the frame path defers inside the window.
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(
+                &["l1 needle a", "l2", "l3 needle b", "l4", "l5", "l6"],
+                4,
+                4,
+            ),
+        );
+        let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::Wakeup));
+        assert!(app.refresh_visible_history(t0 + std::time::Duration::from_millis(1)));
+        let before = app.tools.history_refresh_count;
+
+        let _ = app.tool_update(tools::Action::HistorySelect(1));
+        assert_eq!(
+            app.tools.history_refresh_count,
+            before + 1,
+            "a click must snapshot before resolving the hit"
+        );
+        assert_eq!(
+            stale_coords_selected(&app, id),
+            (clicked.line_id, clicked.column, clicked.grid_row - 1),
+            "same match, fresh row"
+        );
+    }
+
+    #[test]
+    fn history_click_on_evicted_hit_declines_with_stale_coords() {
+        let (mut app, id) = app_with_focused_pane("stale-coords-evicted");
+        app.find_open = true;
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(
+                &["l0 needle a", "l1", "l2", "l3 needle b", "l4", "l5"],
+                4,
+                4,
+            ),
+        );
+        let t0 = std::time::Instant::now();
+        assert!(!app.refresh_visible_history(t0));
+        let _ = app.tool_update(tools::Action::HistoryQuery("needle".into()));
+        let _ = app.tool_update(tools::Action::HistoryNext(true));
+        let kept = stale_coords_selected(&app, id);
+        assert_eq!(kept.2, 3);
+
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(&["l1", "l2", "l3 needle b", "l4", "l5", "l6"], 4, 4),
+        );
+        let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::Wakeup));
+        assert!(app.refresh_visible_history(t0 + std::time::Duration::from_millis(1)));
+        let before = app.tools.history_refresh_count;
+
+        // Index 0 was "l0 needle a" in the cached list; it has rolled off.
+        let _ = app.tool_update(tools::Action::HistorySelect(0));
+        assert_eq!(app.tools.history_refresh_count, before + 1);
+        assert_eq!(
+            app.status,
+            "That match is no longer in the retained history."
+        );
+        let after = stale_coords_selected(&app, id);
+        assert_eq!((after.0, after.1), (kept.0, kept.1), "selection unchanged");
+        assert_eq!(after.2, 2, "the kept selection follows the eviction");
+
+        // An index past the listed hits does nothing.
+        app.status = "untouched".into();
+        let _ = app.tool_update(tools::Action::HistorySelect(99));
+        assert_eq!(app.status, "untouched");
+        assert_eq!(stale_coords_selected(&app, id), after);
+    }
+
+    #[test]
+    fn dropped_marks_status_wording_for_stale_coords() {
+        assert_eq!(
+            tools::history_marks_cleared_status(1),
+            "1 history mark cleared: scrollback changed where lines repeat."
+        );
+        assert_eq!(
+            tools::history_marks_cleared_status(3),
+            "3 history marks cleared: scrollback changed where lines repeat."
+        );
+    }
+
+    #[test]
+    fn ambiguous_scrollback_reports_dropped_marks_with_stale_coords() {
+        let (mut app, id) = app_with_focused_pane("stale-coords-dropped");
+        // At capacity every row repeats, so one eviction cannot be located.
+        let rows = ["$"; 6];
+        app.tools
+            .history_test_source
+            .insert(id, stale_coords_snapshot(&rows, 4, 4));
+        let _ = app.tool_update(tools::Action::HistoryMark);
+        let dropped_before = app
+            .tools
+            .histories
+            .get(&id)
+            .expect("history")
+            .dropped_marks();
+        app.status = "untouched".into();
+        let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::Wakeup));
+        let _ = app.history_refresh_if_stale(std::time::Instant::now(), false);
+        let dropped = app
+            .tools
+            .histories
+            .get(&id)
+            .expect("history")
+            .dropped_marks()
+            - dropped_before;
+        assert_eq!(dropped, 1, "the single mark sits on an ambiguous line");
+        assert_eq!(
+            app.status,
+            "1 history mark cleared: scrollback changed where lines repeat."
         );
     }
 
