@@ -5248,6 +5248,7 @@ impl App {
                             mismatch.expected.1
                         );
                         pane.grid_mismatch_corrected = Some(mismatch);
+                        self.tools.mark_history_layout_changed(pane.id);
                         let (columns, lines) = mismatch.expected;
                         let cell = pane.cell_size;
                         terminal.process_command(terminal_core::BackendCommand::Resize(
@@ -5310,6 +5311,9 @@ impl App {
                 }
                 pane.terminal_grid_size = Some((columns, lines));
                 pane.cell_size = cell;
+                // The backend reflows on resize without necessarily emitting
+                // output, so history coordinates must be re-read.
+                self.tools.mark_history_layout_changed(pane.id);
                 if let Some(terminal) = pane.terminal.as_mut() {
                     terminal.process_command(terminal_core::BackendCommand::Resize(
                         terminal_core::Size::new(columns as f32 * cell.0, lines as f32 * cell.1),
