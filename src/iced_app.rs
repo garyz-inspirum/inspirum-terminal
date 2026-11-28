@@ -3024,6 +3024,16 @@ impl KeyChord {
     }
 }
 
+/// Test stand-in for the focused pane's terminal mode. Unit panes have no
+/// live terminal, so tests set the mode as last painted and as the parser
+/// holds it now.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+struct FakeFocusedModes {
+    painted: terminal_core::TerminalMode,
+    live: terminal_core::TerminalMode,
+}
+
 /// Where plain Ctrl+F goes (`Message::FindOrForward`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FindChordRoute {
@@ -4595,6 +4605,9 @@ struct App {
     /// `process_command` never fires. Must not change write behaviour.
     #[cfg(test)]
     pty_write_log: Vec<(u64, Vec<u8>)>,
+    /// Replaces the focused pane's terminal mode reads; see `FakeFocusedModes`.
+    #[cfg(test)]
+    fake_focused_modes: Option<FakeFocusedModes>,
     /// Explorer (local) column. Independent of the Filer sort.
     local_file_sort: FileSortColumn,
     local_file_sort_ascending: bool,
@@ -4778,6 +4791,8 @@ impl App {
             remote_editor_open_generation: 0,
             #[cfg(test)]
             pty_write_log: Vec::new(),
+            #[cfg(test)]
+            fake_focused_modes: None,
             local_file_sort: FileSortColumn::Name,
             local_file_sort_ascending: true,
             remote_file_sort: FileSortColumn::Name,
@@ -5010,7 +5025,12 @@ impl App {
         (!pane.exited && pane.terminal.is_some()).then_some(pane.id)
     }
 
+    /// Mode bits from the focused terminal's last sync (paint).
     fn focused_terminal_mode(&self) -> terminal_core::TerminalMode {
+        #[cfg(test)]
+        if let Some(fake) = self.fake_focused_modes {
+            return fake.painted;
+        }
         self.tabs
             .get(self.active)
             .and_then(|tab| tab.panes.get(tab.focus))
@@ -17745,6 +17765,62 @@ mod tests {
         assert!(app.find_open && app.find_focused);
         assert_eq!(query(&app), before, "Ctrl+F must not type 'f'");
         assert!(app.pty_write_log.is_empty());
+    }
+
+    /// The program left the alternate screen but the display snapshot that
+    /// would repaint is still deferred: the painted mode says alt screen, the
+    /// parser says main screen. Ctrl+F belongs to Find.
+    #[test]
+    fn plain_ctrl_f_live_mode_alt_exit_before_repaint_opens_find() {
+        let (mut app, id) = app_with_focused_pane("ctrl-f-live-exit");
+        let fake = FakeFocusedModes {
+            painted: terminal_core::TerminalMode::ALT_SCREEN,
+            live: terminal_core::TerminalMode::empty(),
+        };
+        assert!(
+            fake.painted
+                .contains(terminal_core::TerminalMode::ALT_SCREEN)
+        );
+        assert!(!fake.live.contains(terminal_core::TerminalMode::ALT_SCREEN));
+        app.fake_focused_modes = Some(fake);
+        app.pty_write_log.clear();
+        let _ = app.update(Message::FindOrForward(ctrl_f_event()));
+        assert!(
+            app.find_open && app.find_focused,
+            "main screen (live) must open Find"
+        );
+        assert_eq!(app.tools.history_owner, Some(id));
+        assert!(
+            app.pty_write_log.is_empty(),
+            "no 0x06 may reach the shell: {:?}",
+            app.pty_write_log
+        );
+    }
+
+    /// The program entered the alternate screen before the next paint: the
+    /// painted mode says main screen, the parser says alt screen. Ctrl+F
+    /// belongs to the program, exactly once.
+    #[test]
+    fn plain_ctrl_f_live_mode_alt_enter_before_repaint_forwards_once() {
+        let (mut app, id) = app_with_focused_pane("ctrl-f-live-enter");
+        let fake = FakeFocusedModes {
+            painted: terminal_core::TerminalMode::empty(),
+            live: terminal_core::TerminalMode::ALT_SCREEN,
+        };
+        assert!(
+            !fake
+                .painted
+                .contains(terminal_core::TerminalMode::ALT_SCREEN)
+        );
+        assert!(fake.live.contains(terminal_core::TerminalMode::ALT_SCREEN));
+        app.fake_focused_modes = Some(fake);
+        app.pty_write_log.clear();
+        let _ = app.update(Message::FindOrForward(ctrl_f_event()));
+        assert_eq!(app.pty_write_log, vec![(id, vec![0x06])]);
+        assert!(
+            !app.find_open,
+            "alt screen (live) keeps Ctrl+F for the program"
+        );
     }
 
     #[test]
