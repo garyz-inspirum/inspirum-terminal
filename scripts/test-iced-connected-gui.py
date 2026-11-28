@@ -1877,6 +1877,17 @@ def connection_dialog_region(width: int, height: int):
     return (max(0, width // 2 - half), 32, min(width, width // 2 + half), max(33, height - 22))
 
 
+def connection_scroll_drag(shot: Path, dialog):
+    """Drag the visible form scroller to its lower stop, bypassing wheel routing
+    through controls in the expanded Advanced SSH options section."""
+    _left, top, right, bottom = dialog
+    thumb = vertical_thumb_box(shot, (right - 32, top + 40, right - 12, bottom - 30))
+    if thumb is None:
+        raise RuntimeError(f"connection dialog scrollbar thumb not found in {shot}")
+    x = (thumb[0] + thumb[2]) // 2
+    return (x, (thumb[1] + thumb[3]) // 2), (x, bottom - 44)
+
+
 def danger_text_pixels(path: Path, region, *, image=None) -> int:
     """Pixels of saturated danger-red text inside ``region``.
 
@@ -8650,13 +8661,24 @@ async def main() -> int:
                             )
                             return dialog
 
-                        def scroll_bottom(dialog) -> None:
+                        async def scroll_bottom(dialog, tag: str) -> None:
+                            start_shot = destination / f"connected-profile-{tag}-scroll-start.png"
+                            await asyncio.to_thread(screenshot, window, start_shot, env)
+                            (x, y), (end_x, end_y) = await asyncio.to_thread(
+                                connection_scroll_drag, start_shot, dialog,
+                            )
                             command("xdotool", "mousemove", "--window", window,
-                                    str((dialog[0] + dialog[2]) // 2), str((dialog[1] + dialog[3]) // 2),
-                                    "click", "--repeat", "30", "--delay", "15", "5", env=env)
+                                    str(x), str(y), env=env)
+                            await asyncio.sleep(.15)
+                            command("xdotool", "mousedown", "1", env=env)
+                            await asyncio.sleep(.15)
+                            command("xdotool", "mousemove", "--window", window,
+                                    str(end_x), str(end_y), env=env)
+                            await asyncio.sleep(.15)
+                            command("xdotool", "mouseup", "1", env=env)
 
                         async def bottom_shot(dialog, tag: str) -> Path:
-                            scroll_bottom(dialog)
+                            await scroll_bottom(dialog, tag)
                             await asyncio.sleep(.8)
                             shot = destination / f"connected-profile-{tag}.png"
                             await asyncio.to_thread(screenshot, window, shot, env)

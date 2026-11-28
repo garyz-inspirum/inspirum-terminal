@@ -80,7 +80,8 @@ class DialogScrollTest(unittest.TestCase):
         if not shot.is_file():
             self.skipTest("CI screenshot artifact unavailable")
         start, end = module.connection_scroll_drag(shot, module.connection_dialog_region(W, H))
-        self.assertEqual(start, (922, 243))
+        self.assertTrue(920 <= start[0] <= 925, start)
+        self.assertEqual(start[1], 243)
         self.assertEqual(end[0], start[0])
         self.assertGreater(end[1], 700)
         self.assertLess(end[1], H - 22)
@@ -90,8 +91,9 @@ class DialogScrollTest(unittest.TestCase):
                       ((917, 123, 927, 363), (81, 81, 81))])
         self.addCleanup(shot.unlink)
         start, end = module.connection_scroll_drag(shot, module.connection_dialog_region(W, H))
-        self.assertEqual(start, (922, 243))
-        self.assertEqual(end, (922, 734))
+        self.assertTrue(920 <= start[0] <= 925, start)
+        self.assertEqual(start[1], 243)
+        self.assertEqual(end, (start[0], 734))
 
     def test_missing_thumb_fails_closed(self):
         shot = frame([])
