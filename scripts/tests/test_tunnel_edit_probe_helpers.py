@@ -271,6 +271,90 @@ class TunnelFrameHelpersTest(unittest.TestCase):
         self.assertGreaterEqual(region[3], 684)
 
 
+# Runner frame of head 937f4fc: the Tunnel Settings dialog sits half a
+# pixel lower (heading OCR y 143..152 vs 142..150 on the build host), so
+# besides the 2 px side borders every top/bottom border is anti-aliased
+# over TWO rows: top y 534/535 = luma 48/49, bottom y 556/557 = 53/44, and
+# no single top row reaches the crisp-border floor of 50. HALF_PIXEL_LOCAL
+# is the same step from the local (build-host container) run of that head.
+HALF_PIXEL_CI = FIXTURES / "ci2-tunnels-delete-alpha-remove.png"
+HALF_PIXEL_CI_HEADING = (250, 143, 367, 152)
+HALF_PIXEL_LOCAL = FIXTURES / "local2-tunnels-delete-alpha-remove.png"
+HALF_PIXEL_LOCAL_HEADING = (249, 142, 367, 150)
+
+
+@unittest.skipUnless(HALF_PIXEL_CI.is_file() and HALF_PIXEL_LOCAL.is_file(),
+                     "half-pixel fixtures missing")
+class HalfPixelListButtonsTest(unittest.TestCase):
+    def _states(self, image=None, frame=HALF_PIXEL_CI, heading=HALF_PIXEL_CI_HEADING):
+        return module.tunnel_list_button_states(frame, heading, 1280, image=image)
+
+    def test_border_rows_are_split(self):
+        _w, _h, channels, rows = module._read_png(HALF_PIXEL_CI)
+        luma = lambda x, y: module._luma_at(rows, channels, x, y)  # noqa: E731
+        self.assertEqual([luma(270, y) for y in range(533, 538)], [25, 48, 49, 30, 30])
+        self.assertEqual([luma(270, y) for y in range(555, 559)], [30, 53, 44, 25])
+        self.assertTrue(all(luma(x, 535) < 50 for x in range(255, 278)))
+
+    def test_ci_frame_finds_one_enabled_pair(self):
+        found = self._states()
+        self.assertIsNotNone(found, "no +/- pair on the half-pixel runner frame")
+        (plus, plus_on), (minus, minus_on) = found
+        print(f"half-pixel CI pair: + {plus} - {minus}", flush=True)
+        self.assertTrue(plus_on and minus_on)
+        for box, (lo, hi) in ((plus, (253, 281)), (minus, (284, 313))):
+            self.assertTrue(lo <= box[0] and box[2] <= hi + 1, box)
+            self.assertTrue(533 <= box[1] <= 535 and 557 <= box[3] <= 559, box)
+        x, y = module.tunnel_remove_centre(HALF_PIXEL_CI, HALF_PIXEL_CI_HEADING, 1280)
+        self.assertTrue(286 <= x <= 313 and 534 <= y <= 558, (x, y))
+
+    def test_ci_click_points_inside_button_interiors(self):
+        # Reviewer-measured interiors: "+" x 255..280, "−" x 287..312,
+        # both y 536..555 (fill 30, card 25).
+        _w, _h, channels, rows = module._read_png(HALF_PIXEL_CI)
+        ax, ay = module.tunnel_add_centre(HALF_PIXEL_CI, HALF_PIXEL_CI_HEADING, 1280)
+        rx, ry = module.tunnel_remove_centre(HALF_PIXEL_CI, HALF_PIXEL_CI_HEADING, 1280)
+        print(f"half-pixel CI add ({ax},{ay}) remove ({rx},{ry})", flush=True)
+        self.assertTrue(255 < ax < 280 and 536 < ay < 555, (ax, ay))
+        self.assertTrue(287 < rx < 312 and 536 < ry < 555, (rx, ry))
+        for x, y in ((ax, ay), (rx, ry)):
+            self.assertGreaterEqual(module._luma_at(rows, channels, x, y), 28,
+                                    f"({x},{y}) is card background, not the button")
+
+    def test_local_frame_boxes_unchanged(self):
+        # Recorded on 937f4fc's detector before the half-pixel change.
+        (plus, plus_on), (minus, minus_on) = self._states(
+            frame=HALF_PIXEL_LOCAL, heading=HALF_PIXEL_LOCAL_HEADING)
+        self.assertEqual((plus, minus), ((254, 535, 281, 557), (286, 535, 313, 557)))
+        self.assertTrue(plus_on and minus_on)
+        self.assertEqual(module.tunnel_remove_centre(
+            HALF_PIXEL_LOCAL, HALF_PIXEL_LOCAL_HEADING, 1280), (299, 546))
+        self.assertEqual(module.tunnel_add_centre(
+            HALF_PIXEL_LOCAL, HALF_PIXEL_LOCAL_HEADING, 1280), (267, 546))
+
+    def test_one_button_painted_out_is_no_pair(self):
+        # Negative control: either button (borders included, 1 px margin)
+        # repainted to the card leaves a lone outline; it must not pair
+        # with list-row outlines, the list card or the editor card.
+        width, height, channels, real_rows = module._read_png(HALF_PIXEL_CI)
+        real = module._read_png
+        for name, (bx1, bx2) in (("plus", (252, 281)), ("minus", (283, 313))):
+            with self.subTest(removed=name):
+                rows = [bytearray(r) for r in real_rows]
+                for y in range(533, 559):
+                    for x in range(bx1, bx2 + 1):
+                        rows[y][x * channels:x * channels + 3] = bytes((25, 25, 25))
+                mutated = (width, height, channels, rows)
+                self.assertIsNone(self._states(image=mutated))
+                with mock.patch.object(
+                        module, "_read_png",
+                        lambda path, m=mutated: m if path == HALF_PIXEL_CI else real(path)):
+                    with self.assertRaisesRegex(RuntimeError, r"no \+/- buttons"):
+                        module.tunnel_remove_centre(HALF_PIXEL_CI, HALF_PIXEL_CI_HEADING, 1280)
+                    with self.assertRaisesRegex(RuntimeError, r"no \+/- buttons"):
+                        module.tunnel_add_centre(HALF_PIXEL_CI, HALF_PIXEL_CI_HEADING, 1280)
+
+
 LIGHT_EMPTY = FIXTURES / "tour-tunnel-manager-light-empty.png"
 
 
