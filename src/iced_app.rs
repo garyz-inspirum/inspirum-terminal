@@ -2788,6 +2788,9 @@ struct AutoStartPass {
     failed: Vec<String>,
     /// Opted in but not `tunnels::auto_start_eligible` (hand-edited JSON).
     skipped_ineligible: Vec<String>,
+    /// The host's OpenSSH configuration adds or changes forwards
+    /// (`tunnels::InheritedForwards`), so only a manual start is allowed.
+    skipped_config: Vec<String>,
 }
 
 /// Opted-in forwards of every saved profile, in library order, each once.
@@ -2845,6 +2848,14 @@ fn auto_start_summary(pass: &AutoStartPass, remaining: usize) -> String {
 auto-start: start manually ({})",
             tunnel_count(pass.skipped_ineligible.len()),
             pass.skipped_ineligible.join(", ")
+        ));
+    }
+    if !pass.skipped_config.is_empty() {
+        parts.push(format!(
+            "{} skipped, the host's OpenSSH configuration adds or changes port forwards: \
+start manually ({})",
+            tunnel_count(pass.skipped_config.len()),
+            pass.skipped_config.join(", ")
         ));
     }
     if remaining > 0 {
@@ -4882,7 +4893,7 @@ impl App {
             return task;
         }
         self.auto_start_step(&mut |manager, session, kind, spec, config| {
-            manager.start_forward(session, kind, spec, config)
+            manager.start_forward_exact(session, kind, spec, config)
         })
     }
 
@@ -4948,6 +4959,11 @@ impl App {
                         }
                         Ok(tunnels::Status::Stopped) => {
                             pass.failed.push(format!("{name}: did not start"))
+                        }
+                        Err(error)
+                            if error.downcast_ref::<tunnels::InheritedForwards>().is_some() =>
+                        {
+                            pass.skipped_config.push(name)
                         }
                         Err(error) => pass.failed.push(format!("{name}: {error:#}")),
                     }

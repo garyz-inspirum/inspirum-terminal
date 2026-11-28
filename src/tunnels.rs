@@ -809,9 +809,97 @@ pub fn ensure_exact_forward(
     kind: ForwardKind,
     spec: &str,
 ) -> Result<()> {
-    // Seam only: enforcement lands with the fix.
-    let _ = (effective, kind, spec);
-    Ok(())
+    let total = effective.local.len() + effective.remote.len() + effective.dynamic.len();
+    let only = [
+        (ForwardKind::Local, &effective.local),
+        (ForwardKind::Remote, &effective.remote),
+        (ForwardKind::Dynamic, &effective.dynamic),
+    ]
+    .into_iter()
+    .find_map(|(found, values)| values.first().map(|value| (found, value)));
+    let exact = !effective.tunnel_device
+        && total == 1
+        && only.is_some_and(|(found, value)| {
+            found == kind
+                && matches!(
+                    (effective_endpoints(kind, value), spec_endpoints(kind, spec)),
+                    (Some(actual), Some(wanted)) if actual == wanted
+                )
+        });
+    if exact {
+        Ok(())
+    } else {
+        Err(InheritedForwards.into())
+    }
+}
+
+/// A forward side normalised for comparison: brackets stripped, the host
+/// absent when only a port is given.
+#[derive(Debug, PartialEq, Eq)]
+struct Endpoint {
+    host: Option<String>,
+    port: u16,
+}
+
+/// Listener and (for Local/Remote) target of one forward.
+type Endpoints = (Endpoint, Option<Endpoint>);
+
+/// `[host]:port`, `host:port` or a bare `port`; anything else (socket
+/// paths, empty or unbalanced hosts, port 0) is `None` so callers fail closed.
+fn parse_endpoint(text: &str) -> Option<Endpoint> {
+    let (host, port) = if let Some(rest) = text.strip_prefix('[') {
+        let (host, port) = rest.split_once("]:")?;
+        (Some(host), port)
+    } else if let Some((host, port)) = text.rsplit_once(':') {
+        if host.contains(':') {
+            return None;
+        }
+        (Some(host), port)
+    } else {
+        (None, text)
+    };
+    if host.is_some_and(|host| {
+        host.is_empty() || host.contains(['[', ']', '/']) || host.chars().any(char::is_whitespace)
+    }) {
+        return None;
+    }
+    if port.is_empty() || port.len() > 5 || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let port = port.parse::<u16>().ok().filter(|port| *port != 0)?;
+    Some(Endpoint {
+        host: host.map(str::to_owned),
+        port,
+    })
+}
+
+fn target_endpoint(text: &str) -> Option<Endpoint> {
+    parse_endpoint(text).filter(|target| target.host.is_some())
+}
+
+/// One `ssh -G` forward value: `listener target` (Local/Remote) or `listener`.
+fn effective_endpoints(kind: ForwardKind, value: &str) -> Option<Endpoints> {
+    let mut parts = value.split_whitespace();
+    let listener = parse_endpoint(parts.next()?)?;
+    let target = match kind {
+        ForwardKind::Dynamic => None,
+        _ => Some(target_endpoint(parts.next()?)?),
+    };
+    parts.next().is_none().then_some((listener, target))
+}
+
+/// A saved forward spec in OpenSSH `-L`/`-R`/`-D` syntax.
+fn spec_endpoints(kind: ForwardKind, spec: &str) -> Option<Endpoints> {
+    if spec.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let (listener, target) = split_spec(kind, spec);
+    let listener = parse_endpoint(&listener)?;
+    let target = match kind {
+        ForwardKind::Dynamic => None,
+        _ => Some(target_endpoint(&target)?),
+    };
+    Some((listener, target))
 }
 
 fn isolated_forward(session: &Session, kind: ForwardKind, spec: &str) -> Session {

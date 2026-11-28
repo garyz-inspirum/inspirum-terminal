@@ -337,7 +337,11 @@ The supplied WindTerm screenshots distinguish **daily operation** from **editing
   an existing opt-in. The start-up summary says *launch requested*, not
   *started*: a surviving ssh process after the launcher's early-exit check
   does not prove a listening socket; failures and skips are still listed in
-  the status bar and tunnel popup notice.
+  the status bar and tunnel popup notice. Before each unattended launch the
+  app asks OpenSSH (`ssh -G`, no connection) which forwards the launch would
+  really set up; if the host's OpenSSH configuration contributes any other
+  forward (or a `Tunnel` device, or changes or clears the selected one), the
+  forward is skipped at start-up and can still be started manually.
 - Do not hard-code names from the supplied screenshots; these are the user's
   personal saved entries, not fixtures or app defaults. Do not copy WindTerm
   icons or source. Match the two-surface workflow, row alignment, density,
