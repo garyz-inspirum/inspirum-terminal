@@ -110,6 +110,11 @@ pub fn load_settings(path: &Path) -> Result<StartupSettings> {
     Ok(settings)
 }
 
+/// Save a newly chosen SSH config path: its content is checked first.
+pub fn save_settings_checking_config(path: &Path, settings: &StartupSettings) -> Result<()> {
+    save_settings(path, settings)
+}
+
 pub fn save_settings(path: &Path, settings: &StartupSettings) -> Result<()> {
     settings.validate()?;
     if let Some(config) = &settings.ssh_config {
@@ -201,7 +206,8 @@ mod tests {
             ssh_config: Some(dir.path().to_str().unwrap().into()),
             ..Default::default()
         };
-        assert!(save_settings(&path, &settings).is_err());
+        assert!(save_settings_checking_config(&path, &settings).is_err());
+        assert!(!path.exists());
         #[cfg(unix)]
         {
             use std::os::unix::fs::symlink;
@@ -213,7 +219,7 @@ mod tests {
                 ssh_config: Some(link.to_str().unwrap().into()),
                 ..Default::default()
             };
-            save_settings(&path, &settings).unwrap();
+            save_settings_checking_config(&path, &settings).unwrap();
             assert_eq!(load_settings(&path).unwrap(), settings);
         }
     }
@@ -244,17 +250,38 @@ mod tests {
                 ssh_config: Some(config.to_str().unwrap().into()),
                 ..Default::default()
             };
-            assert!(save_settings(&path, &settings).is_err());
+            assert!(save_settings_checking_config(&path, &settings).is_err());
             assert_eq!(fs::read(&path).unwrap(), b"sentinel");
         }
     }
 
+    /// A non-UTF-8 path is refused lexically; the file is never created
+    /// (APFS rejects such names before any check could run).
     #[cfg(unix)]
     #[test]
-    fn saved_config_refuses_fifo_and_non_utf8_path() {
-        use std::os::unix::{ffi::OsStringExt, fs::symlink};
+    fn saved_config_path_rejects_non_utf8_without_creating_it() {
+        use std::os::unix::ffi::OsStrExt;
+        let bad = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/inspirum-\xff-config"));
+        assert!(validate_ssh_config_path(bad).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_config_follows_symlink_to_regular_file_and_refuses_fifo_without_blocking() {
+        use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("startup.json");
+        let config = dir.path().join("config");
+        fs::write(&config, "Host *\n").unwrap();
+        let link = dir.path().join("link");
+        symlink(&config, &link).unwrap();
+        let to_regular = StartupSettings {
+            ssh_config: Some(link.to_str().unwrap().into()),
+            ..Default::default()
+        };
+        save_settings_checking_config(&path, &to_regular).unwrap();
+        assert_eq!(load_settings(&path).unwrap(), to_regular);
+
         let fifo = dir.path().join("fifo");
         assert!(
             std::process::Command::new("mkfifo")
@@ -263,17 +290,83 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        let settings = StartupSettings {
-            ssh_config: Some(fifo.to_str().unwrap().into()),
-            ..Default::default()
+        let fifo_link = dir.path().join("fifo-link");
+        symlink(&fifo, &fifo_link).unwrap();
+        for target in [&fifo, &fifo_link] {
+            let settings = StartupSettings {
+                ssh_config: Some(target.to_str().unwrap().into()),
+                ..Default::default()
+            };
+            assert!(save_settings_checking_config(&path, &settings).is_err());
+            assert_eq!(load_settings(&path).unwrap(), to_regular);
+        }
+    }
+
+    /// Restart regression: a saved path whose file was removed is still a
+    /// valid record. Behavior and path survive, behavior writes keep the
+    /// path, Clear works and a checked replacement can be saved.
+    #[test]
+    fn missing_saved_ssh_config_keeps_record_and_allows_clear_and_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        fs::write(&config, "Host *\n").unwrap();
+        let path = dir.path().join("startup.json");
+        let saved = StartupSettings {
+            behavior: StartupBehavior::Profile {
+                profile: "prod".into(),
+            },
+            ssh_config: Some(config.to_str().unwrap().into()),
         };
-        assert!(save_settings(&path, &settings).is_err());
-        let bad = dir.path().join(std::ffi::OsString::from_vec(vec![0xff]));
-        fs::write(&bad, "Host *\n").unwrap();
-        assert!(validate_ssh_config_path(&bad).is_err());
-        let link = dir.path().join("link");
-        symlink(&bad, &link).unwrap();
-        assert!(validate_ssh_config_path(&link).is_ok());
+        save_settings_checking_config(&path, &saved).unwrap();
+        fs::remove_file(&config).unwrap();
+        assert_eq!(load_settings(&path).unwrap(), saved);
+
+        let behavior_only = StartupSettings {
+            behavior: StartupBehavior::None,
+            ..saved.clone()
+        };
+        save_settings(&path, &behavior_only).unwrap();
+        assert_eq!(load_settings(&path).unwrap(), behavior_only);
+
+        let missing_replacement = StartupSettings {
+            ssh_config: Some(dir.path().join("also-missing").to_str().unwrap().into()),
+            ..saved.clone()
+        };
+        assert!(save_settings_checking_config(&path, &missing_replacement).is_err());
+        assert_eq!(load_settings(&path).unwrap(), behavior_only);
+
+        let cleared = StartupSettings {
+            ssh_config: None,
+            ..saved.clone()
+        };
+        save_settings(&path, &cleared).unwrap();
+        assert_eq!(load_settings(&path).unwrap(), cleared);
+        assert!(!fs::read_to_string(&path).unwrap().contains("ssh_config"));
+
+        let replacement = dir.path().join("replacement");
+        fs::write(&replacement, "Host *\n").unwrap();
+        let replaced = StartupSettings {
+            ssh_config: Some(replacement.to_str().unwrap().into()),
+            ..saved
+        };
+        save_settings_checking_config(&path, &replaced).unwrap();
+        assert_eq!(load_settings(&path).unwrap(), replaced);
+    }
+
+    #[test]
+    fn load_rejects_lexically_invalid_saved_path_without_touching_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("startup.json");
+        for record in [
+            r#"{"ssh_config":"relative/config"}"#,
+            r#"{"ssh_config":"   "}"#,
+            r#"{"ssh_config":"/tmp/bad\u0000path"}"#,
+            r#"{"ssh_config":"/tmp/x","extra":1}"#,
+        ] {
+            fs::write(&path, record).unwrap();
+            assert!(load_settings(&path).is_err(), "{record}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), record);
+        }
     }
 
     #[test]

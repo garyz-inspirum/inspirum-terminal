@@ -2005,6 +2005,70 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
     }
 
+    /// Restart regression: the saved SSH file disappears between runs. The
+    /// record still loads, behavior and path stay, and Tools can change the
+    /// behavior, Clear the path or Save a checked replacement.
+    #[test]
+    fn missing_saved_ssh_config_keeps_settings_and_tools_can_clear_or_replace() {
+        let (mut app, dir) = app();
+        let config = dir.path().join("ssh-config");
+        std::fs::write(&config, "Host *\n").unwrap();
+        let _ = app.tool_update(Action::StartupProfile("prod".into()));
+        let _ = app.tool_update(Action::ConfigDraft);
+        let _ = app.tool_update(Action::ConfigInput(config.display().to_string()));
+        let _ = app.tool_update(Action::ConfigSave);
+        let prod = StartupBehavior::Profile {
+            profile: "prod".into(),
+        };
+        let path = startup::settings_path(&app.profiles_path);
+        std::fs::remove_file(&config).unwrap();
+
+        let mut app = App::boot(app.profiles_path.clone(), None);
+        assert!(!app.tools.startup_load_failed);
+        assert_eq!(app.tools.startup.behavior, prod);
+        assert_eq!(app.tools.startup.ssh_config.as_deref(), config.to_str());
+
+        let _ = app.tool_update(Action::StartupProfile("other".into()));
+        let other = StartupBehavior::Profile {
+            profile: "other".into(),
+        };
+        let loaded = startup::load_settings(&path).unwrap();
+        assert_eq!(loaded.behavior, other, "{}", app.status);
+        assert_eq!(loaded.ssh_config.as_deref(), config.to_str());
+
+        // Saving another missing file is still refused.
+        let _ = app.tool_update(Action::ConfigDraft);
+        let _ = app.tool_update(Action::ConfigInput(
+            dir.path().join("also-missing").display().to_string(),
+        ));
+        let _ = app.tool_update(Action::ConfigSave);
+        assert!(app.tools.config_draft.is_some());
+        assert_eq!(
+            startup::load_settings(&path).unwrap().ssh_config.as_deref(),
+            config.to_str()
+        );
+
+        let _ = app.tool_update(Action::ConfigClear);
+        assert!(app.tools.startup.ssh_config.is_none(), "{}", app.status);
+        let loaded = startup::load_settings(&path).unwrap();
+        assert_eq!(loaded.ssh_config, None);
+        assert_eq!(loaded.behavior, other);
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("ssh_config")
+        );
+
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, "Host *\n").unwrap();
+        let _ = app.tool_update(Action::ConfigDraft);
+        let _ = app.tool_update(Action::ConfigInput(replacement.display().to_string()));
+        let _ = app.tool_update(Action::ConfigSave);
+        let loaded = startup::load_settings(&path).unwrap();
+        assert_eq!(loaded.ssh_config.as_deref(), replacement.to_str());
+        assert_eq!(loaded.behavior, other);
+    }
+
     #[test]
     fn config_save_does_not_treat_blank_draft_as_clear() {
         let (mut app, _dir) = app();

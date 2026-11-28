@@ -2858,7 +2858,7 @@ type AutoStartLaunch<'a> = dyn FnMut(
         &Session,
         tunnels::ForwardKind,
         &str,
-        Option<&std::path::Path>,
+        Option<&Arc<terminal::ConfigSnapshot>>,
     ) -> anyhow::Result<tunnels::Status>
     + 'a;
 
@@ -2868,7 +2868,7 @@ type AutoStartLaunch<'a> = dyn FnMut(
 #[derive(Debug, Default)]
 struct AutoStartPass {
     queue: std::collections::VecDeque<AutoStartCandidate>,
-    snapshot: Option<terminal::ConfigSnapshot>,
+    snapshot: Option<Arc<terminal::ConfigSnapshot>>,
     config_error: Option<tunnels::ConfigSkip>,
     /// ssh was spawned and survived the launcher's brief early-exit check.
     /// That does not prove the listener is accepting connections, so the
@@ -2990,6 +2990,9 @@ struct AutoStartFake {
     /// Refused as `start_forward_exact` refuses a configuration it cannot
     /// snapshot (no `--ssh-config`, Include/Match, ...).
     config_skips: Vec<(String, tunnels::ConfigSkip)>,
+    /// Snapshot handles kept as a spawned tunnel's process record keeps
+    /// them, one per successful fake launch.
+    held: Vec<Arc<terminal::ConfigSnapshot>>,
 }
 
 fn tunnel_menu_separator<'a>() -> Element<'a, Message> {
@@ -4882,7 +4885,7 @@ impl App {
             });
             if let Some(config) = config {
                 match tunnels::snapshot_config(config) {
-                    Ok(snapshot) => pass.snapshot = Some(snapshot),
+                    Ok(snapshot) => pass.snapshot = Some(Arc::new(snapshot)),
                     Err(error) => {
                         pass.config_error = Some(
                             error
@@ -5024,7 +5027,7 @@ impl App {
     fn auto_start_next(&mut self) -> Task<Message> {
         #[cfg(test)]
         if let Some(mut fake) = self.auto_start_fake.take() {
-            let task = self.auto_start_step(&mut |_, session, kind, spec, _| {
+            let task = self.auto_start_step(&mut |_, session, kind, spec, snapshot| {
                 fake.calls
                     .push((session_profile_key(session), kind, spec.to_owned()));
                 if fake.config_skip_specs.iter().any(|skip| skip == spec) {
@@ -5039,6 +5042,7 @@ impl App {
                 Ok(if fake.fail_specs.iter().any(|fail| fail == spec) {
                     tunnels::Status::Failed("listener busy".into())
                 } else {
+                    fake.held.extend(snapshot.cloned());
                     tunnels::Status::Running { pid: 4242 }
                 })
             });
@@ -5112,8 +5116,7 @@ impl App {
                         &spec,
                         self.auto_start
                             .as_ref()
-                            .and_then(|pass| pass.snapshot.as_ref())
-                            .map(terminal::ConfigSnapshot::path),
+                            .and_then(|pass| pass.snapshot.as_ref()),
                     )
                 };
                 if let Some(pass) = self.auto_start.as_mut() {
@@ -18360,8 +18363,11 @@ mod tunnel_layout_tests {
             TUNNEL_AUTO_START_LABEL,
             "Automatically start when app opens"
         );
-        assert!(TUNNEL_AUTO_START_NO_SSH_CONFIG.contains("saved SSH config"));
-        assert!(!TUNNEL_AUTO_START_NO_SSH_CONFIG.contains("without --ssh-config"));
+        assert_eq!(
+            TUNNEL_AUTO_START_NO_SSH_CONFIG,
+            "Not active: no SSH config file is selected. Choose one in Tools → Profiles, or \
+start this tunnel manually."
+        );
     }
 
     #[test]
@@ -18790,6 +18796,18 @@ mod tunnel_layout_tests {
         assert_eq!(std::fs::read_to_string(&frozen).unwrap(), "Host *\n");
         app.auto_start_fake = Some(AutoStartFake::default());
         drain_auto_start(&mut app);
+        // One snapshot for the whole pass, still held by each launched
+        // tunnel after the pass itself has finished.
+        let held = &app.auto_start_fake.as_ref().unwrap().held;
+        assert_eq!(held.len(), 2);
+        assert!(held.iter().all(|one| one.path() == frozen.as_path()));
+        assert!(Arc::ptr_eq(&held[0], &held[1]));
+        assert!(app.auto_start.is_none());
+        assert!(
+            frozen.exists(),
+            "removed while launched tunnels still need it"
+        );
+        app.auto_start_fake = None;
         assert!(!frozen.exists());
         let (app, _) = App::startup(path, Some(dir.path().join("missing-cli")));
         assert!(app.auto_start.as_ref().unwrap().snapshot.is_none());
@@ -18828,45 +18846,126 @@ mod tunnel_layout_tests {
         assert_eq!(auto_start_calls(&app), vec![AUTO_START_WEB, AUTO_START_DB]);
     }
 
-    #[test]
-    fn corrupt_startup_settings_skip_autostart_unless_cli_supplies_config() {
-        let (dir, path, _) = auto_start_boot_library();
-        let settings = crate::startup::settings_path(&path);
-        std::fs::write(&settings, "{broken").unwrap();
-        let (app, _) = App::startup(path.clone(), None);
-        assert!(app.tools.startup_load_failed);
-        assert!(app.auto_start.is_none());
-        let cli = dir.path().join("cli");
-        std::fs::write(&cli, "Host *\n").unwrap();
-        let (app, _) = App::startup(path, Some(cli));
-        assert!(app.tools.startup_load_failed);
-        assert!(app.auto_start.as_ref().unwrap().snapshot.is_some());
-        assert_eq!(std::fs::read_to_string(settings).unwrap(), "{broken");
+    /// Both opted-in loopback forwards of `auto_start_boot_library`, then
+    /// `notice`: the grouped sentence a whole-pass config skip produces.
+    fn auto_start_grouped_skip(notice: tunnels::ConfigSkip) -> String {
+        format!(
+            "Auto-start: 1 tunnel skipped, only Local or Dynamic tunnels bound to 127.0.0.1 or \
+[::1] can auto-start: start manually (0.0.0.0:9091 -> api:443). 127.0.0.1:8080 -> web:80, \
+127.0.0.1:5432 -> db:5432: {notice}"
+        )
     }
 
+    /// An unusable settings RECORD stops every unattended launch, even with
+    /// a valid `--ssh-config`, and the record is never rewritten.
+    #[test]
+    fn corrupt_startup_settings_skip_all_autostart_even_with_cli() {
+        let (dir, path, _) = auto_start_boot_library();
+        let settings = crate::startup::settings_path(&path);
+        let cli = dir.path().join("cli");
+        std::fs::write(&cli, "Host *\n").unwrap();
+        for record in [
+            "{broken",
+            r#"{"behavior":{"mode":"none"},"unknown":true}"#,
+            r#"{"ssh_config":"relative/config"}"#,
+        ] {
+            std::fs::write(&settings, record).unwrap();
+            for cli in [None, Some(cli.clone())] {
+                let (mut app, _) = App::startup(path.clone(), cli.clone());
+                assert!(app.tools.startup_load_failed, "{record}");
+                assert!(app.auto_start.as_ref().unwrap().snapshot.is_none());
+                app.auto_start_fake = Some(AutoStartFake::default());
+                drain_auto_start(&mut app);
+                assert!(auto_start_calls(&app).is_empty(), "{record} {cli:?}");
+                assert_eq!(
+                    app.tunnel_notice,
+                    auto_start_grouped_skip(tunnels::ConfigSkip::StartupSettingsUnreadable)
+                );
+                // Manual SSH still sees the CLI file.
+                assert_eq!(app.ssh_config, cli);
+                assert_eq!(std::fs::read_to_string(&settings).unwrap(), record);
+            }
+        }
+        // An unreadable record (a directory in its place) is the same.
+        std::fs::remove_file(&settings).unwrap();
+        std::fs::create_dir(&settings).unwrap();
+        let (mut app, _) = App::startup(path, Some(cli));
+        assert!(app.tools.startup_load_failed);
+        app.auto_start_fake = Some(AutoStartFake::default());
+        drain_auto_start(&mut app);
+        assert!(auto_start_calls(&app).is_empty());
+        assert!(settings.is_dir());
+    }
+
+    /// The saved file vanished: the record and its behavior survive, the
+    /// unattended tunnels are skipped with a reason and nothing is rewritten.
     #[test]
     fn missing_saved_config_reports_error_without_launching() {
         let (dir, path, _) = auto_start_boot_library();
         let config = dir.path().join("saved");
         std::fs::write(&config, "Host *\n").unwrap();
+        let record = crate::startup::StartupSettings {
+            behavior: crate::startup::StartupBehavior::Profile {
+                profile: "prod".into(),
+            },
+            ssh_config: Some(config.to_str().unwrap().into()),
+        };
+        let settings = crate::startup::settings_path(&path);
+        crate::startup::save_settings(&settings, &record).unwrap();
+        let bytes = std::fs::read(&settings).unwrap();
+        std::fs::remove_file(config).unwrap();
+        let (mut app, _) = App::startup(path, None);
+        assert!(!app.tools.startup_load_failed);
+        assert!(
+            app.tools.load_errors.is_empty(),
+            "{:?}",
+            app.tools.load_errors
+        );
+        assert_eq!(app.tools.startup, record);
+        assert!(app.auto_start.as_ref().unwrap().snapshot.is_none());
+        app.auto_start_fake = Some(AutoStartFake::default());
+        drain_auto_start(&mut app);
+        assert!(auto_start_calls(&app).is_empty());
+        assert!(
+            app.tunnel_notice.ends_with(
+                "127.0.0.1:8080 -> web:80: Auto-start skipped: the SSH config file is missing or \
+is not a regular file. Start it manually. 127.0.0.1:5432 -> db:5432: Auto-start skipped: the \
+SSH config file is missing or is not a regular file. Start it manually."
+            ),
+            "{}",
+            app.tunnel_notice
+        );
+        assert_eq!(std::fs::read(&settings).unwrap(), bytes);
+    }
+
+    /// No opted-in forward: no SSH config is read or copied at open, no
+    /// error is recorded and no pass is left behind.
+    #[test]
+    fn zero_auto_start_candidates_do_no_config_io() {
+        let (dir, path, _app, _key) = auto_start_app();
+        let missing = dir.path().join("missing");
         crate::startup::save_settings(
             &crate::startup::settings_path(&path),
             &crate::startup::StartupSettings {
-                ssh_config: Some(config.to_str().unwrap().into()),
+                ssh_config: Some(missing.to_str().unwrap().into()),
                 ..Default::default()
             },
         )
         .unwrap();
-        std::fs::remove_file(config).unwrap();
-        let (app, _) = App::startup(path, None);
-        assert!(app.tools.startup_load_failed);
-        assert!(app.auto_start.is_none());
-        assert!(
-            app.tools
-                .load_errors
-                .iter()
-                .any(|error| error.contains("Could not load startup preferences"))
-        );
+        let valid = dir.path().join("valid");
+        std::fs::write(&valid, "Host *\n").unwrap();
+        for cli in [
+            None,
+            Some(missing.clone()),
+            Some(dir.path().to_owned()),
+            Some(valid),
+        ] {
+            let (app, _) = App::startup(path.clone(), cli.clone());
+            assert!(!app.tools.startup_load_failed, "{cli:?}");
+            assert!(app.auto_start.is_none(), "{cli:?}");
+            assert!(app.tools.errors.is_empty(), "{cli:?}");
+            assert!(app.load_error.is_none(), "{cli:?}");
+        }
     }
 
     #[test]
@@ -19052,7 +19151,7 @@ this tunnel's OpenSSH configuration uses Include or Match. Start it manually."
             "Auto-start: launch requested for 1 tunnel (see Tunnels for live status); \
 1 tunnel skipped, only Local or Dynamic tunnels bound to 127.0.0.1 or [::1] can auto-start: \
 start manually (0.0.0.0:9091 -> api:443). 127.0.0.1:8080 -> web:80: Auto-start skipped: \
-no explicit SSH configuration was provided. Start this tunnel manually."
+no SSH config file is selected. Choose one in Tools → Profiles, or start this tunnel manually."
         );
 
         // Two tunnels skipped for the same reason share one sentence.
@@ -19067,12 +19166,13 @@ no explicit SSH configuration was provided. Start this tunnel manually."
         });
         drain_auto_start(&mut app);
         assert_eq!(auto_start_calls(&app), vec![AUTO_START_WEB, AUTO_START_DB]);
+        assert_eq!(app.status, auto_start_grouped_skip(no_config));
         assert_eq!(
             app.status,
             "Auto-start: 1 tunnel skipped, only Local or Dynamic tunnels bound to 127.0.0.1 or \
 [::1] can auto-start: start manually (0.0.0.0:9091 -> api:443). 127.0.0.1:8080 -> web:80, \
-127.0.0.1:5432 -> db:5432: Auto-start skipped: no explicit SSH configuration was provided. \
-Start this tunnel manually."
+127.0.0.1:5432 -> db:5432: Auto-start skipped: no SSH config file is selected. Choose one in \
+Tools → Profiles, or start this tunnel manually."
         );
         assert_eq!(app.tunnel_notice, app.status);
     }
