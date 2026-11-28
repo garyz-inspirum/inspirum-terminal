@@ -3664,19 +3664,97 @@ def vertical_thumb_left_edge(shot, half_box, **kwargs):
     return None if box is None else box[0]
 
 
+GUTTER_PROBE_TIMESTAMP_RE = re.compile(r"\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}")
+# The space must be whitelisted too, or tesseract joins the date and time
+# into one word (read 2026/11/2723:56:58 on the it13 run3 frame).
+GUTTER_PROBE_DIGIT_WHITELIST = "0123456789/: "
+
+
+def gutter_probe_verdict(gaps_beside_thumb, ocr_text, expected_text):
+    """(verdict, reason) of the gutter probe; verdict is CLEAR or OVERLAP.
+
+    OVERLAP iff a row beside the thumb has a pixel gap < 1, or the OCR read
+    of the beside-thumb Date Modified cell fails the right-edge check: the
+    stripped read must be a full ``YYYY/MM/DD HH:MM:SS`` (19 characters, so
+    nothing is missing at the right end) whose final character equals the
+    expected one. The OCR crop stops at the thumb, so a thumb overlap clips
+    exactly the right end. A misread elsewhere in the string is a CLEAR with
+    reason ``ocr_differs_away_from_right_edge`` (the caller logs it).
+    Reasons are single tokens (no spaces) for the GUTTER_PROBE line.
+    """
+    gaps = list(gaps_beside_thumb)
+    if not gaps:
+        return "OVERLAP", "no_row_beside_thumb"
+    if min(gaps) < 1:
+        return "OVERLAP", "pixel_gap_below_1"
+    text = (ocr_text or "").strip()
+    expected = (expected_text or "").strip()
+    if not text:
+        return "OVERLAP", "ocr_empty"
+    if not GUTTER_PROBE_TIMESTAMP_RE.fullmatch(text):
+        return "OVERLAP", "ocr_not_full_timestamp"
+    if not expected or text[-1] != expected[-1]:
+        return "OVERLAP", "ocr_final_char_differs"
+    if text != expected:
+        return "CLEAR", "ocr_differs_away_from_right_edge"
+    return "CLEAR", "ocr_exact"
+
+
+def _gutter_probe_smooth_ocr(shot, tesseract, region, *, scale: int = 3, pad: int = 12):
+    """One digit-whitelisted psm 7 read of ``region``: greyed, inverted to
+    dark-on-white, upscaled ``scale``x with a smooth (Lanczos) resample and
+    padded white. The nearest-neighbour x3 crop of region_upscaled_rows
+    keeps the 13 px font's blocky steps; tesseract read a 5 as 3 there."""
+    from PIL import Image, ImageOps
+
+    image = _rgb_image(shot)
+    box = _clamped_box(image, region)
+    grey = ImageOps.invert(image.crop(box).convert("L"))
+    big = grey.resize((grey.width * scale, grey.height * scale), Image.Resampling.LANCZOS)
+    big = ImageOps.expand(big, border=pad, fill=255)
+    handle, name = tempfile.mkstemp(suffix=".png")
+    os.close(handle)
+    temporary = Path(name)
+    try:
+        big.save(temporary)
+        result = subprocess.run(
+            [tesseract, str(temporary), "stdout", "--psm", "7",
+             "-c", f"tessedit_char_whitelist={GUTTER_PROBE_DIGIT_WHITELIST}"],
+            capture_output=True, text=True, timeout=15 * TIME_SCALE,
+        )
+    except subprocess.TimeoutExpired:
+        _OCR_FAILURES.append(f"tesseract timed out after {15 * TIME_SCALE:.0f}s (gutter smooth psm 7)")
+        return ""
+    finally:
+        temporary.unlink(missing_ok=True)
+    if result.returncode != 0:
+        _OCR_FAILURES.append(
+            f"tesseract exited {result.returncode} (gutter smooth psm 7): "
+            f"{(result.stderr or '').strip()[:200]}"
+        )
+        return ""
+    return " ".join(result.stdout.split())
+
+
 def _gutter_probe_ocr_text(shot, tesseract, region, expected):
-    """OCR one Date Modified cell; the pass equal to ``expected`` wins, else
-    the first non-empty read. Words joined left to right with one space."""
+    """OCR one Date Modified cell. Returns (text, reads): the first pass
+    equal to ``expected`` wins, else the first non-empty read; ``reads`` is
+    [(pass label, text)] for every pass run. Words joined left to right
+    with one space. The smooth whitelisted pass runs first."""
     reads = []
+    text = _gutter_probe_smooth_ocr(shot, tesseract, region)
+    reads.append(("smooth-x3-psm7-digits", text))
+    if text == expected:
+        return text, reads
     for psm, invert in (("7", True), ("7", False), ("6", True)):
         words = region_upscaled_rows(shot, tesseract, region, psm=psm, invert=invert)
         # _scaled_words tuples: (text, x, y, width, height, confidence).
         text = " ".join(word[0] for word in sorted(words, key=lambda item: item[1]))
         text = " ".join(text.split())
+        reads.append((f"nearest-x3-psm{psm}{'-inverted' if invert else ''}", text))
         if text == expected:
-            return text
-        reads.append(text)
-    return next((text for text in reads if text), "")
+            return text, reads
+    return next((text for _label, text in reads if text), ""), reads
 
 
 async def filer_gutter_probe_step(app, window, env, destination, local_root, events, remote_heading):
@@ -3686,9 +3764,11 @@ async def filer_gutter_probe_step(app, window, env, destination, local_root, eve
     the window until the local half is 600 px (Name 338 + Size 93 + Date
     166 + 3 dividers fill it exactly), scroll the listing to its end so the
     thumb sits beside probe rows, and require the Date Modified glyphs of
-    every row beside the thumb to end left of it and the cell to OCR as the
-    expected timestamp. Always removes the files, restores the window size
-    and re-lists the local half.
+    every row beside the thumb to end left of it (gap >= 1 px) and the cell
+    to pass the OCR right-edge check of ``gutter_probe_verdict`` (a full
+    timestamp whose final character is the expected one; a misread further
+    left is logged, not failed). Always removes the files, restores the
+    window size and re-lists the local half.
     """
     count_lists = lambda: events.path.read_text(encoding="utf-8").count("SFTP_LIST_READY")
     path_bar_y = center(remote_heading)[1] + 27
@@ -3845,14 +3925,24 @@ async def filer_gutter_probe_step(app, window, env, destination, local_root, eve
         #    thumb, so text hidden under it cannot be read back).
         ocr_cy, ocr_band = beside_rows[0][0], beside_rows[0][1]
         ocr_region = (ocr_band[0], ocr_band[1] - 2, thumb_left, ocr_band[3] + 2)
-        ocr_text = await asyncio.to_thread(_gutter_probe_ocr_text, shot, tesseract, ocr_region, expected)
+        ocr_text, ocr_reads = await asyncio.to_thread(
+            _gutter_probe_ocr_text, shot, tesseract, ocr_region, expected,
+        )
+        for pass_label, pass_text in ocr_reads:
+            print(f"gutter probe OCR pass {pass_label} read={pass_text!r}", flush=True)
         print(f"gutter probe OCR row y={ocr_cy} read={ocr_text!r} expected={expected!r}", flush=True)
 
-        # h. Verdict.
-        verdict = "CLEAR" if min_gap >= 1 and ocr_text == expected else "OVERLAP"
+        # h. Verdict: pixel gap of every beside-thumb row, plus the OCR
+        #    right-edge check (full 19-char timestamp, final char matches).
+        verdict, reason = gutter_probe_verdict(
+            [row[3] for row in beside_rows], ocr_text, expected,
+        )
+        if reason == "ocr_differs_away_from_right_edge":
+            print(f"gutter probe OCR differs from expected away from the right edge "
+                  f"(informational): read={ocr_text!r} expected={expected!r}", flush=True)
         line = (f"GUTTER_PROBE half={half} thumb_left={thumb_left} min_gap={min_gap} "
                 f"ocr={ocr_text.replace(' ', '_') or '<none>'} "
-                f"expected={expected.replace(' ', '_')} verdict={verdict}")
+                f"expected={expected.replace(' ', '_')} verdict={verdict} reason={reason}")
         print(line, flush=True)
         if verdict != "CLEAR":
             raise RuntimeError(line)

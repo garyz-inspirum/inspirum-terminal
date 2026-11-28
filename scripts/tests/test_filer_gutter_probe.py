@@ -1,6 +1,6 @@
 """Pure helpers of the opt-in Filer gutter probe (INSPIRUM_GUI_FILER_GUTTER_PROBE).
 
-Synthetic PIL frames only: no GUI, no tesseract.
+Synthetic PIL frames and pure verdict inputs only: no GUI, no tesseract.
 """
 from __future__ import annotations
 
@@ -138,6 +138,54 @@ class VerticalThumb(unittest.TestCase):
             right = module.text_right_edge(image, (433, 98, 600, 115))
             self.assertEqual(thumb_left, THUMB_LEFT)
             self.assertLessEqual(thumb_left - right, 0)
+
+
+class GutterProbeVerdict(unittest.TestCase):
+    EXPECTED = "2026/11/27 23:56:58"
+
+    def verdict(self, ocr_text, gaps=(4,)):
+        return module.gutter_probe_verdict(list(gaps), ocr_text, self.EXPECTED)
+
+    def test_exact_match_is_clear(self):
+        self.assertEqual(self.verdict(self.EXPECTED), ("CLEAR", "ocr_exact"))
+
+    def test_real_mid_string_misread_is_clear_informational(self):
+        # it13 run3: tesseract read the tens-of-seconds 5 as 3; gap 4 px.
+        self.assertEqual(
+            self.verdict("2026/11/27 23:56:38"),
+            ("CLEAR", "ocr_differs_away_from_right_edge"),
+        )
+
+    def test_surrounding_whitespace_is_stripped(self):
+        self.assertEqual(self.verdict(f"  {self.EXPECTED}\n"), ("CLEAR", "ocr_exact"))
+
+    def test_one_character_short_is_overlap(self):
+        self.assertEqual(self.verdict("2026/11/27 23:56:5"), ("OVERLAP", "ocr_not_full_timestamp"))
+
+    def test_wrong_final_character_is_overlap(self):
+        self.assertEqual(self.verdict("2026/11/27 23:56:53"), ("OVERLAP", "ocr_final_char_differs"))
+
+    def test_trailing_junk_is_overlap(self):
+        self.assertEqual(self.verdict("2026/11/27 23:56:5:"), ("OVERLAP", "ocr_not_full_timestamp"))
+
+    def test_zero_gap_with_perfect_ocr_is_overlap(self):
+        self.assertEqual(self.verdict(self.EXPECTED, gaps=(4, 0)), ("OVERLAP", "pixel_gap_below_1"))
+        self.assertEqual(self.verdict(self.EXPECTED, gaps=(-3,)), ("OVERLAP", "pixel_gap_below_1"))
+
+    def test_gap_of_one_is_enough(self):
+        self.assertEqual(self.verdict(self.EXPECTED, gaps=(1,)), ("CLEAR", "ocr_exact"))
+
+    def test_empty_ocr_is_overlap(self):
+        self.assertEqual(self.verdict(""), ("OVERLAP", "ocr_empty"))
+        self.assertEqual(self.verdict("   "), ("OVERLAP", "ocr_empty"))
+        self.assertEqual(self.verdict(None), ("OVERLAP", "ocr_empty"))
+
+    def test_no_row_beside_thumb_is_overlap(self):
+        self.assertEqual(self.verdict(self.EXPECTED, gaps=()), ("OVERLAP", "no_row_beside_thumb"))
+
+    def test_reasons_are_single_tokens(self):
+        for text in (self.EXPECTED, "2026/11/27 23:56:38", "", "2026/11/27 23:56:5"):
+            self.assertNotIn(" ", self.verdict(text)[1])
 
 
 if __name__ == "__main__":
