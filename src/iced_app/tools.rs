@@ -349,7 +349,9 @@ impl State {
 /// Status shown when a snapshot cleared marks whose line identity was lost.
 pub(super) fn history_marks_cleared_status(count: u64) -> String {
     let noun = if count == 1 { "mark" } else { "marks" };
-    format!("{count} history {noun} cleared: scrollback changed where lines repeat.")
+    format!(
+        "{count} history {noun} cleared: line identity could not be verified after a history refresh."
+    )
 }
 impl Drop for State {
     fn drop(&mut self) {

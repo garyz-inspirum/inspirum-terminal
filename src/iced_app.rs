@@ -18073,7 +18073,7 @@ mod tests {
     }
 
     #[test]
-    fn history_click_after_eviction_uses_fresh_stale_coords() {
+    fn history_click_after_eviction_uses_fresh_identity_and_coords() {
         let (mut app, id) = app_with_focused_pane("stale-coords-click");
         app.find_open = true;
         app.tools.history_test_source.insert(
@@ -18116,9 +18116,24 @@ mod tests {
             "a click must snapshot before resolving the hit"
         );
         assert_eq!(
+            app.status,
+            "That match is no longer in the retained history."
+        );
+        let fresh = app.tools.histories[&id].hits()[1].clone();
+        assert_ne!(
+            fresh.line_id, clicked.line_id,
+            "capacity invalidates old identities"
+        );
+        assert_eq!(fresh.grid_row, clicked.grid_row - 1);
+        let _ = app.tool_update(tools::Action::HistorySelect(
+            id,
+            fresh.line_id,
+            fresh.column,
+        ));
+        assert_eq!(
             stale_coords_selected(&app, id),
-            (clicked.line_id, clicked.column, clicked.grid_row - 1),
-            "same match, fresh row"
+            (fresh.line_id, fresh.column, 2),
+            "the refreshed button selects its own match at the new row"
         );
     }
 
@@ -18140,6 +18155,7 @@ mod tests {
         let _ = app.tool_update(tools::Action::HistoryNext(true));
         let kept = stale_coords_selected(&app, id);
         assert_eq!(kept.2, 3);
+        let evicted = app.tools.histories[&id].hits()[0].clone();
 
         app.tools.history_test_source.insert(
             id,
@@ -18150,7 +18166,6 @@ mod tests {
         let before = app.tools.history_refresh_count;
 
         // The rendered "l0 needle a" has rolled off.
-        let evicted = app.tools.histories[&id].hits()[0].clone();
         let _ = app.tool_update(tools::Action::HistorySelect(
             id,
             evicted.line_id,
@@ -18162,10 +18177,19 @@ mod tests {
             "That match is no longer in the retained history."
         );
         let after = stale_coords_selected(&app, id);
-        assert_eq!((after.0, after.1), (kept.0, kept.1), "selection unchanged");
-        assert_eq!(after.2, 2, "the kept selection follows the eviction");
+        let remaining = app.tools.histories[&id].hits();
+        assert_eq!(remaining.len(), 1, "only the retained match remains");
+        assert_ne!(
+            after.0, kept.0,
+            "capacity invalidates even retained identities"
+        );
+        assert_ne!(
+            after.0, evicted.line_id,
+            "the evicted button must not select a new row"
+        );
+        assert_eq!(after, (remaining[0].line_id, remaining[0].column, 2));
 
-        // An unknown identity also declines without changing selection.
+        // An unknown identity also declines without changing the refreshed selection.
         app.status = "untouched".into();
         let _ = app.tool_update(tools::Action::HistorySelect(id, u64::MAX, 0));
         assert_eq!(
@@ -18274,11 +18298,11 @@ mod tests {
     fn dropped_marks_status_wording_for_stale_coords() {
         assert_eq!(
             tools::history_marks_cleared_status(1),
-            "1 history mark cleared: scrollback changed where lines repeat."
+            "1 history mark cleared: line identity could not be verified after a history refresh."
         );
         assert_eq!(
             tools::history_marks_cleared_status(3),
-            "3 history marks cleared: scrollback changed where lines repeat."
+            "3 history marks cleared: line identity could not be verified after a history refresh."
         );
     }
 
@@ -18310,7 +18334,7 @@ mod tests {
         assert_eq!(dropped, 1, "the single mark sits on an ambiguous line");
         assert_eq!(
             app.status,
-            "1 history mark cleared: scrollback changed where lines repeat."
+            "1 history mark cleared: line identity could not be verified after a history refresh."
         );
     }
 
