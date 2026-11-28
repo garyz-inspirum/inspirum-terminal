@@ -19,10 +19,12 @@ Modes: `smoke`, `connected`, `all` (= smoke + connected), `tour`. Artifacts (log
 CI runs the connected acceptance with `INSPIRUM_GUI_POPULATED=1 INSPIRUM_GUI_AUTOSTART=1
 INSPIRUM_GUI_SAVED_SSH_CONFIG=1`: the existing CLI-config auto-start gate remains, followed
 by Tools → Profiles Save, process quit, ordinary relaunch without `--ssh-config`, fixture
-TCP echo/refusal, Cancel/relaunch and Clear/relaunch. The saved-path gate requires the
-production field label `SSH config file for tunnel auto-start`, a text input immediately
-below it, Save/Clear/Cancel controls, and `ssh_config_path` in `ui-state.json` beside the
-profiles file. It is not a separate CI pass.
+TCP echo/refusal, Cancel/relaunch and Clear/relaunch. The saved-path gate clicks
+`Set SSH config for auto-start…` in Tools → Profiles, locates the draft input
+by its `Absolute SSH config file path` placeholder (or the prefilled saved path),
+and targets Save/Clear/Cancel only in that section. It checks the `ssh_config`
+field in `<profiles-filename>.startup.json` beside the profiles file; this is
+not `ui-state.json`. It is not a separate CI pass.
 `connected` here runs without those flags unless passed: add `-e INSPIRUM_GUI_POPULATED=1
 -e INSPIRUM_GUI_AUTOSTART=1 -e INSPIRUM_GUI_SAVED_SSH_CONFIG=1` to `docker run` to mirror
 CI. The saved-path mode requires populated auto-start and cannot be combined with `tour`.
