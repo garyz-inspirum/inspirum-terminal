@@ -5810,30 +5810,37 @@ async def autostart_min_window_probe(window: str, destination: Path, env: dict[s
           f"notice (wheel steps: {wheel_steps}; footer {footer_steps})", flush=True)
 
 
-def require_saved_ssh_config(path: Path, expected: str | None) -> None:
-    """Read the actual ui-state.json beside the profiles, not an in-memory draft."""
+def saved_ssh_config_path(profiles: Path) -> Path:
+    """Mirror startup::settings_path for the fixture's profiles filename."""
+    return profiles.with_name(f"{profiles.name}.startup.json")
+
+
+def require_saved_ssh_config(profiles: Path, expected: str | None) -> None:
+    """Read the startup sidecar, not an in-memory draft or unrelated UI state."""
+    path = saved_ssh_config_path(profiles)
     if not path.exists():
         if expected is None:
             return
         raise RuntimeError(f"saved SSH config missing: {path}")
     state = json.loads(path.read_text(encoding="utf-8"))
-    actual = state.get("ssh_config_path")
-    if actual != expected and not (expected is None and actual in (None, "")):
+    actual = state.get("ssh_config")
+    if actual != expected:
         raise RuntimeError(f"saved SSH config: expected {expected!r}, got {actual!r} in {path}")
 
 
 async def saved_ssh_config_probe(binary: Path, profiles: Path, ssh_config: Path,
-                                 destination: Path, env: dict[str, str], app_log: Path,
-                                 forward_ports, inherit_ports, events) -> None:
+                                 local_root: Path, destination: Path, env: dict[str, str],
+                                 app_log: Path, forward_ports, inherit_ports, events) -> None:
     """Tools -> Profiles Save/Clear/Cancel across genuine process relaunches.
 
     All listeners are observed through the native fixture, not a GUI badge.
     No relaunch has --ssh-config; the initial editor launch does, so the
-    SSH config file for tunnel auto-start field can be filled by a user.
+    draft input can be filled by a user.
     """
     port_a, port_b = forward_ports
     port_c, port_inherited = inherit_ports
-    state_path = profiles.with_name("ui-state.json")
+    if not local_root.is_dir():
+        raise RuntimeError(f"saved GUI local working directory missing: {local_root}")
     started_before = events.path.read_text(encoding="utf-8").splitlines().count("SESSION_STARTED")
     app = None
     window = ""
@@ -5847,7 +5854,7 @@ async def saved_ssh_config_probe(binary: Path, profiles: Path, ssh_config: Path,
             raise RuntimeError("ordinary relaunch unexpectedly inherited --ssh-config")
         with app_log.open("a", encoding="utf-8") as output:
             app = subprocess.Popen(argv, stdout=output, stderr=subprocess.STDOUT,
-                                   cwd=profiles.parent / "local-files", env=env)
+                                   cwd=local_root, env=env)
         window = ""
         for _ in range(int(100 * TIME_SCALE)):
             if app.poll() is not None:
@@ -5891,52 +5898,45 @@ async def saved_ssh_config_probe(binary: Path, profiles: Path, ssh_config: Path,
         region = (max(0, (w - 880) // 2), 34, min(w, (w + 880) // 2), h - 22)
         await locate_rendered_label(window, destination / f"saved-{tag}-profiles.png",
                                     "Profiles", env=env, region=region)
-        label = await locate_rendered_label(
-            window, destination / f"saved-{tag}-field.png",
-            "SSH config file for tunnel auto-start", env=env, region=region,
+        saved = await locate_rendered_label(
+            window, destination / f"saved-{tag}-current.png",
+            "Saved SSH config:", env=env, region=region,
         )
-        return region, label
+        # Bound the section below the persisted-value row, above Startup.
+        section = (region[0], saved[3] + 1, region[2], min(region[3], saved[3] + 100))
+        await click_label(window, destination / f"saved-{tag}-set.png",
+                          "Set SSH config for auto-start…", env, region=section, timeout=20)
+        # Empty draft renders the placeholder; a saved draft renders its actual
+        # path instead. Both are OCR targets *inside* the input, never an
+        # inferred coordinate below a non-existent field label.
+        field = await locate_rendered_label(
+            window, destination / f"saved-{tag}-field.png",
+            "Absolute SSH config file path" if tag == "save" else str(ssh_config),
+            env=env, region=section, timeout=20,
+        )
+        # The action row is directly below the observed input, not the other
+        # Save/Clear/Cancel buttons elsewhere in Tools.
+        actions = (section[0], field[3] + 1, section[2], min(section[3], field[3] + 48))
+        await locate_rendered_label(window, destination / f"saved-{tag}-actions.png",
+                                    "Cancel", env=env, region=actions)
+        return actions, field
 
     async def edit_path(tag: str, value: str):
-        region, label = await panel(tag)
-        # Iced form convention: text input immediately below its field label.
-        x = min(region[2] - 70, max(label[0] + 140, (label[0] + label[2]) // 2))
-        y = label[3] + 22
-        if not (region[0] <= x < region[2] and region[1] <= y < region[3]):
-            raise RuntimeError(f"{tag}: SSH config field {label} has no reachable input")
-        command("xdotool", "mousemove", "--window", window, str(x), str(y), "click", "1", env=env)
+        actions, field = await panel(tag)
+        command("xdotool", "mousemove", "--window", window,
+                *map(str, center(field)), "click", "1", env=env)
         command("xdotool", "key", "--clearmodifiers", "ctrl+a", env=env)
         if value:
             command("xdotool", "type", "--clearmodifiers", "--delay", "5", value, env=env)
         await asyncio.to_thread(screenshot, window, destination / f"saved-{tag}-draft.png", env)
-        return region
+        return actions
 
     async def action(tag: str, label: str, region):
-        # Require the named button; a primary blue Save has dark text that
-        # light-text OCR may miss, so use its fill only on the same footer row
-        # as OCR-located Clear/Cancel, never an arbitrary blue toggle.
+        # All three product buttons use the quiet style (not a primary fill).
+        # The region is the row immediately below this SSH-config input.
         before = destination / f"saved-{tag}-{label.lower()}-before.png"
-        if label == "Save":
-            cancel = await locate_rendered_label(window, before, "Cancel", env=env,
-                                                 region=region, timeout=20)
-            await asyncio.to_thread(screenshot, window, before, env)
-            image = await asyncio.to_thread(_read_png, before)
-            candidates = []
-            for y in range(max(region[1], cancel[1] - 10), min(region[3], cancel[3] + 10)):
-                run = primary_fill_run(before, y, region[0], region[2],
-                                       min_width=25, image=image)
-                if run and 30 <= run[1] - run[0] <= 140:
-                    candidates.append((y, run))
-            if len(candidates) < 8:
-                raise RuntimeError(f"Save primary fill not found beside Cancel {cancel} in {before}")
-            box = (min(r[0] for _, r in candidates), min(y for y, _ in candidates),
-                   max(r[1] for _, r in candidates), max(y for y, _ in candidates) + 1)
-            command("xdotool", "mousemove", "--window", window,
-                    *map(str, center(box)), "click", "1", env=env)
-            await asyncio.sleep(.7)
-        else:
-            await click_label(window, before, label, env, region=region,
-                              timeout=20, settle=.7)
+        await click_label(window, before, label, env, region=region,
+                          timeout=20, settle=.7)
         await asyncio.to_thread(screenshot, window,
                                 destination / f"saved-{tag}-{label.lower()}-after.png", env)
 
@@ -5960,10 +5960,10 @@ async def saved_ssh_config_probe(binary: Path, profiles: Path, ssh_config: Path,
         # gesture and the next launch without a CLI flag are the acceptance.
         await launch(cli=True, tag="editor")
         await startup_oracle("editor", enabled=True)
-        require_saved_ssh_config(state_path, None)
+        require_saved_ssh_config(profiles, None)
         region = await edit_path("save", str(ssh_config))
         await action("save", "Save", region)
-        require_saved_ssh_config(state_path, str(ssh_config))
+        require_saved_ssh_config(profiles, str(ssh_config))
         await close("saved")
 
         await launch(cli=False, tag="ordinary-saved")
@@ -5971,13 +5971,13 @@ async def saved_ssh_config_probe(binary: Path, profiles: Path, ssh_config: Path,
         # Cancel an edited draft; the saved path must survive another process.
         region = await edit_path("cancel", str(profiles.parent / "discarded_config"))
         await action("cancel", "Cancel", region)
-        require_saved_ssh_config(state_path, str(ssh_config))
+        require_saved_ssh_config(profiles, str(ssh_config))
         await close("cancel")
         await launch(cli=False, tag="ordinary-cancel")
         await startup_oracle("ordinary-cancel", enabled=True)
         region, _field = await panel("clear")
         await action("clear", "Clear", region)
-        require_saved_ssh_config(state_path, None)
+        require_saved_ssh_config(profiles, None)
         await close("clear")
         await launch(cli=False, tag="ordinary-cleared")
         await startup_oracle("ordinary-cleared", enabled=False)
@@ -10051,22 +10051,21 @@ async def main() -> int:
                     encoding="utf-8",
                 )
                 print("PASS production Iced GUI: connected split, click-driven SFTP upload/download, draft, focus/privacy, alternate-screen and PTY isolation", flush=True)
-                if SAVED_SSH_CONFIG:
-                    # Existing connected edits intentionally replace/remove
-                    # Bravo. Restore ONLY the generated profile fixture after
-                    # that process has exited, so the relaunch tests the same
-                    # original Alpha/Bravo/Charlie metadata, not its edits.
-                    profiles.write_text(json.dumps(fixture_profiles(
-                        forward_ports, echo_port,
-                        charlie_port=inherit_ports[0] if inherit_ports else None,
-                    )), encoding="utf-8")
-                    # The legacy --ssh-config run above is retained verbatim;
-                    # after it exits, a fresh process exercises the saved UI
-                    # and several ordinary relaunches against the same fixture.
-                    await saved_ssh_config_probe(
-                        binary, profiles, ssh_config, destination, env, app_log,
-                        forward_ports, inherit_ports, events,
-                    )
+            if SAVED_SSH_CONFIG:
+                # The original output handle is closed and its process exited.
+                if app is None or app.poll() != 0:
+                    raise RuntimeError("original GUI must exit successfully before saved-path relaunch")
+                app = None
+                # Connected edits replace/remove Bravo; restore only the
+                # disposable profiles, never the setting being tested.
+                profiles.write_text(json.dumps(fixture_profiles(
+                    forward_ports, echo_port,
+                    charlie_port=inherit_ports[0] if inherit_ports else None,
+                )), encoding="utf-8")
+                await saved_ssh_config_probe(
+                    binary, profiles, ssh_config, local_root, destination, env, app_log,
+                    forward_ports, inherit_ports, events,
+                )
         finally:
             if app is not None and app.poll() is None:
                 app.terminate()
