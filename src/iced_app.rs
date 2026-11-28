@@ -4550,6 +4550,16 @@ to 127.0.0.1 or [::1] (an empty bind or a host name such as localhost is not acc
 off automatic start.";
 const TUNNEL_AUTO_START_REMOTE: &str = "Remote tunnels cannot auto-start: the SSH server can \
 override their bind address. Start remote tunnels manually, or turn off automatic start.";
+const TUNNEL_AUTO_START_NO_SSH_CONFIG: &str = "Not active: the app was started without \
+--ssh-config, so this tunnel will not auto-start. Start it manually.";
+
+/// Editor note under the auto-start checkbox: the start-up pass skips every
+/// opted-in tunnel when the app was launched without `--ssh-config`.
+fn tunnel_auto_start_inactive_note(ssh_config: Option<&std::path::Path>) -> Option<&'static str> {
+    ssh_config
+        .is_none()
+        .then_some(TUNNEL_AUTO_START_NO_SSH_CONFIG)
+}
 
 /// Why this forward may not auto-start, or `None` when it may. The same
 /// check gates the editor's save and the start-up pass, so a hand-edited
@@ -10906,6 +10916,18 @@ impl App {
                 SessionTunnelOp::Unavailable(reason) => text(reason).size(11).color(muted()).into(),
                 SessionTunnelOp::Stop | SessionTunnelOp::Start => column![].into(),
             };
+            // Without --ssh-config the start-up pass skips opted-in tunnels;
+            // say so under the help. With it, the editor is unchanged.
+            let auto_start_help: Element<'_, Message> =
+                match tunnel_auto_start_inactive_note(self.ssh_config.as_deref()) {
+                    Some(note) => column![
+                        text(TUNNEL_AUTO_START_HELP).size(11).color(muted()),
+                        text(note).size(12).color(danger()),
+                    ]
+                    .spacing(10)
+                    .into(),
+                    None => text(TUNNEL_AUTO_START_HELP).size(11).color(muted()).into(),
+                };
             let mut controls = column![
                 grid,
                 row![
@@ -10928,7 +10950,7 @@ impl App {
                         (edit.draft.kind != tunnels::ForwardKind::Remote || edit.auto_start)
                             .then_some(Message::TunnelDraftAutoStart),
                     ),
-                text(TUNNEL_AUTO_START_HELP).size(11).color(muted()),
+                auto_start_help,
                 operation.style(quiet),
                 operation_reason,
             ]
@@ -18013,6 +18035,22 @@ mod tunnel_layout_tests {
         for value in ["CI tunnel fixture", "Alpha forward", "127.0.0.1", "Running"] {
             assert!(value.chars().count() <= chars_fitting(field - 12.0, 13.0));
         }
+    }
+
+    #[test]
+    fn auto_start_note_shows_only_without_ssh_config() {
+        assert_eq!(
+            tunnel_auto_start_inactive_note(None),
+            Some(TUNNEL_AUTO_START_NO_SSH_CONFIG)
+        );
+        let config = std::path::Path::new("/tmp/ssh_config");
+        assert_eq!(tunnel_auto_start_inactive_note(Some(config)), None);
+        // The OCR-read checkbox label stays as it was.
+        assert_eq!(
+            TUNNEL_AUTO_START_LABEL,
+            "Automatically start when app opens"
+        );
+        assert!(TUNNEL_AUTO_START_NO_SSH_CONFIG.contains("--ssh-config"));
     }
 
     #[test]
