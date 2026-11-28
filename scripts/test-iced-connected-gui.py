@@ -192,6 +192,14 @@ POPULATED_LABELS = ("Alpha forward", "Bravo forward")
 # Alpha with the real popup toggle so the populated flow below starts from
 # "both stopped" exactly as without this mode.
 AUTOSTART = os.environ.get("INSPIRUM_GUI_AUTOSTART") == "1"
+# Auto-start mode also saves a THIRD profile (last in the library, so the
+# rows above keep their order) whose host is an ssh_config alias that adds a
+# LocalForward of its own. Its one saved forward (Charlie) is opted in, but
+# OpenSSH would bring up the inherited listener with it, so unattended start
+# must skip it: neither Charlie's nor the inherited port may ever listen.
+AUTOSTART_INHERIT_PROFILE = "CI inherited-forward fixture"
+AUTOSTART_INHERIT_HOST = "native-smoke-inherit"
+AUTOSTART_INHERIT_LABEL = "Charlie forward"
 # Checkbox label in the Tunnel Settings form (src/iced_app.rs
 # TUNNEL_AUTO_START_LABEL).
 AUTOSTART_CHECKBOX_LABEL = "Automatically start when app opens"
@@ -319,7 +327,20 @@ def populated_profile_ssh(ports, echo_port: int, *, auto_start=()) -> dict:
     return {"local_forwards": specs, "tunnel_labels": labels}
 
 
-def fixture_profiles(forward_ports, echo_port, *, populated=None, autostart=None) -> list[dict]:
+def inherit_profile_ssh(charlie_port: int, echo_port: int) -> dict:
+    """``ssh`` block of the auto-start inherited-forward profile: one opted-in
+    loopback forward (Charlie), same row shape as ``populated_profile_ssh``."""
+    spec = f"127.0.0.1:{charlie_port}:127.0.0.1:{echo_port}"
+    return {
+        "local_forwards": [spec],
+        "tunnel_labels": [
+            {"kind": "local", "spec": spec, "label": AUTOSTART_INHERIT_LABEL, "auto_start": True},
+        ],
+    }
+
+
+def fixture_profiles(forward_ports, echo_port, *, populated=None, autostart=None,
+                     charlie_port=None) -> list[dict]:
     """Saved profiles for the connected run.
 
     The first profile is always the plain terminal target ('CI connected
@@ -327,12 +348,20 @@ def fixture_profiles(forward_ports, echo_port, *, populated=None, autostart=None
     auxiliary shells, each its own SSH process, which would collide on any
     ``-L`` listener. Populated mode therefore puts the labelled forwards on a
     SECOND profile with the same SSH target; the Tunnels quick menu lists
-    saved forwards from every profile. Auto-start mode opts in Alpha only.
+    saved forwards from every profile. Auto-start mode opts in Alpha, and
+    appends a THIRD profile (AUTOSTART_INHERIT_PROFILE, last so the earlier
+    rows keep their order) whose opted-in Charlie forward must be skipped
+    because its ssh_config host adds another LocalForward.
     """
     populated = POPULATED if populated is None else populated
     autostart = AUTOSTART if autostart is None else autostart
     if autostart and not populated:
         raise RuntimeError("INSPIRUM_GUI_AUTOSTART=1 requires INSPIRUM_GUI_POPULATED=1")
+    if autostart:
+        if charlie_port is None:
+            raise RuntimeError("auto-start fixture needs charlie_port")
+        if charlie_port in (*forward_ports, echo_port):
+            raise RuntimeError(f"charlie_port {charlie_port} collides with {forward_ports}/{echo_port}")
     base = {
         "host": "native-smoke",
         "user": "native-smoke",
@@ -348,7 +377,53 @@ def fixture_profiles(forward_ports, echo_port, *, populated=None, autostart=None
                 auto_start=POPULATED_LABELS[:1] if autostart else (),
             ),
         })
+    if autostart:
+        out.append({
+            "name": AUTOSTART_INHERIT_PROFILE, **base, "host": AUTOSTART_INHERIT_HOST,
+            "ssh": inherit_profile_ssh(charlie_port, echo_port),
+        })
     return out
+
+
+def inherited_forward_stanza(config_text: str, inherited_port: int, echo_port: int) -> str:
+    """``Host native-smoke-inherit`` stanza for the auto-start regression.
+
+    A verbatim copy of the ``Host native-smoke`` stanza's settings (so the
+    alias reaches the same fixture server with the same key and known-hosts
+    files) plus one LocalForward that exists ONLY in ssh_config. The fixture
+    server allows direct-tcpip to the echo port from any session, so on a
+    build that launches this host the inherited listener really echoes.
+    """
+    lines = config_text.splitlines()
+    try:
+        start = lines.index("Host native-smoke")
+    except ValueError:
+        raise RuntimeError("ssh_config has no 'Host native-smoke' stanza to copy") from None
+    body = []
+    for line in lines[start + 1:]:
+        if line.strip().lower().startswith(("host ", "match ")):
+            break
+        if line.strip():
+            body.append(line)
+    if not any(line.strip().startswith("HostName ") for line in body):
+        raise RuntimeError(f"native-smoke stanza has no HostName: {body}")
+    if any(line.strip().lower().startswith(("localforward", "remoteforward", "dynamicforward"))
+           for line in body):
+        raise RuntimeError(f"native-smoke stanza already forwards: {body}")
+    return "\n".join([
+        f"Host {AUTOSTART_INHERIT_HOST}",
+        *body,
+        f" LocalForward 127.0.0.1:{inherited_port} 127.0.0.1:{echo_port}",
+        "",
+    ])
+
+
+def append_inherited_forward_host(path: Path, inherited_port: int, echo_port: int) -> None:
+    """Append ``inherited_forward_stanza`` to the written ssh_config."""
+    text = path.read_text(encoding="utf-8")
+    sep = "" if text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
+    path.write_text(text + sep + inherited_forward_stanza(text, inherited_port, echo_port),
+                    encoding="utf-8")
 
 
 async def forward_echo(port: int, message: bytes, *, timeout: float = 15) -> None:
@@ -401,6 +476,64 @@ async def forward_refused(port: int, context: str, *, timeout: float = 8) -> Non
             last = "connected"
         await asyncio.sleep(.25)
     raise RuntimeError(f"{context}: listener {port} did not refuse ({last})")
+
+
+async def forward_stays_refused(port: int, context: str, *, seconds: float) -> None:
+    """Require that NOTHING accepts on loopback ``port`` for ``seconds``.
+
+    Polls a TCP connect; the moment one succeeds it raises RuntimeError
+    naming the port (``context`` says which forward it is). A refusal or any
+    other connect error is "not listening" and polling continues until the
+    window ends. Truth is the TCP listener, never product status text.
+    """
+    start = time.monotonic()
+    deadline = start + seconds
+    while True:
+        try:
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", port), 2,
+            )
+        except (OSError, asyncio.TimeoutError):
+            pass
+        else:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"{context} (port {port} accepted a connection "
+                f"{time.monotonic() - start:.1f}s into the {seconds:g}s window)"
+            )
+        if time.monotonic() >= deadline:
+            return
+        await asyncio.sleep(min(.25, max(0.0, deadline - time.monotonic())))
+
+
+async def require_inherited_forwards_refused(charlie_port: int, inherited_port: int, *,
+                                             seconds: float) -> None:
+    """Both the skipped opted-in forward and the ssh_config-only forward stay
+    closed for the whole window (polled concurrently; first opener fails)."""
+    tasks = [
+        asyncio.create_task(forward_stays_refused(
+            inherited_port,
+            f"UNEXPECTED_INHERITED_FORWARD: ssh_config LocalForward {inherited_port} "
+            f"is listening after app launch",
+            seconds=seconds,
+        )),
+        asyncio.create_task(forward_stays_refused(
+            charlie_port,
+            f"UNEXPECTED_INHERITED_FORWARD: opted-in Charlie {charlie_port} is listening "
+            f"after app launch although its ssh_config host adds a forward",
+            seconds=seconds,
+        )),
+    ]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def observe_pty_chunk(events, probe_state: dict[str, str | None], chunk: str) -> None:
@@ -4633,25 +4766,51 @@ async def run_tour(window: str, tour_dir: Path, env: dict[str, str], events, app
 
 
 async def autostart_precheck(window: str, destination: Path, env: dict[str, str], events,
-                             forward_ports, profiles: Path) -> None:
+                             forward_ports, profiles: Path, *, inherit_ports,
+                             ssh_config: Path) -> None:
     """INSPIRUM_GUI_AUTOSTART=1: prove app launch started Alpha and only Alpha.
 
     Runs right after the first frame, before any Tunnels click, toggle or
     session open. Truth is the loopback listener and the fixture's
-    LOCAL_FORWARD_ALLOW event, never a screenshot. Ends with Alpha stopped by
-    the real popup toggle so the populated flow keeps "both initially
-    stopped". Every step is required; nothing here is best-effort.
+    LOCAL_FORWARD_ALLOW event, never a screenshot. ``inherit_ports`` is
+    ``(charlie_port, inherited_port)``: Charlie is opted in on the third
+    profile, whose ssh_config host adds the inherited LocalForward, so
+    neither may ever listen. Ends with Alpha stopped by the real popup toggle
+    so the populated flow keeps "both initially stopped". Every step is
+    required; nothing here is best-effort.
     """
     port_a, port_b = forward_ports
+    port_c, port_inherited = inherit_ports
     label_a, label_b = POPULATED_LABELS
     with profiles.open(encoding="utf-8") as handle:
-        saved = {p["name"]: p for p in json.load(handle)}
+        library = json.load(handle)
+    saved = {p["name"]: p for p in library}
     flags = {
         row["label"]: bool(row.get("auto_start"))
         for row in saved["CI tunnel fixture"]["ssh"]["tunnel_labels"]
     }
     if flags != {label_a: True, label_b: False}:
         raise RuntimeError(f"auto-start fixture metadata wrong on disk: {flags}")
+    # The inherited-forward profile is last (library order = launch order),
+    # targets the ssh_config alias and opts in exactly Charlie.
+    inherit = library[-1] if library else {}
+    inherit_rows = [
+        (row["label"], row["spec"], bool(row.get("auto_start")))
+        for row in inherit.get("ssh", {}).get("tunnel_labels", [])
+    ]
+    charlie_spec = f"127.0.0.1:{port_c}:127.0.0.1:"
+    if (inherit.get("name") != AUTOSTART_INHERIT_PROFILE
+            or inherit.get("host") != AUTOSTART_INHERIT_HOST
+            or len(inherit_rows) != 1
+            or inherit_rows[0][0] != AUTOSTART_INHERIT_LABEL
+            or not inherit_rows[0][1].startswith(charlie_spec)
+            or inherit_rows[0][2] is not True
+            or inherit["ssh"].get("local_forwards") != [inherit_rows[0][1]]):
+        raise RuntimeError(f"inherited-forward fixture profile wrong on disk: {inherit}")
+    config_text = ssh_config.read_text(encoding="utf-8")
+    if (f"Host {AUTOSTART_INHERIT_HOST}" not in config_text
+            or f" LocalForward 127.0.0.1:{port_inherited} " not in config_text):
+        raise RuntimeError(f"ssh_config lacks the {AUTOSTART_INHERIT_HOST} LocalForward stanza")
     # 1. Launch alone (no click) brings Alpha up through the fixture SSH
     # server. Startup spawns ssh and authenticates, so allow a generous
     # TIME_SCALE'd window instead of the per-toggle 15 s.
@@ -4664,8 +4823,19 @@ async def autostart_precheck(window: str, destination: Path, env: dict[str, str]
         raise RuntimeError("auto-start opened a shell session; it must only forward")
     print(f"PASS auto-start: Alpha {port_a} echoed at launch, Bravo {port_b} refused",
           flush=True)
+    # 2b. Opted-in Charlie must be SKIPPED: its ssh_config host adds the
+    # inherited LocalForward, so launching it would open a listener the user
+    # never selected. The pass launches in library order and Charlie's
+    # profile is last, so Alpha's echo above means Charlie's turn has come;
+    # the settle window then covers a slow ssh start.
+    await require_inherited_forwards_refused(
+        port_c, port_inherited, seconds=5 * TIME_SCALE,
+    )
+    print(f"PASS auto-start: Charlie {port_c} and inherited {port_inherited} refused "
+          f"(ssh_config adds a forward)", flush=True)
 
-    # 3. Evidence: popup with Alpha on / Bravo off (both rows located).
+    # 3. Evidence: popup with Alpha on / Bravo off; all three rows (Charlie
+    # listed, skipped) located inside the popup region, above its footer.
     tun_width, tun_height = window_size(window, env)
     button_region = (max(0, tun_width - 220), 0, tun_width, 42)
     tunnels_bounds = await click_label(
@@ -4680,7 +4850,7 @@ async def autostart_precheck(window: str, destination: Path, env: dict[str, str]
     footer = await locate_rendered_label(
         window, popup_shot, "Tunnel Settings...", env=env, region=popup_region, timeout=15,
     )
-    for label in POPULATED_LABELS:
+    for label in (*POPULATED_LABELS, AUTOSTART_INHERIT_LABEL):
         box = await asyncio.to_thread(locate_visible_label, popup_shot, label,
                                       region=popup_region)
         if not (_bounds_inside(box, popup_region) and box[3] <= footer[1]):
@@ -4751,6 +4921,10 @@ async def autostart_precheck(window: str, destination: Path, env: dict[str, str]
     await asyncio.sleep(1)
     await forward_refused(port_a, "auto-started Alpha after popup stop")
     await forward_refused(port_b, "Bravo after Alpha popup stop")
+    await forward_refused(port_c, "UNEXPECTED_INHERITED_FORWARD: skipped Charlie at end of "
+                          "auto-start precheck")
+    await forward_refused(port_inherited, "UNEXPECTED_INHERITED_FORWARD: ssh_config "
+                          "LocalForward at end of auto-start precheck")
     await asyncio.to_thread(
         screenshot, window, destination / "connected-autostart-popup-stopped.png", env,
     )
@@ -4798,6 +4972,14 @@ async def main() -> int:
             echo_port = int(echo_server.sockets[0].getsockname()[1])
             first_port = free_loopback_port({echo_port})
             forward_ports = (first_port, free_loopback_port({echo_port, first_port}))
+        # Auto-start only: Charlie (opted-in saved forward on the third
+        # profile) and the forward its ssh_config host adds on its own.
+        inherit_ports: tuple[int, ...] = ()
+        if AUTOSTART:
+            charlie_port = free_loopback_port({echo_port, *forward_ports})
+            inherit_ports = (
+                charlie_port, free_loopback_port({echo_port, *forward_ports, charlie_port}),
+            )
         server = await asyncssh.create_server(
             lambda: MonitoredServer(trusted, events, echo_port=echo_port),
             "127.0.0.1", 0, server_host_keys=[str(host)], encoding="utf-8",
@@ -4822,9 +5004,15 @@ async def main() -> int:
             ssh_config, port=port, identity=client,
             known_hosts=known, global_known_hosts=global_known,
         )
+        if AUTOSTART:
+            append_inherited_forward_host(ssh_config, inherit_ports[1], echo_port)
         profiles = root / "profiles.json"
         profiles.write_text(
-            json.dumps(fixture_profiles(forward_ports, echo_port)), encoding="utf-8",
+            json.dumps(fixture_profiles(
+                forward_ports, echo_port,
+                charlie_port=inherit_ports[0] if inherit_ports else None,
+            )),
+            encoding="utf-8",
         )
         extedit_editor = root / "fake-editor.py"
         extedit_argv_log = root / "fake-editor-argv.log"
@@ -4916,6 +5104,7 @@ async def main() -> int:
                 if AUTOSTART:
                     await autostart_precheck(
                         window, destination, env, events, forward_ports, profiles,
+                        inherit_ports=inherit_ports, ssh_config=ssh_config,
                     )
 
                 # Saved sessions are listed in the bottom Session dock panel
