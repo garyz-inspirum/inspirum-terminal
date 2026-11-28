@@ -3038,6 +3038,73 @@ fn find_chord_route(
     }
 }
 
+/// Why the Find input is being focused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FindFocusCause {
+    /// A command opened or re-focused the strip (`open_find_strip`).
+    Command,
+    /// The Prev/Next buttons keep the keyboard in the input.
+    Step,
+    /// Focus handed back after a dialog or the privacy lock.
+    Restore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FindFocusEffects {
+    focus: bool,
+    select_all: bool,
+}
+
+/// `strip_owned`: the strip is open and its input owns the keyboard.
+/// `modal`: a dialog or the privacy lock is up. Only a command selects the
+/// kept query; a mouse click into the input never reaches this function
+/// (the text input places the caret itself).
+fn find_focus_effects(cause: FindFocusCause, strip_owned: bool, modal: bool) -> FindFocusEffects {
+    let focus = strip_owned && !modal;
+    FindFocusEffects {
+        focus,
+        select_all: focus && cause == FindFocusCause::Command,
+    }
+}
+
+/// Focus `id` and select all of its text in ONE widget action. Iced's
+/// `focus` moves the caret to the end, and `Task::batch` does not order its
+/// members, so a separate `select_all` task could run first and be undone.
+/// The select pass is chained through `Outcome::Chain`, which the runtime
+/// applies in the same action, before any further event is processed.
+fn focus_and_select_all(id: &'static str) -> Task<Message> {
+    use iced::advanced::widget::{
+        Id, Operation,
+        operation::{Focusable, Outcome, text_input::select_all},
+    };
+    struct FocusThenSelectAll {
+        target: Id,
+    }
+    impl<T: Send + 'static> Operation<T> for FocusThenSelectAll {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<T>)) {
+            operate(self);
+        }
+        fn focusable(
+            &mut self,
+            id: Option<&Id>,
+            _bounds: iced::Rectangle,
+            state: &mut dyn Focusable,
+        ) {
+            if id == Some(&self.target) {
+                state.focus();
+            } else {
+                state.unfocus();
+            }
+        }
+        fn finish(&self) -> Outcome<T> {
+            Outcome::Chain(Box::new(select_all(self.target.clone())))
+        }
+    }
+    iced::advanced::widget::operate(FocusThenSelectAll {
+        target: Id::from(id),
+    })
+}
+
 #[derive(Clone, Debug)]
 enum Message {
     Tool(tools::Action),
@@ -8481,14 +8548,14 @@ impl App {
                 self.find_focused = true;
                 return Task::batch([
                     self.tool_update(tools::Action::HistoryNext(true)),
-                    operation::focus(FIND_INPUT_ID),
+                    self.find_focus_task(FindFocusCause::Step),
                 ]);
             }
             Message::FindPrev => {
                 self.find_focused = true;
                 return Task::batch([
                     self.tool_update(tools::Action::HistoryNext(false)),
-                    operation::focus(FIND_INPUT_ID),
+                    self.find_focus_task(FindFocusCause::Step),
                 ]);
             }
             Message::FindClose => self.close_find_strip(),
@@ -11469,10 +11536,23 @@ impl App {
     }
 
     fn restore_find_focus(&self) -> Task<Message> {
-        if self.find_open && self.find_focused && self.dialog.is_none() && !self.privacy_locked {
-            operation::focus(FIND_INPUT_ID)
-        } else {
-            Task::none()
+        self.find_focus_task(FindFocusCause::Restore)
+    }
+
+    /// The one place that turns a Find focus request into widget operations.
+    /// Every command that opens or re-focuses the strip (Ctrl+F, Ctrl+Shift+F,
+    /// Cmd+F, Edit > Find, the palette) reaches it through `open_find_strip`
+    /// with `FindFocusCause::Command`.
+    fn find_focus_task(&self, cause: FindFocusCause) -> Task<Message> {
+        let effects = find_focus_effects(
+            cause,
+            self.find_open && self.find_focused,
+            self.dialog.is_some() || self.privacy_locked,
+        );
+        match (effects.focus, effects.select_all) {
+            (true, true) => focus_and_select_all(FIND_INPUT_ID),
+            (true, false) => operation::focus(FIND_INPUT_ID),
+            _ => Task::none(),
         }
     }
 
@@ -11501,7 +11581,9 @@ impl App {
         self.history_refresh();
         self.find_open = true;
         self.find_focused = true;
-        operation::focus(FIND_INPUT_ID)
+        // Focus + select-all: typing replaces the kept query, Enter/Next
+        // still searches it.
+        self.find_focus_task(FindFocusCause::Command)
     }
 
     /// `alt_screen` is the focused terminal's mode bit, passed in so unit
@@ -11523,19 +11605,8 @@ impl App {
             || free_type_draft;
         match find_chord_route(menu_open, self.find_focused, keyboard_owned, alt_screen) {
             FindChordRoute::Drop => Task::none(),
-            FindChordRoute::Reselect => {
-                let open = self.update(Message::FindOpen);
-                if self.find_open
-                    && self.find_focused
-                    && self.dialog.is_none()
-                    && !self.privacy_locked
-                {
-                    Task::batch([open, operation::select_all(FIND_INPUT_ID)])
-                } else {
-                    open
-                }
-            }
-            FindChordRoute::Open => self.update(Message::FindOpen),
+            // Both re-run the open path, which selects the kept query.
+            FindChordRoute::Reselect | FindChordRoute::Open => self.update(Message::FindOpen),
             FindChordRoute::Forward => self.update(Message::Event(event)),
         }
     }
@@ -17412,6 +17483,102 @@ mod tests {
                 "menu={menu} find={find} owned={owned} alt={alt}"
             );
         }
+    }
+
+    #[test]
+    fn find_focus_effects_select_only_on_command() {
+        use FindFocusCause::{Command, Restore, Step};
+        let on = FindFocusEffects {
+            focus: true,
+            select_all: true,
+        };
+        let focus_only = FindFocusEffects {
+            focus: true,
+            select_all: false,
+        };
+        let none = FindFocusEffects {
+            focus: false,
+            select_all: false,
+        };
+        // (cause, strip_owned, modal) -> effects
+        let cases = [
+            ((Command, true, false), on),
+            ((Step, true, false), focus_only),
+            ((Restore, true, false), focus_only),
+            ((Command, false, false), none),
+            ((Command, true, true), none),
+            ((Step, true, true), none),
+            ((Restore, false, false), none),
+        ];
+        for ((cause, owned, modal), want) in cases {
+            assert_eq!(
+                find_focus_effects(cause, owned, modal),
+                want,
+                "cause={cause:?} owned={owned} modal={modal}"
+            );
+        }
+    }
+
+    /// Every command entry point reaches `open_find_strip` and returns a
+    /// non-empty task. Iced operations are opaque here, so this proves a
+    /// task exists and the state that `find_focus_effects` maps to
+    /// focus + select-all; that the widget really selects is only shown on
+    /// screen (connected `ctrl_f_probe`).
+    #[test]
+    fn every_find_command_opens_through_the_select_path() {
+        let entries: [(&str, fn(&mut App) -> Task<Message>); 5] = [
+            ("FindOpen", |app| app.update(Message::FindOpen)),
+            ("FindToggle (Edit > Find, palette)", |app| {
+                app.update(Message::FindToggle)
+            }),
+            ("KeyChord::Find (Ctrl+Shift+F, Cmd+F)", |app| {
+                app.update(Message::KeyChord(KeyChord::Find))
+            }),
+            ("plain Ctrl+F", |app| {
+                app.update(Message::FindOrForward(ctrl_f_event()))
+            }),
+            ("menu Edit > Find", |app| {
+                app.update(Message::MenuCommand(menu::Command::Find))
+            }),
+        ];
+        for (name, run) in entries {
+            let (mut app, id) = app_with_focused_pane("find-entry");
+            let task = run(&mut app);
+            assert!(app.find_open && app.find_focused, "{name}: strip not open");
+            assert_eq!(app.tools.history_owner, Some(id), "{name}");
+            assert!(task.units() > 0, "{name}: no focus task returned");
+            assert_eq!(
+                find_focus_effects(
+                    FindFocusCause::Command,
+                    app.find_open && app.find_focused,
+                    app.dialog.is_some() || app.privacy_locked,
+                ),
+                FindFocusEffects {
+                    focus: true,
+                    select_all: true
+                },
+                "{name}"
+            );
+        }
+        // Re-focus with a kept query: Ctrl+F in the focused input and the
+        // Ctrl+Shift+F chord both re-run the open path; the query stays.
+        let (mut app, id) = app_with_focused_pane("find-reopen");
+        let _ = app.update(Message::FindOpen);
+        let _ = app.update(Message::FindQuery("needle".into()));
+        for task in [
+            app.find_or_forward(ctrl_f_event(), false),
+            app.update(Message::KeyChord(KeyChord::Find)),
+        ] {
+            assert!(task.units() > 0, "re-focus returned no task");
+            assert_eq!(
+                app.tools.histories.get(&id).map(|h| h.query().to_owned()),
+                Some("needle".to_owned()),
+                "reopening must keep the query"
+            );
+        }
+        // A modal blocks the select path.
+        app.privacy_locked = true;
+        assert_eq!(app.restore_find_focus().units(), 0);
     }
 
     #[test]
