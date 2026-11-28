@@ -177,6 +177,22 @@ fn privacy_lock_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bo
         && matches!(key.as_ref(), keyboard::Key::Character("l" | "L"))
 }
 
+/// Ctrl/Cmd+F or Ctrl/Cmd+Shift+F that a focused text field captured. The
+/// `TerminalIme` wrapper captures every key while a child editor wants IME,
+/// so a Find chord pressed in the focused Find input never arrives Ignored.
+/// `Message::FindCapturedChord` reselects only when that input owns the
+/// keyboard; in any other field the key stays that widget's.
+fn captured_find_chord(
+    key: &keyboard::Key,
+    modifiers: keyboard::Modifiers,
+    status: event::Status,
+) -> bool {
+    status == event::Status::Captured
+        && modifiers.command()
+        && !modifiers.alt()
+        && matches!(key.as_ref(), keyboard::Key::Character("f" | "F"))
+}
+
 fn focus_mode_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
     modifiers.alt()
         && !modifiers.control()
@@ -435,6 +451,11 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                     key: keyboard::Key::Named(keyboard::key::Named::Escape),
                     ..
                 }) if status == event::Status::Captured => Some(Message::DismissModalKey),
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                    if captured_find_chord(key, *modifiers, status) =>
+                {
+                    Some(Message::FindCapturedChord)
+                }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if modifiers.command()
                         && matches!(
@@ -3008,8 +3029,6 @@ impl KeyChord {
 enum FindChordRoute {
     /// An open menu owns the keyboard: dropped, like Ctrl+Shift+F.
     Drop,
-    /// The Find input already owns the keyboard: keep focus, select its text.
-    Reselect,
     /// Same as Ctrl+Shift+F (`Message::FindOpen` and its own guards).
     Open,
     /// Re-dispatch the original key through `Message::Event` so the PTY
@@ -3018,19 +3037,13 @@ enum FindChordRoute {
 }
 
 /// `keyboard_owned`: a dialog, the remote editor, the privacy lock, the
-/// Sender editor or the focused pane's free-type draft owns the keyboard. In
+/// Sender editor, the Find input or the focused pane's free-type draft owns
+/// the keyboard. In
 /// those states Ctrl+F does exactly what Ctrl+Shift+F does. Only an
 /// unowned focused pane in alternate-screen mode forwards the key.
-fn find_chord_route(
-    menu_open: bool,
-    find_focused: bool,
-    keyboard_owned: bool,
-    alt_screen: bool,
-) -> FindChordRoute {
+fn find_chord_route(menu_open: bool, keyboard_owned: bool, alt_screen: bool) -> FindChordRoute {
     if menu_open {
         FindChordRoute::Drop
-    } else if find_focused {
-        FindChordRoute::Reselect
     } else if !keyboard_owned && alt_screen {
         FindChordRoute::Forward
     } else {
@@ -3380,6 +3393,8 @@ enum Message {
     TunnelSessionSearch(String),
     /// Plain Ctrl+F: open Find, or forward the key in alternate screen.
     FindOrForward(iced::Event),
+    /// A Find chord captured by a focused text field (`captured_find_chord`).
+    FindCapturedChord,
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -5814,6 +5829,7 @@ impl App {
                     | Message::ToggleFocusMode
                     | Message::ToggleAuxiliaryShell
                     | Message::FindOpen
+                    | Message::FindCapturedChord
                     | Message::FindToggle
                     | Message::ToggleLocalNavigation
                     | Message::ToggleRemoteKeys(..)
@@ -8533,6 +8549,23 @@ impl App {
                 }
             }
             Message::FindOpen => return self.open_find_strip(),
+            Message::FindCapturedChord => {
+                // Only the focused Find input reselects its query; any other
+                // field keeps the key, and nothing reaches the PTY.
+                let find_owns = self.find_open
+                    && self.find_focused
+                    && !self.sender_focused
+                    && self.dialog.is_none()
+                    && self.remote_editor.is_none()
+                    && !self.privacy_locked
+                    && self.open_menu.is_none()
+                    && self.dock_menu.is_none()
+                    && self.context_menu.is_none()
+                    && !self.tunnel_menu;
+                if find_owns {
+                    return self.open_find_strip();
+                }
+            }
             Message::FindToggle => {
                 if self.find_open {
                     self.close_find_strip();
@@ -11602,11 +11635,14 @@ impl App {
             || self.remote_editor.is_some()
             || self.privacy_locked
             || self.sender_focused
+            // A stale `find_focused` (the input usually captures Ctrl+F, see
+            // `captured_find_chord`) still keeps 0x06 off the PTY.
+            || self.find_focused
             || free_type_draft;
-        match find_chord_route(menu_open, self.find_focused, keyboard_owned, alt_screen) {
+        match find_chord_route(menu_open, keyboard_owned, alt_screen) {
             FindChordRoute::Drop => Task::none(),
-            // Both re-run the open path, which selects the kept query.
-            FindChordRoute::Reselect | FindChordRoute::Open => self.update(Message::FindOpen),
+            // Re-runs the open path, which selects the kept query.
+            FindChordRoute::Open => self.update(Message::FindOpen),
             FindChordRoute::Forward => self.update(Message::Event(event)),
         }
     }
@@ -17462,26 +17498,92 @@ mod tests {
 
     #[test]
     fn find_chord_route_covers_every_ownership_state() {
-        use FindChordRoute::{Drop, Forward, Open, Reselect};
-        // (menu_open, find_focused, keyboard_owned, alt_screen) -> route
+        use FindChordRoute::{Drop, Forward, Open};
+        // (menu_open, keyboard_owned, alt_screen) -> route
         let cases = [
-            ((false, false, false, false), Open),
-            ((false, false, false, true), Forward),
-            ((false, false, true, false), Open),
-            ((false, false, true, true), Open),
-            ((false, true, false, false), Reselect),
-            ((false, true, false, true), Reselect),
-            ((false, true, true, true), Reselect),
-            ((true, false, false, false), Drop),
-            ((true, false, false, true), Drop),
-            ((true, true, true, true), Drop),
+            ((false, false, false), Open),
+            ((false, false, true), Forward),
+            ((false, true, false), Open),
+            ((false, true, true), Open),
+            ((true, false, false), Drop),
+            ((true, false, true), Drop),
+            ((true, true, true), Drop),
         ];
-        for ((menu, find, owned, alt), want) in cases {
+        for ((menu, owned, alt), want) in cases {
             assert_eq!(
-                find_chord_route(menu, find, owned, alt),
+                find_chord_route(menu, owned, alt),
                 want,
-                "menu={menu} find={find} owned={owned} alt={alt}"
+                "menu={menu} owned={owned} alt={alt}"
             );
+        }
+    }
+
+    #[test]
+    fn captured_find_chord_maps_only_captured_ctrl_f() {
+        use event::Status::{Captured, Ignored};
+        let f = keyboard::Key::Character("f".into());
+        let upper = keyboard::Key::Character("F".into());
+        let g = keyboard::Key::Character("g".into());
+        let cmd = keyboard::Modifiers::COMMAND;
+        let cmd_shift = cmd | keyboard::Modifiers::SHIFT;
+        assert!(captured_find_chord(&f, cmd, Captured));
+        assert!(captured_find_chord(&upper, cmd_shift, Captured));
+        assert!(
+            !captured_find_chord(&f, cmd, Ignored),
+            "Ignored keeps FindOrForward"
+        );
+        assert!(!captured_find_chord(
+            &f,
+            cmd | keyboard::Modifiers::ALT,
+            Captured
+        ));
+        assert!(!captured_find_chord(
+            &f,
+            keyboard::Modifiers::default(),
+            Captured
+        ));
+        assert!(!captured_find_chord(&g, cmd, Captured));
+    }
+
+    #[test]
+    fn captured_find_chord_reselects_only_in_the_focused_find_input() {
+        let query = |app: &App, id| app.tools.histories.get(&id).map(|h| h.query().to_owned());
+        // Find input focused: re-runs open (focus + select-all), query kept.
+        let (mut app, id) = app_with_focused_pane("captured-ctrl-f");
+        let _ = app.update(Message::FindOpen);
+        let _ = app.update(Message::FindQuery("needle".into()));
+        app.pty_write_log.clear();
+        let task = app.update(Message::FindCapturedChord);
+        assert!(
+            task.units() > 0,
+            "focused Find input must get a select task"
+        );
+        assert!(app.find_open && app.find_focused);
+        assert_eq!(query(&app, id), Some("needle".to_owned()));
+        assert!(app.pty_write_log.is_empty());
+
+        type Setup = fn(&mut App);
+        let others: [(&str, Setup); 7] = [
+            ("strip closed", |app| app.close_find_strip()),
+            ("strip open, input unfocused", |app| {
+                app.find_focused = false
+            }),
+            ("Sender editor", |app| app.sender_focused = true),
+            ("dialog", |app| app.dialog = Some(Dialog::About)),
+            ("privacy lock", |app| app.privacy_locked = true),
+            ("menu", |app| app.open_menu = Some(menu::Menu::Edit)),
+            ("tunnel menu", |app| app.tunnel_menu = true),
+        ];
+        for (name, setup) in others {
+            let (mut app, _id) = app_with_focused_pane("captured-ctrl-f-other");
+            let _ = app.update(Message::FindOpen);
+            setup(&mut app);
+            let (open, focused) = (app.find_open, app.find_focused);
+            app.pty_write_log.clear();
+            let task = app.update(Message::FindCapturedChord);
+            assert_eq!(task.units(), 0, "{name}: must be a no-op");
+            assert_eq!((app.find_open, app.find_focused), (open, focused), "{name}");
+            assert!(app.pty_write_log.is_empty(), "{name}");
         }
     }
 

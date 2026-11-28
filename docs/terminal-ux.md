@@ -68,6 +68,10 @@ Find shortcut rules:
 - Opening or re-focusing Find by any of these commands (or Edit > Find, the palette)
   keeps the previous query and selects it: typing replaces it, Enter/Next searches it.
   Clicking into the input places the caret without selecting.
+- Pressing Ctrl+F (Cmd+F on macOS) or Ctrl/Cmd+Shift+F again while the Find input
+  has the keyboard keeps focus there and selects the query again; no `f` is typed and
+  nothing reaches the terminal. In any other text field (Sender, dialogs, editors)
+  the chord stays with that field and does not open Find.
 
 In the Find strip, **Enter** or **Next** selects the next result and **Prev** the
 previous one; navigation wraps and scrolls the terminal viewport so the selected
