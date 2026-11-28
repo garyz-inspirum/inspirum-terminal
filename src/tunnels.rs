@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 
@@ -632,7 +633,7 @@ impl Manager {
         let seam = Seam {
             exact: None,
             spawn: &crate::terminal::spawn_tunnel,
-            existing_snapshot: false,
+            existing_snapshot: None,
         };
         self.launch_forward(session, kind, spec, config, seam)
     }
@@ -660,19 +661,21 @@ impl Manager {
                 snapshot_dir: &snapshot_dir,
             }),
             spawn: &crate::terminal::spawn_tunnel,
-            existing_snapshot: false,
+            existing_snapshot: None,
         };
         self.launch_forward(session, kind, spec, config, seam)
     }
 
-    /// Use a startup-pass snapshot for both preflight and spawn; the caller
-    /// retains the snapshot until all queued launches have completed.
+    /// Use a start-up pass snapshot for both preflight and spawn. The
+    /// spawned process record keeps its own handle, so the file outlives the
+    /// pass until that tunnel is stopped or reaped: spawn returns before ssh
+    /// has necessarily opened `-F <snapshot>`.
     pub fn start_forward_snapshot(
         &mut self,
         session: &Session,
         kind: ForwardKind,
         spec: &str,
-        snapshot: &Path,
+        snapshot: &Arc<ConfigSnapshot>,
     ) -> Result<Status> {
         let snapshot_dir = std::env::temp_dir();
         let seam = Seam {
@@ -681,9 +684,9 @@ impl Manager {
                 snapshot_dir: &snapshot_dir,
             }),
             spawn: &crate::terminal::spawn_tunnel,
-            existing_snapshot: true,
+            existing_snapshot: Some(snapshot),
         };
-        self.launch_forward(session, kind, spec, Some(snapshot), seam)
+        self.launch_forward(session, kind, spec, None, seam)
     }
 
     /// Shared body of the start variants. `seam.exact` runs strictly before
@@ -757,14 +760,15 @@ impl Manager {
             "non-loopback tunnel binds require explicit risk acknowledgement"
         );
         selected.ssh_args()?;
-        let launch_config = match &seam.exact {
-            None => TunnelConfig::User(config),
-            Some(exact) if seam.existing_snapshot => {
-                let snapshot = config.ok_or(ConfigSkip::NoExplicitConfig)?;
-                exact.check_snapshot(&selected, kind, spec, snapshot)?;
-                TunnelConfig::User(Some(snapshot))
+        let launch_config = match (&seam.exact, seam.existing_snapshot) {
+            (None, _) => TunnelConfig::User(config),
+            (Some(exact), Some(snapshot)) => {
+                exact.check_snapshot(&selected, kind, spec, snapshot.path())?;
+                TunnelConfig::Snapshot(Arc::clone(snapshot))
             }
-            Some(exact) => TunnelConfig::Snapshot(exact.snapshot(&selected, kind, spec, config)?),
+            (Some(exact), None) => {
+                TunnelConfig::Snapshot(Arc::new(exact.snapshot(&selected, kind, spec, config)?))
+            }
         };
         self.failures.remove(&key);
         match (seam.spawn)(&selected, launch_config) {
@@ -834,7 +838,9 @@ impl Manager {
 
 /// How [`Manager::launch_forward`] checks and spawns; tests inject fakes.
 struct Seam<'a> {
-    existing_snapshot: bool,
+    /// A start-up pass snapshot to check and launch from instead of reading
+    /// `config` again.
+    existing_snapshot: Option<&'a Arc<ConfigSnapshot>>,
     /// `None` for manual starts: no `ssh -G`, the user configuration as is.
     exact: Option<ExactCheck<'a>>,
     spawn: &'a dyn Fn(&Session, TunnelConfig<'_>) -> Result<TunnelProcess>,
@@ -895,18 +901,20 @@ pub fn read_config_bytes(path: &Path) -> Result<Vec<u8>> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
-    options.custom_flags(if cfg!(any(target_os = "linux", target_os = "android")) {
-        0o4000 // O_NONBLOCK on Linux
-    } else {
-        0x4 // O_NONBLOCK on macOS/BSD
-    });
-    let file = options.open(path).map_err(|_| ConfigSkip::Unreadable)?;
+    options.custom_flags(libc::O_NONBLOCK);
+    let file = options.open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ConfigSkip::MissingOrNotRegular
+        } else {
+            ConfigSkip::Unreadable
+        }
+    })?;
     if !file
         .metadata()
         .map_err(|_| ConfigSkip::Unreadable)?
         .is_file()
     {
-        return Err(ConfigSkip::Unreadable.into());
+        return Err(ConfigSkip::MissingOrNotRegular.into());
     }
     const MAX_CONFIG_BYTES: usize = 1024 * 1024;
     let mut bytes = Vec::new();
@@ -985,13 +993,19 @@ impl std::error::Error for InheritedForwards {}
 /// skipped at start-up and left for a manual start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfigSkip {
-    /// The app runs without `--ssh-config`: OpenSSH would read files the app
-    /// cannot snapshot without evaluating them first.
+    /// Neither `--ssh-config` nor a saved file (Tools → Profiles) selects a
+    /// configuration: OpenSSH would read files the app cannot snapshot
+    /// without evaluating them first.
     NoExplicitConfig,
     /// The configuration has an `Include` or `Match` line.
     IncludeOrMatch,
-    /// The configuration file is missing, unreadable or not UTF-8.
+    /// The configuration file is unreadable, too large or not UTF-8.
     Unreadable,
+    /// The configuration file does not exist or is not a regular file.
+    MissingOrNotRegular,
+    /// The startup settings record could not be loaded, so no unattended
+    /// launch runs, whatever `--ssh-config` says.
+    StartupSettingsUnreadable,
     /// `CanonicalizeHostname` re-evaluates `Host` blocks against DNS, so the
     /// preflight and the launch could see different settings.
     CanonicalizeHostname,
@@ -1001,8 +1015,8 @@ impl std::fmt::Display for ConfigSkip {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::NoExplicitConfig => {
-                "Auto-start skipped: no explicit SSH configuration was provided. \
-Start this tunnel manually."
+                "Auto-start skipped: no SSH config file is selected. Choose one in Tools → \
+Profiles, or start this tunnel manually."
             }
             Self::IncludeOrMatch => {
                 "Auto-start skipped: this tunnel's OpenSSH configuration uses Include or \
@@ -1011,6 +1025,14 @@ Match. Start it manually."
             Self::Unreadable => {
                 "Auto-start skipped: the SSH configuration file could not be read as UTF-8 \
 text. Start it manually."
+            }
+            Self::MissingOrNotRegular => {
+                "Auto-start skipped: the SSH config file is missing or is not a regular \
+file. Start it manually."
+            }
+            Self::StartupSettingsUnreadable => {
+                "Auto-start skipped: the startup settings file could not be read. Repair or \
+remove it, or start this tunnel manually."
             }
             Self::CanonicalizeHostname => {
                 "Auto-start skipped: this tunnel's OpenSSH configuration uses \
@@ -1678,7 +1700,14 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        assert!(read_config_bytes(&fifo).is_err());
+        let skip = |path: &Path| {
+            read_config_bytes(path)
+                .unwrap_err()
+                .downcast_ref::<ConfigSkip>()
+                .copied()
+        };
+        assert_eq!(skip(&fifo), Some(ConfigSkip::MissingOrNotRegular));
+        assert_eq!(skip(dir.path()), Some(ConfigSkip::MissingOrNotRegular));
         let source = dir.path().join("config");
         std::fs::write(&source, [0xff]).unwrap();
         assert!(read_config_bytes(&source).is_err());
@@ -1972,7 +2001,7 @@ clearallforwardings no
         };
         let mut manager = Manager::default();
         let seam = Seam {
-            existing_snapshot: false,
+            existing_snapshot: None,
             exact: Some(ExactCheck {
                 query,
                 snapshot_dir,
@@ -2211,7 +2240,10 @@ clearallforwardings no
         let missing = dir.path().join("does_not_exist");
         let binary = dir.path().join("binary_config");
         std::fs::write(&binary, b"Host exactfwd.invalid\n  User \xff\n").unwrap();
-        for source in [&missing, &binary] {
+        for (source, want) in [
+            (&missing, ConfigSkip::MissingOrNotRegular),
+            (&binary, ConfigSkip::Unreadable),
+        ] {
             let asked = std::cell::Cell::new(0);
             let query = counting_query(&asked);
             let (result, seen, manager) = exact_forward_attempt(
@@ -2221,15 +2253,60 @@ clearallforwardings no
                 snapshot_dir.path(),
                 &query,
             );
-            assert_exact_forward_skipped(
-                result,
-                &seen,
-                &manager,
-                snapshot_dir.path(),
-                ConfigSkip::Unreadable,
-            );
+            assert_exact_forward_skipped(result, &seen, &manager, snapshot_dir.path(), want);
             assert_eq!(asked.get(), 0, "{source:?}");
         }
+    }
+
+    #[test]
+    fn config_skip_notices_name_the_settings_location() {
+        assert_eq!(
+            ConfigSkip::NoExplicitConfig.to_string(),
+            "Auto-start skipped: no SSH config file is selected. Choose one in Tools → \
+Profiles, or start this tunnel manually."
+        );
+        assert_eq!(
+            ConfigSkip::StartupSettingsUnreadable.to_string(),
+            "Auto-start skipped: the startup settings file could not be read. Repair or \
+remove it, or start this tunnel manually."
+        );
+    }
+
+    /// A start-up snapshot stays on disk while a tunnel spawned from it
+    /// runs, even after the pass dropped its own handle: spawn returns
+    /// before ssh has necessarily opened `-F <snapshot>`. Stopping the
+    /// tunnel removes it.
+    #[test]
+    fn startup_snapshot_lives_as_long_as_a_tunnel_spawned_from_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = single_forward_session("exactfwd.invalid", &[COUNTED_SPEC]);
+        let snapshot = Arc::new(
+            ConfigSnapshot::write(dir.path(), b"Host *\n  ProxyCommand sleep 30\n").unwrap(),
+        );
+        let path = snapshot.path().to_owned();
+        let asked = std::cell::Cell::new(0);
+        let query = counting_query(&asked);
+        let seam = Seam {
+            existing_snapshot: Some(&snapshot),
+            exact: Some(ExactCheck {
+                query: &query,
+                snapshot_dir: dir.path(),
+            }),
+            spawn: &crate::terminal::spawn_tunnel,
+        };
+        let mut manager = Manager::default();
+        let status = manager
+            .launch_forward(&session, ForwardKind::Local, COUNTED_SPEC, None, seam)
+            .unwrap();
+        assert!(status.is_running(), "{status:?}");
+        assert_eq!(asked.get(), 1);
+        drop(snapshot);
+        assert!(path.exists(), "snapshot removed while its tunnel runs");
+        manager.stop_all();
+        assert!(
+            !path.exists(),
+            "snapshot kept after its last tunnel stopped"
+        );
     }
 
     /// Without `--ssh-config` nothing runs: no `ssh -G`, no snapshot, no
@@ -2295,7 +2372,7 @@ clearallforwardings no
             anyhow::bail!("fake spawn")
         };
         let seam = Seam {
-            existing_snapshot: false,
+            existing_snapshot: None,
             exact: None,
             spawn: &spawn,
         };
@@ -2340,7 +2417,7 @@ localforward [127.0.0.1]:18092 [127.0.0.1]:7\ntunnel false\n"
             anyhow::bail!("spawn must not be reached")
         };
         let seam = Seam {
-            existing_snapshot: false,
+            existing_snapshot: None,
             exact: Some(ExactCheck {
                 query: &query,
                 snapshot_dir: snapshot_dir.path(),
@@ -2396,7 +2473,7 @@ localforward [127.0.0.1]:18092 [127.0.0.1]:7\ntunnel false\n"
             crate::terminal::spawn_tunnel(selected, launch)
         };
         let seam = Seam {
-            existing_snapshot: false,
+            existing_snapshot: None,
             exact: Some(ExactCheck {
                 query: &query,
                 snapshot_dir: snapshot_dir.path(),
@@ -2590,7 +2667,7 @@ LocalForward 127.0.0.1:18097 127.0.0.1:7\n",
             anyhow::bail!("checked; nothing spawned")
         };
         let seam = Seam {
-            existing_snapshot: false,
+            existing_snapshot: None,
             exact: Some(ExactCheck {
                 query: &query,
                 snapshot_dir: snapshot_dir.path(),
@@ -2631,7 +2708,7 @@ LocalForward 127.0.0.1:18097 127.0.0.1:7\n",
         };
         let mut manager = Manager::default();
         let seam = Seam {
-            existing_snapshot: false,
+            existing_snapshot: None,
             exact: Some(ExactCheck {
                 query: &crate::terminal::query_effective_config,
                 snapshot_dir: snapshot_dir.path(),
@@ -2653,7 +2730,7 @@ LocalForward 127.0.0.1:18097 127.0.0.1:7\n",
 
         // Manual start (the seam `start_forward` uses): no query, spawn reached.
         let seam = Seam {
-            existing_snapshot: false,
+            existing_snapshot: None,
             exact: None,
             spawn: &spawn,
         };

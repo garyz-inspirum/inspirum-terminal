@@ -477,9 +477,11 @@ pub fn sftp_launch_args(session: &Session, config: Option<&Path>) -> Result<Vec<
 
 pub struct TunnelProcess {
     child: Child,
-    /// Configuration snapshot the child reads; removed after the child is
-    /// stopped (fields drop after `Drop::drop` has killed the child).
-    _snapshot: Option<ConfigSnapshot>,
+    /// Configuration snapshot the child reads. A start-up pass shares one
+    /// snapshot between its launches; the file is removed when the last
+    /// holder drops, never before this child is stopped (fields drop after
+    /// `Drop::drop` has killed and reaped it).
+    _snapshot: Option<Arc<ConfigSnapshot>>,
 }
 
 impl TunnelProcess {
@@ -712,7 +714,7 @@ pub enum TunnelConfig<'a> {
     /// The app's `--ssh-config` (or OpenSSH's defaults when `None`).
     User(Option<&'a Path>),
     /// A private configuration snapshot, kept alive with the process.
-    Snapshot(ConfigSnapshot),
+    Snapshot(Arc<ConfigSnapshot>),
 }
 
 impl TunnelConfig<'_> {

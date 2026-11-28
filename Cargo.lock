@@ -1245,6 +1245,7 @@ dependencies = [
  "directories",
  "iced",
  "inspirum-terminal-core",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
