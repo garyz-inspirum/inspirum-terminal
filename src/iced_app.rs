@@ -177,6 +177,22 @@ fn privacy_lock_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bo
         && matches!(key.as_ref(), keyboard::Key::Character("l" | "L"))
 }
 
+/// Ctrl/Cmd+F or Ctrl/Cmd+Shift+F that a focused text field captured. The
+/// `TerminalIme` wrapper captures every key while a child editor wants IME,
+/// so a Find chord pressed in the focused Find input never arrives Ignored.
+/// `Message::FindCapturedChord` reselects only when that input owns the
+/// keyboard; in any other field the key stays that widget's.
+fn captured_find_chord(
+    key: &keyboard::Key,
+    modifiers: keyboard::Modifiers,
+    status: event::Status,
+) -> bool {
+    status == event::Status::Captured
+        && modifiers.command()
+        && !modifiers.alt()
+        && matches!(key.as_ref(), keyboard::Key::Character("f" | "F"))
+}
+
 fn focus_mode_chord(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
     modifiers.alt()
         && !modifiers.control()
@@ -436,6 +452,11 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                     ..
                 }) if status == event::Status::Captured => Some(Message::DismissModalKey),
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                    if captured_find_chord(key, *modifiers, status) =>
+                {
+                    Some(Message::FindCapturedChord)
+                }
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if modifiers.command()
                         && matches!(
                             key.as_ref(),
@@ -467,6 +488,28 @@ pub fn run(profiles_path: PathBuf, ssh_config: Option<PathBuf>) -> iced::Result 
                         && matches!(key.as_ref(), keyboard::Key::Character("f" | "F")) =>
                 {
                     Some(Message::KeyChord(KeyChord::Find))
+                }
+                // Plain Ctrl+F (Cmd+F on macOS) is the primary Find chord.
+                // This closure cannot read app state, so off macOS it emits
+                // FindOrForward and `update` decides: alt-screen programs
+                // (vim, less, htop) still get 0x06, otherwise Find opens.
+                // Returning this message instead of Message::Event is what
+                // keeps the key off the ordinary KeyPressed path, so it is
+                // delivered exactly once. On macOS `command()` is Cmd, which
+                // never reaches a PTY as a control byte, so Cmd+F opens Find
+                // unconditionally and Ctrl+F still falls through to the PTY.
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                    if status == event::Status::Ignored
+                        && modifiers.command()
+                        && !modifiers.shift()
+                        && !modifiers.alt()
+                        && matches!(key.as_ref(), keyboard::Key::Character("f" | "F")) =>
+                {
+                    Some(if cfg!(target_os = "macos") {
+                        Message::KeyChord(KeyChord::Find)
+                    } else {
+                        Message::FindOrForward(event)
+                    })
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if status == event::Status::Ignored
@@ -3069,6 +3112,110 @@ impl KeyChord {
     }
 }
 
+/// Test stand-in for the focused pane's terminal mode. Unit panes have no
+/// live terminal, so tests set the mode as last painted and as the parser
+/// holds it now.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+struct FakeFocusedModes {
+    painted: terminal_core::TerminalMode,
+    live: terminal_core::TerminalMode,
+}
+
+/// Where plain Ctrl+F goes (`Message::FindOrForward`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FindChordRoute {
+    /// An open menu owns the keyboard: dropped, like Ctrl+Shift+F.
+    Drop,
+    /// Same as Ctrl+Shift+F (`Message::FindOpen` and its own guards).
+    Open,
+    /// Re-dispatch the original key through `Message::Event` so the PTY
+    /// receives 0x06 under every ordinary key rule.
+    Forward,
+}
+
+/// `keyboard_owned`: a dialog, the remote editor, the privacy lock, the
+/// Sender editor, the Find input or the focused pane's free-type draft owns
+/// the keyboard. In
+/// those states Ctrl+F does exactly what Ctrl+Shift+F does. Only an
+/// unowned focused pane in alternate-screen mode forwards the key.
+fn find_chord_route(menu_open: bool, keyboard_owned: bool, alt_screen: bool) -> FindChordRoute {
+    if menu_open {
+        FindChordRoute::Drop
+    } else if !keyboard_owned && alt_screen {
+        FindChordRoute::Forward
+    } else {
+        FindChordRoute::Open
+    }
+}
+
+/// Why the Find input is being focused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FindFocusCause {
+    /// A command opened or re-focused the strip (`open_find_strip`).
+    Command,
+    /// The Prev/Next buttons keep the keyboard in the input.
+    Step,
+    /// Focus handed back after a dialog or the privacy lock.
+    Restore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FindFocusEffects {
+    focus: bool,
+    select_all: bool,
+}
+
+/// `strip_owned`: the strip is open and its input owns the keyboard.
+/// `modal`: a dialog or the privacy lock is up. Only a command selects the
+/// kept query; a mouse click into the input never reaches this function
+/// (the text input places the caret itself).
+fn find_focus_effects(cause: FindFocusCause, strip_owned: bool, modal: bool) -> FindFocusEffects {
+    let focus = strip_owned && !modal;
+    FindFocusEffects {
+        focus,
+        select_all: focus && cause == FindFocusCause::Command,
+    }
+}
+
+/// Focus `id` and select all of its text in ONE widget action. Iced's
+/// `focus` moves the caret to the end, and `Task::batch` does not order its
+/// members, so a separate `select_all` task could run first and be undone.
+/// The select pass is chained through `Outcome::Chain`, which the runtime
+/// applies in the same action, before any further event is processed.
+fn focus_and_select_all(id: &'static str) -> Task<Message> {
+    use iced::advanced::widget::{
+        Id, Operation,
+        operation::{Focusable, Outcome, text_input::select_all},
+    };
+    struct FocusThenSelectAll {
+        target: Id,
+    }
+    impl<T: Send + 'static> Operation<T> for FocusThenSelectAll {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<T>)) {
+            operate(self);
+        }
+        fn focusable(
+            &mut self,
+            id: Option<&Id>,
+            _bounds: iced::Rectangle,
+            state: &mut dyn Focusable,
+        ) {
+            if id == Some(&self.target) {
+                state.focus();
+            } else {
+                state.unfocus();
+            }
+        }
+        fn finish(&self) -> Outcome<T> {
+            Outcome::Chain(Box::new(select_all(self.target.clone())))
+        }
+    }
+    iced::advanced::widget::operate(FocusThenSelectAll {
+        target: Id::from(id),
+    })
+}
+
 #[derive(Clone, Debug)]
 enum Message {
     Tool(tools::Action),
@@ -3342,6 +3489,10 @@ enum Message {
     ExternalEditorSave,
     TunnelDraftSession(TunnelSessionOption),
     TunnelSessionSearch(String),
+    /// Plain Ctrl+F: open Find, or forward the key in alternate screen.
+    FindOrForward(iced::Event),
+    /// A Find chord captured by a focused text field (`captured_find_chord`).
+    FindCapturedChord,
 }
 
 fn iced_palette_items(query: &str, library: &SnippetLibrary) -> Vec<PaletteItem> {
@@ -4542,6 +4693,9 @@ struct App {
     /// `process_command` never fires. Must not change write behaviour.
     #[cfg(test)]
     pty_write_log: Vec<(u64, Vec<u8>)>,
+    /// Replaces the focused pane's terminal mode reads; see `FakeFocusedModes`.
+    #[cfg(test)]
+    fake_focused_modes: Option<FakeFocusedModes>,
     /// Explorer (local) column. Independent of the Filer sort.
     local_file_sort: FileSortColumn,
     local_file_sort_ascending: bool,
@@ -4725,6 +4879,8 @@ impl App {
             remote_editor_open_generation: 0,
             #[cfg(test)]
             pty_write_log: Vec::new(),
+            #[cfg(test)]
+            fake_focused_modes: None,
             local_file_sort: FileSortColumn::Name,
             local_file_sort_ascending: true,
             remote_file_sort: FileSortColumn::Name,
@@ -4957,12 +5113,31 @@ impl App {
         (!pane.exited && pane.terminal.is_some()).then_some(pane.id)
     }
 
+    /// Mode bits from the focused terminal's last sync (paint).
     fn focused_terminal_mode(&self) -> terminal_core::TerminalMode {
+        #[cfg(test)]
+        if let Some(fake) = self.fake_focused_modes {
+            return fake.painted;
+        }
         self.tabs
             .get(self.active)
             .and_then(|tab| tab.panes.get(tab.focus))
             .and_then(|pane| pane.terminal.as_ref())
             .map(|terminal| terminal.last_content().terminal_mode)
+            .unwrap_or_else(terminal_core::TerminalMode::empty)
+    }
+
+    /// Mode bits the focused terminal's parser holds now (no grid clone).
+    fn focused_live_terminal_mode(&self) -> terminal_core::TerminalMode {
+        #[cfg(test)]
+        if let Some(fake) = self.fake_focused_modes {
+            return fake.live;
+        }
+        self.tabs
+            .get(self.active)
+            .and_then(|tab| tab.panes.get(tab.focus))
+            .and_then(|pane| pane.terminal.as_ref())
+            .map(|terminal| terminal.live_terminal_mode())
             .unwrap_or_else(terminal_core::TerminalMode::empty)
     }
 
@@ -5111,9 +5286,9 @@ impl App {
                 if pane.id != id {
                     continue;
                 }
-                let terminal = pane.terminal.as_mut()?;
-                terminal.sync();
-                let selection = terminal.selectable_content();
+                // selectable_content reads the selection under the term lock;
+                // a prior sync() only cloned the whole grid and discarded it.
+                let selection = pane.terminal.as_ref()?.selectable_content();
                 return (!selection.is_empty()).then_some(selection);
             }
         }
@@ -5195,6 +5370,7 @@ impl App {
                             mismatch.expected.1
                         );
                         pane.grid_mismatch_corrected = Some(mismatch);
+                        self.tools.mark_history_layout_changed(pane.id);
                         let (columns, lines) = mismatch.expected;
                         let cell = pane.cell_size;
                         terminal.process_command(terminal_core::BackendCommand::Resize(
@@ -5257,6 +5433,9 @@ impl App {
                 }
                 pane.terminal_grid_size = Some((columns, lines));
                 pane.cell_size = cell;
+                // The backend reflows on resize without necessarily emitting
+                // output, so history coordinates must be re-read.
+                self.tools.mark_history_layout_changed(pane.id);
                 if let Some(terminal) = pane.terminal.as_mut() {
                     terminal.process_command(terminal_core::BackendCommand::Resize(
                         terminal_core::Size::new(columns as f32 * cell.0, lines as f32 * cell.1),
@@ -5730,6 +5909,14 @@ impl App {
                 }
                 return self.update(chord.message());
             }
+            Message::FindOrForward(event) => {
+                // The live mode, not the painted one: a program can enter or
+                // leave the alternate screen before the deferred repaint.
+                let alt_screen = self
+                    .focused_live_terminal_mode()
+                    .contains(terminal_core::TerminalMode::ALT_SCREEN);
+                return self.find_or_forward(event, alt_screen);
+            }
             other => other,
         };
         if matches!(&message, Message::TogglePrivacyLock) {
@@ -5770,6 +5957,7 @@ impl App {
                     | Message::ToggleFocusMode
                     | Message::ToggleAuxiliaryShell
                     | Message::FindOpen
+                    | Message::FindCapturedChord
                     | Message::FindToggle
                     | Message::ToggleLocalNavigation
                     | Message::ToggleRemoteKeys(..)
@@ -5907,6 +6095,7 @@ impl App {
             Message::TerminalImeCursor(..) | Message::TerminalImeCommit(..) => {}
             Message::TogglePrivacyLock => unreachable!("privacy lock handled before match"),
             Message::KeyChord(_) => unreachable!("key chord handled before match"),
+            Message::FindOrForward(_) => unreachable!("Find chord handled before match"),
             Message::ToggleFocusMode => unreachable!("focus mode handled before match"),
             Message::ToggleLocalNavigation => {
                 unreachable!("local navigation handled before match")
@@ -8001,6 +8190,10 @@ impl App {
                 if wakeup || exited {
                     self.queue_terminal_refresh(id, exited);
                 }
+                if wakeup {
+                    let generation = self.tools.history_output_generation.entry(id).or_default();
+                    *generation = generation.wrapping_add(1);
+                }
                 if exited {
                     self.status = format!("Terminal {id} exited.");
                 }
@@ -8031,8 +8224,14 @@ impl App {
                         self.refresh_workspace_displays(index);
                     }
                 }
-                self.refresh_visible_history();
-                return self.capture_session_logs();
+                // Trailing edge of the history throttle: a deferred snapshot
+                // re-arms the 12 ms frame-bridge timer until the interval passes.
+                let history_pending = self.refresh_visible_history(std::time::Instant::now());
+                let logs = self.capture_session_logs();
+                if history_pending {
+                    return Task::batch([logs, self.schedule_terminal_frame()]);
+                }
+                return logs;
             }
             Message::TerminalResized(id, size) => self.resize_terminal(id, size),
             Message::Event(iced::Event::Window(iced::window::Event::FileDropped(path))) => {
@@ -8478,6 +8677,23 @@ impl App {
                 }
             }
             Message::FindOpen => return self.open_find_strip(),
+            Message::FindCapturedChord => {
+                // Only the focused Find input reselects its query; any other
+                // field keeps the key, and nothing reaches the PTY.
+                let find_owns = self.find_open
+                    && self.find_focused
+                    && !self.sender_focused
+                    && self.dialog.is_none()
+                    && self.remote_editor.is_none()
+                    && !self.privacy_locked
+                    && self.open_menu.is_none()
+                    && self.dock_menu.is_none()
+                    && self.context_menu.is_none()
+                    && !self.tunnel_menu;
+                if find_owns {
+                    return self.open_find_strip();
+                }
+            }
             Message::FindToggle => {
                 if self.find_open {
                     self.close_find_strip();
@@ -8493,14 +8709,14 @@ impl App {
                 self.find_focused = true;
                 return Task::batch([
                     self.tool_update(tools::Action::HistoryNext(true)),
-                    operation::focus(FIND_INPUT_ID),
+                    self.find_focus_task(FindFocusCause::Step),
                 ]);
             }
             Message::FindPrev => {
                 self.find_focused = true;
                 return Task::batch([
                     self.tool_update(tools::Action::HistoryNext(false)),
-                    operation::focus(FIND_INPUT_ID),
+                    self.find_focus_task(FindFocusCause::Step),
                 ]);
             }
             Message::FindClose => self.close_find_strip(),
@@ -11475,10 +11691,23 @@ impl App {
     }
 
     fn restore_find_focus(&self) -> Task<Message> {
-        if self.find_open && self.find_focused && self.dialog.is_none() && !self.privacy_locked {
-            operation::focus(FIND_INPUT_ID)
-        } else {
-            Task::none()
+        self.find_focus_task(FindFocusCause::Restore)
+    }
+
+    /// The one place that turns a Find focus request into widget operations.
+    /// Every command that opens or re-focuses the strip (Ctrl+F, Ctrl+Shift+F,
+    /// Cmd+F, Edit > Find, the palette) reaches it through `open_find_strip`
+    /// with `FindFocusCause::Command`.
+    fn find_focus_task(&self, cause: FindFocusCause) -> Task<Message> {
+        let effects = find_focus_effects(
+            cause,
+            self.find_open && self.find_focused,
+            self.dialog.is_some() || self.privacy_locked,
+        );
+        match (effects.focus, effects.select_all) {
+            (true, true) => focus_and_select_all(FIND_INPUT_ID),
+            (true, false) => operation::focus(FIND_INPUT_ID),
+            _ => Task::none(),
         }
     }
 
@@ -11507,7 +11736,37 @@ impl App {
         self.history_refresh();
         self.find_open = true;
         self.find_focused = true;
-        operation::focus(FIND_INPUT_ID)
+        // Focus + select-all: typing replaces the kept query, Enter/Next
+        // still searches it.
+        self.find_focus_task(FindFocusCause::Command)
+    }
+
+    /// `alt_screen` is the focused terminal's mode bit, passed in so unit
+    /// panes (no live terminal) can exercise the forward branch.
+    fn find_or_forward(&mut self, event: iced::Event, alt_screen: bool) -> Task<Message> {
+        let menu_open = self.open_menu.is_some()
+            || self.dock_menu.is_some()
+            || self.context_menu.is_some()
+            || self.tunnel_menu;
+        let free_type_draft = self.tabs.get(self.active).is_some_and(|tab| {
+            tab.panes
+                .get(tab.focus)
+                .is_some_and(|pane| self.free_type.contains_key(&pane.id))
+        });
+        let keyboard_owned = self.dialog.is_some()
+            || self.remote_editor.is_some()
+            || self.privacy_locked
+            || self.sender_focused
+            // A stale `find_focused` (the input usually captures Ctrl+F, see
+            // `captured_find_chord`) still keeps 0x06 off the PTY.
+            || self.find_focused
+            || free_type_draft;
+        match find_chord_route(menu_open, keyboard_owned, alt_screen) {
+            FindChordRoute::Drop => Task::none(),
+            // Re-runs the open path, which selects the kept query.
+            FindChordRoute::Open => self.update(Message::FindOpen),
+            FindChordRoute::Forward => self.update(Message::Event(event)),
+        }
     }
 
     fn find_strip(&self) -> Element<'_, Message> {
@@ -11517,10 +11776,11 @@ impl App {
             .history_owner
             .and_then(|id| self.tools.histories.get(&id));
         let query = state.map(|state| state.query()).unwrap_or("");
-        let (counter, danger) = find_counter(
+        let (counter, columns, danger) = find_counter(
             query,
             state.map(|state| state.selected_hit_index()).unwrap_or(0),
             state.map(|state| state.hits().len()).unwrap_or(0),
+            state.map(|state| state.total_hits()).unwrap_or(0),
         );
         let counter_color = if danger { p.danger } else { p.text };
         let chrome = |label: String| {
@@ -11537,9 +11797,10 @@ impl App {
                 .font(Font::MONOSPACE)
                 .wrapping(iced::widget::text::Wrapping::None)
         };
-        // Seven monospace columns (`123/456`) so Prev/Next do not jump.
+        // At least seven monospace columns (`123/456`) so Prev/Next do not jump; wider
+        // when the exact total needs it, so large counts are not clipped.
         let counter_slot = stack![
-            counter_glyph(FIND_COUNTER_MIN.to_owned(), Color::TRANSPARENT),
+            counter_glyph("0".repeat(columns), Color::TRANSPARENT),
             counter_glyph(counter, counter_color),
         ];
         let body = row![
@@ -11582,13 +11843,25 @@ impl App {
 /// Width reservation for the Find counter (`123/456` is seven columns).
 const FIND_COUNTER_MIN: &str = "123/456";
 
-/// Counter label, and whether it uses the danger colour.
-/// Danger only when `query` is non-empty and there are no hits.
-fn find_counter(query: &str, selected_index: usize, hit_count: usize) -> (String, bool) {
-    if hit_count == 0 {
-        return ("0/0".to_owned(), !query.is_empty());
-    }
-    (format!("{}/{}", selected_index + 1, hit_count), false)
+/// Counter label, monospace columns to reserve for it, and whether it uses the danger
+/// colour. `n/m`: `n` is the selected listed hit (1-based), `m` the exact total (Next/Prev
+/// only cycle the listed hits). Danger only when `query` is non-empty and there are no hits.
+fn find_counter(
+    query: &str,
+    selected_index: usize,
+    listed: usize,
+    total: usize,
+) -> (String, usize, bool) {
+    let (label, danger) = if listed == 0 {
+        ("0/0".to_owned(), !query.is_empty())
+    } else {
+        (
+            format!("{}/{}", selected_index + 1, total.max(listed)),
+            false,
+        )
+    };
+    let columns = FIND_COUNTER_MIN.chars().count().max(label.chars().count());
+    (label, columns, danger)
 }
 
 fn exit_confirm_body(open_sessions: usize) -> String {
@@ -17492,6 +17765,325 @@ mod tests {
         assert!(!app.find_open, "privacy lock must drop the Find chord");
     }
 
+    fn ctrl_f_event() -> iced::Event {
+        iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            modified_key: keyboard::Key::Character("f".into()),
+            key: keyboard::Key::Character("f".into()),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyF),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::CTRL,
+            text: None,
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn find_chord_route_covers_every_ownership_state() {
+        use FindChordRoute::{Drop, Forward, Open};
+        // (menu_open, keyboard_owned, alt_screen) -> route
+        let cases = [
+            ((false, false, false), Open),
+            ((false, false, true), Forward),
+            ((false, true, false), Open),
+            ((false, true, true), Open),
+            ((true, false, false), Drop),
+            ((true, false, true), Drop),
+            ((true, true, true), Drop),
+        ];
+        for ((menu, owned, alt), want) in cases {
+            assert_eq!(
+                find_chord_route(menu, owned, alt),
+                want,
+                "menu={menu} owned={owned} alt={alt}"
+            );
+        }
+    }
+
+    #[test]
+    fn captured_find_chord_maps_only_captured_ctrl_f() {
+        use event::Status::{Captured, Ignored};
+        let f = keyboard::Key::Character("f".into());
+        let upper = keyboard::Key::Character("F".into());
+        let g = keyboard::Key::Character("g".into());
+        let cmd = keyboard::Modifiers::COMMAND;
+        let cmd_shift = cmd | keyboard::Modifiers::SHIFT;
+        assert!(captured_find_chord(&f, cmd, Captured));
+        assert!(captured_find_chord(&upper, cmd_shift, Captured));
+        assert!(
+            !captured_find_chord(&f, cmd, Ignored),
+            "Ignored keeps FindOrForward"
+        );
+        assert!(!captured_find_chord(
+            &f,
+            cmd | keyboard::Modifiers::ALT,
+            Captured
+        ));
+        assert!(!captured_find_chord(
+            &f,
+            keyboard::Modifiers::default(),
+            Captured
+        ));
+        assert!(!captured_find_chord(&g, cmd, Captured));
+    }
+
+    #[test]
+    fn captured_find_chord_reselects_only_in_the_focused_find_input() {
+        let query = |app: &App, id| app.tools.histories.get(&id).map(|h| h.query().to_owned());
+        // Find input focused: re-runs open (focus + select-all), query kept.
+        let (mut app, id) = app_with_focused_pane("captured-ctrl-f");
+        let _ = app.update(Message::FindOpen);
+        let _ = app.update(Message::FindQuery("needle".into()));
+        app.pty_write_log.clear();
+        let task = app.update(Message::FindCapturedChord);
+        assert!(
+            task.units() > 0,
+            "focused Find input must get a select task"
+        );
+        assert!(app.find_open && app.find_focused);
+        assert_eq!(query(&app, id), Some("needle".to_owned()));
+        assert!(app.pty_write_log.is_empty());
+
+        type Setup = fn(&mut App);
+        let others: [(&str, Setup); 7] = [
+            ("strip closed", |app| app.close_find_strip()),
+            ("strip open, input unfocused", |app| {
+                app.find_focused = false
+            }),
+            ("Sender editor", |app| app.sender_focused = true),
+            ("dialog", |app| app.dialog = Some(Dialog::About)),
+            ("privacy lock", |app| app.privacy_locked = true),
+            ("menu", |app| app.open_menu = Some(menu::Menu::Edit)),
+            ("tunnel menu", |app| app.tunnel_menu = true),
+        ];
+        for (name, setup) in others {
+            let (mut app, _id) = app_with_focused_pane("captured-ctrl-f-other");
+            let _ = app.update(Message::FindOpen);
+            setup(&mut app);
+            let (open, focused) = (app.find_open, app.find_focused);
+            app.pty_write_log.clear();
+            let task = app.update(Message::FindCapturedChord);
+            assert_eq!(task.units(), 0, "{name}: must be a no-op");
+            assert_eq!((app.find_open, app.find_focused), (open, focused), "{name}");
+            assert!(app.pty_write_log.is_empty(), "{name}");
+        }
+    }
+
+    #[test]
+    fn find_focus_effects_select_only_on_command() {
+        use FindFocusCause::{Command, Restore, Step};
+        let on = FindFocusEffects {
+            focus: true,
+            select_all: true,
+        };
+        let focus_only = FindFocusEffects {
+            focus: true,
+            select_all: false,
+        };
+        let none = FindFocusEffects {
+            focus: false,
+            select_all: false,
+        };
+        // (cause, strip_owned, modal) -> effects
+        let cases = [
+            ((Command, true, false), on),
+            ((Step, true, false), focus_only),
+            ((Restore, true, false), focus_only),
+            ((Command, false, false), none),
+            ((Command, true, true), none),
+            ((Step, true, true), none),
+            ((Restore, false, false), none),
+        ];
+        for ((cause, owned, modal), want) in cases {
+            assert_eq!(
+                find_focus_effects(cause, owned, modal),
+                want,
+                "cause={cause:?} owned={owned} modal={modal}"
+            );
+        }
+    }
+
+    /// Every command entry point reaches `open_find_strip` and returns a
+    /// non-empty task. Iced operations are opaque here, so this proves a
+    /// task exists and the state that `find_focus_effects` maps to
+    /// focus + select-all; that the widget really selects is only shown on
+    /// screen (connected `ctrl_f_probe`).
+    #[test]
+    fn every_find_command_opens_through_the_select_path() {
+        type Entry = (&'static str, fn(&mut App) -> Task<Message>);
+        let entries: [Entry; 5] = [
+            ("FindOpen", |app| app.update(Message::FindOpen)),
+            ("FindToggle (Edit > Find, palette)", |app| {
+                app.update(Message::FindToggle)
+            }),
+            ("KeyChord::Find (Ctrl+Shift+F, Cmd+F)", |app| {
+                app.update(Message::KeyChord(KeyChord::Find))
+            }),
+            ("plain Ctrl+F", |app| {
+                app.update(Message::FindOrForward(ctrl_f_event()))
+            }),
+            ("menu Edit > Find", |app| {
+                app.update(Message::MenuCommand(menu::Command::Find))
+            }),
+        ];
+        for (name, run) in entries {
+            let (mut app, id) = app_with_focused_pane("find-entry");
+            let task = run(&mut app);
+            assert!(app.find_open && app.find_focused, "{name}: strip not open");
+            assert_eq!(app.tools.history_owner, Some(id), "{name}");
+            assert!(task.units() > 0, "{name}: no focus task returned");
+            assert_eq!(
+                find_focus_effects(
+                    FindFocusCause::Command,
+                    app.find_open && app.find_focused,
+                    app.dialog.is_some() || app.privacy_locked,
+                ),
+                FindFocusEffects {
+                    focus: true,
+                    select_all: true
+                },
+                "{name}"
+            );
+        }
+        // Re-focus with a kept query: Ctrl+F in the focused input and the
+        // Ctrl+Shift+F chord both re-run the open path; the query stays.
+        let (mut app, id) = app_with_focused_pane("find-reopen");
+        let _ = app.update(Message::FindOpen);
+        let _ = app.update(Message::FindQuery("needle".into()));
+        for task in [
+            app.find_or_forward(ctrl_f_event(), false),
+            app.update(Message::KeyChord(KeyChord::Find)),
+        ] {
+            assert!(task.units() > 0, "re-focus returned no task");
+            assert_eq!(
+                app.tools.histories.get(&id).map(|h| h.query().to_owned()),
+                Some("needle".to_owned()),
+                "reopening must keep the query"
+            );
+        }
+        // A modal blocks the select path.
+        app.privacy_locked = true;
+        assert_eq!(app.restore_find_focus().units(), 0);
+    }
+
+    #[test]
+    fn plain_ctrl_f_opens_find_on_main_screen_and_writes_nothing() {
+        let (mut app, id) = app_with_focused_pane("ctrl-f-main");
+        app.pty_write_log.clear();
+        // Unit panes have no live terminal, so the mode is the main screen.
+        let _ = app.update(Message::FindOrForward(ctrl_f_event()));
+        assert!(app.find_open && app.find_focused, "Ctrl+F must open Find");
+        assert_eq!(app.tools.history_owner, Some(id));
+        assert!(
+            app.pty_write_log.is_empty(),
+            "no 0x06 may reach the PTY when Find opens: {:?}",
+            app.pty_write_log
+        );
+    }
+
+    #[test]
+    fn plain_ctrl_f_in_alt_screen_writes_0x06_exactly_once() {
+        let (mut app, id) = app_with_focused_pane("ctrl-f-alt");
+        app.pty_write_log.clear();
+        let _ = app.find_or_forward(ctrl_f_event(), true);
+        assert_eq!(app.pty_write_log, vec![(id, vec![0x06])]);
+        assert!(!app.find_open, "alt screen keeps Ctrl+F for the program");
+    }
+
+    #[test]
+    fn plain_ctrl_f_in_alt_screen_follows_keyboard_ownership() {
+        // Menu open: dropped, like Ctrl+Shift+F.
+        let (mut app, _id) = app_with_focused_pane("ctrl-f-menu");
+        app.open_menu = Some(menu::Menu::Edit);
+        app.pty_write_log.clear();
+        let _ = app.find_or_forward(ctrl_f_event(), true);
+        assert!(!app.find_open && app.pty_write_log.is_empty());
+        assert!(app.open_menu.is_some(), "Ctrl+F must not close the menu");
+
+        // Privacy lock: dropped, nothing reaches the PTY.
+        let (mut app, _id) = app_with_focused_pane("ctrl-f-privacy");
+        app.privacy_locked = true;
+        app.pty_write_log.clear();
+        let _ = app.find_or_forward(ctrl_f_event(), true);
+        assert!(!app.find_open && app.pty_write_log.is_empty());
+
+        // Sender editor owns the keyboard: same as Ctrl+Shift+F (opens Find).
+        let (mut app, _id) = app_with_focused_pane("ctrl-f-sender");
+        app.sender_focused = true;
+        app.pty_write_log.clear();
+        let _ = app.find_or_forward(ctrl_f_event(), true);
+        assert!(app.find_open && app.find_focused);
+        assert!(app.pty_write_log.is_empty());
+
+        // Find already focused: keeps focus, no byte, query untouched.
+        let (mut app, id) = app_with_focused_pane("ctrl-f-refocus");
+        let _ = app.update(Message::FindOpen);
+        let _ = app.update(Message::FindQuery("needle".into()));
+        let query = |app: &App| app.tools.histories.get(&id).map(|h| h.query().to_owned());
+        let before = query(&app);
+        app.pty_write_log.clear();
+        let _ = app.find_or_forward(ctrl_f_event(), true);
+        let _ = app.update(Message::FindOrForward(ctrl_f_event()));
+        assert!(app.find_open && app.find_focused);
+        assert_eq!(query(&app), before, "Ctrl+F must not type 'f'");
+        assert!(app.pty_write_log.is_empty());
+    }
+
+    /// The program left the alternate screen but the display snapshot that
+    /// would repaint is still deferred: the painted mode says alt screen, the
+    /// parser says main screen. Ctrl+F belongs to Find.
+    #[test]
+    fn plain_ctrl_f_live_mode_alt_exit_before_repaint_opens_find() {
+        let (mut app, id) = app_with_focused_pane("ctrl-f-live-exit");
+        let fake = FakeFocusedModes {
+            painted: terminal_core::TerminalMode::ALT_SCREEN,
+            live: terminal_core::TerminalMode::empty(),
+        };
+        assert!(
+            fake.painted
+                .contains(terminal_core::TerminalMode::ALT_SCREEN)
+        );
+        assert!(!fake.live.contains(terminal_core::TerminalMode::ALT_SCREEN));
+        app.fake_focused_modes = Some(fake);
+        app.pty_write_log.clear();
+        let _ = app.update(Message::FindOrForward(ctrl_f_event()));
+        assert!(
+            app.find_open && app.find_focused,
+            "main screen (live) must open Find"
+        );
+        assert_eq!(app.tools.history_owner, Some(id));
+        assert!(
+            app.pty_write_log.is_empty(),
+            "no 0x06 may reach the shell: {:?}",
+            app.pty_write_log
+        );
+    }
+
+    /// The program entered the alternate screen before the next paint: the
+    /// painted mode says main screen, the parser says alt screen. Ctrl+F
+    /// belongs to the program, exactly once.
+    #[test]
+    fn plain_ctrl_f_live_mode_alt_enter_before_repaint_forwards_once() {
+        let (mut app, id) = app_with_focused_pane("ctrl-f-live-enter");
+        let fake = FakeFocusedModes {
+            painted: terminal_core::TerminalMode::empty(),
+            live: terminal_core::TerminalMode::ALT_SCREEN,
+        };
+        assert!(
+            !fake
+                .painted
+                .contains(terminal_core::TerminalMode::ALT_SCREEN)
+        );
+        assert!(fake.live.contains(terminal_core::TerminalMode::ALT_SCREEN));
+        app.fake_focused_modes = Some(fake);
+        app.pty_write_log.clear();
+        let _ = app.update(Message::FindOrForward(ctrl_f_event()));
+        assert_eq!(app.pty_write_log, vec![(id, vec![0x06])]);
+        assert!(
+            !app.find_open,
+            "alt screen (live) keeps Ctrl+F for the program"
+        );
+    }
+
     #[test]
     fn find_focus_blocks_key_and_paste_until_escape_releases_the_terminal() {
         let (mut app, id) = app_with_focused_pane("chord-keys");
@@ -17562,6 +18154,429 @@ mod tests {
             1
         );
         assert!(app.find_focused, "typing and Next keep Find focus");
+    }
+
+    #[test]
+    fn history_frames_without_output_do_not_resnapshot() {
+        let (mut app, _id) = app_with_focused_pane("history-idle");
+        app.find_open = true;
+        let t0 = std::time::Instant::now();
+        assert!(!app.refresh_visible_history(t0));
+        assert_eq!(app.tools.history_refresh_count, 1);
+        for frame in 1..=50u64 {
+            let now = t0 + std::time::Duration::from_millis(frame * 12);
+            assert!(!app.refresh_visible_history(now));
+        }
+        assert_eq!(
+            app.tools.history_refresh_count, 1,
+            "idle frames re-read history"
+        );
+    }
+
+    #[test]
+    fn history_burst_within_throttle_window_refreshes_at_most_twice() {
+        let (mut app, id) = app_with_focused_pane("history-burst");
+        app.find_open = true;
+        let t0 = std::time::Instant::now();
+        let _ = app.refresh_visible_history(t0);
+        let before = app.tools.history_refresh_count;
+        let mut pending = false;
+        for frame in 1..=20u64 {
+            let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::Wakeup));
+            pending =
+                app.refresh_visible_history(t0 + std::time::Duration::from_millis(frame * 10));
+        }
+        assert!(pending, "the last burst frame must owe a trailing refresh");
+        // Trailing refresh once the window has passed captures the final state.
+        assert!(!app.refresh_visible_history(t0 + std::time::Duration::from_millis(500)));
+        let taken = app.tools.history_refresh_count - before;
+        assert!((1..=2).contains(&taken), "burst took {taken} snapshots");
+        assert!(!app.refresh_visible_history(t0 + std::time::Duration::from_millis(600)));
+        assert_eq!(app.tools.history_refresh_count - before, taken);
+    }
+
+    #[test]
+    fn find_query_after_output_forces_a_fresh_snapshot_despite_throttle() {
+        let (mut app, id) = app_with_focused_pane("history-query-fresh");
+        app.find_open = true;
+        app.tools.history_owner = Some(id);
+        let t0 = std::time::Instant::now();
+        let _ = app.refresh_visible_history(t0);
+        let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::Wakeup));
+        // Inside the throttle window the frame path defers...
+        assert!(app.refresh_visible_history(t0 + std::time::Duration::from_millis(1)));
+        let before = app.tools.history_refresh_count;
+        // ...but a query must snapshot the new output before searching.
+        let _ = app.update(Message::FindQuery("x".into()));
+        assert_eq!(app.tools.history_refresh_count, before + 1);
+        let _ = app.update(Message::FindNext);
+        assert_eq!(
+            app.tools.history_refresh_count,
+            before + 1,
+            "no output since"
+        );
+    }
+
+    /// One unwrapped grid row per string, rows numbered from the oldest retained row.
+    fn stale_coords_snapshot(
+        rows: &[&str],
+        history_rows: usize,
+        capacity: usize,
+    ) -> terminal_core::HistorySnapshot {
+        terminal_core::HistorySnapshot {
+            lines: rows
+                .iter()
+                .enumerate()
+                .map(|(row, text)| terminal_core::LogicalLine {
+                    text: (*text).to_string(),
+                    first_row: row,
+                    segment_starts: vec![0],
+                })
+                .collect(),
+            history_rows,
+            capacity,
+            columns: 80,
+        }
+    }
+
+    fn stale_coords_selected(app: &App, id: u64) -> (u64, usize, usize) {
+        let hit = app
+            .tools
+            .histories
+            .get(&id)
+            .and_then(|state| state.selected_hit())
+            .expect("selected hit");
+        (hit.line_id, hit.column, hit.grid_row)
+    }
+
+    #[test]
+    fn quiet_resize_invalidates_stale_coords() {
+        let (mut app, id) = app_with_focused_pane("stale-coords-resize");
+        app.find_open = true;
+        let wide = iced::Size::new(800.0, 400.0);
+        let _ = app.update(Message::TerminalResized(id, wide));
+        let long = "a".repeat(60);
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(&[long.as_str(), "bbbb needle", "cccc"], 0, 100),
+        );
+        let _ = app.tool_update(tools::Action::HistoryQuery("needle".into()));
+        assert_eq!(stale_coords_selected(&app, id).2, 1);
+        let before = app.tools.history_refresh_count;
+
+        // Same grid and cell size: no reflow, nothing to invalidate.
+        let _ = app.update(Message::TerminalResized(id, wide));
+        let _ = app.history_refresh_if_stale(std::time::Instant::now(), false);
+        assert_eq!(
+            app.tools.history_refresh_count, before,
+            "an unchanged size must not invalidate the snapshot"
+        );
+
+        // A narrower grid rewraps the long first line onto two rows. The child
+        // stays quiet: no PtyEvent follows the resize.
+        app.tools.history_test_source.insert(
+            id,
+            terminal_core::HistorySnapshot {
+                lines: vec![
+                    terminal_core::LogicalLine {
+                        text: long,
+                        first_row: 0,
+                        segment_starts: vec![0, 40],
+                    },
+                    terminal_core::LogicalLine {
+                        text: "bbbb needle".into(),
+                        first_row: 2,
+                        segment_starts: vec![0],
+                    },
+                    terminal_core::LogicalLine {
+                        text: "cccc".into(),
+                        first_row: 3,
+                        segment_starts: vec![0],
+                    },
+                ],
+                history_rows: 0,
+                capacity: 100,
+                columns: 40,
+            },
+        );
+        let _ = app.update(Message::TerminalResized(id, iced::Size::new(400.0, 400.0)));
+        let _ = app.history_refresh_if_stale(std::time::Instant::now(), false);
+        assert_eq!(
+            app.tools.history_refresh_count,
+            before + 1,
+            "a reflow must make the old snapshot stale"
+        );
+        assert_eq!(
+            stale_coords_selected(&app, id).2,
+            2,
+            "the hit must use the post-reflow row"
+        );
+    }
+
+    #[test]
+    fn history_click_after_eviction_uses_fresh_identity_and_coords() {
+        let (mut app, id) = app_with_focused_pane("stale-coords-click");
+        app.find_open = true;
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(
+                &["l0", "l1 needle a", "l2", "l3 needle b", "l4", "l5"],
+                4,
+                4,
+            ),
+        );
+        let t0 = std::time::Instant::now();
+        assert!(!app.refresh_visible_history(t0));
+        let _ = app.tool_update(tools::Action::HistoryQuery("needle".into()));
+        let state = app.tools.histories.get(&id).expect("history");
+        assert_eq!(state.hits().len(), 2);
+        let clicked = state.hits()[1].clone();
+        assert_eq!(clicked.grid_row, 3);
+
+        // One row rolls off at capacity; the frame path defers inside the window.
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(
+                &["l1 needle a", "l2", "l3 needle b", "l4", "l5", "l6"],
+                4,
+                4,
+            ),
+        );
+        let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::Wakeup));
+        assert!(app.refresh_visible_history(t0 + std::time::Duration::from_millis(1)));
+        let before = app.tools.history_refresh_count;
+
+        let _ = app.tool_update(tools::Action::HistorySelect(
+            id,
+            clicked.line_id,
+            clicked.column,
+        ));
+        assert_eq!(
+            app.tools.history_refresh_count,
+            before + 1,
+            "a click must snapshot before resolving the hit"
+        );
+        assert_eq!(
+            app.status,
+            "That match is no longer in the retained history."
+        );
+        let fresh = app.tools.histories[&id].hits()[1].clone();
+        assert_ne!(
+            fresh.line_id, clicked.line_id,
+            "capacity invalidates old identities"
+        );
+        assert_eq!(fresh.grid_row, clicked.grid_row - 1);
+        let _ = app.tool_update(tools::Action::HistorySelect(
+            id,
+            fresh.line_id,
+            fresh.column,
+        ));
+        assert_eq!(
+            stale_coords_selected(&app, id),
+            (fresh.line_id, fresh.column, 2),
+            "the refreshed button selects its own match at the new row"
+        );
+    }
+
+    #[test]
+    fn history_click_on_evicted_hit_declines_with_stale_coords() {
+        let (mut app, id) = app_with_focused_pane("stale-coords-evicted");
+        app.find_open = true;
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(
+                &["l0 needle a", "l1", "l2", "l3 needle b", "l4", "l5"],
+                4,
+                4,
+            ),
+        );
+        let t0 = std::time::Instant::now();
+        assert!(!app.refresh_visible_history(t0));
+        let _ = app.tool_update(tools::Action::HistoryQuery("needle".into()));
+        let _ = app.tool_update(tools::Action::HistoryNext(true));
+        let kept = stale_coords_selected(&app, id);
+        assert_eq!(kept.2, 3);
+        let evicted = app.tools.histories[&id].hits()[0].clone();
+
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(&["l1", "l2", "l3 needle b", "l4", "l5", "l6"], 4, 4),
+        );
+        let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::Wakeup));
+        assert!(app.refresh_visible_history(t0 + std::time::Duration::from_millis(1)));
+        let before = app.tools.history_refresh_count;
+
+        // The rendered "l0 needle a" has rolled off.
+        let _ = app.tool_update(tools::Action::HistorySelect(
+            id,
+            evicted.line_id,
+            evicted.column,
+        ));
+        assert_eq!(app.tools.history_refresh_count, before + 1);
+        assert_eq!(
+            app.status,
+            "That match is no longer in the retained history."
+        );
+        let after = stale_coords_selected(&app, id);
+        let remaining = app.tools.histories[&id].hits();
+        assert_eq!(remaining.len(), 1, "only the retained match remains");
+        assert_ne!(
+            after.0, kept.0,
+            "capacity invalidates even retained identities"
+        );
+        assert_ne!(
+            after.0, evicted.line_id,
+            "the evicted button must not select a new row"
+        );
+        assert_eq!(after, (remaining[0].line_id, remaining[0].column, 2));
+
+        // An unknown identity also declines without changing the refreshed selection.
+        app.status = "untouched".into();
+        let _ = app.tool_update(tools::Action::HistorySelect(id, u64::MAX, 0));
+        assert_eq!(
+            app.status,
+            "That match is no longer in the retained history."
+        );
+        assert_eq!(stale_coords_selected(&app, id), after);
+    }
+
+    #[test]
+    fn stale_coords_round2_refresh_before_dispatch_keeps_rendered_hit() {
+        let (mut app, id) = app_with_focused_pane("round2-before-dispatch");
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(&["needle first", "needle target"], 0, 100),
+        );
+        let _ = app.tool_update(tools::Action::HistoryQuery("needle".into()));
+        let rendered = app.tools.histories[&id].hits()[1].clone();
+        let message = tools::Action::HistorySelect(id, rendered.line_id, rendered.column);
+
+        // A second hit on the first line appears before the clicked one;
+        // the old index now identifies the wrong result. The target row and
+        // identity remain unchanged in this below-capacity snapshot.
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(&["needle first needle added", "needle target"], 0, 100),
+        );
+        app.history_refresh();
+        assert_eq!(app.tools.histories[&id].hits().len(), 3);
+        assert_ne!(app.tools.histories[&id].hits()[1].line_id, rendered.line_id);
+
+        let _ = app.tool_update(message);
+        assert_eq!(
+            stale_coords_selected(&app, id),
+            (rendered.line_id, rendered.column, 1)
+        );
+    }
+
+    #[test]
+    fn stale_coords_round2_refresh_in_handler_keeps_rendered_hit() {
+        let (mut app, id) = app_with_focused_pane("round2-in-handler");
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(&["needle first", "needle target"], 0, 100),
+        );
+        let _ = app.tool_update(tools::Action::HistoryQuery("needle".into()));
+        let rendered = app.tools.histories[&id].hits()[1].clone();
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(&["needle first needle added", "needle target"], 0, 100),
+        );
+        let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::Wakeup));
+        let before = app.tools.history_refresh_count;
+        let _ = app.tool_update(tools::Action::HistorySelect(
+            id,
+            rendered.line_id,
+            rendered.column,
+        ));
+        assert_eq!(app.tools.history_refresh_count, before + 1);
+        assert_eq!(
+            stale_coords_selected(&app, id),
+            (rendered.line_id, rendered.column, 1)
+        );
+    }
+
+    #[test]
+    fn stale_coords_round2_pane_switch_declines_old_button() {
+        let (mut app, id) = app_with_focused_pane("round2-pane-switch");
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(&["needle first", "needle target"], 0, 100),
+        );
+        let _ = app.tool_update(tools::Action::HistoryQuery("needle".into()));
+        let rendered = app.tools.histories[&id].hits()[1].clone();
+        let other = app.new_terminal_pane(Session::default());
+        let other_id = other.id;
+        app.tabs.push(Workspace::new(Session::default(), other));
+        app.active = 1;
+        // Even while the old owner still names the first pane, focus alone
+        // must reject its queued button without refreshing the new pane.
+        let before = app.tools.history_refresh_count;
+        let _ = app.tool_update(tools::Action::HistorySelect(
+            id,
+            rendered.line_id,
+            rendered.column,
+        ));
+        assert_eq!(app.tools.history_refresh_count, before);
+        assert_eq!(app.status, "That match belongs to a different pane.");
+
+        app.tools
+            .history_test_source
+            .insert(other_id, stale_coords_snapshot(&["needle other"], 0, 100));
+        app.history_refresh();
+        let before = app.tools.history_refresh_count;
+        let _ = app.tool_update(tools::Action::HistorySelect(
+            id,
+            rendered.line_id,
+            rendered.column,
+        ));
+        assert_eq!(app.tools.history_refresh_count, before);
+        assert_eq!(app.status, "That match belongs to a different pane.");
+        assert!(app.tools.histories[&other_id].selected_hit().is_none());
+    }
+
+    #[test]
+    fn dropped_marks_status_wording_for_stale_coords() {
+        assert_eq!(
+            tools::history_marks_cleared_status(1),
+            "1 history mark cleared: line identity could not be verified after a history refresh."
+        );
+        assert_eq!(
+            tools::history_marks_cleared_status(3),
+            "3 history marks cleared: line identity could not be verified after a history refresh."
+        );
+    }
+
+    #[test]
+    fn ambiguous_scrollback_reports_dropped_marks_with_stale_coords() {
+        let (mut app, id) = app_with_focused_pane("stale-coords-dropped");
+        // At capacity every row repeats, so one eviction cannot be located.
+        let rows = ["$"; 6];
+        app.tools
+            .history_test_source
+            .insert(id, stale_coords_snapshot(&rows, 4, 4));
+        let _ = app.tool_update(tools::Action::HistoryMark);
+        let dropped_before = app
+            .tools
+            .histories
+            .get(&id)
+            .expect("history")
+            .dropped_marks();
+        app.status = "untouched".into();
+        let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::Wakeup));
+        let _ = app.history_refresh_if_stale(std::time::Instant::now(), false);
+        let dropped = app
+            .tools
+            .histories
+            .get(&id)
+            .expect("history")
+            .dropped_marks()
+            - dropped_before;
+        assert_eq!(dropped, 1, "the single mark sits on an ambiguous line");
+        assert_eq!(
+            app.status,
+            "1 history mark cleared: line identity could not be verified after a history refresh."
+        );
     }
 
     #[test]
@@ -17739,18 +18754,28 @@ mod tests {
 
     #[test]
     fn find_counter_is_danger_only_when_a_query_misses() {
-        let (label, danger) = super::find_counter("", 0, 0);
+        let (label, columns, danger) = super::find_counter("", 0, 0, 0);
         assert_eq!(label, "0/0");
+        assert_eq!(columns, 7);
         assert!(!danger, "an empty query with no hits stays normal");
-        let (label, danger) = super::find_counter("needle", 0, 0);
+        let (label, _, danger) = super::find_counter("needle", 0, 0, 0);
         assert_eq!(label, "0/0");
         assert!(danger, "a miss must use the danger colour");
-        let (label, danger) = super::find_counter("needle", 1, 2);
+        let (label, _, danger) = super::find_counter("needle", 1, 2, 2);
         assert_eq!(label, "2/2");
         assert!(!danger, "a hit must stay normal");
-        let (label, danger) = super::find_counter("", 0, 3);
+        let (label, _, danger) = super::find_counter("", 0, 3, 3);
         assert_eq!(label, "1/3");
         assert!(!danger);
+        // Exact total, not the listed cap.
+        let (label, columns, danger) = super::find_counter("needle", 4, 500, 1234);
+        assert_eq!(label, "5/1234");
+        assert_eq!(columns, 7);
+        assert!(!danger);
+        // A 9-character label reserves 9 columns.
+        let (label, columns, _) = super::find_counter("needle", 499, 500, 12345);
+        assert_eq!(label, "500/12345");
+        assert_eq!(columns, 9);
         assert_eq!(super::FIND_COUNTER_MIN.chars().count(), 7);
     }
 }

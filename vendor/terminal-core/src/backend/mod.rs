@@ -328,7 +328,7 @@ impl TerminalBackend {
             ..tty::Options::default()
         };
         let config = term::Config {
-            scrolling_history: 10_000,
+            scrolling_history: SCROLLBACK_LINES,
             ..term::Config::default()
         };
         let terminal_size = TerminalSize::default();
@@ -465,6 +465,13 @@ impl TerminalBackend {
         &self.last_content
     }
 
+    /// The parser's current mode bits. `last_content().terminal_mode` is only
+    /// as fresh as the last `sync()`; this locks the term and clones nothing.
+    pub fn live_terminal_mode(&self) -> TerminalMode {
+        let term = self.term.lock();
+        *term.mode()
+    }
+
     /// Return the currently visible terminal grid with resolved colors and text attributes.
     ///
     /// This keeps toolkit-specific rendering outside the PTY/parser backend while preserving the
@@ -565,37 +572,23 @@ impl TerminalBackend {
 
     /// Snapshot retained scrollback plus the visible screen without changing viewport state.
     ///
-    /// Lines are returned oldest-to-newest and trailing blank cells are trimmed. This reads the
-    /// terminal's existing in-memory grid; it does not capture keyboard input or write to disk.
-    pub fn history_lines(&self) -> Vec<String> {
+    /// Returns logical lines oldest-to-newest: soft-wrapped grid rows are joined, wide-char
+    /// spacer cells are skipped and combining marks follow their base character (see
+    /// [`logical_lines_from_rows`]). The snapshot also carries the grid facts taken under the
+    /// same lock (rows above the screen, scrollback capacity, columns) so a consumer can tell
+    /// when no row can have been evicted (see [`HistorySnapshot`]). This reads the terminal's
+    /// existing in-memory grid without cloning it; it does not capture keyboard input or
+    /// write to disk.
+    pub fn history_lines(&self) -> HistorySnapshot {
         let term = self.term.clone();
         let terminal = term.lock();
-        let grid = terminal.grid();
-        let start = Point::new(terminal.topmost_line(), Column(0));
-        let end_line = terminal.bottommost_line();
-
-        let mut lines = Vec::with_capacity(terminal.total_lines());
-        // Grid::iter_from advances from the supplied point, so seed the first retained cell.
-        let mut current_line = Some(start.line);
-        let mut current = String::from(grid.index(start).c);
-        for indexed in grid.iter_from(start) {
-            if indexed.point.line > end_line {
-                break;
-            }
-            if current_line != Some(indexed.point.line) {
-                lines.push(current.trim_end_matches(' ').to_owned());
-                current.clear();
-                current_line = Some(indexed.point.line);
-            }
-            current.push(indexed.c);
-        }
-        lines.push(current.trim_end_matches(' ').to_owned());
-        lines
+        grid_history_snapshot(&terminal, SCROLLBACK_LINES)
     }
 
     /// Scroll the viewport so a retained-history line is visible.
     ///
-    /// `index` is zero-based from the oldest retained line returned by `history_lines`.
+    /// `index` is a zero-based grid row counted from the oldest retained row (see
+    /// [`LogicalLine::row_for_char`]).
     pub fn scroll_to_history_index(&mut self, index: usize) -> bool {
         let term = self.term.clone();
         let mut terminal = term.lock();
@@ -1178,6 +1171,309 @@ pub fn probe_drag_selection_steps(
     DragSelectionProbe {
         text: terminal.selection_to_string().unwrap_or_default(),
         selected,
+    }
+}
+
+/// Grid rows of scrollback kept per pane (above the screen).
+///
+/// Memory: alacritty cells are 24 bytes and every row is allocated at full width, so at 150
+/// columns a line costs about 3.6 KB and a full pane about 36 MB (10,000 x 3,632 B).
+/// alacritty grows history lazily, so a pane only pays for the rows it has actually used.
+/// Raising it (for example to 50,000, about 182 MB per full pane) waits for release-build
+/// latency and peak-RSS measurements at both sizes.
+pub const SCROLLBACK_LINES: usize = 10_000;
+
+/// Retained history lines plus the grid facts needed to keep line identity across snapshots.
+///
+/// alacritty exposes no eviction count: once `history_rows == capacity` the history size is
+/// constant while rows keep rotating out at the top. Below capacity no row can be evicted,
+/// so rows `0..history_rows` of two snapshots with the same `columns` are the same rows as
+/// long as history did not shrink (it shrinks on clear, reset or a screen-height increase).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HistorySnapshot {
+    /// Logical lines oldest-to-newest: scrollback, then the screen.
+    pub lines: Vec<LogicalLine>,
+    /// Grid rows above the screen when the snapshot was taken. Rows `0..history_rows` are
+    /// immutable scrollback; later rows are the live screen and may be rewritten in place.
+    pub history_rows: usize,
+    /// Most scrollback rows the active grid keeps: [`SCROLLBACK_LINES`] on the main screen,
+    /// `0` on the alternate screen (alacritty gives it no scrollback). A change means the
+    /// snapshot came from the other grid.
+    pub capacity: usize,
+    /// Grid columns; a change means every row was reflowed.
+    pub columns: usize,
+}
+
+/// One logical line of retained history: soft-wrapped grid rows joined into one string.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LogicalLine {
+    /// Text with wide-char spacers removed and combining marks after their base character.
+    /// Trailing spaces of the last row are trimmed.
+    pub text: String,
+    /// Zero-based grid row (from the oldest retained row) of the first row of this line.
+    pub first_row: usize,
+    /// Char offsets into `text` at which each grid row starts; always begins with `0`.
+    pub segment_starts: Vec<usize>,
+}
+
+impl LogicalLine {
+    /// Grid row containing the char at `char_offset` (zero-based) of `text`.
+    pub fn row_for_char(&self, char_offset: usize) -> usize {
+        let segment = self
+            .segment_starts
+            .iter()
+            .rposition(|start| *start <= char_offset)
+            .unwrap_or(0);
+        self.first_row + segment
+    }
+}
+
+/// One grid cell as seen by [`logical_lines_from_rows`].
+#[derive(Clone, Copy, Debug)]
+pub struct HistoryCell<'a> {
+    pub c: char,
+    /// `WIDE_CHAR_SPACER` or `LEADING_WIDE_CHAR_SPACER`: not part of the text.
+    pub spacer: bool,
+    /// Zero-width (combining) characters attached to this cell.
+    pub zerowidth: &'a [char],
+}
+
+/// Build logical lines from grid rows, oldest first. Each row is its cells plus whether it
+/// soft-wraps into the next row (`WRAPLINE` on its last cell). A row that exactly fills the
+/// width and then ends with a newline is not wrapped and is not joined.
+pub fn logical_lines_from_rows<'a, R, C>(rows: R) -> Vec<LogicalLine>
+where
+    R: IntoIterator<Item = (C, bool)>,
+    C: IntoIterator<Item = HistoryCell<'a>>,
+{
+    let mut lines = Vec::new();
+    let mut current = LogicalLine::default();
+    let mut chars = 0usize;
+    let mut open = false;
+    for (row_index, (cells, wrapped)) in rows.into_iter().enumerate() {
+        if !open {
+            current = LogicalLine {
+                text: String::new(),
+                first_row: row_index,
+                segment_starts: Vec::new(),
+            };
+            chars = 0;
+            open = true;
+        }
+        current.segment_starts.push(chars);
+        for cell in cells {
+            if cell.spacer {
+                continue;
+            }
+            current.text.push(cell.c);
+            chars += 1;
+            for mark in cell.zerowidth {
+                current.text.push(*mark);
+                chars += 1;
+            }
+        }
+        if !wrapped {
+            let trimmed = current.text.trim_end_matches(' ').len();
+            current.text.truncate(trimmed);
+            lines.push(std::mem::take(&mut current));
+            open = false;
+        }
+    }
+    if open {
+        let trimmed = current.text.trim_end_matches(' ').len();
+        current.text.truncate(trimmed);
+        lines.push(current);
+    }
+    lines
+}
+
+/// [`HistorySnapshot`] of the active alacritty grid; `capacity` is the main grid's
+/// configured `scrolling_history` (the alternate grid keeps none).
+fn grid_history_snapshot<T>(terminal: &Term<T>, capacity: usize) -> HistorySnapshot {
+    let alternate = terminal.mode().contains(TermMode::ALT_SCREEN);
+    HistorySnapshot {
+        lines: grid_logical_lines(terminal),
+        history_rows: terminal.history_size(),
+        capacity: if alternate { 0 } else { capacity },
+        columns: terminal.columns(),
+    }
+}
+
+/// Adapt a real alacritty grid (topmost retained row to bottom of screen) to
+/// [`logical_lines_from_rows`].
+fn grid_logical_lines<T>(terminal: &Term<T>) -> Vec<LogicalLine> {
+    let grid = terminal.grid();
+    let top = terminal.topmost_line().0;
+    let bottom = terminal.bottommost_line().0;
+    let spacer = term::cell::Flags::WIDE_CHAR_SPACER | term::cell::Flags::LEADING_WIDE_CHAR_SPACER;
+    logical_lines_from_rows((top..=bottom).map(|line| {
+        let row = &grid[Line(line)];
+        let columns = row.len();
+        let wrapped = columns > 0
+            && row[Column(columns - 1)]
+                .flags
+                .contains(term::cell::Flags::WRAPLINE);
+        let cells = (0..columns).map(move |column| {
+            let cell = &row[Column(column)];
+            HistoryCell {
+                c: cell.c,
+                spacer: cell.flags.intersects(spacer),
+                zerowidth: cell.zerowidth().unwrap_or(&[]),
+            }
+        });
+        (cells, wrapped)
+    }))
+}
+
+#[cfg(test)]
+mod logical_line_tests {
+    use super::*;
+
+    fn row(text: &str, wrapped: bool) -> (Vec<HistoryCell<'static>>, bool) {
+        let cells = text
+            .chars()
+            .map(|c| HistoryCell {
+                c,
+                spacer: false,
+                zerowidth: &[],
+            })
+            .collect();
+        (cells, wrapped)
+    }
+
+    #[test]
+    fn wide_spacers_are_skipped() {
+        let cells = vec![
+            HistoryCell {
+                c: '東',
+                spacer: false,
+                zerowidth: &[],
+            },
+            HistoryCell {
+                c: ' ',
+                spacer: true,
+                zerowidth: &[],
+            },
+            HistoryCell {
+                c: '京',
+                spacer: false,
+                zerowidth: &[],
+            },
+            HistoryCell {
+                c: ' ',
+                spacer: true,
+                zerowidth: &[],
+            },
+        ];
+        let lines = logical_lines_from_rows(vec![(cells, false)]);
+        assert_eq!(lines[0].text, "東京");
+    }
+
+    #[test]
+    fn combining_marks_follow_their_base() {
+        static ACUTE: [char; 1] = ['\u{301}'];
+        let cells = vec![
+            HistoryCell {
+                c: 'e',
+                spacer: false,
+                zerowidth: &ACUTE,
+            },
+            HistoryCell {
+                c: 'x',
+                spacer: false,
+                zerowidth: &[],
+            },
+        ];
+        let lines = logical_lines_from_rows(vec![(cells, false)]);
+        assert_eq!(lines[0].text, "e\u{301}x");
+    }
+
+    #[test]
+    fn wrapped_rows_join_and_map_offsets_to_rows() {
+        let lines = logical_lines_from_rows(vec![
+            row("top   ", false),
+            row("abcdef", true),
+            row("ghi   ", false),
+        ]);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "top");
+        assert_eq!(lines[1].text, "abcdefghi");
+        assert_eq!(lines[1].first_row, 1);
+        assert_eq!(lines[1].segment_starts, vec![0, 6]);
+        // "efg" straddles the wrap and starts on the first row; "ghi" starts on the second.
+        assert_eq!(lines[1].row_for_char(lines[1].text.find("efg").unwrap()), 1);
+        assert_eq!(lines[1].row_for_char(lines[1].text.find("ghi").unwrap()), 2);
+    }
+
+    #[test]
+    fn full_width_row_without_wrap_flag_is_not_joined() {
+        let lines = logical_lines_from_rows(vec![row("abcdef", false), row("ghi", false)]);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "abcdef");
+        assert_eq!(lines[1].first_row, 1);
+    }
+
+    #[test]
+    fn real_term_cjk_wraps_into_one_logical_line() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+
+        let dimensions = TermSize::new(10, 4);
+        let mut terminal = Term::new(term::Config::default(), &dimensions, VoidListener);
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        // 東京 takes 4 columns; 10 ASCII chars force one soft wrap at width 10.
+        parser.advance(&mut terminal, "東京abcdefghij\r\nnext".as_bytes());
+        let lines = grid_logical_lines(&terminal);
+        assert_eq!(lines[0].text, "東京abcdefghij");
+        assert_eq!(lines[0].first_row, 0);
+        // Row 1 starts after 東京abcdef (8 chars, 10 columns).
+        assert_eq!(lines[0].segment_starts, vec![0, 8]);
+        assert_eq!(lines[1].text, "next");
+        assert_eq!(lines[1].first_row, 2);
+    }
+
+    #[test]
+    fn real_term_snapshot_reports_history_rows_capacity_and_columns() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+
+        let dimensions = TermSize::new(10, 4);
+        let config = term::Config {
+            scrolling_history: 3,
+            ..term::Config::default()
+        };
+        let mut terminal = Term::new(config, &dimensions, VoidListener);
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        // Seven rows on a four-row screen: three rows scroll into history.
+        parser.advance(&mut terminal, b"r0\r\nr1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6");
+        let snapshot = grid_history_snapshot(&terminal, 3);
+        assert_eq!(
+            (snapshot.history_rows, snapshot.capacity, snapshot.columns),
+            (3, 3, 10)
+        );
+        assert_eq!(snapshot.lines.len(), 7);
+        assert_eq!(snapshot.lines[0].text, "r0");
+        assert_eq!(snapshot.lines[3].first_row, 3);
+
+        // At capacity the history size stays constant while the oldest rows rotate out.
+        parser.advance(&mut terminal, b"\r\nr7\r\nr8");
+        let snapshot = grid_history_snapshot(&terminal, 3);
+        assert_eq!(snapshot.history_rows, 3);
+        assert_eq!(snapshot.lines.len(), 7);
+        assert_eq!(snapshot.lines[0].text, "r2");
+        assert_eq!(snapshot.lines[6].text, "r8");
+
+        // The alternate screen has no scrollback; leaving it restores the main grid.
+        parser.advance(&mut terminal, b"\x1b[?1049hvim");
+        let snapshot = grid_history_snapshot(&terminal, 3);
+        assert_eq!(
+            (snapshot.history_rows, snapshot.capacity, snapshot.columns),
+            (0, 0, 10)
+        );
+        parser.advance(&mut terminal, b"\x1b[?1049l");
+        let snapshot = grid_history_snapshot(&terminal, 3);
+        assert_eq!((snapshot.history_rows, snapshot.capacity), (3, 3));
+        assert_eq!(snapshot.lines[0].text, "r2");
     }
 }
 

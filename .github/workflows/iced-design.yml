@@ -56,6 +56,10 @@ jobs:
         # independently exercises every integration target, with bounded
         # Windows execution. Avoid rerunning the full Windows suite here.
         run: cargo test --locked --lib --features iced-ui
+      - name: Vendored terminal core tests
+        # The path dependency is not a workspace member, so the command
+        # above never runs its unit tests (scrollback text extraction).
+        run: cargo test --manifest-path vendor/terminal-core/Cargo.toml
       - name: Production Iced shell Clippy
         run: cargo clippy --locked --features iced-ui --all-targets -- -D warnings
       - name: Build production Iced shell

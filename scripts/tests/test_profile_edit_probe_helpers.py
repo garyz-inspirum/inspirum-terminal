@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import shutil
 import sys
 import tempfile
 import types
@@ -72,6 +73,61 @@ class DialogGeometryTest(unittest.TestCase):
         left, _t, right, _b = module.connection_dialog_region(1280, 800)
         self.assertTrue(left < x < right - 30, x)
         self.assertTrue(label[3] + 12 <= y <= label[3] + 36, y)
+
+
+class DialogScrollTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("tesseract"), "tesseract is not installed")
+    def test_real_footer_visible_after_refusal_needs_no_drag(self):
+        shot = Path("/mnt/data/atlas/gui-out/it14r3-ci/connected/connected-profile-rename-cancel-scroll-start.png")
+        if not shot.is_file():
+            self.skipTest("gsb-dev screenshot artifact unavailable")
+        self.assertTrue(module.connection_footer_visible(shot, module.connection_dialog_region(W, H)))
+
+    def test_failing_ci_frame_drags_thumb_to_bottom_of_dialog(self):
+        shot = Path("/mnt/data/atlas/it14-fe89d61-ci/connected/connected-profile-rename-before-submit.png")
+        if not shot.is_file():
+            self.skipTest("CI screenshot artifact unavailable")
+        if shutil.which("tesseract"):
+            self.assertFalse(module.connection_footer_visible(shot, module.connection_dialog_region(W, H)))
+        start, end = module.connection_scroll_drag(shot, module.connection_dialog_region(W, H))
+        self.assertTrue(920 <= start[0] <= 925, start)
+        self.assertEqual(start[1], 243)
+        self.assertEqual(end[0], start[0])
+        self.assertGreater(end[1], 700)
+        self.assertLess(end[1], H - 22)
+
+    def test_synthetic_thumb_drags_into_footer(self):
+        shot = frame([((917, 80, 927, 746), (55, 55, 55)),
+                      ((917, 123, 927, 363), (81, 81, 81))])
+        self.addCleanup(shot.unlink)
+        start, end = module.connection_scroll_drag(shot, module.connection_dialog_region(W, H))
+        self.assertTrue(920 <= start[0] <= 925, start)
+        self.assertEqual(start[1], 243)
+        self.assertEqual(end, (start[0], 734))
+
+    def test_missing_thumb_fails_closed(self):
+        shot = frame([])
+        self.addCleanup(shot.unlink)
+        with self.assertRaisesRegex(RuntimeError, "scrollbar thumb"):
+            module.connection_scroll_drag(shot, module.connection_dialog_region(W, H))
+
+    @unittest.skipUnless(shutil.which("tesseract"), "tesseract is not installed")
+    def test_footer_visible_on_synthetic_button_row(self):
+        from PIL import Image, ImageDraw, ImageFont
+        shot = frame([])
+        self.addCleanup(shot.unlink)
+        image = Image.open(shot)
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.truetype("DejaVuSans.ttf", 14)
+        draw.text((708, 727), "Save only", fill=(230, 230, 230), font=font)
+        image.save(shot)
+        self.assertTrue(module.connection_footer_visible(shot, module.connection_dialog_region(W, H)))
+
+    @unittest.skipUnless(shutil.which("tesseract"), "tesseract is not installed")
+    def test_footer_absent_on_synthetic_empty_dialog(self):
+        shot = frame([])
+        self.addCleanup(shot.unlink)
+        self.assertFalse(module.connection_footer_visible(shot, module.connection_dialog_region(W, H)))
 
 
 class DangerPixelsTest(unittest.TestCase):
@@ -196,6 +252,18 @@ class ProbeWiringTest(unittest.TestCase):
         self.assertIn("connection_submit_button", body)
         self.assertIn("profile_edit_refused", body)
         self.assertNotIn('"Return"', body)           # Submit is a click
+
+    def test_scroll_bottom_drags_visible_scrollbar_not_wheels_in_form(self):
+        body = function_source(self.src, "scroll_bottom")
+        self.assertIn("connection_scroll_drag", body)
+        self.assertIn('"mousedown", "1"', body)
+        self.assertIn('"mouseup", "1"', body)
+        self.assertNotIn('"click", "--repeat"', body)
+
+    def test_bottom_shot_checks_footer_before_drag(self):
+        body = function_source(self.src, "bottom_shot")
+        self.assertLess(body.index("connection_footer_visible"), body.index("scroll_bottom(dialog, tag)"))
+        self.assertIn("return start_shot", body)
 
     def test_switch_stops_alpha_after_refusals_before_sibling_edits(self):
         body = self.body()

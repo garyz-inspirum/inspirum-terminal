@@ -73,7 +73,7 @@ impl Menu {
             Menu::Edit => vec![
                 item("Copy", "", Copy),
                 item("Paste", "", Paste),
-                item("Find", "Ctrl+Shift+F", Find),
+                item("Find", "Ctrl+F", Find),
                 Entry::Separator,
                 item("Command Palette", "", Palette),
                 item("Snippets", "", Tool(Panel::Snippets)),
@@ -230,7 +230,7 @@ mod tests {
             entries.get(paste + 1),
             Some(Entry::Item {
                 label: "Find",
-                shortcut: "Ctrl+Shift+F",
+                shortcut: "Ctrl+F",
                 command: Command::Find,
             })
         ));
