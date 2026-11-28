@@ -4385,7 +4385,13 @@ async def locate_rendered_label(
     # time out during banner exchange while we are looking at the screen.
     deadline = time.monotonic() + timeout
     while True:
-        await asyncio.to_thread(screenshot, window, path, env)
+        try:
+            await asyncio.to_thread(screenshot, window, path, env)
+        except RuntimeError as error:
+            if not str(error).startswith("empty GUI screenshot:") or time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(.5)
+            continue
         try:
             return await asyncio.to_thread(
                 locate_visible_label, path, label, region=region,

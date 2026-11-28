@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 SOURCE = Path(__file__).resolve().parents[1] / "test-iced-connected-gui.py"
 spec = importlib.util.spec_from_file_location("iced_connected_saved", SOURCE)
@@ -63,3 +64,47 @@ class SavedSshConfigGui(unittest.TestCase):
         self.assertIn("saved_ssh_config_probe(", main)
         self.assertIn("profiles.write_text(json.dumps(fixture_profiles(", main)
         self.assertIn("app = None", main.split("await saved_ssh_config_probe(", 1)[0][-900:])
+
+
+class SavedGuiFirstFrame(unittest.IsolatedAsyncioTestCase):
+    async def test_locator_retries_initial_empty_frame_then_locates_real_frame(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frame = Path(tmp) / "saved-editor-ready.png"
+            attempts = []
+
+            def capture(window, path, env):
+                attempts.append(path)
+                if len(attempts) == 1:
+                    path.write_bytes(b"empty")
+                    raise RuntimeError(f"empty GUI screenshot: {path.name}")
+                path.write_bytes(b"rendered frame" * 100)
+
+            def locate(path, label, *, region):
+                self.assertEqual(path.read_bytes(), b"rendered frame" * 100)
+                self.assertEqual(label, "Tunnels")
+                return (1, 2, 3, 4)
+
+            with mock.patch.object(module, "screenshot", side_effect=capture), \
+                 mock.patch.object(module, "locate_visible_label", side_effect=locate), \
+                 mock.patch.object(module.asyncio, "sleep", new_callable=mock.AsyncMock):
+                bounds = await module.locate_rendered_label(
+                    "window", frame, "Tunnels", env={}, timeout=20,
+                )
+            self.assertEqual(bounds, (1, 2, 3, 4))
+            self.assertEqual(attempts, [frame, frame])
+
+    async def test_locator_does_not_retry_imagemagick_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frame = Path(tmp) / "saved-editor-ready.png"
+            with mock.patch.object(module, "screenshot", side_effect=RuntimeError("ImageMagick screenshot failed: bad binary")) as capture:
+                with self.assertRaisesRegex(RuntimeError, "ImageMagick screenshot failed"):
+                    await module.locate_rendered_label("window", frame, "Tunnels", env={}, timeout=20)
+            capture.assert_called_once()
+
+    async def test_locator_stops_on_empty_frame_at_deadline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frame = Path(tmp) / "saved-editor-ready.png"
+            with mock.patch.object(module, "screenshot", side_effect=RuntimeError("empty GUI screenshot: saved-editor-ready.png")) as capture:
+                with self.assertRaisesRegex(RuntimeError, "empty GUI screenshot"):
+                    await module.locate_rendered_label("window", frame, "Tunnels", env={}, timeout=0)
+            capture.assert_called_once()
