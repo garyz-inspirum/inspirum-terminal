@@ -84,15 +84,11 @@ struct SnapshotGeometry {
 /// How the ids of the previous snapshot carry into a new one (see `update_lines`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Carry {
-    /// Nothing can have been evicted: a line keeps the id of the old line on its first row.
+    /// The same grid is below capacity: no row can have been evicted.
     ByRow,
-    /// Exactly one shift fits: `evicted` old lines lost their identity at the top. With
-    /// `cut_top` the last of them lost only its first rows and its remainder is the new
-    /// first line.
-    Shift { evicted: usize, cut_top: bool },
-    /// No old line survived: ordinary roll-off of everything.
-    RolledOff,
-    /// Ambiguous shift or reset: every line is new and marks are dropped.
+    /// First snapshot; no previous identity or marks to invalidate.
+    Initial,
+    /// Continuity is unproven: every line is new and marks are dropped.
     Invalidate,
 }
 
@@ -122,132 +118,38 @@ fn new_key(line: &LogicalLine) -> (&str, &[usize]) {
     (&line.text, &line.segment_starts)
 }
 
-/// Every `overlap >= 1` for which the last `overlap` lines of `old` equal the first
-/// `overlap` lines of `new`, longest first. One KMP pass: O(old + new) comparisons.
-fn suffix_prefix_overlaps(
-    old: &[HistoryLine],
-    new: &[LogicalLine],
-    same_columns: bool,
-) -> Vec<usize> {
-    if old.is_empty() || new.is_empty() {
-        return Vec::new();
-    }
-    let eq_new = |a: &LogicalLine, b: &LogicalLine| same_line(new_key(a), new_key(b), same_columns);
-    let eq_old = |a: &HistoryLine, b: &LogicalLine| same_line(old_key(a), new_key(b), same_columns);
-
-    // KMP failure table over `new`.
-    let mut prefix = vec![0usize; new.len()];
-    for index in 1..new.len() {
-        let mut matched = prefix[index - 1];
-        while matched > 0 && !eq_new(&new[index], &new[matched]) {
-            matched = prefix[matched - 1];
-        }
-        if eq_new(&new[index], &new[matched]) {
-            matched += 1;
-        }
-        prefix[index] = matched;
-    }
-
-    // `matched` ends as the longest prefix of `new` that is a suffix of `old`; the failure
-    // chain from it lists every shorter one.
-    let mut matched = 0usize;
-    for line in old {
-        if matched == new.len() {
-            matched = prefix[matched - 1];
-        }
-        while matched > 0 && !eq_old(line, &new[matched]) {
-            matched = prefix[matched - 1];
-        }
-        if eq_old(line, &new[matched]) {
-            matched += 1;
-        }
-    }
-    let mut overlaps = Vec::new();
-    while matched > 0 {
-        overlaps.push(matched);
-        matched = prefix[matched - 1];
-    }
-    overlaps
-}
-
-/// Whether `new` is what remains of the soft-wrapped `old` after its first grid rows were
-/// evicted. With unchanged columns the remainder must be exactly `old`'s last rows; after a
-/// reflow it must be a proper suffix of `old`'s text.
-fn is_cut_remainder(old: &HistoryLine, new: &LogicalLine, same_columns: bool) -> bool {
-    if !same_columns {
-        return old.text.len() > new.text.len() && old.text.ends_with(&new.text);
-    }
-    let (old_rows, new_rows) = (old.segment_starts.len(), new.segment_starts.len());
-    if new_rows == 0 || new_rows >= old_rows {
-        return false;
-    }
-    let kept = &old.segment_starts[old_rows - new_rows..];
-    let start = kept[0];
-    let byte = old
-        .text
-        .char_indices()
-        .nth(start)
-        .map_or(old.text.len(), |(byte, _)| byte);
-    old.text[byte..] == new.text
-        && kept
-            .iter()
-            .zip(&new.segment_starts)
-            .all(|(old_start, new_start)| old_start.checked_sub(start) == Some(*new_start))
-}
-
-/// Decide how ids carry from `old_lines` to `new_lines` (the rule is documented on
-/// `HistoryState::update_lines`).
+/// Preserve row ids only when the active grid cannot have evicted any old rows.
+/// At capacity a complete rotation may produce *any* text, including a unique
+/// suffix/prefix match or an identical snapshot; text cannot prove continuity.
 fn carry_ids(
     old_lines: &[HistoryLine],
     old: SnapshotGeometry,
     new_lines: &[LogicalLine],
     new: SnapshotGeometry,
 ) -> Carry {
-    let same_columns = old.columns == new.columns;
-    let immutable = &old_lines[..immutable_len(old_lines, old.history_rows)];
-
-    let same_grid = same_columns && old.capacity == new.capacity;
-    let grew = new.history_rows >= old.history_rows;
-    // `capacity == 0` is the alternate screen: no scrollback, every row is live screen.
-    if same_grid && grew && (new.history_rows < new.capacity || new.capacity == 0) {
-        let unchanged = immutable.iter().all(|old_line| {
+    // A grid switch must be checked before comparing texts or row positions.
+    if old.capacity != new.capacity || old.columns != new.columns {
+        return Carry::Invalidate;
+    }
+    // Alternate-screen rows are live and stay in place on the same grid.
+    // On the main grid, reaching capacity permits arbitrary unobserved eviction.
+    if new.capacity != 0 && (new.history_rows >= new.capacity || old.history_rows >= old.capacity) {
+        return Carry::Invalidate;
+    }
+    if new.history_rows < old.history_rows {
+        return Carry::Invalidate;
+    }
+    let unchanged = old_lines[..immutable_len(old_lines, old.history_rows)]
+        .iter()
+        .all(|old_line| {
             new_lines
                 .binary_search_by_key(&old_line.first_row, |line| line.first_row)
                 .is_ok_and(|index| same_line(old_key(old_line), new_key(&new_lines[index]), true))
         });
-        return if unchanged {
-            Carry::ByRow
-        } else {
-            Carry::Invalidate
-        };
-    }
-
-    let exact = suffix_prefix_overlaps(immutable, new_lines, same_columns)
-        .into_iter()
-        .map(|overlap| Carry::Shift {
-            evicted: immutable.len() - overlap,
-            cut_top: false,
-        });
-    let cut = suffix_prefix_overlaps(
-        immutable,
-        new_lines.get(1..).unwrap_or_default(),
-        same_columns,
-    )
-    .into_iter()
-    .map(|overlap| immutable.len() - overlap)
-    .filter(|&evicted| {
-        evicted > 0 && is_cut_remainder(&immutable[evicted - 1], &new_lines[0], same_columns)
-    })
-    .map(|evicted| Carry::Shift {
-        evicted,
-        cut_top: true,
-    });
-    let mut candidates = exact.chain(cut);
-    match (candidates.next(), candidates.next()) {
-        (Some(only), None) => only,
-        (Some(_), Some(_)) => Carry::Invalidate,
-        (None, _) if same_grid && grew && !immutable.is_empty() => Carry::RolledOff,
-        (None, _) => Carry::Invalidate,
+    if unchanged {
+        Carry::ByRow
+    } else {
+        Carry::Invalidate
     }
 }
 
@@ -285,16 +187,15 @@ impl HistoryState {
         self.truncated_lines
     }
 
-    /// Running total of marks removed because their line identity became ambiguous or was
-    /// reset. Marks whose line rolled off with a uniquely known shift, and marks the user
-    /// removed, are not counted.
+    /// Running total of marks removed when line identity cannot be established.
+    /// Explicitly user-removed marks are not counted. At capacity this includes marks
+    /// on lines that may actually have rolled off, because their fate is unprovable.
     pub fn dropped_marks(&self) -> u64 {
         self.dropped_marks
     }
 
-    /// Test convenience: one unwrapped grid row per string, modelling a pane at scrollback
-    /// capacity whose last row is the live screen (`history_rows = len - 1 = capacity`).
-    /// Every row but the last is immutable scrollback and ids follow text alignment only.
+    /// Test convenience: one unwrapped row per string below the normal scrollback
+    /// capacity, with the last row on the live screen.
     #[cfg(test)]
     pub fn update_snapshot(&mut self, snapshot: Vec<String>) {
         let history_rows = snapshot.len().saturating_sub(1);
@@ -309,48 +210,21 @@ impl HistoryState {
                 })
                 .collect(),
             history_rows,
-            capacity: history_rows,
+            capacity: terminal_core::SCROLLBACK_LINES,
             columns: 80,
         });
     }
 
-    /// Replace the retained lines with `snapshot`, carrying line ids (and so marks and the
-    /// selected hit) across only when the backend's grid facts or the immutable history
-    /// prove which old line each new line is.
+    /// Replace retained lines, carrying ids only across a provable same-grid,
+    /// below-capacity transition. Immutable old history must still match at its
+    /// original row; live screen rows retain their row ids when rewritten.
     ///
-    /// "Immutable" old lines are those lying wholly in the old rows `0..history_rows`
-    /// (scrollback cannot change once written); rows below are the live screen.
-    ///
-    /// 1. **No eviction possible** (same `columns` and `capacity`, history did not shrink,
-    ///    and `history_rows < capacity`, or `capacity == 0` for the alternate screen, whose
-    ///    rows are all live screen): a new line keeps the id of the old line with the same
-    ///    `first_row`;
-    ///    screen lines rewritten in place keep their id, new rows get fresh ids. Every
-    ///    immutable old line must reappear with the same text and row breaks at the same
-    ///    `first_row`; if one does not (history cleared and regrown, reset) it is a
-    ///    **reset**.
-    /// 2. **Otherwise** (at capacity, history shrank, columns changed, or the snapshot comes
-    ///    from the other grid, i.e. `capacity` changed) align by text. A
-    ///    shift `e` is consistent when the immutable old lines from index `e` equal the new
-    ///    lines from index 0 for their whole length (text, plus row breaks when the columns
-    ///    are unchanged), or, for a soft-wrapped line cut at the top by eviction, when new
-    ///    line 0 is exactly the last rows of immutable old line `e - 1` and the immutable old
-    ///    lines from `e` equal the new lines from index 1. Overlaps must be non-empty.
-    ///    - Exactly one consistent shift: new line `i` keeps the id of old line `e + i`
-    ///      (`e + i - 1` after a cut, whose remainder gets a fresh id), screen lines
-    ///      included; `truncated_lines += e`; marks on the `e` lost lines roll off normally.
-    ///    - Two or more: **ambiguous** (runs of identical or blank lines, periodic output, or
-    ///      merely the oldest retained line equalling the newest history line). Text cannot
-    ///      tell these apart and alacritty exposes no eviction count, so nothing is guessed:
-    ///      handled as a reset.
-    ///    - None: with the same columns and capacity, history not shrunk and at least one
-    ///      immutable old line, everything rolled off (`truncated_lines += old line count`,
-    ///      marks roll off, not counted); otherwise (columns changed, history shrank, no
-    ///      immutable evidence, or a switch between main and alternate screen) a reset.
-    ///
-    /// A **reset** gives every line a fresh id (no old id is ever reused), drops every mark
-    /// and adds them to `dropped_marks`, drops the selected-hit anchor (selection goes to the
-    /// first hit) and leaves `truncated_lines` unchanged.
+    /// At capacity, even one unique textual overlap (or an unchanged snapshot)
+    /// could be unrelated output after a complete rotation between polls. Without
+    /// a backend eviction count, invalidate every id and mark on each such refresh.
+    /// A grid switch, reflow, shrink, or immutable-history mismatch invalidates too.
+    /// Invalidations add marks to `dropped_marks` and reset the selected-hit anchor;
+    /// `truncated_lines` stays unchanged because the eviction count is unknown.
     pub fn update_lines(&mut self, snapshot: HistorySnapshot) {
         let HistorySnapshot {
             lines,
@@ -365,7 +239,7 @@ impl HistoryState {
         };
         let carry = match self.geometry {
             Some(old) if !self.lines.is_empty() => carry_ids(&self.lines, old, &lines, geometry),
-            _ => Carry::RolledOff,
+            _ => Carry::Initial,
         };
         self.geometry = Some(geometry);
 
@@ -383,24 +257,10 @@ impl HistoryState {
                         .map(|index| self.lines[index].id)
                 })
                 .collect(),
-            Carry::Shift { evicted, cut_top } => (0..lines.len())
-                .map(|index| {
-                    index
-                        .checked_sub(usize::from(cut_top))
-                        .and_then(|offset| self.lines.get(evicted + offset))
-                        .map(|old| old.id)
-                })
-                .collect(),
-            Carry::RolledOff | Carry::Invalidate => vec![None; lines.len()],
+            Carry::Initial | Carry::Invalidate => vec![None; lines.len()],
         };
         match carry {
-            Carry::ByRow => {}
-            Carry::Shift { evicted, .. } => {
-                self.truncated_lines = self.truncated_lines.saturating_add(evicted as u64);
-            }
-            Carry::RolledOff => {
-                self.truncated_lines = self.truncated_lines.saturating_add(self.lines.len() as u64);
-            }
+            Carry::ByRow | Carry::Initial => {}
             Carry::Invalidate => {
                 self.dropped_marks = self.dropped_marks.saturating_add(self.marks.len() as u64);
                 self.marks.clear();
@@ -669,25 +529,15 @@ mod tests {
     }
 
     #[test]
-    fn truncation_preserves_retained_ids_and_drops_old_marks() {
+    fn history_shrink_invalidates_marks_without_claiming_eviction_count() {
         let mut state = HistoryState::default();
-        // The trailing "" is the live screen row; "three" is immutable scrollback.
         state.update_snapshot(vec!["one".into(), "two".into(), "three".into(), "".into()]);
-        let old = state.lines()[0].id;
-        state.marks.insert(
-            old,
-            HistoryMark {
-                line_id: old,
-                timestamp_epoch_seconds: None,
-                collapsed: false,
-            },
-        );
-        let retained = state.lines()[2].id;
-
+        let before = line_ids(&state);
+        mark_at(&mut state, 0);
         state.update_snapshot(vec!["three".into(), "four".into(), "".into()]);
-        assert_eq!(state.lines()[0].id, retained);
-        assert!(!state.marks().any(|mark| mark.line_id == old));
-        assert_eq!(state.truncated_lines(), 2);
+        assert_all_ids_fresh(&state, &before);
+        assert!(mark_ids(&state).is_empty());
+        assert_eq!((state.truncated_lines(), state.dropped_marks()), (0, 1));
     }
 
     #[test]
@@ -721,10 +571,9 @@ mod tests {
                 ..
             }
         ));
-        assert!(
-            rows.iter()
-                .any(|row| matches!(row, HistoryRow::Line(line) if line.id == second))
-        );
+        assert!(rows
+            .iter()
+            .any(|row| matches!(row, HistoryRow::Line(line) if line.id == second)));
     }
 
     #[test]
@@ -786,17 +635,17 @@ mod tests {
     }
 
     #[test]
-    fn ids_survive_roll_off_with_live_tail() {
+    fn ids_do_not_survive_unproven_roll_off_with_live_tail() {
         let mut state = HistoryState::default();
         state.update_snapshot(vec!["A".into(), "B".into(), "C".into(), "".into()]);
-        let before = ids_of(&state, &["B", "C"]);
+        let before = line_ids(&state);
         state.update_snapshot(vec!["B".into(), "C".into(), "D".into(), "".into()]);
-        assert_eq!(ids_of(&state, &["B", "C"]), before);
-        assert_eq!(state.truncated_lines(), 1);
+        assert_all_ids_fresh(&state, &before);
+        assert_eq!(state.truncated_lines(), 0);
     }
 
     #[test]
-    fn selected_hit_follows_its_line_when_lines_arrive_and_roll_off() {
+    fn selected_hit_follows_below_capacity_then_resets_on_unproven_roll_off() {
         let mut state = HistoryState::default();
         state.update_snapshot(vec!["hit a".into(), "x".into(), "hit b".into(), "".into()]);
         state.set_query("hit");
@@ -810,10 +659,9 @@ mod tests {
             "".into(),
         ]);
         assert_eq!(state.selected_hit().unwrap().line_id, selected);
-        // "hit a" rolls off: selection stays on "hit b", now at list index 0.
         state.update_snapshot(vec!["x".into(), "hit b".into(), "hit c".into(), "".into()]);
-        assert_eq!(state.selected_hit().unwrap().line_id, selected);
         assert_eq!(state.selected_hit_index(), 0);
+        assert_ne!(state.selected_hit().unwrap().line_id, selected);
     }
 
     #[test]
@@ -912,31 +760,17 @@ mod tests {
 
     #[test]
     fn line_identity_no_scroll_control_at_capacity() {
-        // Identical rows: a refresh with no scrolling is indistinguishable from the
-        // roll-off above, so it is handled the same way (ambiguous, mark dropped).
-        let mut identical = HistoryState::default();
-        let screen = ["same", "same", "same", "$"];
-        identical.update_lines(rows_snapshot(&screen, 3, 3));
-        let before = line_ids(&identical);
-        mark_at(&mut identical, 2);
-        identical.update_lines(rows_snapshot(&screen, 3, 3));
-        assert!(mark_ids(&identical).is_empty());
-        assert_eq!(identical.dropped_marks(), 1);
-        assert_all_ids_fresh(&identical, &before);
-
-        // Distinct rows: shift 0 is the only one that fits, so ids and the mark stay.
-        let mut distinct = HistoryState::default();
-        let screen = ["a", "b", "c", "$"];
-        distinct.update_lines(rows_snapshot(&screen, 3, 3));
-        let before = line_ids(&distinct);
-        let marked = mark_at(&mut distinct, 1);
-        distinct.update_lines(rows_snapshot(&screen, 3, 3));
-        assert_eq!(line_ids(&distinct), before);
-        assert_eq!(mark_ids(&distinct), vec![marked]);
-        assert_eq!(
-            (distinct.dropped_marks(), distinct.truncated_lines()),
-            (0, 0)
-        );
+        // Even distinct unchanged text could have been produced after a full rotation.
+        for screen in [["same", "same", "same", "$"], ["a", "b", "c", "$"]] {
+            let mut state = HistoryState::default();
+            state.update_lines(rows_snapshot(&screen, 3, 3));
+            let before = line_ids(&state);
+            mark_at(&mut state, 1);
+            state.update_lines(rows_snapshot(&screen, 3, 3));
+            assert_all_ids_fresh(&state, &before);
+            assert!(mark_ids(&state).is_empty());
+            assert_eq!((state.dropped_marks(), state.truncated_lines()), (1, 0));
+        }
     }
 
     #[test]
@@ -965,26 +799,15 @@ mod tests {
 
     #[test]
     fn line_identity_blank_run_no_scroll_control_at_capacity() {
-        let mut blank = HistoryState::default();
-        let screen = ["", "", "", "$"];
-        blank.update_lines(rows_snapshot(&screen, 3, 3));
-        let before = line_ids(&blank);
-        mark_at(&mut blank, 1);
-        blank.update_lines(rows_snapshot(&screen, 3, 3));
-        assert!(mark_ids(&blank).is_empty(), "same as the blank roll-off");
-        assert_eq!(blank.dropped_marks(), 1);
-        assert_all_ids_fresh(&blank, &before);
-
-        // Blank-separated distinct rows have one consistent shift.
-        let mut separated = HistoryState::default();
-        let screen = ["a", "", "b", "$"];
-        separated.update_lines(rows_snapshot(&screen, 3, 3));
-        let before = line_ids(&separated);
-        let marked = mark_at(&mut separated, 1);
-        separated.update_lines(rows_snapshot(&screen, 3, 3));
-        assert_eq!(line_ids(&separated), before);
-        assert_eq!(mark_ids(&separated), vec![marked]);
-        assert_eq!(separated.dropped_marks(), 0);
+        for screen in [["", "", "", "$"], ["a", "", "b", "$"]] {
+            let mut state = HistoryState::default();
+            state.update_lines(rows_snapshot(&screen, 3, 3));
+            let before = line_ids(&state);
+            mark_at(&mut state, 1);
+            state.update_lines(rows_snapshot(&screen, 3, 3));
+            assert_all_ids_fresh(&state, &before);
+            assert_eq!(state.dropped_marks(), 1);
+        }
     }
 
     #[test]
@@ -1051,35 +874,22 @@ mod tests {
     }
 
     #[test]
-    fn line_identity_unique_shift_at_capacity_keeps_ids_and_selection() {
+    fn line_identity_unique_shift_at_capacity_invalidates_without_eviction_evidence() {
         let mut state = HistoryState::default();
-        state.update_lines(rows_snapshot(
-            &["l0", "l1", "l2", "l3", "l4", "l5", "$"],
-            6,
-            6,
-        ));
+        state.update_lines(rows_snapshot(&["l0", "l1", "l2", "l3", "$"], 4, 4));
         let before = line_ids(&state);
-        let marked = mark_at(&mut state, 3);
+        mark_at(&mut state, 2);
         state.set_query("l");
-        assert!(state.select_hit_at(before[4], 1));
-        assert_eq!(state.selected_hit_index(), 4);
-
-        state.update_lines(rows_snapshot(
-            &["l2", "l3", "l4", "l5", "l6", "l7", "$"],
-            6,
-            6,
-        ));
-        assert_eq!(line_ids(&state)[..4], before[2..6]);
-        assert_eq!(state.truncated_lines(), 2);
-        assert_eq!(mark_ids(&state), vec![marked]);
-        assert_eq!(state.dropped_marks(), 0);
-        assert_eq!(state.selected_hit().unwrap().line_id, before[4]);
-        assert_eq!(state.selected_hit_index(), 2);
+        assert!(state.select_hit_at(before[2], 1));
+        state.update_lines(rows_snapshot(&["l2", "l3", "l4", "l5", "$"], 4, 4));
+        assert_all_ids_fresh(&state, &before);
+        assert!(mark_ids(&state).is_empty());
+        assert_eq!((state.dropped_marks(), state.truncated_lines()), (1, 0));
+        assert_eq!(state.selected_hit_index(), 0);
     }
 
     #[test]
     fn line_identity_cut_wrapped_top_line_at_capacity() {
-        // Four columns; the oldest logical line spans rows 0-2 and loses row 0.
         let mut state = HistoryState::default();
         state.update_lines(lines_snapshot(
             vec![
@@ -1093,9 +903,7 @@ mod tests {
             4,
         ));
         let before = line_ids(&state);
-        mark_at(&mut state, 0);
-        let marked = mark_at(&mut state, 1);
-
+        mark_at(&mut state, 1);
         state.update_lines(lines_snapshot(
             vec![
                 line_at("bbbbcc", 0, &[0, 4]),
@@ -1108,35 +916,13 @@ mod tests {
             5,
             4,
         ));
-        let after = line_ids(&state);
-        assert!(!before.contains(&after[0]), "cut line gets a fresh id");
-        assert_eq!(after[1..4], before[1..4]);
-        assert_eq!(state.truncated_lines(), 1);
-        assert_eq!(mark_ids(&state), vec![marked], "cut line's mark rolled off");
-        assert_eq!(state.dropped_marks(), 0);
-
-        // The remainder loses one more row on the next refresh.
-        state.update_lines(lines_snapshot(
-            vec![
-                line_at("cc", 0, &[0]),
-                line_at("d", 1, &[0]),
-                line_at("e", 2, &[0]),
-                line_at("f", 3, &[0]),
-                line_at("g", 4, &[0]),
-                line_at("$", 5, &[0]),
-            ],
-            5,
-            5,
-            4,
-        ));
-        assert_eq!(line_ids(&state)[1..4], after[1..4]);
-        assert_eq!(state.truncated_lines(), 2);
-        assert_eq!(mark_ids(&state), vec![marked]);
-        assert_eq!(state.dropped_marks(), 0);
+        assert_all_ids_fresh(&state, &before);
+        assert!(mark_ids(&state).is_empty());
+        assert_eq!((state.dropped_marks(), state.truncated_lines()), (1, 0));
     }
 
     #[test]
-    fn line_identity_full_roll_off_at_capacity_is_not_counted_as_dropped() {
+    fn line_identity_full_roll_off_at_capacity_counts_unproven_marks_as_dropped() {
         let mut state = HistoryState::default();
         state.update_lines(rows_snapshot(&["a", "b", "$"], 2, 2));
         let before = line_ids(&state);
@@ -1144,8 +930,8 @@ mod tests {
         state.update_lines(rows_snapshot(&["c", "d", "$"], 2, 2));
         assert!(mark_ids(&state).is_empty());
         assert_all_ids_fresh(&state, &before);
-        assert_eq!(state.truncated_lines(), 3);
-        assert_eq!(state.dropped_marks(), 0);
+        assert_eq!(state.truncated_lines(), 0);
+        assert_eq!(state.dropped_marks(), 1);
     }
 
     #[test]
@@ -1170,8 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn line_identity_column_change_aligns_by_text() {
-        // Eight columns to four: the wrapped first line reflows from two rows to three.
+    fn line_identity_column_change_invalidates_even_matching_text() {
         let mut state = HistoryState::default();
         state.update_lines(lines_snapshot(
             vec![
@@ -1185,7 +970,7 @@ mod tests {
             8,
         ));
         let before = line_ids(&state);
-        let marked = mark_at(&mut state, 1);
+        mark_at(&mut state, 1);
         state.update_lines(lines_snapshot(
             vec![
                 line_at("abcdefghij", 0, &[0, 4, 8]),
@@ -1197,20 +982,9 @@ mod tests {
             100,
             4,
         ));
-        assert_eq!(line_ids(&state), before);
-        assert_eq!(mark_ids(&state), vec![marked]);
-        assert_eq!(state.line(marked).unwrap().first_row, 3);
-        assert_eq!((state.dropped_marks(), state.truncated_lines()), (0, 0));
-
-        // With no immutable history there is no evidence across a reflow: reset.
-        let mut screen_only = HistoryState::default();
-        screen_only.update_lines(rows_snapshot(&["$"], 0, 100));
-        mark_at(&mut screen_only, 0);
-        let mut reflowed = rows_snapshot(&["$"], 0, 100);
-        reflowed.columns = 40;
-        screen_only.update_lines(reflowed);
-        assert!(mark_ids(&screen_only).is_empty());
-        assert_eq!(screen_only.dropped_marks(), 1);
+        assert_all_ids_fresh(&state, &before);
+        assert!(mark_ids(&state).is_empty());
+        assert_eq!((state.dropped_marks(), state.truncated_lines()), (1, 0));
     }
 
     #[test]
