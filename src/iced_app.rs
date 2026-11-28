@@ -18105,7 +18105,7 @@ mod tests {
         assert!(app.refresh_visible_history(t0 + std::time::Duration::from_millis(1)));
         let before = app.tools.history_refresh_count;
 
-        let _ = app.tool_update(tools::Action::HistorySelect(1));
+        let _ = app.tool_update(tools::Action::HistorySelect(id, clicked.line_id, clicked.column));
         assert_eq!(
             app.tools.history_refresh_count,
             before + 1,
@@ -18145,8 +18145,9 @@ mod tests {
         assert!(app.refresh_visible_history(t0 + std::time::Duration::from_millis(1)));
         let before = app.tools.history_refresh_count;
 
-        // Index 0 was "l0 needle a" in the cached list; it has rolled off.
-        let _ = app.tool_update(tools::Action::HistorySelect(0));
+        // The rendered "l0 needle a" has rolled off.
+        let evicted = app.tools.histories[&id].hits()[0].clone();
+        let _ = app.tool_update(tools::Action::HistorySelect(id, evicted.line_id, evicted.column));
         assert_eq!(app.tools.history_refresh_count, before + 1);
         assert_eq!(
             app.status,
@@ -18156,11 +18157,96 @@ mod tests {
         assert_eq!((after.0, after.1), (kept.0, kept.1), "selection unchanged");
         assert_eq!(after.2, 2, "the kept selection follows the eviction");
 
-        // An index past the listed hits does nothing.
+        // An unknown identity also declines without changing selection.
         app.status = "untouched".into();
-        let _ = app.tool_update(tools::Action::HistorySelect(99));
-        assert_eq!(app.status, "untouched");
+        let _ = app.tool_update(tools::Action::HistorySelect(id, u64::MAX, 0));
+        assert_eq!(app.status, "That match is no longer in the retained history.");
         assert_eq!(stale_coords_selected(&app, id), after);
+    }
+
+    #[test]
+    fn stale_coords_round2_refresh_before_dispatch_keeps_rendered_hit() {
+        let (mut app, id) = app_with_focused_pane("round2-before-dispatch");
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(&["needle first", "needle target"], 0, 100),
+        );
+        let _ = app.tool_update(tools::Action::HistoryQuery("needle".into()));
+        let rendered = app.tools.histories[&id].hits()[1].clone();
+        let message = tools::Action::HistorySelect(id, rendered.line_id, rendered.column);
+
+        // A second hit on the first line appears before the clicked one;
+        // the old index now identifies the wrong result. The target row and
+        // identity remain unchanged in this below-capacity snapshot.
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(&["needle first needle added", "needle target"], 0, 100),
+        );
+        app.history_refresh();
+        assert_eq!(app.tools.histories[&id].hits().len(), 3);
+        assert_ne!(app.tools.histories[&id].hits()[1].line_id, rendered.line_id);
+
+        let _ = app.tool_update(message);
+        assert_eq!(
+            stale_coords_selected(&app, id),
+            (rendered.line_id, rendered.column, 1)
+        );
+    }
+
+    #[test]
+    fn stale_coords_round2_refresh_in_handler_keeps_rendered_hit() {
+        let (mut app, id) = app_with_focused_pane("round2-in-handler");
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(&["needle first", "needle target"], 0, 100),
+        );
+        let _ = app.tool_update(tools::Action::HistoryQuery("needle".into()));
+        let rendered = app.tools.histories[&id].hits()[1].clone();
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(&["needle first needle added", "needle target"], 0, 100),
+        );
+        let _ = app.update(Message::PtyEvent(id, terminal_core::PtyEvent::Wakeup));
+        let before = app.tools.history_refresh_count;
+        let _ = app.tool_update(tools::Action::HistorySelect(
+            id,
+            rendered.line_id,
+            rendered.column,
+        ));
+        assert_eq!(app.tools.history_refresh_count, before + 1);
+        assert_eq!(
+            stale_coords_selected(&app, id),
+            (rendered.line_id, rendered.column, 1)
+        );
+    }
+
+    #[test]
+    fn stale_coords_round2_pane_switch_declines_old_button() {
+        let (mut app, id) = app_with_focused_pane("round2-pane-switch");
+        app.tools.history_test_source.insert(
+            id,
+            stale_coords_snapshot(&["needle first", "needle target"], 0, 100),
+        );
+        let _ = app.tool_update(tools::Action::HistoryQuery("needle".into()));
+        let rendered = app.tools.histories[&id].hits()[1].clone();
+        let other = app.new_terminal_pane(Session::default());
+        let other_id = other.id;
+        app.tabs.push(Workspace::new(Session::default(), other));
+        app.active = 1;
+        app.tools.history_test_source.insert(
+            other_id,
+            stale_coords_snapshot(&["needle other"], 0, 100),
+        );
+        app.history_refresh();
+        let before = app.tools.history_refresh_count;
+        let _ = app.tool_update(tools::Action::HistorySelect(
+            id,
+            rendered.line_id,
+            rendered.column,
+        ));
+        assert_eq!(app.tools.history_refresh_count, before);
+        assert_eq!(app.status, "That match belongs to a different pane.");
+        assert!(app.tools.histories[&other_id].selected_hit().is_none());
     }
 
     #[test]
