@@ -65,7 +65,9 @@ Find shortcut rules:
 - While a menu is open, Ctrl+F is ignored. While a dialog, the remote editor, the
   privacy lock, the Sender editor or a free-type draft owns the keyboard, Ctrl+F does
   what Ctrl+Shift+F does in that state, and is never sent to the terminal.
-- With the Find input already focused, Ctrl+F keeps focus there and selects the query.
+- Opening or re-focusing Find by any of these commands (or Edit > Find, the palette)
+  keeps the previous query and selects it: typing replaces it, Enter/Next searches it.
+  Clicking into the input places the caret without selecting.
 
 In the Find strip, **Enter** or **Next** selects the next result and **Prev** the
 previous one; navigation wraps and scrolls the terminal viewport so the selected

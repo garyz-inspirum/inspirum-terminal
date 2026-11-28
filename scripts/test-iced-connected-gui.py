@@ -416,11 +416,18 @@ def alt_byte_count(log_text: str, byte: int) -> int:
 
 
 # ctrl_f_probe query plan. OCR does not read the Find input text, so the
-# input-content oracle is the hit counter: FIRST matches a fixture line,
-# FIRST+NOHIT matches none (the counter must read 0/0 before the second
-# Ctrl+F, so a stale frame cannot pass), and REPLACEMENT matches again. Every
-# way the second Ctrl+F could go wrong (append instead of select-all, a typed
-# f, or both) yields a query that matches no fixture line and reads 0/0.
+# input-content oracle is the hit counter. The Find query is kept between
+# opens, so the probe starts with LEFTOVER in the input: the query the P3
+# probe leaves (its reopen types NATIVE_ECHO, its click-back appends ZZQ).
+# The open frame must read 0/0 (LEFTOVER matches nothing). FIRST then
+# matches a fixture line, which proves the open selected LEFTOVER: without
+# select-on-open the input would hold LEFTOVER+FIRST, which matches nothing.
+# FIRST+NOHIT matches none (typed with the input still focused: an append;
+# the counter must read 0/0 before the second Ctrl+F, so a stale frame
+# cannot pass), and REPLACEMENT matches again. Every way the second Ctrl+F
+# could go wrong (append instead of select-all, a typed f, or both) yields a
+# query that matches no fixture line and reads 0/0.
+CTRL_F_LEFTOVER_QUERY = "NATIVE_ECHOZZQ"
 CTRL_F_FIRST_QUERY = "NATIVE"
 CTRL_F_NOHIT_SUFFIX = "ZZQ"
 CTRL_F_REPLACEMENT = "SMOKE"
@@ -436,14 +443,24 @@ def ctrl_f_failure_queries(first: str, suffix: str, replacement: str) -> list[st
 
 def ctrl_f_plan_problems(lines, first: str = CTRL_F_FIRST_QUERY,
                          suffix: str = CTRL_F_NOHIT_SUFFIX,
-                         replacement: str = CTRL_F_REPLACEMENT) -> list[str]:
+                         replacement: str = CTRL_F_REPLACEMENT,
+                         leftover: str = CTRL_F_LEFTOVER_QUERY) -> list[str]:
     """Why the plan cannot discriminate against ``lines`` (ASCII case-fold,
-    as the product's Find); empty when it can."""
+    as the product's Find); empty when it can. ``leftover`` is the query
+    already in the input when the probe's first Ctrl+F opens Find."""
     folded = [line.lower() for line in lines]
     hits = lambda query: sum(line.count(query.lower()) for line in folded)
     problems = []
     if "f" in replacement.lower():
         problems.append(f"replacement {replacement!r} contains f")
+    if not leftover:
+        problems.append("no leftover query: replace and append look the same")
+    elif hits(leftover):
+        problems.append(f"leftover {leftover!r} matches a line (open frame is not 0/0)")
+    if hits(leftover + first):
+        problems.append(
+            f"leftover+first {leftover + first!r} matches a line "
+            "(an append on open would pass)")
     if not hits(first):
         problems.append(f"first query {first!r} matches no line")
     if hits(first + suffix):
@@ -4723,10 +4740,12 @@ async def _ctrl_f_counter(app, window, shot: Path, find_band, env, *, want_hits:
 
 async def ctrl_f_probe(app, window, env, events, probe_state, destination: Path,
                        find_band) -> None:
-    """Required: plain Ctrl+F on the main screen opens Find with no PTY input;
-    Ctrl+F inside the input selects the query (replace, not append, no ``f``);
-    Escape hands the keyboard back. Precondition: the terminal owns the
-    keyboard (the caller's last step is a shell echo) and Find is closed."""
+    """Required: plain Ctrl+F on the main screen opens Find with no PTY input
+    and selects the kept query (typing replaces it); Ctrl+F inside the input
+    selects the query again (replace, not append, no ``f``); Escape hands the
+    keyboard back. Precondition: the terminal owns the keyboard (the caller's
+    last step is a shell echo), Find is closed and its kept query is
+    CTRL_F_LEFTOVER_QUERY (left by P3)."""
     marker = "UNEXPECTED_FIND_PTY_INPUT"
     before = destination / "connected-find-ctrl-f-before.png"
     opened = destination / "connected-find-ctrl-f.png"
@@ -4761,12 +4780,28 @@ async def ctrl_f_probe(app, window, env, events, probe_state, destination: Path,
             raise RuntimeError("ctrl_f_probe: plain Ctrl+F reached the shell as input")
         print(f"ctrl_f_probe: plain Ctrl+F opened Find: Prev {prev} Next {nxt}; "
               f"{pixels} pixels; no PTY input", flush=True)
+        # The input still holds the leftover query (no-hit: 0/0). The labels
+        # above were read on a settled frame, which is after the open's
+        # focus + select-all action (one widget action in the product).
+        await _ctrl_f_counter(
+            app, window, destination / "connected-find-ctrl-f-leftover.png", find_band, env,
+            want_hits=False, deadline_s=8 * TIME_SCALE)
+        await asyncio.sleep(.3 * TIME_SCALE)
 
+        # Typing replaces the selected leftover. If the open had left the
+        # caret at the end, the query would be LEFTOVER+FIRST and read 0/0.
         command("xdotool", "type", "--clearmodifiers", "--delay", "25",
                 CTRL_F_FIRST_QUERY, env=env)
-        first = await _ctrl_f_counter(
-            app, window, destination / "connected-find-ctrl-f-typed.png", find_band, env,
-            want_hits=True, deadline_s=8 * TIME_SCALE)
+        try:
+            first = await _ctrl_f_counter(
+                app, window, destination / "connected-find-ctrl-f-typed.png", find_band, env,
+                want_hits=True, deadline_s=8 * TIME_SCALE)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"{exc}. Opening Find did not select the kept query: the input holds "
+                f"{CTRL_F_LEFTOVER_QUERY + CTRL_F_FIRST_QUERY!r} (or another append of "
+                f"{CTRL_F_FIRST_QUERY!r} to an earlier query), not {CTRL_F_FIRST_QUERY!r}"
+            ) from None
         command("xdotool", "type", "--clearmodifiers", "--delay", "25",
                 CTRL_F_NOHIT_SUFFIX, env=env)
         await _ctrl_f_counter(
@@ -6529,10 +6564,12 @@ async def main() -> int:
                         f"Enter is Next, not PTY input",
                         flush=True,
                     )
-                    # No-hit: select-all and replace is fiddly with xdotool,
-                    # so append ZZQ. The query becomes NATIVEZZQ, which is
-                    # absent from the focused pane, and the counter must read
-                    # 0/0. Still no PTY input.
+                    # No-hit: append ZZQ. There is no reopen since NATIVE was
+                    # typed (Return is FindNext, which refocuses with the caret
+                    # at the end and never selects), so this is an append even
+                    # though a reopen now selects the kept query. The query
+                    # becomes NATIVEZZQ, which is absent from the focused
+                    # pane, and the counter must read 0/0. Still no PTY input.
                     command(
                         "xdotool", "type", "--clearmodifiers", "--delay", "25",
                         "ZZQ", env=env,
@@ -6679,6 +6716,10 @@ async def main() -> int:
                 # P1: pane ownership, then click back into unchanged query.
                 p1_open, p1_prev, _p1_next = await open_find_and_locate("p1")
                 p1_input = find_input_point(p1_prev)
+                # Each P reopen selects the kept query, so NATIVE_ECHO
+                # replaces it (P1-P3 check PTY input and focus, not the
+                # counter). P3 leaves NATIVE_ECHO + click-back ZZQ =
+                # CTRL_F_LEFTOVER_QUERY, which ctrl_f_probe starts from.
                 probe_state["phase"] = "FIND"
                 try:
                     p1_initial = count("UNEXPECTED_FIND_PTY_INPUT")

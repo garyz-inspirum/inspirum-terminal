@@ -42,17 +42,30 @@ logs/screenshots alongside any subsequent acceptance report.
 `scripts/test-iced-connected-gui.py` runs it on every connected run (no env
 flag), in two parts. Not yet seen green or red against a build.
 
+Every command that opens Find (Ctrl+F, Ctrl/Cmd+Shift+F, Cmd+F, Edit > Find,
+the palette) selects the kept query, so the P1-P3 reopens replace the query
+with `NATIVE_ECHO` instead of appending; those probes check PTY input and
+focus only, and their click-back/Next-then-type steps still append (a click
+or Next never selects).
+
 1. **Main screen** (after the Find ownership probes P1-P3, terminal owning the
    keyboard, Find closed). The `FIND` no-PTY-input watch is armed *before*
    plain `ctrl+f` is pressed. Required: Prev/Next appear in the Find band
    (`connected-find-ctrl-f.png`); no fixture shell received any chunk
    (`UNEXPECTED_FIND_PTY_INPUT` unchanged; this proves no byte reached the
-   shell's stdin while armed, not which pane's input was suppressed); typing
-   `NATIVE` gives a match counter, appending `ZZQ` gives `0/0`. Then `ctrl+f`
+   shell's stdin while armed, not which pane's input was suppressed). The
+   query is kept between opens, so the input still holds P3's leftover
+   `NATIVE_ECHOZZQ` and the open frame reads `0/0`
+   (`connected-find-ctrl-f-leftover.png`). Opening selects that query, so
+   typing `NATIVE` must replace it and give a match counter
+   (`connected-find-ctrl-f-typed.png`); without select-on-open the input
+   would hold `NATIVE_ECHOZZQNATIVE` and read `0/0`. Appending `ZZQ` (input
+   still focused) gives `0/0`. Then `ctrl+f`
    inside the input and `SMOKE`: the counter must read a match again. OCR does
    not read the input text, so the counter is the input-content oracle: an
    append (`NATIVEZZQSMOKE`), a typed `f`, or focus leaving the input all read
-   `0/0` (`ctrl_f_plan_problems` checks this against every fixture line). The
+   `0/0` (`ctrl_f_plan_problems` checks this, and that leftover+`NATIVE`
+   matches nothing, against every fixture line). The
    watch must stay unchanged; Escape must close the strip
    (`wait_find_strip_closed`); `echo:AFTER_CTRL_F` typed without a click must
    echo, which also fails if a `0x06`/`f` was delivered late into that line.

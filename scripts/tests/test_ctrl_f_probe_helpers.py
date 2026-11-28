@@ -11,7 +11,7 @@ SRC = SOURCE.read_text(encoding="utf-8")
 # the script, so these tests run without asyncssh/Pillow.
 _WANTED = {
     "ALT_BYTE_PREFIX", "_ALT_BYTE_SKIP", "alt_screen_control_tokens", "alt_byte_count",
-    "CTRL_F_FIRST_QUERY", "CTRL_F_NOHIT_SUFFIX", "CTRL_F_REPLACEMENT",
+    "CTRL_F_LEFTOVER_QUERY", "CTRL_F_FIRST_QUERY", "CTRL_F_NOHIT_SUFFIX", "CTRL_F_REPLACEMENT",
     "ctrl_f_failure_queries", "ctrl_f_plan_problems", "ctrl_f_counter_problem",
     "LOGGED_ECHO_LINES",
 }
@@ -86,6 +86,48 @@ class QueryPlanTest(unittest.TestCase):
         self.assertTrue(plan(lines, replacement="ABSENTQQ"))  # no match at all
         self.assertTrue(plan(lines + ["NATIVEZZQSMOKE"]))  # append would match
         self.assertTrue(plan(lines + ["xfsmoke"]))  # typed f would match (case-fold)
+
+    def test_leftover_is_modelled_so_open_must_replace(self):
+        lines = fixture_lines()
+        plan = NS["ctrl_f_plan_problems"]
+        leftover = NS["CTRL_F_LEFTOVER_QUERY"]
+        first = NS["CTRL_F_FIRST_QUERY"]
+        self.assertTrue(leftover)
+        # The oracle: without select-on-open the input holds leftover+first,
+        # which must match nothing, while first alone matches.
+        folded = [line.lower() for line in lines]
+        self.assertFalse(any((leftover + first).lower() in line for line in folded))
+        self.assertTrue(any(first.lower() in line for line in folded))
+        # The whole append-era leftover seen on screen is no-hit too.
+        self.assertEqual(plan(lines, leftover="NATIVEZZQNATIVE_ECHONATIVE_ECHOZZQ"
+                              "NATIVE_ECHOZZQ"), [])
+        # Weak plans: no leftover (replace == append), a leftover whose
+        # append would still match, a leftover that itself matches.
+        self.assertTrue(plan(lines, leftover=""))
+        self.assertTrue(plan(lines + [leftover + first]))
+        self.assertTrue(plan(lines, leftover="NATIVE_"))  # matches: open is not 0/0
+        self.assertEqual(plan(lines, leftover="QQZ"), [])
+        self.assertTrue(plan(lines + ["xQQZ" + first + "x"], leftover="QQZ"))
+
+    def test_leftover_is_what_p3_leaves(self):
+        main = function_source("main")
+        p3 = main.index('open_find_and_locate("p3")')
+        p3_end = main.index('await find_echo("FIND_P3_AFTER")')
+        body = main[p3:p3_end]
+        typed = re.findall(r'"--delay", "25",\s*"([A-Z_]+)"', body)
+        self.assertEqual(typed, ["NATIVE_ECHO", "ZZQ"])
+        self.assertEqual("".join(typed), NS["CTRL_F_LEFTOVER_QUERY"])
+        # Nothing opens Find between P3 and the probe.
+        gap = main[p3_end:main.index("await ctrl_f_probe(")]
+        self.assertNotIn("ctrl+shift+f", gap)
+        self.assertNotIn('"ctrl+f"', gap)
+
+    def test_probe_reads_leftover_no_hit_before_typing_first(self):
+        body = function_source("ctrl_f_probe")
+        leftover = body.index("connected-find-ctrl-f-leftover.png")
+        typed_first = body.index("CTRL_F_FIRST_QUERY, env=env")
+        self.assertLess(leftover, typed_first)
+        self.assertIn("want_hits=False", body[leftover:typed_first])
 
     def test_failure_queries_cover_append_and_f(self):
         got = NS["ctrl_f_failure_queries"]("A", "B", "C")

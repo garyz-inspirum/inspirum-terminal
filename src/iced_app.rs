@@ -17526,7 +17526,8 @@ mod tests {
     /// screen (connected `ctrl_f_probe`).
     #[test]
     fn every_find_command_opens_through_the_select_path() {
-        let entries: [(&str, fn(&mut App) -> Task<Message>); 5] = [
+        type Entry = (&'static str, fn(&mut App) -> Task<Message>);
+        let entries: [Entry; 5] = [
             ("FindOpen", |app| app.update(Message::FindOpen)),
             ("FindToggle (Edit > Find, palette)", |app| {
                 app.update(Message::FindToggle)
