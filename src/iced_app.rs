@@ -10967,13 +10967,23 @@ impl App {
             .into()
         };
 
+        // The notice gets only the width left after Cancel and Save (Fill
+        // children are laid out after the shrink-sized buttons) and wraps
+        // there, so a long notice can never push the buttons out of the
+        // dialog. Top-aligned: the buttons stay on the first notice line
+        // however many lines it wraps to; the inset centres that first
+        // 12 px line (1.3 line height) on the 13 px + 3/3 padded buttons,
+        // so a one-line notice sits where the centred row drew it. With no
+        // notice the row is still exactly one button tall.
+        const NOTICE_INSET: f32 = ((13.0 * 1.3 + 2.0 * 3.0) - 12.0 * 1.3) / 2.0;
         let footer = row![
-            if self.tunnel_notice.is_empty() {
+            container(if self.tunnel_notice.is_empty() {
                 text("").size(1)
             } else {
                 text(&self.tunnel_notice).size(12).color(danger())
-            },
-            space::horizontal(),
+            })
+            .padding(iced::Padding::ZERO.top(NOTICE_INSET))
+            .width(Fill),
             action("Cancel", Message::CloseDialog).style(quiet),
             if self.tunnel_edit.is_some() {
                 action("Save", Message::TunnelSaveEdit).style(primary)
@@ -10984,7 +10994,7 @@ impl App {
             },
         ]
         .spacing(8)
-        .align_y(iced::Center);
+        .align_y(iced::alignment::Vertical::Top);
         let body = column![
             row![
                 text(TUNNEL_MANAGER_HEADING).size(15).color(ink),
