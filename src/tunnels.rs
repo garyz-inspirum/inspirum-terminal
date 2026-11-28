@@ -2309,6 +2309,63 @@ remove it, or start this tunnel manually."
         );
     }
 
+    /// Two tunnels started from one start-up snapshot each keep it alive:
+    /// after the pass dropped its handle, stopping the first leaves the
+    /// file intact for the second, which may not have opened it yet.
+    /// Stopping the second removes it.
+    #[test]
+    fn startup_snapshot_outlives_first_of_two_tunnels_sharing_it() {
+        const FIRST: &str = "127.0.0.1:18115:127.0.0.1:7";
+        const SECOND: &str = "127.0.0.1:18116:127.0.0.1:7";
+        let dir = tempfile::tempdir().unwrap();
+        let session = single_forward_session("exactfwd.invalid", &[FIRST, SECOND]);
+        let key = crate::session_profile_key(&session);
+        let snapshot = Arc::new(
+            ConfigSnapshot::write(dir.path(), b"Host *\n  ProxyCommand sleep 30\n").unwrap(),
+        );
+        let path = snapshot.path().to_owned();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes, b"Host *\n  ProxyCommand sleep 30\n");
+        let mut manager = Manager::default();
+        for spec in [FIRST, SECOND] {
+            let status = manager
+                .start_forward_snapshot(&session, ForwardKind::Local, spec, &snapshot)
+                .unwrap();
+            assert!(status.is_running(), "{spec}: {status:?}");
+        }
+        drop(snapshot);
+        assert_eq!(
+            manager
+                .stop_forward(&key, ForwardKind::Local, FIRST)
+                .unwrap(),
+            Status::Stopped
+        );
+        let first = ProcessKey::forward(&key, ForwardKind::Local, FIRST);
+        let second = ProcessKey::forward(&key, ForwardKind::Local, SECOND);
+        assert!(!manager.status_for(&first).is_running());
+        assert!(
+            manager.status_for(&second).is_running(),
+            "{:?}",
+            manager.status_for(&second)
+        );
+        assert!(
+            path.exists(),
+            "snapshot removed while the second tunnel runs"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            manager
+                .stop_forward(&key, ForwardKind::Local, SECOND)
+                .unwrap(),
+            Status::Stopped
+        );
+        assert!(
+            !path.exists(),
+            "snapshot kept after its last tunnel stopped"
+        );
+        manager.stop_all();
+    }
+
     /// Without `--ssh-config` nothing runs: no `ssh -G`, no snapshot, no
     /// spawn.
     #[test]
