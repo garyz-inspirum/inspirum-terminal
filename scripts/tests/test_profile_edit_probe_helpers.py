@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import shutil
 import sys
 import tempfile
 import types
@@ -75,6 +76,7 @@ class DialogGeometryTest(unittest.TestCase):
 
 
 class DialogScrollTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("tesseract"), "tesseract is not installed")
     def test_real_footer_visible_after_refusal_needs_no_drag(self):
         shot = Path("/mnt/data/atlas/gui-out/it14r3-ci/connected/connected-profile-rename-cancel-scroll-start.png")
         if not shot.is_file():
@@ -85,7 +87,8 @@ class DialogScrollTest(unittest.TestCase):
         shot = Path("/mnt/data/atlas/it14-fe89d61-ci/connected/connected-profile-rename-before-submit.png")
         if not shot.is_file():
             self.skipTest("CI screenshot artifact unavailable")
-        self.assertFalse(module.connection_footer_visible(shot, module.connection_dialog_region(W, H)))
+        if shutil.which("tesseract"):
+            self.assertFalse(module.connection_footer_visible(shot, module.connection_dialog_region(W, H)))
         start, end = module.connection_scroll_drag(shot, module.connection_dialog_region(W, H))
         self.assertTrue(920 <= start[0] <= 925, start)
         self.assertEqual(start[1], 243)
@@ -108,6 +111,7 @@ class DialogScrollTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "scrollbar thumb"):
             module.connection_scroll_drag(shot, module.connection_dialog_region(W, H))
 
+    @unittest.skipUnless(shutil.which("tesseract"), "tesseract is not installed")
     def test_footer_visible_on_synthetic_button_row(self):
         from PIL import Image, ImageDraw, ImageFont
         shot = frame([])
@@ -119,6 +123,7 @@ class DialogScrollTest(unittest.TestCase):
         image.save(shot)
         self.assertTrue(module.connection_footer_visible(shot, module.connection_dialog_region(W, H)))
 
+    @unittest.skipUnless(shutil.which("tesseract"), "tesseract is not installed")
     def test_footer_absent_on_synthetic_empty_dialog(self):
         shot = frame([])
         self.addCleanup(shot.unlink)
