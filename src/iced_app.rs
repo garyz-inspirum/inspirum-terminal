@@ -18105,7 +18105,11 @@ mod tests {
         assert!(app.refresh_visible_history(t0 + std::time::Duration::from_millis(1)));
         let before = app.tools.history_refresh_count;
 
-        let _ = app.tool_update(tools::Action::HistorySelect(id, clicked.line_id, clicked.column));
+        let _ = app.tool_update(tools::Action::HistorySelect(
+            id,
+            clicked.line_id,
+            clicked.column,
+        ));
         assert_eq!(
             app.tools.history_refresh_count,
             before + 1,
@@ -18147,7 +18151,11 @@ mod tests {
 
         // The rendered "l0 needle a" has rolled off.
         let evicted = app.tools.histories[&id].hits()[0].clone();
-        let _ = app.tool_update(tools::Action::HistorySelect(id, evicted.line_id, evicted.column));
+        let _ = app.tool_update(tools::Action::HistorySelect(
+            id,
+            evicted.line_id,
+            evicted.column,
+        ));
         assert_eq!(app.tools.history_refresh_count, before + 1);
         assert_eq!(
             app.status,
@@ -18160,7 +18168,10 @@ mod tests {
         // An unknown identity also declines without changing selection.
         app.status = "untouched".into();
         let _ = app.tool_update(tools::Action::HistorySelect(id, u64::MAX, 0));
-        assert_eq!(app.status, "That match is no longer in the retained history.");
+        assert_eq!(
+            app.status,
+            "That match is no longer in the retained history."
+        );
         assert_eq!(stale_coords_selected(&app, id), after);
     }
 
@@ -18233,10 +18244,20 @@ mod tests {
         let other_id = other.id;
         app.tabs.push(Workspace::new(Session::default(), other));
         app.active = 1;
-        app.tools.history_test_source.insert(
-            other_id,
-            stale_coords_snapshot(&["needle other"], 0, 100),
-        );
+        // Even while the old owner still names the first pane, focus alone
+        // must reject its queued button without refreshing the new pane.
+        let before = app.tools.history_refresh_count;
+        let _ = app.tool_update(tools::Action::HistorySelect(
+            id,
+            rendered.line_id,
+            rendered.column,
+        ));
+        assert_eq!(app.tools.history_refresh_count, before);
+        assert_eq!(app.status, "That match belongs to a different pane.");
+
+        app.tools
+            .history_test_source
+            .insert(other_id, stale_coords_snapshot(&["needle other"], 0, 100));
         app.history_refresh();
         let before = app.tools.history_refresh_count;
         let _ = app.tool_update(tools::Action::HistorySelect(
