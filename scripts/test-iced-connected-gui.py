@@ -3670,10 +3670,25 @@ GUTTER_PROBE_TIMESTAMP_RE = re.compile(r"\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}")
 GUTTER_PROBE_DIGIT_WHITELIST = "0123456789/: "
 
 
+def gutter_clear_columns(text_right, thumb_left) -> int:
+    """Empty pixel columns between the last glyph pixel and the thumb.
+
+    ``text_right`` is inclusive (``text_right_edge``: the rightmost glyph
+    pixel) and ``thumb_left`` is the thumb's first column, so the clear
+    columns are text_right + 1 .. thumb_left - 1: ink at 586 and the thumb
+    at 590 leave 3 (587..589); ink at 589 beside a thumb at 590 leaves 0
+    (adjacent ink); a negative count means the ink reaches into the thumb.
+    """
+    return int(thumb_left) - int(text_right) - 1
+
+
 def gutter_probe_verdict(gaps_beside_thumb, ocr_text, expected_text):
     """(verdict, reason) of the gutter probe; verdict is CLEAR or OVERLAP.
 
-    OVERLAP iff a row beside the thumb has a pixel gap < 1, or the OCR read
+    ``gaps_beside_thumb`` are ``gutter_clear_columns`` counts (empty pixel
+    columns between the last glyph pixel and the thumb), one per row beside
+    the thumb. OVERLAP iff a row has fewer than 1 clear column (0 is ink
+    adjacent to the thumb), or the OCR read
     of the beside-thumb Date Modified cell fails the right-edge check: the
     stripped read must be a full ``YYYY/MM/DD HH:MM:SS`` (19 characters, so
     nothing is missing at the right end) whose final character equals the
@@ -3764,7 +3779,8 @@ async def filer_gutter_probe_step(app, window, env, destination, local_root, eve
     the window until the local half is 600 px (Name 338 + Size 93 + Date
     166 + 3 dividers fill it exactly), scroll the listing to its end so the
     thumb sits beside probe rows, and require the Date Modified glyphs of
-    every row beside the thumb to end left of it (gap >= 1 px) and the cell
+    every row beside the thumb to end left of it with at least one empty
+    pixel column in between (``gutter_clear_columns`` >= 1) and the cell
     to pass the OCR right-edge check of ``gutter_probe_verdict`` (a full
     timestamp whose final character is the expected one; a misread further
     left is logged, not failed). Always removes the files, restores the
@@ -3903,7 +3919,8 @@ async def filer_gutter_probe_step(app, window, env, destination, local_root, eve
             if right_edge is None:
                 continue
             beside = cy - 11 < thumb[3] and cy + 12 > thumb[1]
-            gap = thumb_left - right_edge
+            # Empty columns between the last glyph pixel and the thumb.
+            gap = gutter_clear_columns(right_edge, thumb_left)
             rows.append((cy, band, right_edge, gap, beside))
             print(f"gutter probe row y={cy} text_right={right_edge} thumb_left={thumb_left} "
                   f"gap={gap} beside_thumb={beside}"
@@ -3932,7 +3949,7 @@ async def filer_gutter_probe_step(app, window, env, destination, local_root, eve
             print(f"gutter probe OCR pass {pass_label} read={pass_text!r}", flush=True)
         print(f"gutter probe OCR row y={ocr_cy} read={ocr_text!r} expected={expected!r}", flush=True)
 
-        # h. Verdict: pixel gap of every beside-thumb row, plus the OCR
+        # h. Verdict: clear columns (>= 1) of every beside-thumb row, plus the OCR
         #    right-edge check (full 19-char timestamp, final char matches).
         verdict, reason = gutter_probe_verdict(
             [row[3] for row in beside_rows], ocr_text, expected,

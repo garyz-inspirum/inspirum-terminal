@@ -128,7 +128,8 @@ class VerticalThumb(unittest.TestCase):
         image = frame(text_right=575, thumb_top=90, thumb_bottom=130)
         thumb_left = module.vertical_thumb_left_edge(image, HALF)
         right = module.text_right_edge(image, (433, 98, 600, 115))
-        self.assertEqual(thumb_left - right, 15)
+        # Columns 576..589 are empty.
+        self.assertEqual(module.gutter_clear_columns(right, thumb_left), 14)
 
     def test_text_overlapping_thumb_gives_non_positive_gap(self):
         for text_right in (THUMB_LEFT, THUMB_LEFT + 4):
@@ -137,7 +138,43 @@ class VerticalThumb(unittest.TestCase):
             thumb_left = module.vertical_thumb_left_edge(image, HALF)
             right = module.text_right_edge(image, (433, 98, 600, 115))
             self.assertEqual(thumb_left, THUMB_LEFT)
-            self.assertLessEqual(thumb_left - right, 0)
+            self.assertLess(module.gutter_clear_columns(right, thumb_left), 0)
+
+
+class GutterClearColumns(unittest.TestCase):
+    def test_counts_empty_columns_not_distance(self):
+        # it13 run4 frame: ink ends at 586, thumb starts at 590 (587..589 clear).
+        self.assertEqual(module.gutter_clear_columns(586, 590), 3)
+        # Ink in the column immediately left of the thumb: nothing clear.
+        self.assertEqual(module.gutter_clear_columns(589, 590), 0)
+        # Ink in the thumb's first column.
+        self.assertEqual(module.gutter_clear_columns(590, 590), -1)
+
+
+@unittest.skipIf(Image is None, "Pillow not installed")
+class GutterAdjacentInk(unittest.TestCase):
+    """Measured end to end with the probe's own helpers (Quill, PR #154: a
+    timestamp shifted until its ink touched the thumb still OCR'd exactly
+    and passed when the gap was thumb_left - right_edge)."""
+
+    EXPECTED = "2026/11/28 00:09:58"
+    BAND = (433, 98, 600, 115)
+
+    def measured_verdict(self, text_right):
+        image = frame(text_right=text_right, thumb_top=90, thumb_bottom=130)
+        right = module.text_right_edge(image, self.BAND)
+        thumb_left = module.vertical_thumb_left_edge(image, HALF)
+        self.assertEqual((right, thumb_left), (text_right, THUMB_LEFT))
+        gap = module.gutter_clear_columns(right, thumb_left)
+        return gap, module.gutter_probe_verdict([gap], self.EXPECTED, self.EXPECTED)
+
+    def test_ink_adjacent_to_thumb_is_overlap_despite_exact_ocr(self):
+        self.assertEqual(
+            self.measured_verdict(THUMB_LEFT - 1), (0, ("OVERLAP", "pixel_gap_below_1")),
+        )
+
+    def test_one_empty_column_is_clear(self):
+        self.assertEqual(self.measured_verdict(THUMB_LEFT - 2), (1, ("CLEAR", "ocr_exact")))
 
 
 class GutterProbeVerdict(unittest.TestCase):
