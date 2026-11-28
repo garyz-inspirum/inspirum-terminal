@@ -5039,6 +5039,20 @@ impl App {
             .unwrap_or_else(terminal_core::TerminalMode::empty)
     }
 
+    /// Mode bits the focused terminal's parser holds now (no grid clone).
+    fn focused_live_terminal_mode(&self) -> terminal_core::TerminalMode {
+        #[cfg(test)]
+        if let Some(fake) = self.fake_focused_modes {
+            return fake.live;
+        }
+        self.tabs
+            .get(self.active)
+            .and_then(|tab| tab.panes.get(tab.focus))
+            .and_then(|pane| pane.terminal.as_ref())
+            .map(|terminal| terminal.live_terminal_mode())
+            .unwrap_or_else(terminal_core::TerminalMode::empty)
+    }
+
     fn focused_pane_matches(&self, id: u64) -> bool {
         self.tabs
             .get(self.active)
@@ -5804,8 +5818,10 @@ impl App {
                 return self.update(chord.message());
             }
             Message::FindOrForward(event) => {
+                // The live mode, not the painted one: a program can enter or
+                // leave the alternate screen before the deferred repaint.
                 let alt_screen = self
-                    .focused_terminal_mode()
+                    .focused_live_terminal_mode()
                     .contains(terminal_core::TerminalMode::ALT_SCREEN);
                 return self.find_or_forward(event, alt_screen);
             }

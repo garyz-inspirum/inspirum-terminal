@@ -465,6 +465,13 @@ impl TerminalBackend {
         &self.last_content
     }
 
+    /// The parser's current mode bits. `last_content().terminal_mode` is only
+    /// as fresh as the last `sync()`; this locks the term and clones nothing.
+    pub fn live_terminal_mode(&self) -> TerminalMode {
+        let term = self.term.lock();
+        *term.mode()
+    }
+
     /// Return the currently visible terminal grid with resolved colors and text attributes.
     ///
     /// This keeps toolkit-specific rendering outside the PTY/parser backend while preserving the
