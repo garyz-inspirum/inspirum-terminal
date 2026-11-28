@@ -4563,6 +4563,16 @@ to 127.0.0.1 or [::1] (an empty bind or a host name such as localhost is not acc
 off automatic start.";
 const TUNNEL_AUTO_START_REMOTE: &str = "Remote tunnels cannot auto-start: the SSH server can \
 override their bind address. Start remote tunnels manually, or turn off automatic start.";
+const TUNNEL_AUTO_START_NO_SSH_CONFIG: &str = "Not active: the app was started without \
+--ssh-config, so this tunnel will not auto-start. Start it manually.";
+
+/// Editor note under the auto-start checkbox: the start-up pass skips every
+/// opted-in tunnel when the app was launched without `--ssh-config`.
+fn tunnel_auto_start_inactive_note(ssh_config: Option<&std::path::Path>) -> Option<&'static str> {
+    ssh_config
+        .is_none()
+        .then_some(TUNNEL_AUTO_START_NO_SSH_CONFIG)
+}
 
 /// Why this forward may not auto-start, or `None` when it may. The same
 /// check gates the editor's save and the start-up pass, so a hand-edited
@@ -10928,6 +10938,18 @@ impl App {
                 SessionTunnelOp::Unavailable(reason) => text(reason).size(11).color(muted()).into(),
                 SessionTunnelOp::Stop | SessionTunnelOp::Start => column![].into(),
             };
+            // Without --ssh-config the start-up pass skips opted-in tunnels;
+            // say so under the help. With it, the editor is unchanged.
+            let auto_start_help: Element<'_, Message> =
+                match tunnel_auto_start_inactive_note(self.ssh_config.as_deref()) {
+                    Some(note) => column![
+                        text(TUNNEL_AUTO_START_HELP).size(11).color(muted()),
+                        text(note).size(12).color(danger()),
+                    ]
+                    .spacing(10)
+                    .into(),
+                    None => text(TUNNEL_AUTO_START_HELP).size(11).color(muted()).into(),
+                };
             let mut controls = column![
                 grid,
                 row![
@@ -10950,7 +10972,7 @@ impl App {
                         (edit.draft.kind != tunnels::ForwardKind::Remote || edit.auto_start)
                             .then_some(Message::TunnelDraftAutoStart),
                     ),
-                text(TUNNEL_AUTO_START_HELP).size(11).color(muted()),
+                auto_start_help,
                 operation.style(quiet),
                 operation_reason,
             ]
@@ -10989,13 +11011,23 @@ impl App {
             .into()
         };
 
+        // The notice gets only the width left after Cancel and Save (Fill
+        // children are laid out after the shrink-sized buttons) and wraps
+        // there, so a long notice can never push the buttons out of the
+        // dialog. Top-aligned: the buttons stay on the first notice line
+        // however many lines it wraps to; the inset centres that first
+        // 12 px line (1.3 line height) on the 13 px + 3/3 padded buttons,
+        // so a one-line notice sits where the centred row drew it. With no
+        // notice the row is still exactly one button tall.
+        const NOTICE_INSET: f32 = ((13.0 * 1.3 + 2.0 * 3.0) - 12.0 * 1.3) / 2.0;
         let footer = row![
-            if self.tunnel_notice.is_empty() {
+            container(if self.tunnel_notice.is_empty() {
                 text("").size(1)
             } else {
                 text(&self.tunnel_notice).size(12).color(danger())
-            },
-            space::horizontal(),
+            })
+            .padding(iced::Padding::ZERO.top(NOTICE_INSET))
+            .width(Fill),
             action("Cancel", Message::CloseDialog).style(quiet),
             if self.tunnel_edit.is_some() {
                 action("Save", Message::TunnelSaveEdit).style(primary)
@@ -11006,7 +11038,7 @@ impl App {
             },
         ]
         .spacing(8)
-        .align_y(iced::Center);
+        .align_y(iced::alignment::Vertical::Top);
         let body = column![
             row![
                 text(TUNNEL_MANAGER_HEADING).size(15).color(ink),
@@ -18025,6 +18057,22 @@ mod tunnel_layout_tests {
         for value in ["CI tunnel fixture", "Alpha forward", "127.0.0.1", "Running"] {
             assert!(value.chars().count() <= chars_fitting(field - 12.0, 13.0));
         }
+    }
+
+    #[test]
+    fn auto_start_note_shows_only_without_ssh_config() {
+        assert_eq!(
+            tunnel_auto_start_inactive_note(None),
+            Some(TUNNEL_AUTO_START_NO_SSH_CONFIG)
+        );
+        let config = std::path::Path::new("/tmp/ssh_config");
+        assert_eq!(tunnel_auto_start_inactive_note(Some(config)), None);
+        // The OCR-read checkbox label stays as it was.
+        assert_eq!(
+            TUNNEL_AUTO_START_LABEL,
+            "Automatically start when app opens"
+        );
+        assert!(TUNNEL_AUTO_START_NO_SSH_CONFIG.contains("--ssh-config"));
     }
 
     #[test]
