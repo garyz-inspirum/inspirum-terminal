@@ -477,9 +477,9 @@ pub fn sftp_launch_args(session: &Session, config: Option<&Path>) -> Result<Vec<
 
 pub struct TunnelProcess {
     child: Child,
-    /// Frozen configuration the child reads; removed after the child is
+    /// Configuration snapshot the child reads; removed after the child is
     /// stopped (fields drop after `Drop::drop` has killed the child).
-    _frozen: Option<FrozenConfig>,
+    _snapshot: Option<ConfigSnapshot>,
 }
 
 impl TunnelProcess {
@@ -543,6 +543,12 @@ pub struct EffectiveForwards {
     pub tunnel_device: bool,
     /// Effective `ProxyJump` (absent, empty and `none` mean no jump host).
     pub proxy_jump: Option<String>,
+    /// `CanonicalizeHostname` is anything other than `false`/`no`.
+    pub canonicalize_hostname: bool,
+}
+
+fn is_off(value: &str) -> bool {
+    value.eq_ignore_ascii_case("false") || value.eq_ignore_ascii_case("no")
 }
 
 /// Collect the forwarding lines of `ssh -G` output (keywords match
@@ -562,10 +568,8 @@ pub fn parse_effective_forwards(output: &str) -> EffectiveForwards {
             "proxyjump" if !value.is_empty() && !value.eq_ignore_ascii_case("none") => {
                 forwards.proxy_jump = Some(value.to_owned());
             }
-            "tunnel" => {
-                forwards.tunnel_device =
-                    !(value.eq_ignore_ascii_case("false") || value.eq_ignore_ascii_case("no"));
-            }
+            "tunnel" => forwards.tunnel_device = !is_off(value),
+            "canonicalizehostname" => forwards.canonicalize_hostname = !is_off(value),
             _ => {}
         }
     }
@@ -666,60 +670,26 @@ pub fn effective_forwards(session: &Session, config: Option<&Path>) -> Result<Ef
     Ok(parse_effective_forwards(&text))
 }
 
-/// Configuration text for an unattended launch, built from one `ssh -G`
-/// evaluation: every resolved option kept verbatim except the forward
-/// keywords (the selected forward comes from the command line). The result
-/// has no `Host`/`Match`/`Include`, so evaluating it again cannot add
-/// forwards. OpenSSH 9.x starts `ssh -G` output with an informational
-/// `host <destination>` line; that first line is dropped. Any other `host`,
-/// `match` or `include` line is refused.
-pub fn frozen_config_text(output: &str) -> Result<String> {
-    let mut text = String::new();
-    let mut first = true;
-    for line in output.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let key = line
-            .split(char::is_whitespace)
-            .next()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let leading = std::mem::replace(&mut first, false);
-        match key.as_str() {
-            "host" if leading => {}
-            "match" | "include" | "host" => {
-                anyhow::bail!("ssh -G output contains a {key} line; refusing to freeze it")
-            }
-            "localforward" | "remoteforward" | "dynamicforward" => {}
-            _ => {
-                text.push_str(line);
-                text.push('\n');
-            }
-        }
-    }
-    Ok(text)
-}
-
-/// A frozen launch configuration on disk (owner-only on unix), deleted on drop.
+/// A private copy of the user's SSH configuration (owner-only on unix),
+/// written once from bytes read before any `ssh` runs and deleted on drop.
+/// The unattended preflight and the launch both read this copy, so a later
+/// change to the source file cannot reach either of them.
 #[derive(Debug)]
-pub struct FrozenConfig {
+pub struct ConfigSnapshot {
     path: tempfile::TempPath,
 }
 
-impl FrozenConfig {
-    pub fn write(dir: &Path, text: &str) -> Result<Self> {
+impl ConfigSnapshot {
+    pub fn write(dir: &Path, bytes: &[u8]) -> Result<Self> {
         let mut file = tempfile::Builder::new()
             .prefix("inspirum-tunnel-")
             .suffix(".ssh_config")
             .tempfile_in(dir)
-            .context("create frozen SSH configuration")?;
-        std::io::Write::write_all(&mut file, text.as_bytes())
-            .context("write frozen SSH configuration")?;
+            .context("create SSH configuration snapshot")?;
+        std::io::Write::write_all(&mut file, bytes).context("write SSH configuration snapshot")?;
         file.as_file()
             .sync_all()
-            .context("write frozen SSH configuration")?;
+            .context("write SSH configuration snapshot")?;
         Ok(Self {
             path: file.into_temp_path(),
         })
@@ -730,25 +700,26 @@ impl FrozenConfig {
     }
 }
 
-/// Tunnel argv reading only `frozen` (`-F` replaces the user's configuration:
-/// OpenSSH then reads neither `~/.ssh/config` nor the system file).
-pub fn tunnel_launch_args_frozen(session: &Session, frozen: &Path) -> Result<Vec<String>> {
-    tunnel_launch_args(session, Some(frozen))
+/// Tunnel argv reading only `snapshot` (`-F` replaces the user's
+/// configuration: OpenSSH then reads neither `~/.ssh/config` nor the system
+/// file).
+pub fn tunnel_launch_args_snapshot(session: &Session, snapshot: &Path) -> Result<Vec<String>> {
+    tunnel_launch_args(session, Some(snapshot))
 }
 
 /// Which configuration a tunnel spawn reads.
 pub enum TunnelConfig<'a> {
     /// The app's `--ssh-config` (or OpenSSH's defaults when `None`).
     User(Option<&'a Path>),
-    /// A frozen configuration, kept alive with the process.
-    Frozen(FrozenConfig),
+    /// A private configuration snapshot, kept alive with the process.
+    Snapshot(ConfigSnapshot),
 }
 
 impl TunnelConfig<'_> {
     pub fn path(&self) -> Option<&Path> {
         match self {
             Self::User(config) => *config,
-            Self::Frozen(frozen) => Some(frozen.path()),
+            Self::Snapshot(snapshot) => Some(snapshot.path()),
         }
     }
 
@@ -756,7 +727,7 @@ impl TunnelConfig<'_> {
     pub fn launch_args(&self, session: &Session) -> Result<Vec<String>> {
         match self {
             Self::User(config) => tunnel_launch_args(session, *config),
-            Self::Frozen(frozen) => tunnel_launch_args_frozen(session, frozen.path()),
+            Self::Snapshot(snapshot) => tunnel_launch_args_snapshot(session, snapshot.path()),
         }
     }
 }
@@ -793,11 +764,11 @@ pub fn spawn_tunnel(session: &Session, config: TunnelConfig<'_>) -> Result<Tunne
             }
         );
     }
-    let _frozen = match config {
+    let _snapshot = match config {
         TunnelConfig::User(_) => None,
-        TunnelConfig::Frozen(frozen) => Some(frozen),
+        TunnelConfig::Snapshot(snapshot) => Some(snapshot),
     };
-    Ok(TunnelProcess { child, _frozen })
+    Ok(TunnelProcess { child, _snapshot })
 }
 
 pub fn connect(

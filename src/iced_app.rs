@@ -2791,8 +2791,13 @@ struct AutoStartPass {
     /// The host's OpenSSH configuration adds or changes forwards
     /// (`tunnels::InheritedForwards`), so only a manual start is allowed.
     skipped_config: Vec<String>,
-    /// Effective ProxyJump (`tunnels::ProxyJumpSkipped`): manual start only.
-    skipped_proxy_jump: Vec<String>,
+    /// Skipped for a reason with its own notice (`tunnels::ProxyJumpSkipped`,
+    /// `tunnels::ConfigSkip` other than `NoExplicitConfig`): one
+    /// `"{name}: {notice}"` sentence each. Manual start only.
+    skipped_manual: Vec<String>,
+    /// `tunnels::ConfigSkip::NoExplicitConfig` (the app runs without
+    /// `--ssh-config`): names listed under one shared notice.
+    skipped_no_config: Vec<String>,
 }
 
 /// Opted-in forwards of every saved profile, in library order, each once.
@@ -2870,9 +2875,14 @@ start manually ({})",
     if !parts.is_empty() {
         sentences.push(format!("Auto-start: {}.", parts.join("; ")));
     }
-    for name in &pass.skipped_proxy_jump {
-        sentences.push(format!("{name}: {}", tunnels::ProxyJumpSkipped));
+    if !pass.skipped_no_config.is_empty() {
+        sentences.push(format!(
+            "{}: {}",
+            pass.skipped_no_config.join(", "),
+            tunnels::ConfigSkip::NoExplicitConfig
+        ));
     }
+    sentences.extend(pass.skipped_manual.iter().cloned());
     sentences.join(" ")
 }
 
@@ -2887,6 +2897,9 @@ struct AutoStartFake {
     config_skip_specs: Vec<String>,
     /// Refused as `start_forward_exact` refuses an effective ProxyJump.
     proxy_jump_specs: Vec<String>,
+    /// Refused as `start_forward_exact` refuses a configuration it cannot
+    /// snapshot (no `--ssh-config`, Include/Match, ...).
+    config_skips: Vec<(String, tunnels::ConfigSkip)>,
 }
 
 fn tunnel_menu_separator<'a>() -> Element<'a, Message> {
@@ -4893,6 +4906,9 @@ impl App {
                 if fake.proxy_jump_specs.iter().any(|skip| skip == spec) {
                     return Err(tunnels::ProxyJumpSkipped.into());
                 }
+                if let Some((_, skip)) = fake.config_skips.iter().find(|(skip, _)| skip == spec) {
+                    return Err((*skip).into());
+                }
                 Ok(if fake.fail_specs.iter().any(|fail| fail == spec) {
                     tunnels::Status::Failed("listener busy".into())
                 } else {
@@ -4978,9 +4994,15 @@ impl App {
                         Err(error)
                             if error.downcast_ref::<tunnels::ProxyJumpSkipped>().is_some() =>
                         {
-                            pass.skipped_proxy_jump.push(name)
+                            pass.skipped_manual.push(format!("{name}: {error}"))
                         }
-                        Err(error) => pass.failed.push(format!("{name}: {error:#}")),
+                        Err(error) => match error.downcast_ref::<tunnels::ConfigSkip>() {
+                            Some(tunnels::ConfigSkip::NoExplicitConfig) => {
+                                pass.skipped_no_config.push(name)
+                            }
+                            Some(skip) => pass.skipped_manual.push(format!("{name}: {skip}")),
+                            None => pass.failed.push(format!("{name}: {error:#}")),
+                        },
                     }
                 }
             }
@@ -18529,6 +18551,68 @@ forwards: start manually ("
 1 tunnel skipped, only Local or Dynamic tunnels bound to 127.0.0.1 or [::1] can auto-start: \
 start manually (0.0.0.0:9091 -> api:443). 127.0.0.1:8080 -> web:80: Auto-start skipped: \
 this tunnel uses ProxyJump. Start it manually."
+        );
+        assert_eq!(app.tunnel_notice, app.status);
+    }
+
+    #[test]
+    fn startup_pass_reports_exact_forward_include_or_match_skip() {
+        let (_dir, path, _key) = auto_start_boot_library();
+        let (mut app, _task) = App::startup(path, None);
+        app.auto_start_fake = Some(AutoStartFake {
+            config_skips: vec![(AUTO_START_WEB.into(), tunnels::ConfigSkip::IncludeOrMatch)],
+            ..Default::default()
+        });
+        drain_auto_start(&mut app);
+        // The skipped forward does not stop the next launch.
+        assert_eq!(auto_start_calls(&app), vec![AUTO_START_WEB, AUTO_START_DB]);
+        assert_eq!(
+            app.status,
+            "Auto-start: launch requested for 1 tunnel (see Tunnels for live status); \
+1 tunnel skipped, only Local or Dynamic tunnels bound to 127.0.0.1 or [::1] can auto-start: \
+start manually (0.0.0.0:9091 -> api:443). 127.0.0.1:8080 -> web:80: Auto-start skipped: \
+this tunnel's OpenSSH configuration uses Include or Match. Start it manually."
+        );
+        assert_eq!(app.tunnel_notice, app.status);
+    }
+
+    #[test]
+    fn startup_pass_groups_exact_forward_no_explicit_config_skips() {
+        let no_config = tunnels::ConfigSkip::NoExplicitConfig;
+        let (_dir, path, _key) = auto_start_boot_library();
+        let (mut app, _task) = App::startup(path, None);
+        app.auto_start_fake = Some(AutoStartFake {
+            config_skips: vec![(AUTO_START_WEB.into(), no_config)],
+            ..Default::default()
+        });
+        drain_auto_start(&mut app);
+        assert_eq!(auto_start_calls(&app), vec![AUTO_START_WEB, AUTO_START_DB]);
+        assert_eq!(
+            app.status,
+            "Auto-start: launch requested for 1 tunnel (see Tunnels for live status); \
+1 tunnel skipped, only Local or Dynamic tunnels bound to 127.0.0.1 or [::1] can auto-start: \
+start manually (0.0.0.0:9091 -> api:443). 127.0.0.1:8080 -> web:80: Auto-start skipped: \
+no explicit SSH configuration was provided. Start this tunnel manually."
+        );
+
+        // Two tunnels skipped for the same reason share one sentence.
+        let (_dir, path, _key) = auto_start_boot_library();
+        let (mut app, _task) = App::startup(path, None);
+        app.auto_start_fake = Some(AutoStartFake {
+            config_skips: vec![
+                (AUTO_START_WEB.into(), no_config),
+                (AUTO_START_DB.into(), no_config),
+            ],
+            ..Default::default()
+        });
+        drain_auto_start(&mut app);
+        assert_eq!(auto_start_calls(&app), vec![AUTO_START_WEB, AUTO_START_DB]);
+        assert_eq!(
+            app.status,
+            "Auto-start: 1 tunnel skipped, only Local or Dynamic tunnels bound to 127.0.0.1 or \
+[::1] can auto-start: start manually (0.0.0.0:9091 -> api:443). 127.0.0.1:8080 -> web:80, \
+127.0.0.1:5432 -> db:5432: Auto-start skipped: no explicit SSH configuration was provided. \
+Start this tunnel manually."
         );
         assert_eq!(app.tunnel_notice, app.status);
     }
