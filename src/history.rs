@@ -1243,6 +1243,68 @@ mod tests {
     }
 
     #[test]
+    fn line_identity_round2_grid_switch_with_matching_banner_invalidates() {
+        let mut state = HistoryState::default();
+        state.update_lines(rows_snapshot(&["banner", "prompt"], 1, 100));
+        let main = line_ids(&state);
+        mark_at(&mut state, 0);
+        state.set_query("banner");
+        assert!(state.select_hit_at(main[0], 1));
+
+        state.update_lines(rows_snapshot(&["banner", "other"], 0, 0));
+        assert_all_ids_fresh(&state, &main);
+        assert!(mark_ids(&state).is_empty());
+        assert_eq!(state.dropped_marks(), 1);
+        assert_eq!(state.truncated_lines(), 0);
+        assert!(!state.select_hit_at(main[0], 1));
+        assert_ne!(state.selected_hit().unwrap().line_id, main[0]);
+    }
+
+    #[test]
+    fn line_identity_round2_same_grid_below_capacity_preserves_banner() {
+        let mut state = HistoryState::default();
+        state.update_lines(rows_snapshot(&["banner", "prompt"], 1, 100));
+        let before = line_ids(&state);
+        let marked = mark_at(&mut state, 0);
+        state.update_lines(rows_snapshot(&["banner", "other"], 1, 100));
+        assert_eq!(line_ids(&state), before);
+        assert_eq!(mark_ids(&state), vec![marked]);
+        assert_eq!(state.dropped_marks(), 0);
+    }
+
+    #[test]
+    fn line_identity_round2_unique_text_after_full_replacement_invalidates() {
+        let mut state = HistoryState::default();
+        state.update_lines(rows_snapshot(&["A", "B", "C"], 2, 2));
+        let before = line_ids(&state);
+        mark_at(&mut state, 1);
+        state.set_query("B");
+        assert!(state.select_hit_at(before[1], 1));
+
+        // Three appended rows evict A and B. The new B is unrelated to the old B;
+        // a single suffix/prefix text overlap is not continuity evidence.
+        state.update_lines(rows_snapshot(&["B", "X", "Y"], 2, 2));
+        assert_all_ids_fresh(&state, &before);
+        assert!(mark_ids(&state).is_empty());
+        assert_eq!(state.dropped_marks(), 1);
+        assert_eq!(state.truncated_lines(), 0);
+        assert!(!state.select_hit_at(before[1], 1));
+    }
+
+    #[test]
+    fn line_identity_round2_at_capacity_no_scroll_is_indistinguishable() {
+        let mut state = HistoryState::default();
+        let snapshot = rows_snapshot(&["A", "B", "C"], 2, 2);
+        state.update_lines(snapshot.clone());
+        let before = line_ids(&state);
+        mark_at(&mut state, 1);
+        state.update_lines(snapshot);
+        assert_all_ids_fresh(&state, &before);
+        assert!(mark_ids(&state).is_empty());
+        assert_eq!(state.dropped_marks(), 1);
+    }
+
+    #[test]
     fn hit_in_wrapped_line_targets_the_row_holding_the_match_start() {
         let mut state = HistoryState::default();
         state.update_lines(lines_snapshot(
