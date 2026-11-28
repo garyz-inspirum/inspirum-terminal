@@ -2763,7 +2763,7 @@ struct AutoStartCandidate {
     spec: String,
 }
 
-/// Launches one forward for the start-up pass: `Manager::start_forward` in
+/// Launches one forward for the start-up pass: `Manager::start_forward_exact` in
 /// the app, a recording fake in tests.
 type AutoStartLaunch<'a> = dyn FnMut(
         &mut tunnels::Manager,
@@ -2788,6 +2788,11 @@ struct AutoStartPass {
     failed: Vec<String>,
     /// Opted in but not `tunnels::auto_start_eligible` (hand-edited JSON).
     skipped_ineligible: Vec<String>,
+    /// The host's OpenSSH configuration adds or changes forwards
+    /// (`tunnels::InheritedForwards`), so only a manual start is allowed.
+    skipped_config: Vec<String>,
+    /// Effective ProxyJump (`tunnels::ProxyJumpSkipped`): manual start only.
+    skipped_proxy_jump: Vec<String>,
 }
 
 /// Opted-in forwards of every saved profile, in library order, each once.
@@ -2847,17 +2852,28 @@ auto-start: start manually ({})",
             pass.skipped_ineligible.join(", ")
         ));
     }
+    if !pass.skipped_config.is_empty() {
+        parts.push(format!(
+            "{} skipped, the host's OpenSSH configuration adds or changes port forwards: \
+start manually ({})",
+            tunnel_count(pass.skipped_config.len()),
+            pass.skipped_config.join(", ")
+        ));
+    }
     if remaining > 0 {
         parts.push(format!(
             "{} not started while a profile save was in progress",
             tunnel_count(remaining)
         ));
     }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!("Auto-start: {}.", parts.join("; "))
+    let mut sentences = Vec::new();
+    if !parts.is_empty() {
+        sentences.push(format!("Auto-start: {}.", parts.join("; ")));
     }
+    for name in &pass.skipped_proxy_jump {
+        sentences.push(format!("{name}: {}", tunnels::ProxyJumpSkipped));
+    }
+    sentences.join(" ")
 }
 
 /// Test double for the auto-start launcher: records calls, never spawns ssh.
@@ -2866,6 +2882,11 @@ auto-start: start manually ({})",
 struct AutoStartFake {
     calls: Vec<(String, tunnels::ForwardKind, String)>,
     fail_specs: Vec<String>,
+    /// Refused as `Manager::start_forward_exact` refuses a forward whose
+    /// host configuration adds or changes forwards.
+    config_skip_specs: Vec<String>,
+    /// Refused as `start_forward_exact` refuses an effective ProxyJump.
+    proxy_jump_specs: Vec<String>,
 }
 
 fn tunnel_menu_separator<'a>() -> Element<'a, Message> {
@@ -4866,6 +4887,12 @@ impl App {
             let task = self.auto_start_step(&mut |_, session, kind, spec, _| {
                 fake.calls
                     .push((session_profile_key(session), kind, spec.to_owned()));
+                if fake.config_skip_specs.iter().any(|skip| skip == spec) {
+                    return Err(tunnels::InheritedForwards.into());
+                }
+                if fake.proxy_jump_specs.iter().any(|skip| skip == spec) {
+                    return Err(tunnels::ProxyJumpSkipped.into());
+                }
                 Ok(if fake.fail_specs.iter().any(|fail| fail == spec) {
                     tunnels::Status::Failed("listener busy".into())
                 } else {
@@ -4876,7 +4903,7 @@ impl App {
             return task;
         }
         self.auto_start_step(&mut |manager, session, kind, spec, config| {
-            manager.start_forward(session, kind, spec, config)
+            manager.start_forward_exact(session, kind, spec, config)
         })
     }
 
@@ -4942,6 +4969,16 @@ impl App {
                         }
                         Ok(tunnels::Status::Stopped) => {
                             pass.failed.push(format!("{name}: did not start"))
+                        }
+                        Err(error)
+                            if error.downcast_ref::<tunnels::InheritedForwards>().is_some() =>
+                        {
+                            pass.skipped_config.push(name)
+                        }
+                        Err(error)
+                            if error.downcast_ref::<tunnels::ProxyJumpSkipped>().is_some() =>
+                        {
+                            pass.skipped_proxy_jump.push(name)
                         }
                         Err(error) => pass.failed.push(format!("{name}: {error:#}")),
                     }
@@ -18444,6 +18481,56 @@ mod tunnel_layout_tests {
         // The pass ran once: a stray later message launches nothing more.
         let _ = app.update(Message::TunnelAutoStartNext);
         assert_eq!(auto_start_calls(&app).len(), 2);
+    }
+
+    #[test]
+    fn startup_pass_skips_exact_forward_config_mismatch_and_continues() {
+        let (_dir, path, _key) = auto_start_boot_library();
+        let (mut app, _task) = App::startup(path, None);
+        app.auto_start_fake = Some(AutoStartFake {
+            config_skip_specs: vec![AUTO_START_WEB.into()],
+            ..Default::default()
+        });
+        drain_auto_start(&mut app);
+        // The refused forward does not stop the next launch.
+        assert_eq!(auto_start_calls(&app), vec![AUTO_START_WEB, AUTO_START_DB]);
+        assert!(
+            app.status
+                .contains("launch requested for 1 tunnel (see Tunnels for live status)"),
+            "{}",
+            app.status
+        );
+        // Reported as a skip with the manual-start hint, not as a failure.
+        assert!(!app.status.contains("failed"), "{}", app.status);
+        assert!(
+            app.status.contains(
+                "1 tunnel skipped, the host's OpenSSH configuration adds or changes port \
+forwards: start manually ("
+            ),
+            "{}",
+            app.status
+        );
+        assert_eq!(app.tunnel_notice, app.status);
+    }
+
+    #[test]
+    fn startup_pass_reports_exact_forward_proxy_jump_skip() {
+        let (_dir, path, _key) = auto_start_boot_library();
+        let (mut app, _task) = App::startup(path, None);
+        app.auto_start_fake = Some(AutoStartFake {
+            proxy_jump_specs: vec![AUTO_START_WEB.into()],
+            ..Default::default()
+        });
+        drain_auto_start(&mut app);
+        assert_eq!(auto_start_calls(&app), vec![AUTO_START_WEB, AUTO_START_DB]);
+        assert_eq!(
+            app.status,
+            "Auto-start: launch requested for 1 tunnel (see Tunnels for live status); \
+1 tunnel skipped, only Local or Dynamic tunnels bound to 127.0.0.1 or [::1] can auto-start: \
+start manually (0.0.0.0:9091 -> api:443). 127.0.0.1:8080 -> web:80: Auto-start skipped: \
+this tunnel uses ProxyJump. Start it manually."
+        );
+        assert_eq!(app.tunnel_notice, app.status);
     }
 
     #[test]

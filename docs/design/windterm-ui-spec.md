@@ -337,7 +337,24 @@ The supplied WindTerm screenshots distinguish **daily operation** from **editing
   an existing opt-in. The start-up summary says *launch requested*, not
   *started*: a surviving ssh process after the launcher's early-exit check
   does not prove a listening socket; failures and skips are still listed in
-  the status bar and tunnel popup notice.
+  the status bar and tunnel popup notice. Before each unattended launch the
+  app asks OpenSSH (`ssh -G`, no connection) which forwards the launch would
+  really set up; if the host's OpenSSH configuration contributes any other
+  forward (or a `Tunnel` device, or changes or clears the selected one), the
+  forward is skipped at start-up and can still be started manually. That
+  one evaluation is then frozen into a private, owner-only configuration
+  file without `Host`/`Match`/`Include` (forward keywords dropped; the
+  selected forward stays on the command line), re-checked with `ssh -G`, and
+  the tunnel is spawned reading only that file (`-F`), so a second
+  evaluation by the real process (for example a `Match exec` answering
+  differently) cannot add forwards. The file is removed when the tunnel
+  stops. Tunnels with an effective **ProxyJump** (from the profile or from a
+  `Host` stanza) are skipped at start-up ("Auto-start skipped: this tunnel
+  uses ProxyJump. Start it manually."), because the frozen file describes
+  the destination, not the jump host; they can be started manually. If the
+  resolved configuration does not re-parse (for example a `SetEnv` value
+  with spaces), the launch fails closed and is listed as failed. Manual
+  starts are unchanged: no `ssh -G`, the user's configuration as is.
 - Do not hard-code names from the supplied screenshots; these are the user's
   personal saved entries, not fixtures or app defaults. Do not copy WindTerm
   icons or source. Match the two-surface workflow, row alignment, density,

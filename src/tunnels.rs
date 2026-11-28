@@ -9,7 +9,10 @@ use std::path::Path;
 
 use anyhow::{Result, ensure};
 
-use crate::terminal::TunnelProcess;
+use crate::terminal::{
+    EffectiveForwards, FrozenConfig, TunnelConfig, TunnelProcess, frozen_config_text,
+    parse_effective_forwards, tunnel_launch_args, tunnel_launch_args_frozen,
+};
 use crate::{
     Session, TunnelKind, TunnelLabel, session_profile_key, session_requires_forward_risk_ack,
 };
@@ -626,6 +629,48 @@ impl Manager {
         spec: &str,
         config: Option<&Path>,
     ) -> Result<Status> {
+        let seam = Seam {
+            exact: None,
+            spawn: &crate::terminal::spawn_tunnel,
+        };
+        self.launch_forward(session, kind, spec, config, seam)
+    }
+
+    /// [`Self::start_forward`] for unattended launches. Ask OpenSSH
+    /// (`ssh -G`) what the launch would set up, refuse ProxyJump and anything
+    /// but exactly the selected forward, then freeze that one evaluation into
+    /// a private configuration without `Host`/`Match`/`Include`, re-check it
+    /// and spawn ssh reading only the frozen file, so a second evaluation by
+    /// the real process cannot add forwards.
+    pub fn start_forward_exact(
+        &mut self,
+        session: &Session,
+        kind: ForwardKind,
+        spec: &str,
+        config: Option<&Path>,
+    ) -> Result<Status> {
+        let frozen_dir = std::env::temp_dir();
+        let seam = Seam {
+            exact: Some(ExactCheck {
+                query: &crate::terminal::query_effective_config,
+                frozen_dir: &frozen_dir,
+            }),
+            spawn: &crate::terminal::spawn_tunnel,
+        };
+        self.launch_forward(session, kind, spec, config, seam)
+    }
+
+    /// Shared body of the start variants. `seam.exact` runs strictly before
+    /// `seam.spawn`; its failure returns `Err` with nothing spawned or
+    /// recorded.
+    fn launch_forward(
+        &mut self,
+        session: &Session,
+        kind: ForwardKind,
+        spec: &str,
+        config: Option<&Path>,
+        seam: Seam<'_>,
+    ) -> Result<Status> {
         let profile = session_profile_key(session);
         let key = ProcessKey::forward(&profile, kind, spec);
         session.ssh_args()?;
@@ -686,8 +731,12 @@ impl Manager {
             "non-loopback tunnel binds require explicit risk acknowledgement"
         );
         selected.ssh_args()?;
+        let launch_config = match &seam.exact {
+            None => TunnelConfig::User(config),
+            Some(exact) => TunnelConfig::Frozen(exact.freeze(&selected, kind, spec, config)?),
+        };
         self.failures.remove(&key);
-        match crate::terminal::start_tunnels(&selected, config) {
+        match (seam.spawn)(&selected, launch_config) {
             Ok(process) => {
                 let pid = process.id();
                 self.servers.insert(key.clone(), server);
@@ -750,6 +799,175 @@ impl Manager {
         }
         self.failures.clear();
     }
+}
+
+/// How [`Manager::launch_forward`] checks and spawns; tests inject fakes.
+struct Seam<'a> {
+    /// `None` for manual starts: no `ssh -G`, the user configuration as is.
+    exact: Option<ExactCheck<'a>>,
+    spawn: &'a dyn Fn(&Session, TunnelConfig<'_>) -> Result<TunnelProcess>,
+}
+
+/// Unattended-launch checks of [`Manager::start_forward_exact`].
+struct ExactCheck<'a> {
+    /// `ssh -G` stdout for a tunnel argv.
+    query: &'a dyn Fn(&[String]) -> Result<String>,
+    frozen_dir: &'a Path,
+}
+
+impl ExactCheck<'_> {
+    /// Validate `selected` as launched with `config`, freeze that
+    /// evaluation, and validate the frozen launch again.
+    fn freeze(
+        &self,
+        selected: &Session,
+        kind: ForwardKind,
+        spec: &str,
+        config: Option<&Path>,
+    ) -> Result<FrozenConfig> {
+        let resolved = (self.query)(&tunnel_launch_args(selected, config)?)?;
+        ensure_unattended(&parse_effective_forwards(&resolved), kind, spec)?;
+        let frozen = FrozenConfig::write(self.frozen_dir, &frozen_config_text(&resolved)?)?;
+        let relaunch = (self.query)(&tunnel_launch_args_frozen(selected, frozen.path())?)?;
+        ensure_unattended(&parse_effective_forwards(&relaunch), kind, spec)?;
+        Ok(frozen)
+    }
+}
+
+/// The frozen configuration describes the destination, not a jump host:
+/// losing the hop's own settings could change where SSH connects.
+fn ensure_unattended(effective: &EffectiveForwards, kind: ForwardKind, spec: &str) -> Result<()> {
+    if effective.proxy_jump.is_some() {
+        return Err(ProxyJumpSkipped.into());
+    }
+    ensure_exact_forward(effective, kind, spec)
+}
+
+/// An unattended launch would go through an effective `ProxyJump`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProxyJumpSkipped;
+
+impl std::fmt::Display for ProxyJumpSkipped {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Auto-start skipped: this tunnel uses ProxyJump. Start it manually.")
+    }
+}
+
+impl std::error::Error for ProxyJumpSkipped {}
+
+/// The OpenSSH configuration would make an unattended launch set up more,
+/// fewer or different forwards than the selected one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InheritedForwards;
+
+impl std::fmt::Display for InheritedForwards {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "OpenSSH configuration for this host adds or changes port forwards; \
+start this tunnel manually",
+        )
+    }
+}
+
+impl std::error::Error for InheritedForwards {}
+
+/// Ok only when `effective` (from `ssh -G`) is exactly the selected forward.
+pub fn ensure_exact_forward(
+    effective: &EffectiveForwards,
+    kind: ForwardKind,
+    spec: &str,
+) -> Result<()> {
+    let total = effective.local.len() + effective.remote.len() + effective.dynamic.len();
+    let only = [
+        (ForwardKind::Local, &effective.local),
+        (ForwardKind::Remote, &effective.remote),
+        (ForwardKind::Dynamic, &effective.dynamic),
+    ]
+    .into_iter()
+    .find_map(|(found, values)| values.first().map(|value| (found, value)));
+    let exact = !effective.tunnel_device
+        && total == 1
+        && only.is_some_and(|(found, value)| {
+            found == kind
+                && matches!(
+                    (effective_endpoints(kind, value), spec_endpoints(kind, spec)),
+                    (Some(actual), Some(wanted)) if actual == wanted
+                )
+        });
+    if exact {
+        Ok(())
+    } else {
+        Err(InheritedForwards.into())
+    }
+}
+
+/// A forward side normalised for comparison: brackets stripped, the host
+/// absent when only a port is given.
+#[derive(Debug, PartialEq, Eq)]
+struct Endpoint {
+    host: Option<String>,
+    port: u16,
+}
+
+/// Listener and (for Local/Remote) target of one forward.
+type Endpoints = (Endpoint, Option<Endpoint>);
+
+/// `[host]:port`, `host:port` or a bare `port`; anything else (socket
+/// paths, empty or unbalanced hosts, port 0) is `None` so callers fail closed.
+fn parse_endpoint(text: &str) -> Option<Endpoint> {
+    let (host, port) = if let Some(rest) = text.strip_prefix('[') {
+        let (host, port) = rest.split_once("]:")?;
+        (Some(host), port)
+    } else if let Some((host, port)) = text.rsplit_once(':') {
+        if host.contains(':') {
+            return None;
+        }
+        (Some(host), port)
+    } else {
+        (None, text)
+    };
+    if host.is_some_and(|host| {
+        host.is_empty() || host.contains(['[', ']', '/']) || host.chars().any(char::is_whitespace)
+    }) {
+        return None;
+    }
+    if port.is_empty() || port.len() > 5 || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let port = port.parse::<u16>().ok().filter(|port| *port != 0)?;
+    Some(Endpoint {
+        host: host.map(str::to_owned),
+        port,
+    })
+}
+
+fn target_endpoint(text: &str) -> Option<Endpoint> {
+    parse_endpoint(text).filter(|target| target.host.is_some())
+}
+
+/// One `ssh -G` forward value: `listener target` (Local/Remote) or `listener`.
+fn effective_endpoints(kind: ForwardKind, value: &str) -> Option<Endpoints> {
+    let mut parts = value.split_whitespace();
+    let listener = parse_endpoint(parts.next()?)?;
+    let target = match kind {
+        ForwardKind::Dynamic => None,
+        _ => Some(target_endpoint(parts.next()?)?),
+    };
+    parts.next().is_none().then_some((listener, target))
+}
+
+/// A saved forward spec in OpenSSH `-L`/`-R`/`-D` syntax.
+fn spec_endpoints(kind: ForwardKind, spec: &str) -> Option<Endpoints> {
+    if spec.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let (listener, target) = split_spec(kind, spec);
+    let listener = parse_endpoint(&listener)?;
+    let target = match kind {
+        ForwardKind::Dynamic => None,
+        _ => Some(target_endpoint(&target)?),
+    };
+    Some((listener, target))
 }
 
 fn isolated_forward(session: &Session, kind: ForwardKind, spec: &str) -> Session {
@@ -1330,5 +1548,535 @@ mod tests {
         assert_eq!(manager.running_count(), 3);
         manager.stop_all();
         assert_eq!(manager.running_count(), 0);
+    }
+
+    /// `ssh -G` of OpenSSH 8.7 for a `Host charlie` stanza with
+    /// LocalForward/RemoteForward/DynamicForward plus `-L`/`-D` flags.
+    const MEASURED_EFFECTIVE: &str = "\
+dynamicforward [127.0.0.1]:1081
+dynamicforward 1080
+localforward [127.0.0.1]:9100 [127.0.0.1]:7
+localforward [::1]:9104 [::1]:7
+localforward [127.0.0.1]:9101 [127.0.0.1]:7
+remoteforward 9102 [localhost]:7
+tunnel false
+clearallforwardings no
+";
+
+    fn effective(local: &[&str], remote: &[&str], dynamic: &[&str]) -> EffectiveForwards {
+        let owned = |values: &[&str]| values.iter().map(|value| value.to_string()).collect();
+        EffectiveForwards {
+            local: owned(local),
+            remote: owned(remote),
+            dynamic: owned(dynamic),
+            tunnel_device: false,
+            proxy_jump: None,
+        }
+    }
+
+    #[test]
+    fn parse_exact_forward_effective_output_into_buckets() {
+        let parsed = crate::terminal::parse_effective_forwards(MEASURED_EFFECTIVE);
+        assert_eq!(
+            parsed,
+            effective(
+                &[
+                    "[127.0.0.1]:9100 [127.0.0.1]:7",
+                    "[::1]:9104 [::1]:7",
+                    "[127.0.0.1]:9101 [127.0.0.1]:7",
+                ],
+                &["9102 [localhost]:7"],
+                &["[127.0.0.1]:1081", "1080"],
+            )
+        );
+        assert!(!parsed.tunnel_device);
+        let tun = crate::terminal::parse_effective_forwards("Tunnel point-to-point\n");
+        assert!(tun.tunnel_device);
+        let off = crate::terminal::parse_effective_forwards("TUNNEL no\n");
+        assert!(!off.tunnel_device);
+        assert_eq!(
+            crate::terminal::parse_effective_forwards("LocalForward 9 [h]:1\n").local,
+            vec!["9 [h]:1".to_owned()]
+        );
+    }
+
+    #[test]
+    fn ensure_exact_forward_accepts_only_selected_forward() {
+        let (l, d) = (ForwardKind::Local, ForwardKind::Dynamic);
+        for (kind, spec, effective) in [
+            (
+                l,
+                "127.0.0.1:9100:127.0.0.1:7",
+                effective(&["[127.0.0.1]:9100 [127.0.0.1]:7"], &[], &[]),
+            ),
+            (
+                l,
+                "[::1]:9104:[::1]:7",
+                effective(&["[::1]:9104 [::1]:7"], &[], &[]),
+            ),
+            (
+                l,
+                "127.0.0.1:8080:web:80",
+                effective(&["[127.0.0.1]:8080 [web]:80"], &[], &[]),
+            ),
+            (
+                d,
+                "127.0.0.1:1081",
+                effective(&[], &[], &["[127.0.0.1]:1081"]),
+            ),
+        ] {
+            ensure_exact_forward(&effective, kind, spec).unwrap_or_else(|error| {
+                panic!("{spec} must be accepted: {error:#}");
+            });
+        }
+    }
+
+    #[test]
+    fn ensure_exact_forward_rejects_inherited_or_changed_forwards() {
+        let (l, d) = (ForwardKind::Local, ForwardKind::Dynamic);
+        let web = "127.0.0.1:9100:127.0.0.1:7";
+        let web_effective = "[127.0.0.1]:9100 [127.0.0.1]:7";
+        let mut tunnel = effective(&[web_effective], &[], &[]);
+        tunnel.tunnel_device = true;
+        for (case, kind, spec, effective) in [
+            (
+                "extra inherited loopback LocalForward",
+                l,
+                web,
+                effective(&[web_effective, "[127.0.0.1]:9101 [127.0.0.1]:7"], &[], &[]),
+            ),
+            (
+                "inherited RemoteForward",
+                l,
+                web,
+                effective(&[web_effective], &["9102 [localhost]:7"], &[]),
+            ),
+            (
+                "inherited DynamicForward",
+                l,
+                web,
+                effective(&[web_effective], &[], &["1080"]),
+            ),
+            (
+                "inherited wildcard LocalForward",
+                l,
+                web,
+                effective(&[web_effective, "[0.0.0.0]:9200 [web]:80"], &[], &[]),
+            ),
+            (
+                "inherited star LocalForward",
+                l,
+                web,
+                effective(&[web_effective, "[*]:9201 [web]:80"], &[], &[]),
+            ),
+            (
+                "ClearAllForwardings leaves nothing",
+                l,
+                web,
+                effective(&[], &[], &[]),
+            ),
+            (
+                "selected listener with a different target",
+                l,
+                web,
+                effective(&["[127.0.0.1]:9100 [127.0.0.1]:8"], &[], &[]),
+            ),
+            (
+                "selected listener widened by config",
+                l,
+                web,
+                effective(&["9100 [127.0.0.1]:7"], &[], &[]),
+            ),
+            (
+                "same listener under another kind",
+                d,
+                "127.0.0.1:9100",
+                effective(&[web_effective], &[], &[]),
+            ),
+            (
+                "unparseable effective value",
+                l,
+                web,
+                effective(&["/tmp/socket /tmp/target"], &[], &[]),
+            ),
+            ("tunnel device", l, web, tunnel),
+        ] {
+            let error = ensure_exact_forward(&effective, kind, spec)
+                .expect_err(case)
+                .to_string();
+            assert_eq!(error, InheritedForwards.to_string(), "{case}");
+        }
+    }
+
+    fn single_forward_session(host: &str, specs: &[&str]) -> Session {
+        Session {
+            name: "srv".into(),
+            host: host.into(),
+            ssh: crate::SshOptions {
+                local_forwards: specs.iter().map(|spec| spec.to_string()).collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn dir_entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn config_arg(args: &[String]) -> Option<&str> {
+        args.windows(2)
+            .find(|pair| pair[0] == "-F")
+            .map(|pair| pair[1].as_str())
+    }
+
+    #[test]
+    fn exact_forward_preflight_rejects_inherited_forward_before_spawning() {
+        let dir = tempfile::tempdir().unwrap();
+        let frozen_dir = tempfile::tempdir().unwrap();
+        let config = hung_ssh_config(dir.path());
+        let spec = "127.0.0.1:18090:web:80";
+        let session = single_forward_session("srv.invalid", &[spec, "127.0.0.1:18091:db:5432"]);
+        let asked = std::cell::Cell::new(0);
+        let spawned = std::cell::Cell::new(false);
+        let query = |args: &[String]| -> Result<String> {
+            asked.set(asked.get() + 1);
+            // The query sees the isolated launch, not the whole profile.
+            assert!(args.iter().any(|arg| arg == spec));
+            assert!(!args.iter().any(|arg| arg == "127.0.0.1:18091:db:5432"));
+            Ok("localforward [127.0.0.1]:18090 [web]:80\n\
+localforward [127.0.0.1]:18092 [127.0.0.1]:7\ntunnel false\n"
+                .into())
+        };
+        let spawn = |_: &Session, _: TunnelConfig<'_>| -> Result<TunnelProcess> {
+            spawned.set(true);
+            anyhow::bail!("spawn must not be reached")
+        };
+        let seam = Seam {
+            exact: Some(ExactCheck {
+                query: &query,
+                frozen_dir: frozen_dir.path(),
+            }),
+            spawn: &spawn,
+        };
+        let mut manager = Manager::default();
+        let result =
+            manager.launch_forward(&session, ForwardKind::Local, spec, Some(&config), seam);
+        assert_eq!(asked.get(), 1);
+        assert!(!spawned.get());
+        let error = result.expect_err("inherited forward must refuse the launch");
+        assert!(
+            error.downcast_ref::<InheritedForwards>().is_some(),
+            "{error:#}"
+        );
+        let key = session_profile_key(&session);
+        assert_eq!(
+            manager.forward_status(&key, ForwardKind::Local, spec),
+            Status::Stopped
+        );
+        assert_eq!(manager.running_count(), 0);
+        assert!(manager.processes.is_empty());
+        assert!(manager.failures.is_empty());
+        assert!(dir_entries(frozen_dir.path()).is_empty());
+    }
+
+    /// The spawn reads only the frozen file, never the user configuration,
+    /// and the frozen file lives exactly as long as the process.
+    #[test]
+    fn exact_forward_spawn_uses_frozen_launch_argv() {
+        let dir = tempfile::tempdir().unwrap();
+        let frozen_dir = tempfile::tempdir().unwrap();
+        let config = hung_ssh_config(dir.path());
+        let user_config = config.to_str().unwrap().to_owned();
+        let spec = "127.0.0.1:18093:web:80";
+        let session = single_forward_session("srv.invalid", &[spec]);
+        let queried = std::cell::RefCell::new(Vec::new());
+        let spawned = std::cell::RefCell::new(Vec::new());
+        let query = |args: &[String]| -> Result<String> {
+            queried.borrow_mut().push(args.to_vec());
+            Ok(
+                "localforward [127.0.0.1]:18093 [web]:80\nproxycommand sleep 30\ntunnel false\n"
+                    .into(),
+            )
+        };
+        let spawn = |selected: &Session, launch: TunnelConfig<'_>| -> Result<TunnelProcess> {
+            let args = launch.launch_args(selected)?;
+            let frozen = std::fs::read_to_string(launch.path().unwrap()).unwrap();
+            assert_eq!(frozen, "proxycommand sleep 30\ntunnel false\n");
+            spawned.borrow_mut().push(args);
+            crate::terminal::spawn_tunnel(selected, launch)
+        };
+        let seam = Seam {
+            exact: Some(ExactCheck {
+                query: &query,
+                frozen_dir: frozen_dir.path(),
+            }),
+            spawn: &spawn,
+        };
+        let mut manager = Manager::default();
+        let status = manager
+            .launch_forward(&session, ForwardKind::Local, spec, Some(&config), seam)
+            .unwrap();
+        assert!(status.is_running(), "{status:?}");
+
+        let queried = queried.into_inner();
+        let spawned = spawned.into_inner();
+        assert_eq!(queried.len(), 2);
+        assert_eq!(config_arg(&queried[0]), Some(user_config.as_str()));
+        let [args] = spawned.as_slice() else {
+            panic!("one spawn expected: {spawned:?}");
+        };
+        let frozen = config_arg(args).expect("frozen -F").to_owned();
+        assert!(frozen.starts_with(frozen_dir.path().to_str().unwrap()));
+        assert!(!args.iter().any(|arg| arg == &user_config), "{args:?}");
+        assert_eq!(args.iter().filter(|arg| *arg == "-F").count(), 1);
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-L" && pair[1] == spec)
+        );
+        // The re-check ran on exactly the argv that was spawned.
+        assert_eq!(&queried[1], args);
+        assert_eq!(dir_entries(frozen_dir.path()).len(), 1);
+        manager.stop_all();
+        assert!(dir_entries(frozen_dir.path()).is_empty());
+    }
+
+    #[test]
+    fn exact_forward_frozen_config_drops_forwards_and_rejects_scoping() {
+        let frozen = crate::terminal::frozen_config_text(
+            "user bob\nhostname 10.0.0.1\nLocalForward [127.0.0.1]:1 [h]:2\n\
+remoteforward 9102 [localhost]:7\ndynamicforward 1080\n\nproxycommand sh -c 'nc %h %p'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            frozen,
+            "user bob\nhostname 10.0.0.1\nproxycommand sh -c 'nc %h %p'\n"
+        );
+        // OpenSSH 9.x prints the destination as an informational first line.
+        assert_eq!(
+            crate::terminal::frozen_config_text("host exactfwd.invalid\nuser bob\n").unwrap(),
+            "user bob\n"
+        );
+        for line in [
+            "Host *",
+            "host exactfwd.invalid",
+            "match all",
+            "Include other.conf",
+        ] {
+            let output = format!("user bob\n{line}\nport 22\n");
+            assert!(
+                crate::terminal::frozen_config_text(&output).is_err(),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_exact_forward_proxy_jump() {
+        let jump = crate::terminal::parse_effective_forwards("user bob\nproxyjump a@b:2222,c\n");
+        assert_eq!(jump.proxy_jump.as_deref(), Some("a@b:2222,c"));
+        let upper = crate::terminal::parse_effective_forwards("ProxyJump jumphost\n");
+        assert_eq!(upper.proxy_jump.as_deref(), Some("jumphost"));
+        for output in [
+            "user bob\n",
+            "proxyjump none\n",
+            "proxyjump NONE\n",
+            "proxyjump\n",
+        ] {
+            assert_eq!(
+                crate::terminal::parse_effective_forwards(output).proxy_jump,
+                None,
+                "{output}"
+            );
+        }
+        let jump = effective(&["[127.0.0.1]:1 [h]:2"], &[], &[]);
+        let jump = EffectiveForwards {
+            proxy_jump: Some("jumphost".into()),
+            ..jump
+        };
+        let error = ensure_unattended(&jump, ForwardKind::Local, "127.0.0.1:1:h:2").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Auto-start skipped: this tunnel uses ProxyJump. Start it manually."
+        );
+    }
+
+    #[test]
+    fn manual_start_skips_exact_forward_check() {
+        // A config that adds a forward does not change manual semantics.
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("ssh_config");
+        std::fs::write(
+            &config,
+            "Host *\n  ProxyCommand sleep 30\n  LocalForward 127.0.0.1:18095 127.0.0.1:7\n",
+        )
+        .unwrap();
+        let spec = "127.0.0.1:18094:web:80";
+        let session = Session {
+            name: "srv".into(),
+            host: "srv.invalid".into(),
+            ssh: crate::SshOptions {
+                local_forwards: vec![spec.into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut manager = Manager::default();
+        let status = manager
+            .start_forward(&session, ForwardKind::Local, spec, Some(&config))
+            .unwrap();
+        assert!(status.is_running(), "{status:?}");
+        manager.stop_all();
+    }
+
+    /// Real OpenSSH, no network: `ssh -G` only evaluates the configuration.
+    #[test]
+    fn real_openssh_exact_forward_rejects_config_inherited_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = "127.0.0.1:18096:127.0.0.1:7";
+        let session = Session {
+            name: "srv".into(),
+            host: "exactfwd.invalid".into(),
+            ssh: crate::SshOptions {
+                local_forwards: vec![spec.into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let inherited = dir.path().join("inherited_config");
+        std::fs::write(
+            &inherited,
+            "Host exactfwd.invalid\n  ServerAliveInterval 30\n  \
+LocalForward 127.0.0.1:18097 127.0.0.1:7\n",
+        )
+        .unwrap();
+        let plain = dir.path().join("plain_config");
+        std::fs::write(&plain, "Host exactfwd.invalid\n  ServerAliveInterval 30\n").unwrap();
+
+        let found = crate::terminal::effective_forwards(&session, Some(&inherited)).unwrap();
+        assert_eq!(found.local.len(), 2, "{found:?}");
+        let error = ensure_exact_forward(&found, ForwardKind::Local, spec).unwrap_err();
+        assert!(
+            error.downcast_ref::<InheritedForwards>().is_some(),
+            "{error:#}"
+        );
+
+        let found = crate::terminal::effective_forwards(&session, Some(&plain)).unwrap();
+        ensure_exact_forward(&found, ForwardKind::Local, spec).unwrap();
+    }
+
+    /// Real OpenSSH, no network: the user configuration changes after the
+    /// first `ssh -G`, yet the frozen launch still sets up only the selection.
+    #[test]
+    fn real_openssh_exact_forward_frozen_launch_ignores_later_config_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let frozen_dir = tempfile::tempdir().unwrap();
+        let spec = "127.0.0.1:18098:127.0.0.1:7";
+        let session = single_forward_session("exactfwd.invalid", &[spec]);
+        let original = dir.path().join("ssh_config");
+        std::fs::write(
+            &original,
+            "Host exactfwd.invalid\n  ServerAliveInterval 30\n",
+        )
+        .unwrap();
+        let queries = std::cell::Cell::new(0);
+        let query = |args: &[String]| -> Result<String> {
+            let output = crate::terminal::query_effective_config(args)?;
+            if queries.replace(queries.get() + 1) == 0 {
+                let mut file = std::fs::OpenOptions::new().append(true).open(&original)?;
+                std::io::Write::write_all(
+                    &mut file,
+                    b"  LocalForward 127.0.0.1:18099 127.0.0.1:7\n  RemoteForward 18100 127.0.0.1:7\n",
+                )?;
+            }
+            Ok(output)
+        };
+        let spawned = std::cell::Cell::new(false);
+        let spawn = |selected: &Session, launch: TunnelConfig<'_>| -> Result<TunnelProcess> {
+            spawned.set(true);
+            let args = launch.launch_args(selected)?;
+            assert_ne!(config_arg(&args), original.to_str());
+            let actual = parse_effective_forwards(&crate::terminal::query_effective_config(&args)?);
+            ensure_exact_forward(&actual, ForwardKind::Local, spec)?;
+            // The fixture really changed: the user argv now adds forwards.
+            let user = crate::terminal::effective_forwards(selected, Some(&original))?;
+            assert_eq!(user.local.len(), 2, "{user:?}");
+            assert_eq!(user.remote.len(), 1, "{user:?}");
+            anyhow::bail!("checked; nothing spawned")
+        };
+        let seam = Seam {
+            exact: Some(ExactCheck {
+                query: &query,
+                frozen_dir: frozen_dir.path(),
+            }),
+            spawn: &spawn,
+        };
+        let mut manager = Manager::default();
+        let status = manager
+            .launch_forward(&session, ForwardKind::Local, spec, Some(&original), seam)
+            .unwrap();
+        assert!(spawned.get());
+        assert_eq!(status, Status::Failed("checked; nothing spawned".into()));
+        assert_eq!(queries.get(), 2);
+        assert!(dir_entries(frozen_dir.path()).is_empty());
+    }
+
+    /// Real OpenSSH, no network: ProxyJump from a `Host` stanza (not the
+    /// saved profile) skips the unattended launch; a manual start does not
+    /// query OpenSSH and reaches the spawn.
+    #[test]
+    fn real_openssh_exact_forward_skips_config_proxy_jump() {
+        let dir = tempfile::tempdir().unwrap();
+        let frozen_dir = tempfile::tempdir().unwrap();
+        let spec = "127.0.0.1:18101:127.0.0.1:7";
+        let session = single_forward_session("exactfwd.invalid", &[spec]);
+        assert!(session.ssh.proxy_jump.is_empty());
+        let config = dir.path().join("ssh_config");
+        std::fs::write(&config, "Host exactfwd.invalid\n  ProxyJump jumphost\n").unwrap();
+        let spawned = std::cell::Cell::new(0);
+        let spawn = |_: &Session, launch: TunnelConfig<'_>| -> Result<TunnelProcess> {
+            spawned.set(spawned.get() + 1);
+            assert!(
+                matches!(launch, TunnelConfig::User(_)),
+                "manual reads the user config"
+            );
+            anyhow::bail!("fake spawn")
+        };
+        let mut manager = Manager::default();
+        let seam = Seam {
+            exact: Some(ExactCheck {
+                query: &crate::terminal::query_effective_config,
+                frozen_dir: frozen_dir.path(),
+            }),
+            spawn: &spawn,
+        };
+        let error = manager
+            .launch_forward(&session, ForwardKind::Local, spec, Some(&config), seam)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Auto-start skipped: this tunnel uses ProxyJump. Start it manually."
+        );
+        assert!(error.downcast_ref::<ProxyJumpSkipped>().is_some());
+        assert_eq!(spawned.get(), 0);
+        assert!(manager.processes.is_empty());
+        assert!(manager.failures.is_empty());
+        assert!(dir_entries(frozen_dir.path()).is_empty());
+
+        // Manual start (the seam `start_forward` uses): no query, spawn reached.
+        let seam = Seam {
+            exact: None,
+            spawn: &spawn,
+        };
+        let status = manager
+            .launch_forward(&session, ForwardKind::Local, spec, Some(&config), seam)
+            .unwrap();
+        assert_eq!(spawned.get(), 1);
+        assert_eq!(status, Status::Failed("fake spawn".into()));
     }
 }
