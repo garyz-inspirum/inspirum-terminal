@@ -16,7 +16,7 @@ Crate sources: alacritty_terminal 0.25.1 (Cargo.lock:44-45), vte 0.15.0
 ### 1.1 Output path: PTY bytes to viewport jump
 
 1. The backend is an alacritty `Term` behind `Arc<FairMutex<…>>`, built with
-   `scrolling_history: SCROLLBACK_LINES` (50,000; was 10,000 when this analysis was written) (vendor/terminal-core/src/backend/mod.rs)
+   `scrolling_history: SCROLLBACK_LINES` (10,000) (vendor/terminal-core/src/backend/mod.rs)
    and driven by alacritty's own `EventLoop` thread (mod.rs:349,352). That thread reads
    the PTY and parses while holding the term lock, up to `MAX_LOCKED_READ` = 65,535
    bytes per hold (alacritty/event_loop.rs:27,104-160), then sends `Event::Wakeup`
@@ -73,8 +73,8 @@ Sizes:
 
 | Retained rows (150 cols) | Grid memory [calc] | Text only, 120 chars/line [calc] |
 |---|---|---|
-| 10,000 (before) | 36.3 MB | 1.2 MB |
-| 50,000 (now, `SCROLLBACK_LINES`) | 182 MB | 6 MB |
+| 10,000 (default, `SCROLLBACK_LINES`) | 36.3 MB | 1.2 MB |
+| 50,000 (option A; deferred, see Stage 1a) | 182 MB | 6 MB |
 | 100,000 | 363 MB | 12 MB |
 | 1,000,000 | 3.63 GB | 120 MB |
 | 10,000,000 | 36.3 GB | 1.2 GB |
@@ -118,7 +118,7 @@ Sizes:
   (79, history.rs:252). Literal only: no regex and no case toggle. [src]
 - **At most 500 hits** (history.rs:260,269). The counter shows `n/m` with m ≤ 500
   (`find_counter`, iced_app.rs:11505-11511, reserved width `123/456` 11501). [src]
-- Coverage: the active grid only, at most `SCROLLBACK_LINES` (50,000; was 10,000) rows + screen, about 182 MB per full pane at 150 columns. Older rows are recycled
+- Coverage: the active grid only, at most `SCROLLBACK_LINES` (10,000) rows + screen, about 36 MB per full pane at 150 columns. Older rows are recycled
   by the ring buffer (grid/mod.rs:262-280, increase_scroll_limit 175-180). In alt
   screen the active grid is the alt grid with 0 history (term/mod.rs:416,714-733), so
   Find sees only the vim/less screen. [src]
@@ -158,7 +158,7 @@ Sizes:
 | Need | Today |
 |---|---|
 | Plain Ctrl+F opens Find | Ctrl+F sends 0x06 to the PTY; only Ctrl+Shift+F opens Find |
-| Everything that scrolled past, millions of rows | 50,000 rows (was 10,000); 500 listed hits, exact total counted; grid rows at 3.6 KB each make 1M rows cost 3.6 GB |
+| Everything that scrolled past, millions of rows | 10,000 rows; 500 listed hits, exact total counted; grid rows at 3.6 KB each make 1M rows cost 3.6 GB |
 | Usable while streaming | O(N·C) copy and rescan on the UI thread on every frame; parser lock held during the copy; selection drifts by index |
 | See where the hit is | No in-terminal highlight; count capped at 500; CJK, combining and wrapped matches missed |
 
@@ -303,10 +303,27 @@ Sizes:
   - append zero-width characters;
   - join `WRAPLINE` rows into one logical line, recording the row index where each
     logical line starts.
-- Default `scrolling_history`: **50,000**, which is 182 MB per pane at 150 columns when
-  full and lazily allocated [calc]. 100k (363 MB per pane, about 2× resize cost) is not
-  justified until Stage 2 lets the grid shrink again. Make it a backend setting field,
-  not a constant.
+- Default `scrolling_history`: **stays 10,000** (`SCROLLBACK_LINES`), about 36 MB per
+  full pane at 150 columns (10,000 x 3,632 B), lazily allocated [calc]. Raising it to
+  50,000 (182 MB per full pane) is deferred until release-build measurements exist at
+  both 10k and 50k: query-edit latency, streamed-output latency, resize latency and peak
+  RSS. 100k (363 MB per pane, about 2× resize cost) is not justified until Stage 2 lets
+  the grid shrink again. Make it a backend setting field, not a constant.
+- Line identity across refreshes (marks, the selected hit): `history_lines` returns a
+  `HistorySnapshot` with `history_rows`, `capacity` and `columns` read under the same lock
+  (`capacity` is 0 on the alternate screen, so ids never cross between the two grids).
+  Below capacity with unchanged columns and history not shrunk, no row can have been
+  evicted, so a line keeps the id of the line that started on the same grid row; the
+  immutable history rows must read the same, otherwise it is a reset (history cleared or
+  terminal reset). At capacity, after a column change or when history shrank, ids carry
+  only when exactly one shift of the old immutable history matches the new snapshot (a
+  soft-wrapped top line cut by eviction is handled and gets a fresh id). Cost: when two
+  or more shifts match (runs of identical or blank lines, periodic output, or just the
+  oldest retained line equalling the newest history line), alacritty gives no eviction
+  count to tell them apart, so every line gets a fresh id, all marks and the selected-hit
+  anchor are dropped (selection returns to the first hit) and the drop is counted
+  (`HistoryState::dropped_marks`). Exact identity at capacity needs Stage 2's eviction
+  capture.
 - Tests:
   - unit: chord routing for `FindOrForward`, covering main screen, alt screen,
     `find_focused`, open menu and privacy lock;
@@ -350,19 +367,19 @@ Sizes:
     (iced_app.rs:3784-3800).
   - Highlights are not drawn in alt screen and not under the privacy curtain.
 - Tests:
-  - unit: a 50k-row `Term` with the needle on row 0 finds it and the count is exact;
+  - unit: a full `SCROLLBACK_LINES`-row `Term` with the needle on row 0 finds it and the count is exact;
     the generation cancels a stale job; anchor re-location after N evictions; the
     selected hit stays on the same text while 1,000 lines stream; a `HistoryState`
     regression keeps the History panel and its tests (history.rs:285-397) unchanged.
   - connected: add `burst:<N>` to both fixture shell handlers. It writes
     `BURST-%07d` lines, with line 1 containing `FIRSTNEEDLE`, in 64 KiB writes, then
     logs `BURST_SENT:<N>`.
-    - With N = 45,000: Ctrl+F, type FIRSTNEEDLE, and the counter OCR reads `1 of 1`
-      within 1 s.
+    - N scales with `SCROLLBACK_LINES` (10,000 by default). With N = 9,000: Ctrl+F,
+      type FIRSTNEEDLE, and the counter OCR reads `1 of 1` within 1 s.
     - Enter puts `BURST-0000001` on screen (OCR).
-    - With N = 60,000, the counter reads `0 of 0`, the dropped notice appears and the
+    - With N = 12,000, the counter reads `0 of 0`, the dropped notice appears and the
       app stays responsive: an `echo:` probe after Escape is answered.
-    - RSS check: `/proc/<pid>/status` VmRSS grows by ≤ 250 MB for 45k lines.
+    - RSS check: `/proc/<pid>/status` VmRSS grows by ≤ 80 MB for 9,000 lines.
 - Must not regress:
   - `find_focused` guard sites (4812-4815, 5638-5643, 7990-7998, 8400-8430) and the
     focus probe;

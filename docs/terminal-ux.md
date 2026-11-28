@@ -84,7 +84,10 @@ timestamps store only a Unix timestamp alongside the in-memory mark. Marks survi
 normal viewport movement and appended output while their retained line remains in
 scrollback. When terminal scrollback truncation removes a marked line, that mark is
 removed deterministically and the inspector reports the cumulative truncated-line
-count.
+count. Once scrollback is full (10,000 rows) the terminal reports no eviction count, so
+when the retained text could have scrolled by more than one amount (for example runs of
+identical or blank lines) marks are dropped rather than moved to a possibly different
+line, and the selected Find result returns to the first match.
 
 A mark can fold the bounded region after it up to the next mark. Folding affects only
 the **History inspector** presentation; it never changes terminal parser state, deletes
@@ -93,8 +96,8 @@ its last 200 presentation rows even when the retained terminal buffer is much la
 
 Search is bounded to 500 displayed matches per active tab. Tests cover ASCII,
 Unicode/CJK, combining-character and emoji queries, deterministic mark/truncation
-behavior, bounded folding, navigation wrapping, and a 50,000-line retained-history
-regression.
+behavior, bounded folding, navigation wrapping, and a full-pane retained-history regression (the
+10,000-line default scrollback plus a screen).
 
 
 ## Terminal appearance and interaction preferences

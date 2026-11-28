@@ -574,12 +574,15 @@ impl TerminalBackend {
     ///
     /// Returns logical lines oldest-to-newest: soft-wrapped grid rows are joined, wide-char
     /// spacer cells are skipped and combining marks follow their base character (see
-    /// [`logical_lines_from_rows`]). This reads the terminal's existing in-memory grid; it does
-    /// not capture keyboard input or write to disk.
-    pub fn history_lines(&self) -> Vec<LogicalLine> {
+    /// [`logical_lines_from_rows`]). The snapshot also carries the grid facts taken under the
+    /// same lock (rows above the screen, scrollback capacity, columns) so a consumer can tell
+    /// when no row can have been evicted (see [`HistorySnapshot`]). This reads the terminal's
+    /// existing in-memory grid without cloning it; it does not capture keyboard input or
+    /// write to disk.
+    pub fn history_lines(&self) -> HistorySnapshot {
         let term = self.term.clone();
         let terminal = term.lock();
-        grid_logical_lines(&terminal)
+        grid_history_snapshot(&terminal, SCROLLBACK_LINES)
     }
 
     /// Scroll the viewport so a retained-history line is visible.
@@ -1174,9 +1177,32 @@ pub fn probe_drag_selection_steps(
 /// Grid rows of scrollback kept per pane (above the screen).
 ///
 /// Memory: alacritty cells are 24 bytes and every row is allocated at full width, so at 150
-/// columns a line costs about 3.6 KB and a full pane about 182 MB (50,000 x 3,632 B).
+/// columns a line costs about 3.6 KB and a full pane about 36 MB (10,000 x 3,632 B).
 /// alacritty grows history lazily, so a pane only pays for the rows it has actually used.
-pub const SCROLLBACK_LINES: usize = 50_000;
+/// Raising it (for example to 50,000, about 182 MB per full pane) waits for release-build
+/// latency and peak-RSS measurements at both sizes.
+pub const SCROLLBACK_LINES: usize = 10_000;
+
+/// Retained history lines plus the grid facts needed to keep line identity across snapshots.
+///
+/// alacritty exposes no eviction count: once `history_rows == capacity` the history size is
+/// constant while rows keep rotating out at the top. Below capacity no row can be evicted,
+/// so rows `0..history_rows` of two snapshots with the same `columns` are the same rows as
+/// long as history did not shrink (it shrinks on clear, reset or a screen-height increase).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HistorySnapshot {
+    /// Logical lines oldest-to-newest: scrollback, then the screen.
+    pub lines: Vec<LogicalLine>,
+    /// Grid rows above the screen when the snapshot was taken. Rows `0..history_rows` are
+    /// immutable scrollback; later rows are the live screen and may be rewritten in place.
+    pub history_rows: usize,
+    /// Most scrollback rows the active grid keeps: [`SCROLLBACK_LINES`] on the main screen,
+    /// `0` on the alternate screen (alacritty gives it no scrollback). A change means the
+    /// snapshot came from the other grid.
+    pub capacity: usize,
+    /// Grid columns; a change means every row was reflowed.
+    pub columns: usize,
+}
 
 /// One logical line of retained history: soft-wrapped grid rows joined into one string.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1259,6 +1285,18 @@ where
         lines.push(current);
     }
     lines
+}
+
+/// [`HistorySnapshot`] of the active alacritty grid; `capacity` is the main grid's
+/// configured `scrolling_history` (the alternate grid keeps none).
+fn grid_history_snapshot<T>(terminal: &Term<T>, capacity: usize) -> HistorySnapshot {
+    let alternate = terminal.mode().contains(TermMode::ALT_SCREEN);
+    HistorySnapshot {
+        lines: grid_logical_lines(terminal),
+        history_rows: terminal.history_size(),
+        capacity: if alternate { 0 } else { capacity },
+        columns: terminal.columns(),
+    }
 }
 
 /// Adapt a real alacritty grid (topmost retained row to bottom of screen) to
@@ -1392,6 +1430,50 @@ mod logical_line_tests {
         assert_eq!(lines[0].segment_starts, vec![0, 8]);
         assert_eq!(lines[1].text, "next");
         assert_eq!(lines[1].first_row, 2);
+    }
+
+    #[test]
+    fn real_term_snapshot_reports_history_rows_capacity_and_columns() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+
+        let dimensions = TermSize::new(10, 4);
+        let config = term::Config {
+            scrolling_history: 3,
+            ..term::Config::default()
+        };
+        let mut terminal = Term::new(config, &dimensions, VoidListener);
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        // Seven rows on a four-row screen: three rows scroll into history.
+        parser.advance(&mut terminal, b"r0\r\nr1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6");
+        let snapshot = grid_history_snapshot(&terminal, 3);
+        assert_eq!(
+            (snapshot.history_rows, snapshot.capacity, snapshot.columns),
+            (3, 3, 10)
+        );
+        assert_eq!(snapshot.lines.len(), 7);
+        assert_eq!(snapshot.lines[0].text, "r0");
+        assert_eq!(snapshot.lines[3].first_row, 3);
+
+        // At capacity the history size stays constant while the oldest rows rotate out.
+        parser.advance(&mut terminal, b"\r\nr7\r\nr8");
+        let snapshot = grid_history_snapshot(&terminal, 3);
+        assert_eq!(snapshot.history_rows, 3);
+        assert_eq!(snapshot.lines.len(), 7);
+        assert_eq!(snapshot.lines[0].text, "r2");
+        assert_eq!(snapshot.lines[6].text, "r8");
+
+        // The alternate screen has no scrollback; leaving it restores the main grid.
+        parser.advance(&mut terminal, b"\x1b[?1049hvim");
+        let snapshot = grid_history_snapshot(&terminal, 3);
+        assert_eq!(
+            (snapshot.history_rows, snapshot.capacity, snapshot.columns),
+            (0, 0, 10)
+        );
+        parser.advance(&mut terminal, b"\x1b[?1049l");
+        let snapshot = grid_history_snapshot(&terminal, 3);
+        assert_eq!((snapshot.history_rows, snapshot.capacity), (3, 3));
+        assert_eq!(snapshot.lines[0].text, "r2");
     }
 }
 
