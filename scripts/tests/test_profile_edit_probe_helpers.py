@@ -75,10 +75,17 @@ class DialogGeometryTest(unittest.TestCase):
 
 
 class DialogScrollTest(unittest.TestCase):
+    def test_real_footer_visible_after_refusal_needs_no_drag(self):
+        shot = Path("/mnt/data/atlas/gui-out/it14r3-ci/connected/connected-profile-rename-cancel-scroll-start.png")
+        if not shot.is_file():
+            self.skipTest("gsb-dev screenshot artifact unavailable")
+        self.assertTrue(module.connection_footer_visible(shot, module.connection_dialog_region(W, H)))
+
     def test_failing_ci_frame_drags_thumb_to_bottom_of_dialog(self):
         shot = Path("/mnt/data/atlas/it14-fe89d61-ci/connected/connected-profile-rename-before-submit.png")
         if not shot.is_file():
             self.skipTest("CI screenshot artifact unavailable")
+        self.assertFalse(module.connection_footer_visible(shot, module.connection_dialog_region(W, H)))
         start, end = module.connection_scroll_drag(shot, module.connection_dialog_region(W, H))
         self.assertTrue(920 <= start[0] <= 925, start)
         self.assertEqual(start[1], 243)
@@ -100,6 +107,22 @@ class DialogScrollTest(unittest.TestCase):
         self.addCleanup(shot.unlink)
         with self.assertRaisesRegex(RuntimeError, "scrollbar thumb"):
             module.connection_scroll_drag(shot, module.connection_dialog_region(W, H))
+
+    def test_footer_visible_on_synthetic_button_row(self):
+        from PIL import Image, ImageDraw, ImageFont
+        shot = frame([])
+        self.addCleanup(shot.unlink)
+        image = Image.open(shot)
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.truetype("DejaVuSans.ttf", 14)
+        draw.text((708, 727), "Save only", fill=(230, 230, 230), font=font)
+        image.save(shot)
+        self.assertTrue(module.connection_footer_visible(shot, module.connection_dialog_region(W, H)))
+
+    def test_footer_absent_on_synthetic_empty_dialog(self):
+        shot = frame([])
+        self.addCleanup(shot.unlink)
+        self.assertFalse(module.connection_footer_visible(shot, module.connection_dialog_region(W, H)))
 
 
 class DangerPixelsTest(unittest.TestCase):
@@ -231,6 +254,11 @@ class ProbeWiringTest(unittest.TestCase):
         self.assertIn('"mousedown", "1"', body)
         self.assertIn('"mouseup", "1"', body)
         self.assertNotIn('"click", "--repeat"', body)
+
+    def test_bottom_shot_checks_footer_before_drag(self):
+        body = function_source(self.src, "bottom_shot")
+        self.assertLess(body.index("connection_footer_visible"), body.index("scroll_bottom(dialog, tag)"))
+        self.assertIn("return start_shot", body)
 
     def test_switch_stops_alpha_after_refusals_before_sibling_edits(self):
         body = self.body()

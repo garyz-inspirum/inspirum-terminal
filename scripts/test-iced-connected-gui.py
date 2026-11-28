@@ -1877,6 +1877,23 @@ def connection_dialog_region(width: int, height: int):
     return (max(0, width // 2 - half), 32, min(width, width // 2 + half), max(33, height - 22))
 
 
+def connection_footer_visible(shot: Path, dialog) -> bool:
+    """Read Save only in the dialog footer before attempting a scroll drag.
+
+    A narrow button crop avoids the Advanced SSH form confusing whole-dialog
+    OCR; at the top of the scroll this area has no Save only button.
+    """
+    _left, _top, right, bottom = dialog
+    footer = (right - 254, bottom - 59, right - 149, bottom - 26)
+    from PIL import Image
+    with tempfile.NamedTemporaryFile(suffix=".png") as temporary:
+        crop = _rgb_image(shot).crop(footer)
+        crop.resize((crop.width * 4, crop.height * 4), Image.Resampling.BICUBIC).save(temporary.name)
+        words = _scaled_words(_ocr_tsv(shutil.which("tesseract") or "tesseract",
+                                       Path(temporary.name), "6"), footer[:2], 4)
+    return match_visible_label(words, "Save only") is not None
+
+
 def connection_scroll_drag(shot: Path, dialog):
     """Drag the visible form scroller to its lower stop, bypassing wheel routing
     through controls in the expanded Advanced SSH options section."""
@@ -8678,6 +8695,10 @@ async def main() -> int:
                             command("xdotool", "mouseup", "1", env=env)
 
                         async def bottom_shot(dialog, tag: str) -> Path:
+                            start_shot = destination / f"connected-profile-{tag}-scroll-start.png"
+                            await asyncio.to_thread(screenshot, window, start_shot, env)
+                            if await asyncio.to_thread(connection_footer_visible, start_shot, dialog):
+                                return start_shot
                             await scroll_bottom(dialog, tag)
                             await asyncio.sleep(.8)
                             shot = destination / f"connected-profile-{tag}.png"
