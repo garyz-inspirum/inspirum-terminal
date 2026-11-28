@@ -5834,6 +5834,44 @@ def require_saved_ssh_config(profiles: Path, expected: str | None) -> None:
         raise RuntimeError(f"saved SSH config: expected {expected!r}, got {actual!r} in {path}")
 
 
+async def open_saved_ssh_config_editor(window: str, destination: Path, tag: str,
+                                       ssh_config: Path, env: dict[str, str], region):
+    """Locate the actual saved-file row, then target only its editor below.
+
+    Profiles is already visible before entry. One OCR frame per section label
+    is enough here: an absent label should fail with its OCR diagnostics, not
+    spin across screenshots until tesseract runs out of file descriptors.
+    """
+    heading = await locate_rendered_label(
+        window, destination / f"saved-{tag}-heading.png",
+        "SSH config file for tunnel auto-start", env=env, region=region, timeout=0,
+    )
+    saved_row = (region[0], heading[3] + 1, region[2],
+                 min(region[3], heading[3] + 70))
+    saved = await locate_rendered_label(
+        window, destination / f"saved-{tag}-current.png",
+        "Saved file:", env=env, region=saved_row, timeout=0,
+    )
+    # The Set control is directly below Saved file, not the Startup row.
+    set_row = (region[0], saved[3] + 1, region[2],
+               min(region[3], saved[3] + 42))
+    await click_label(window, destination / f"saved-{tag}-set.png",
+                      "Set SSH config for auto-start...", env,
+                      region=set_row, timeout=20)
+    section = (region[0], saved[3] + 1, region[2],
+               min(region[3], saved[3] + 134))
+    # Empty draft renders the placeholder; saved draft renders its path.
+    field = await locate_rendered_label(
+        window, destination / f"saved-{tag}-field.png",
+        "Absolute SSH config file path" if tag == "save" else str(ssh_config),
+        env=env, region=section, timeout=20,
+    )
+    actions = (section[0], field[3] + 1, section[2], min(section[3], field[3] + 48))
+    await locate_rendered_label(window, destination / f"saved-{tag}-actions.png",
+                                "Cancel", env=env, region=actions, timeout=20)
+    return actions, field
+
+
 async def saved_ssh_config_probe(binary: Path, profiles: Path, ssh_config: Path,
                                  local_root: Path, destination: Path, env: dict[str, str],
                                  app_log: Path, forward_ports, inherit_ports, events) -> None:
@@ -5904,28 +5942,9 @@ async def saved_ssh_config_probe(binary: Path, profiles: Path, ssh_config: Path,
         region = (max(0, (w - 880) // 2), 34, min(w, (w + 880) // 2), h - 22)
         await locate_rendered_label(window, destination / f"saved-{tag}-profiles.png",
                                     "Profiles", env=env, region=region)
-        saved = await locate_rendered_label(
-            window, destination / f"saved-{tag}-current.png",
-            "Saved SSH config:", env=env, region=region,
+        return await open_saved_ssh_config_editor(
+            window, destination, tag, ssh_config, env, region,
         )
-        # Bound the section below the persisted-value row, above Startup.
-        section = (region[0], saved[3] + 1, region[2], min(region[3], saved[3] + 100))
-        await click_label(window, destination / f"saved-{tag}-set.png",
-                          "Set SSH config for auto-start…", env, region=section, timeout=20)
-        # Empty draft renders the placeholder; a saved draft renders its actual
-        # path instead. Both are OCR targets *inside* the input, never an
-        # inferred coordinate below a non-existent field label.
-        field = await locate_rendered_label(
-            window, destination / f"saved-{tag}-field.png",
-            "Absolute SSH config file path" if tag == "save" else str(ssh_config),
-            env=env, region=section, timeout=20,
-        )
-        # The action row is directly below the observed input, not the other
-        # Save/Clear/Cancel buttons elsewhere in Tools.
-        actions = (section[0], field[3] + 1, section[2], min(section[3], field[3] + 48))
-        await locate_rendered_label(window, destination / f"saved-{tag}-actions.png",
-                                    "Cancel", env=env, region=actions)
-        return actions, field
 
     async def edit_path(tag: str, value: str):
         actions, field = await panel(tag)
