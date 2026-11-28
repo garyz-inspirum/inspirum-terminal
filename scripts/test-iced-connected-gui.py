@@ -181,12 +181,14 @@ class MonitoredServer(fixture.NativeServer):
 # Must not suppress any other echo.
 TOUR_WITHHOLD_ECHO = os.environ.get("INSPIRUM_GUI_TOUR_WITHHOLD_ECHO") == "1"
 FIND_INJECT_PTY_BYTE = os.environ.get("INSPIRUM_GUI_FIND_INJECT_PTY_BYTE") == "1"
-# Opt-in: the saved profile carries two labelled loopback -L forwards to a
-# fixture echo service, and the connected run toggles each one from the
-# Tunnels quick menu. Default mode keeps the empty-tunnel profile.
+# Env-enabled (CI always sets it): the saved profile carries two labelled
+# loopback -L forwards to a fixture echo service, and the connected run
+# toggles each one from the Tunnels quick menu. Default mode keeps the
+# empty-tunnel profile.
 POPULATED = os.environ.get("INSPIRUM_GUI_POPULATED") == "1"
 POPULATED_LABELS = ("Alpha forward", "Bravo forward")
-# Opt-in on top of POPULATED: Alpha's saved metadata carries
+# On top of POPULATED (CI's connected job sets both, so this check is
+# required there; local runs enable it via env): Alpha's saved metadata carries
 # ``auto_start: true`` (Bravo stays opted out). Before any Tunnels click the
 # run requires Alpha's listener to echo and Bravo's to refuse, then stops
 # Alpha with the real popup toggle so the populated flow below starts from

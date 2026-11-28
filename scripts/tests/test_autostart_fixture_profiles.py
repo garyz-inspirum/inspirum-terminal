@@ -69,7 +69,7 @@ class AutostartFixtureProfiles(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             module.populated_profile_ssh(PORTS, ECHO, auto_start=("Charlie forward",))
 
-    @unittest.skipIf(os.environ.get("INSPIRUM_GUI_AUTOSTART") == "1", "opt-in env set")
+    @unittest.skipIf(os.environ.get("INSPIRUM_GUI_AUTOSTART") == "1", "INSPIRUM_GUI_AUTOSTART set in env (as in CI)")
     def test_env_defaults_off(self):
         self.assertFalse(module.AUTOSTART)
 

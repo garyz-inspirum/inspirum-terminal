@@ -16,6 +16,12 @@ Pinned Python packages: `asyncssh==2.24.0`, `Pillow==13.0.0`.
 
 Modes: `smoke`, `connected`, `all` (= smoke + connected), `tour`. Artifacts (logs, screenshots) land in the `/out` mount.
 
+CI runs the connected acceptance with `INSPIRUM_GUI_POPULATED=1 INSPIRUM_GUI_AUTOSTART=1` (saved
+tunnels, their auto-start at launch and the inherited-ssh_config-forward skip are required there).
+`connected` here runs without them unless passed: add `-e INSPIRUM_GUI_POPULATED=1
+-e INSPIRUM_GUI_AUTOSTART=1` to `docker run` to mirror CI. `INSPIRUM_GUI_AUTOSTART=1` needs
+`INSPIRUM_GUI_POPULATED=1` and cannot be combined with `tour`.
+
 `tour` (`it-remote.sh gui tour`) re-runs the connected fixture with `INSPIRUM_GUI_TOUR=1` and the default LIGHT theme,
 writing best-effort screenshots `tour-01-start.png` … `tour-14-tools.png` (no `tour-09`: the Explorer tab was merged into Filer) to `/out/tour` (log: `/out/tour.log`).
 Only the window and a real SSH session are asserted; other steps warn and continue (fixed 1280x800 coordinates).
