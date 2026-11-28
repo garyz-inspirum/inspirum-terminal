@@ -5,9 +5,12 @@ use std::{
     io::Read,
     path::Path,
     process::{Child, Command, Stdio},
-    sync::{Arc, mpsc::Sender},
+    sync::{
+        Arc,
+        mpsc::{self, Sender},
+    },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const SSH_HELP: &str = "OpenSSH client unavailable. Install OpenSSH Client (Windows Settings > Optional features), macOS command-line tools, or your Linux openssh-clients package; ensure ssh is on PATH and restart Inspirum.";
@@ -524,6 +527,129 @@ pub fn tunnel_launch_args(session: &Session, config: Option<&Path>) -> Result<Ve
         .context("internal SSH argv is missing option terminator")?;
     args.insert(destination, "-N".into());
     Ok(args)
+}
+
+/// Forwards OpenSSH would set up for one invocation, as printed by `ssh -G`:
+/// the raw value after each keyword, command-line and configured alike.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EffectiveForwards {
+    pub local: Vec<String>,
+    pub remote: Vec<String>,
+    pub dynamic: Vec<String>,
+    /// `Tunnel` is anything other than `false`/`no` (a tun/tap device).
+    pub tunnel_device: bool,
+}
+
+/// Collect the forwarding lines of `ssh -G` output (keywords match
+/// case-insensitively; values are kept verbatim).
+pub fn parse_effective_forwards(output: &str) -> EffectiveForwards {
+    let mut forwards = EffectiveForwards::default();
+    for line in output.lines() {
+        let line = line.trim();
+        let (key, value) = match line.split_once(char::is_whitespace) {
+            Some((key, value)) => (key, value.trim()),
+            None => (line, ""),
+        };
+        match key.to_ascii_lowercase().as_str() {
+            "localforward" => forwards.local.push(value.to_owned()),
+            "remoteforward" => forwards.remote.push(value.to_owned()),
+            "dynamicforward" => forwards.dynamic.push(value.to_owned()),
+            "tunnel" => {
+                forwards.tunnel_device =
+                    !(value.eq_ignore_ascii_case("false") || value.eq_ignore_ascii_case("no"));
+            }
+            _ => {}
+        }
+    }
+    forwards
+}
+
+/// Upper bound for an `ssh -G` query run during app start-up: a user
+/// `Match exec` must not hang the app.
+const SSH_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn drain_pipe(pipe: Option<impl Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
+    let (sender, receiver) = mpsc::channel();
+    match pipe {
+        Some(mut pipe) => {
+            thread::spawn(move || {
+                let mut buffer = Vec::new();
+                let _ = pipe.read_to_end(&mut buffer);
+                let _ = sender.send(buffer);
+            });
+        }
+        None => {
+            let _ = sender.send(Vec::new());
+        }
+    }
+    receiver
+}
+
+/// Run `command` with stdin closed, killing it if it outlives `timeout`.
+fn output_within(
+    mut command: Command,
+    timeout: Duration,
+    what: &str,
+) -> Result<std::process::Output> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("start {what}"))?;
+    let stdout = drain_pipe(child.stdout.take());
+    let stderr = drain_pipe(child.stderr.take());
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("{what} did not finish within {} seconds", timeout.as_secs());
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    // A grandchild (for example a `Match exec` helper) may hold a pipe open.
+    let grace = || {
+        deadline
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(200))
+    };
+    let stdout = stdout
+        .recv_timeout(grace())
+        .with_context(|| format!("{what} kept its output open past the time limit"))?;
+    let stderr = stderr.recv_timeout(grace()).unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Ask OpenSSH which forwards the real tunnel launch would set up: the exact
+/// [`tunnel_launch_args`] argv with `-G` before the `--` terminator, so `-F`,
+/// every `-o` and the forward flags are evaluated as the launch would be.
+/// Opens no connection; bounded by a 5 second limit.
+pub fn effective_forwards(session: &Session, config: Option<&Path>) -> Result<EffectiveForwards> {
+    let mut args = tunnel_launch_args(session, config)?;
+    let terminator = args
+        .iter()
+        .position(|arg| arg == "--")
+        .context("internal SSH argv is missing option terminator")?;
+    args.insert(terminator, "-G".into());
+    check_openssh(Path::new("ssh"))?;
+    let mut command = Command::new("ssh");
+    command.args(args);
+    let output = output_within(command, SSH_QUERY_TIMEOUT, "ssh -G forwarding query")?;
+    ensure!(
+        output.status.success(),
+        "ssh -G failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let text = String::from_utf8(output.stdout).context("ssh -G output was not UTF-8")?;
+    Ok(parse_effective_forwards(&text))
 }
 
 pub fn start_tunnels(session: &Session, config: Option<&Path>) -> Result<TunnelProcess> {

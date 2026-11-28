@@ -2866,6 +2866,9 @@ auto-start: start manually ({})",
 struct AutoStartFake {
     calls: Vec<(String, tunnels::ForwardKind, String)>,
     fail_specs: Vec<String>,
+    /// Refused as `Manager::start_forward_exact` refuses a forward whose
+    /// host configuration adds or changes forwards.
+    config_skip_specs: Vec<String>,
 }
 
 fn tunnel_menu_separator<'a>() -> Element<'a, Message> {
@@ -4866,6 +4869,9 @@ impl App {
             let task = self.auto_start_step(&mut |_, session, kind, spec, _| {
                 fake.calls
                     .push((session_profile_key(session), kind, spec.to_owned()));
+                if fake.config_skip_specs.iter().any(|skip| skip == spec) {
+                    return Err(tunnels::InheritedForwards.into());
+                }
                 Ok(if fake.fail_specs.iter().any(|fail| fail == spec) {
                     tunnels::Status::Failed("listener busy".into())
                 } else {
@@ -18444,6 +18450,36 @@ mod tunnel_layout_tests {
         // The pass ran once: a stray later message launches nothing more.
         let _ = app.update(Message::TunnelAutoStartNext);
         assert_eq!(auto_start_calls(&app).len(), 2);
+    }
+
+    #[test]
+    fn startup_pass_skips_exact_forward_config_mismatch_and_continues() {
+        let (_dir, path, _key) = auto_start_boot_library();
+        let (mut app, _task) = App::startup(path, None);
+        app.auto_start_fake = Some(AutoStartFake {
+            config_skip_specs: vec![AUTO_START_WEB.into()],
+            ..Default::default()
+        });
+        drain_auto_start(&mut app);
+        // The refused forward does not stop the next launch.
+        assert_eq!(auto_start_calls(&app), vec![AUTO_START_WEB, AUTO_START_DB]);
+        assert!(
+            app.status
+                .contains("launch requested for 1 tunnel (see Tunnels for live status)"),
+            "{}",
+            app.status
+        );
+        // Reported as a skip with the manual-start hint, not as a failure.
+        assert!(!app.status.contains("failed"), "{}", app.status);
+        assert!(
+            app.status.contains(
+                "1 tunnel skipped, the host's OpenSSH configuration adds or changes port \
+forwards: start manually ("
+            ),
+            "{}",
+            app.status
+        );
+        assert_eq!(app.tunnel_notice, app.status);
     }
 
     #[test]

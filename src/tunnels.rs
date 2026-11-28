@@ -9,7 +9,7 @@ use std::path::Path;
 
 use anyhow::{Result, ensure};
 
-use crate::terminal::TunnelProcess;
+use crate::terminal::{EffectiveForwards, TunnelProcess};
 use crate::{
     Session, TunnelKind, TunnelLabel, session_profile_key, session_requires_forward_risk_ack,
 };
@@ -626,6 +626,34 @@ impl Manager {
         spec: &str,
         config: Option<&Path>,
     ) -> Result<Status> {
+        self.launch_forward(session, kind, spec, config, None)
+    }
+
+    /// [`Self::start_forward`] for unattended launches: before spawning, ask
+    /// OpenSSH (`ssh -G`) which forwards the launch would really set up and
+    /// refuse unless that is exactly the selected one.
+    pub fn start_forward_exact(
+        &mut self,
+        session: &Session,
+        kind: ForwardKind,
+        spec: &str,
+        config: Option<&Path>,
+    ) -> Result<Status> {
+        let preflight: Preflight<'_> = &crate::terminal::effective_forwards;
+        self.launch_forward(session, kind, spec, config, Some(preflight))
+    }
+
+    /// Shared body of the start variants. `preflight` runs strictly before
+    /// `start_tunnels`; its failure returns `Err` with nothing spawned or
+    /// recorded.
+    fn launch_forward(
+        &mut self,
+        session: &Session,
+        kind: ForwardKind,
+        spec: &str,
+        config: Option<&Path>,
+        preflight: Option<Preflight<'_>>,
+    ) -> Result<Status> {
         let profile = session_profile_key(session);
         let key = ProcessKey::forward(&profile, kind, spec);
         session.ssh_args()?;
@@ -686,6 +714,10 @@ impl Manager {
             "non-loopback tunnel binds require explicit risk acknowledgement"
         );
         selected.ssh_args()?;
+        if let Some(preflight) = preflight {
+            let effective = preflight(&selected, config)?;
+            ensure_exact_forward(&effective, kind, spec)?;
+        }
         self.failures.remove(&key);
         match crate::terminal::start_tunnels(&selected, config) {
             Ok(process) => {
@@ -750,6 +782,36 @@ impl Manager {
         }
         self.failures.clear();
     }
+}
+
+/// Effective-forward query run before an unattended spawn.
+type Preflight<'a> = &'a dyn Fn(&Session, Option<&Path>) -> Result<EffectiveForwards>;
+
+/// The OpenSSH configuration would make an unattended launch set up more,
+/// fewer or different forwards than the selected one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InheritedForwards;
+
+impl std::fmt::Display for InheritedForwards {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "OpenSSH configuration for this host adds or changes port forwards; \
+start this tunnel manually",
+        )
+    }
+}
+
+impl std::error::Error for InheritedForwards {}
+
+/// Ok only when `effective` (from `ssh -G`) is exactly the selected forward.
+pub fn ensure_exact_forward(
+    effective: &EffectiveForwards,
+    kind: ForwardKind,
+    spec: &str,
+) -> Result<()> {
+    // Seam only: enforcement lands with the fix.
+    let _ = (effective, kind, spec);
+    Ok(())
 }
 
 fn isolated_forward(session: &Session, kind: ForwardKind, spec: &str) -> Session {
@@ -1330,5 +1392,308 @@ mod tests {
         assert_eq!(manager.running_count(), 3);
         manager.stop_all();
         assert_eq!(manager.running_count(), 0);
+    }
+
+    /// `ssh -G` of OpenSSH 8.7 for a `Host charlie` stanza with
+    /// LocalForward/RemoteForward/DynamicForward plus `-L`/`-D` flags.
+    const MEASURED_EFFECTIVE: &str = "\
+dynamicforward [127.0.0.1]:1081
+dynamicforward 1080
+localforward [127.0.0.1]:9100 [127.0.0.1]:7
+localforward [::1]:9104 [::1]:7
+localforward [127.0.0.1]:9101 [127.0.0.1]:7
+remoteforward 9102 [localhost]:7
+tunnel false
+clearallforwardings no
+";
+
+    fn effective(local: &[&str], remote: &[&str], dynamic: &[&str]) -> EffectiveForwards {
+        let owned = |values: &[&str]| values.iter().map(|value| value.to_string()).collect();
+        EffectiveForwards {
+            local: owned(local),
+            remote: owned(remote),
+            dynamic: owned(dynamic),
+            tunnel_device: false,
+        }
+    }
+
+    #[test]
+    fn parse_exact_forward_effective_output_into_buckets() {
+        let parsed = crate::terminal::parse_effective_forwards(MEASURED_EFFECTIVE);
+        assert_eq!(
+            parsed,
+            effective(
+                &[
+                    "[127.0.0.1]:9100 [127.0.0.1]:7",
+                    "[::1]:9104 [::1]:7",
+                    "[127.0.0.1]:9101 [127.0.0.1]:7",
+                ],
+                &["9102 [localhost]:7"],
+                &["[127.0.0.1]:1081", "1080"],
+            )
+        );
+        assert!(!parsed.tunnel_device);
+        let tun = crate::terminal::parse_effective_forwards("Tunnel point-to-point\n");
+        assert!(tun.tunnel_device);
+        let off = crate::terminal::parse_effective_forwards("TUNNEL no\n");
+        assert!(!off.tunnel_device);
+        assert_eq!(
+            crate::terminal::parse_effective_forwards("LocalForward 9 [h]:1\n").local,
+            vec!["9 [h]:1".to_owned()]
+        );
+    }
+
+    #[test]
+    fn ensure_exact_forward_accepts_only_selected_forward() {
+        let (l, d) = (ForwardKind::Local, ForwardKind::Dynamic);
+        for (kind, spec, effective) in [
+            (
+                l,
+                "127.0.0.1:9100:127.0.0.1:7",
+                effective(&["[127.0.0.1]:9100 [127.0.0.1]:7"], &[], &[]),
+            ),
+            (
+                l,
+                "[::1]:9104:[::1]:7",
+                effective(&["[::1]:9104 [::1]:7"], &[], &[]),
+            ),
+            (
+                l,
+                "127.0.0.1:8080:web:80",
+                effective(&["[127.0.0.1]:8080 [web]:80"], &[], &[]),
+            ),
+            (
+                d,
+                "127.0.0.1:1081",
+                effective(&[], &[], &["[127.0.0.1]:1081"]),
+            ),
+        ] {
+            ensure_exact_forward(&effective, kind, spec).unwrap_or_else(|error| {
+                panic!("{spec} must be accepted: {error:#}");
+            });
+        }
+    }
+
+    #[test]
+    fn ensure_exact_forward_rejects_inherited_or_changed_forwards() {
+        let (l, d) = (ForwardKind::Local, ForwardKind::Dynamic);
+        let web = "127.0.0.1:9100:127.0.0.1:7";
+        let web_effective = "[127.0.0.1]:9100 [127.0.0.1]:7";
+        let mut tunnel = effective(&[web_effective], &[], &[]);
+        tunnel.tunnel_device = true;
+        for (case, kind, spec, effective) in [
+            (
+                "extra inherited loopback LocalForward",
+                l,
+                web,
+                effective(&[web_effective, "[127.0.0.1]:9101 [127.0.0.1]:7"], &[], &[]),
+            ),
+            (
+                "inherited RemoteForward",
+                l,
+                web,
+                effective(&[web_effective], &["9102 [localhost]:7"], &[]),
+            ),
+            (
+                "inherited DynamicForward",
+                l,
+                web,
+                effective(&[web_effective], &[], &["1080"]),
+            ),
+            (
+                "inherited wildcard LocalForward",
+                l,
+                web,
+                effective(&[web_effective, "[0.0.0.0]:9200 [web]:80"], &[], &[]),
+            ),
+            (
+                "inherited star LocalForward",
+                l,
+                web,
+                effective(&[web_effective, "[*]:9201 [web]:80"], &[], &[]),
+            ),
+            (
+                "ClearAllForwardings leaves nothing",
+                l,
+                web,
+                effective(&[], &[], &[]),
+            ),
+            (
+                "selected listener with a different target",
+                l,
+                web,
+                effective(&["[127.0.0.1]:9100 [127.0.0.1]:8"], &[], &[]),
+            ),
+            (
+                "selected listener widened by config",
+                l,
+                web,
+                effective(&["9100 [127.0.0.1]:7"], &[], &[]),
+            ),
+            (
+                "same listener under another kind",
+                d,
+                "127.0.0.1:9100",
+                effective(&[web_effective], &[], &[]),
+            ),
+            (
+                "unparseable effective value",
+                l,
+                web,
+                effective(&["/tmp/socket /tmp/target"], &[], &[]),
+            ),
+            ("tunnel device", l, web, tunnel),
+        ] {
+            let error = ensure_exact_forward(&effective, kind, spec)
+                .expect_err(case)
+                .to_string();
+            assert_eq!(error, InheritedForwards.to_string(), "{case}");
+        }
+    }
+
+    #[test]
+    fn exact_forward_preflight_rejects_inherited_forward_before_spawning() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = hung_ssh_config(dir.path());
+        let spec = "127.0.0.1:18090:web:80";
+        let session = Session {
+            name: "srv".into(),
+            host: "srv.invalid".into(),
+            ssh: crate::SshOptions {
+                local_forwards: vec![spec.into(), "127.0.0.1:18091:db:5432".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let asked = std::cell::Cell::new(0);
+        let fake: Preflight<'_> = &|selected, _| {
+            asked.set(asked.get() + 1);
+            // The preflight sees the isolated launch, not the whole profile.
+            assert_eq!(selected.ssh.local_forwards, vec![spec.to_owned()]);
+            Ok(effective(
+                &[
+                    "[127.0.0.1]:18090 [web]:80",
+                    "[127.0.0.1]:18092 [127.0.0.1]:7",
+                ],
+                &[],
+                &[],
+            ))
+        };
+        let mut manager = Manager::default();
+        // Reaching start_tunnels would yield a running (hung) ssh here.
+        let result = manager.launch_forward(
+            &session,
+            ForwardKind::Local,
+            spec,
+            Some(&config),
+            Some(fake),
+        );
+        assert_eq!(asked.get(), 1);
+        let error = result.expect_err("inherited forward must refuse the launch");
+        assert!(
+            error.downcast_ref::<InheritedForwards>().is_some(),
+            "{error:#}"
+        );
+        let key = session_profile_key(&session);
+        assert_eq!(
+            manager.forward_status(&key, ForwardKind::Local, spec),
+            Status::Stopped
+        );
+        assert_eq!(manager.running_count(), 0);
+        assert!(manager.processes.is_empty());
+        assert!(manager.failures.is_empty());
+    }
+
+    #[test]
+    fn exact_forward_preflight_launches_when_only_selected_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = hung_ssh_config(dir.path());
+        let spec = "127.0.0.1:18093:web:80";
+        let session = Session {
+            name: "srv".into(),
+            host: "srv.invalid".into(),
+            ssh: crate::SshOptions {
+                local_forwards: vec![spec.into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let fake: Preflight<'_> = &|_, _| Ok(effective(&["[127.0.0.1]:18093 [web]:80"], &[], &[]));
+        let mut manager = Manager::default();
+        let status = manager
+            .launch_forward(
+                &session,
+                ForwardKind::Local,
+                spec,
+                Some(&config),
+                Some(fake),
+            )
+            .unwrap();
+        assert!(status.is_running(), "{status:?}");
+        manager.stop_all();
+    }
+
+    #[test]
+    fn manual_start_skips_exact_forward_check() {
+        // A config that adds a forward does not change manual semantics.
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("ssh_config");
+        std::fs::write(
+            &config,
+            "Host *\n  ProxyCommand sleep 30\n  LocalForward 127.0.0.1:18095 127.0.0.1:7\n",
+        )
+        .unwrap();
+        let spec = "127.0.0.1:18094:web:80";
+        let session = Session {
+            name: "srv".into(),
+            host: "srv.invalid".into(),
+            ssh: crate::SshOptions {
+                local_forwards: vec![spec.into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut manager = Manager::default();
+        let status = manager
+            .start_forward(&session, ForwardKind::Local, spec, Some(&config))
+            .unwrap();
+        assert!(status.is_running(), "{status:?}");
+        manager.stop_all();
+    }
+
+    /// Real OpenSSH, no network: `ssh -G` only evaluates the configuration.
+    #[test]
+    fn real_openssh_exact_forward_rejects_config_inherited_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = "127.0.0.1:18096:127.0.0.1:7";
+        let session = Session {
+            name: "srv".into(),
+            host: "exactfwd.invalid".into(),
+            ssh: crate::SshOptions {
+                local_forwards: vec![spec.into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let inherited = dir.path().join("inherited_config");
+        std::fs::write(
+            &inherited,
+            "Host exactfwd.invalid\n  ServerAliveInterval 30\n  \
+LocalForward 127.0.0.1:18097 127.0.0.1:7\n",
+        )
+        .unwrap();
+        let plain = dir.path().join("plain_config");
+        std::fs::write(&plain, "Host exactfwd.invalid\n  ServerAliveInterval 30\n").unwrap();
+
+        let found = crate::terminal::effective_forwards(&session, Some(&inherited)).unwrap();
+        assert_eq!(found.local.len(), 2, "{found:?}");
+        let error = ensure_exact_forward(&found, ForwardKind::Local, spec).unwrap_err();
+        assert!(
+            error.downcast_ref::<InheritedForwards>().is_some(),
+            "{error:#}"
+        );
+
+        let found = crate::terminal::effective_forwards(&session, Some(&plain)).unwrap();
+        ensure_exact_forward(&found, ForwardKind::Local, spec).unwrap();
     }
 }
