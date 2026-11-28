@@ -332,6 +332,21 @@ class HalfPixelListButtonsTest(unittest.TestCase):
         self.assertEqual(module.tunnel_add_centre(
             HALF_PIXEL_LOCAL, HALF_PIXEL_LOCAL_HEADING, 1280), (267, 546))
 
+    def test_split_top_also_crisp_one_row_down_is_one_pair(self):
+        # If the lower top row also cleared the crisp floor (52 instead of
+        # 49) the same buttons would be found at y 534 (split) and 535
+        # (crisp): that is one pair, not "several" (without the overlap
+        # rule this frame raised with boxes at 534 and 535).
+        width, height, channels, real_rows = module._read_png(HALF_PIXEL_CI)
+        rows = [bytearray(r) for r in real_rows]
+        for x in list(range(255, 279)) + list(range(287, 311)):
+            rows[535][x * channels:x * channels + 3] = bytes((52, 52, 52))
+        found = self._states(image=(width, height, channels, rows))
+        self.assertIsNotNone(found)
+        (plus, plus_on), (minus, minus_on) = found
+        self.assertEqual((plus[1], minus[1]), (534, 534))
+        self.assertTrue(plus_on and minus_on)
+
     def test_one_button_painted_out_is_no_pair(self):
         # Negative control: either button (borders included, 1 px margin)
         # repainted to the card leaves a lone outline; it must not pair

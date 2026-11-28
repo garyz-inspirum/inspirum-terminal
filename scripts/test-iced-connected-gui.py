@@ -1808,7 +1808,18 @@ def session_menu_region(session_label_bounds, width: int, height: int):
 # renderings), required to be flat; the fill is the interior median, which
 # must also be the value of most interior pixels (glyph strokes ~180 and
 # the 32/33 inner rows cannot move it).
+# Runner, head 937f4fc (fixed-height editor row): the dialog ALSO sits half
+# a pixel lower, so each horizontal border is split over two rows: top
+# y 534/535 = luma 48/49 (ends 43/53, 38/56), bottom 556/557 = 53/44 (ends
+# 56/40, 57/34); no top row reaches 50 across the box. A split border is a
+# column where BOTH rows lie in TUNNEL_LIST_BUTTON_SPLIT_ROW and their sum
+# is >= TUNNEL_LIST_BUTTON_SPLIT_SUM: the border's coverage shared by two
+# rows (measured 91..101). A crisp frame never matches: the crisp row's
+# neighbours are card 25 / fill 30 (41 at single corner columns), below
+# the per-row floor; card+card 50 and fill+fill 60 fail the sum.
 TUNNEL_LIST_BUTTON_BORDER = (50, 100)
+TUNNEL_LIST_BUTTON_SPLIT_ROW = (36, 100)
+TUNNEL_LIST_BUTTON_SPLIT_SUM = 85
 TUNNEL_LIST_BUTTON_W = (18, 40)
 TUNNEL_LIST_BUTTON_H = (18, 28)
 TUNNEL_LIST_BUTTON_GAP = (1, 10)
@@ -1826,14 +1837,25 @@ TUNNEL_LIST_BUTTON_CARD_DX = (5, 3)
 TUNNEL_LIST_BUTTON_FILL_SHARE = 0.6
 
 
-def _border_runs(row, channels, x1, x2):
+def _border_runs(row, channels, x1, x2, below=None):
+    """Runs ``(start, end)`` of 18..40 border columns in ``row``; with
+    ``below`` (the next pixel row) a column counts when the border is split
+    over the two rows (see TUNNEL_LIST_BUTTON_SPLIT_*) instead."""
     lo, hi = TUNNEL_LIST_BUTTON_BORDER
+    split_lo, split_hi = TUNNEL_LIST_BUTTON_SPLIT_ROW
     runs, start = [], None
     for x in range(x1, x2 + 1):
         on = False
         if x < x2:
             r, g, b = row[x * channels], row[x * channels + 1], row[x * channels + 2]
-            on = lo <= (r * 299 + g * 587 + b * 114) // 1000 <= hi
+            luma = (r * 299 + g * 587 + b * 114) // 1000
+            if below is None:
+                on = lo <= luma <= hi
+            else:
+                r, g, b = below[x * channels], below[x * channels + 1], below[x * channels + 2]
+                luma2 = (r * 299 + g * 587 + b * 114) // 1000
+                on = (split_lo <= luma <= split_hi and split_lo <= luma2 <= split_hi
+                      and luma + luma2 >= TUNNEL_LIST_BUTTON_SPLIT_SUM)
         if on and start is None:
             start = x
         elif not on and start is not None:
@@ -1901,15 +1923,34 @@ def tunnel_list_button_states(path: Path, heading_bounds, width: int, *, image=N
     runs_at = {}
 
     def runs(y):
+        # Crisp runs on row y and split runs over rows y, y+1, merged where
+        # they overlap (one border drawn both ways); the third field is the
+        # number of rows the border covers, so a box closes on its last row.
         if y not in runs_at:
-            runs_at[y] = _border_runs(rows[y], channels, x1, x2)
+            found = [(a, b, 1) for a, b in _border_runs(rows[y], channels, x1, x2)]
+            if y + 1 < img_h:
+                found += [(a, b, 2) for a, b in
+                          _border_runs(rows[y], channels, x1, x2, below=rows[y + 1])]
+            merged = []
+            for a, b, depth in sorted(found):
+                if merged and a < merged[-1][1]:
+                    pa, pb, pd = merged[-1]
+                    merged[-1] = (pa, max(pb, b), max(pd, depth))
+                else:
+                    merged.append((a, b, depth))
+            runs_at[y] = merged
         return runs_at[y]
 
     def bottom_of(run, y):
         for y2 in range(y + TUNNEL_LIST_BUTTON_H[0], min(img_h, y + TUNNEL_LIST_BUTTON_H[1] + 1)):
-            if any(abs(c[0] - run[0]) <= 1 and abs(c[1] - run[1]) <= 1 for c in runs(y2)):
-                return y2
+            for c in runs(y2):
+                if abs(c[0] - run[0]) <= 1 and abs(c[1] - run[1]) <= 1:
+                    return y2 + c[2] - 1
         return None
+
+    def overlaps(p, q):
+        return all(a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+                   for a, b in zip(p, q))
 
     for y in range(max(0, heading_bounds[3]), min(img_h, heading_bounds[1] + 560)):
         top = runs(y)
@@ -1918,7 +1959,11 @@ def tunnel_list_button_states(path: Path, heading_bounds, width: int, *, image=N
                 continue
             ya, yb = bottom_of(a, y), bottom_of(b, y)
             if ya is not None and yb is not None:
-                pairs.append(((a[0], y, a[1] + 1, ya + 1), (b[0], y, b[1] + 1, yb + 1)))
+                pair = ((a[0], y, a[1] + 1, ya + 1), (b[0], y, b[1] + 1, yb + 1))
+                # The lower row of a split top border can also read as a
+                # crisp top one row down: same two boxes, not a second pair.
+                if not any(abs(pair[0][1] - p[0][1]) <= 1 and overlaps(pair, p) for p in pairs):
+                    pairs.append(pair)
     if not pairs:
         return None
     if len(pairs) > 1:
