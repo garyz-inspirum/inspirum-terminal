@@ -28,7 +28,9 @@ jobs:
   preview:
     name: Native preview (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    # Ubuntu's connected GUI run reached the saved-config relaunch at 25 minutes;
+    # allow the full ordinary-launch Save/Cancel/Clear acceptance to finish.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
