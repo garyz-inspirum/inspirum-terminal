@@ -1189,7 +1189,9 @@ pub struct HistorySnapshot {
     /// Grid rows above the screen when the snapshot was taken. Rows `0..history_rows` are
     /// immutable scrollback; later rows are the live screen and may be rewritten in place.
     pub history_rows: usize,
-    /// Most scrollback rows the grid keeps ([`SCROLLBACK_LINES`]).
+    /// Most scrollback rows the active grid keeps: [`SCROLLBACK_LINES`] on the main screen,
+    /// `0` on the alternate screen (alacritty gives it no scrollback). A change means the
+    /// snapshot came from the other grid.
     pub capacity: usize,
     /// Grid columns; a change means every row was reflowed.
     pub columns: usize,
@@ -1278,13 +1280,14 @@ where
     lines
 }
 
-/// [`HistorySnapshot`] of a real alacritty grid; `capacity` is the grid's configured
-/// `scrolling_history`.
+/// [`HistorySnapshot`] of the active alacritty grid; `capacity` is the main grid's
+/// configured `scrolling_history` (the alternate grid keeps none).
 fn grid_history_snapshot<T>(terminal: &Term<T>, capacity: usize) -> HistorySnapshot {
+    let alternate = terminal.mode().contains(TermMode::ALT_SCREEN);
     HistorySnapshot {
         lines: grid_logical_lines(terminal),
         history_rows: terminal.history_size(),
-        capacity,
+        capacity: if alternate { 0 } else { capacity },
         columns: terminal.columns(),
     }
 }
@@ -1452,6 +1455,18 @@ mod logical_line_tests {
         assert_eq!(snapshot.lines.len(), 7);
         assert_eq!(snapshot.lines[0].text, "r2");
         assert_eq!(snapshot.lines[6].text, "r8");
+
+        // The alternate screen has no scrollback; leaving it restores the main grid.
+        parser.advance(&mut terminal, b"\x1b[?1049hvim");
+        let snapshot = grid_history_snapshot(&terminal, 3);
+        assert_eq!(
+            (snapshot.history_rows, snapshot.capacity, snapshot.columns),
+            (0, 0, 10)
+        );
+        parser.advance(&mut terminal, b"\x1b[?1049l");
+        let snapshot = grid_history_snapshot(&terminal, 3);
+        assert_eq!((snapshot.history_rows, snapshot.capacity), (3, 3));
+        assert_eq!(snapshot.lines[0].text, "r2");
     }
 }
 

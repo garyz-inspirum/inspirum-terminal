@@ -309,6 +309,21 @@ Sizes:
   both 10k and 50k: query-edit latency, streamed-output latency, resize latency and peak
   RSS. 100k (363 MB per pane, about 2× resize cost) is not justified until Stage 2 lets
   the grid shrink again. Make it a backend setting field, not a constant.
+- Line identity across refreshes (marks, the selected hit): `history_lines` returns a
+  `HistorySnapshot` with `history_rows`, `capacity` and `columns` read under the same lock
+  (`capacity` is 0 on the alternate screen, so ids never cross between the two grids).
+  Below capacity with unchanged columns and history not shrunk, no row can have been
+  evicted, so a line keeps the id of the line that started on the same grid row; the
+  immutable history rows must read the same, otherwise it is a reset (history cleared or
+  terminal reset). At capacity, after a column change or when history shrank, ids carry
+  only when exactly one shift of the old immutable history matches the new snapshot (a
+  soft-wrapped top line cut by eviction is handled and gets a fresh id). Cost: when two
+  or more shifts match (runs of identical or blank lines, periodic output, or just the
+  oldest retained line equalling the newest history line), alacritty gives no eviction
+  count to tell them apart, so every line gets a fresh id, all marks and the selected-hit
+  anchor are dropped (selection returns to the first hit) and the drop is counted
+  (`HistoryState::dropped_marks`). Exact identity at capacity needs Stage 2's eviction
+  capture.
 - Tests:
   - unit: chord routing for `FindOrForward`, covering main screen, alt screen,
     `find_focused`, open menu and privacy lock;
