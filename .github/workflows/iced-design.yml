@@ -208,8 +208,11 @@ jobs:
         shell: bash
         run: |
           python3 -m pip install --disable-pip-version-check "asyncssh==2.24.0" "Pillow==13.0.0"
-          # Populated tunnels probe is mandatory in CI (same run, not a second pass).
-          INSPIRUM_GUI_POPULATED=1 python3 -B scripts/test-iced-connected-gui.py \
+          # Populated tunnels and saved-tunnel auto-start probes are mandatory in
+          # CI, in this one run (not a second pass): auto-start must launch only
+          # the opted-in Alpha and skip an opted-in forward whose ssh_config host
+          # adds another LocalForward.
+          INSPIRUM_GUI_POPULATED=1 INSPIRUM_GUI_AUTOSTART=1 python3 -B scripts/test-iced-connected-gui.py \
             target/release/inspirum-terminal preview-artifacts/connected
       - name: Prepare preview artifact
         if: always()
