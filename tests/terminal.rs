@@ -96,21 +96,41 @@ fn retained_history_snapshot_includes_scrollback_and_survives_viewport_navigatio
     .unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    let history = loop {
-        let lines = backend.history_lines();
-        if lines.iter().any(|line| line.contains("HIST-080")) {
-            break lines;
+    let snapshot = loop {
+        let snapshot = backend.history_lines();
+        if snapshot
+            .lines
+            .iter()
+            .any(|line| line.text.contains("HIST-080"))
+        {
+            break snapshot;
         }
         assert!(Instant::now() < deadline, "retained history did not fill");
         thread::sleep(Duration::from_millis(20));
     };
 
+    assert_eq!(snapshot.capacity, terminal_core::SCROLLBACK_LINES);
+    assert!(snapshot.columns > 0);
+    assert!(
+        snapshot.history_rows > 0,
+        "81 rows on a shorter screen must reach history"
+    );
+    let history = snapshot.lines;
+    let oldest = history
+        .iter()
+        .find(|line| line.text.contains("HIST-001"))
+        .expect("first generated line retained");
+    assert!(
+        oldest.first_row < snapshot.history_rows,
+        "the oldest line lies in scrollback"
+    );
     let retained_scrollback = history
         .iter()
-        .position(|line| line.contains("HIST-040"))
+        .find(|line| line.text.contains("HIST-040"))
+        .map(|line| line.first_row)
         .expect("offscreen generated line retained");
     assert!(
-        history.iter().any(|line| line.contains("HIST-080")),
+        history.iter().any(|line| line.text.contains("HIST-080")),
         "newest generated line retained"
     );
     assert!(backend.scroll_to_history_index(retained_scrollback));
@@ -126,8 +146,9 @@ fn retained_history_snapshot_includes_scrollback_and_survives_viewport_navigatio
     assert!(
         backend
             .history_lines()
+            .lines
             .iter()
-            .any(|line| line.contains("HIST-040")),
+            .any(|line| line.text.contains("HIST-040")),
         "rendering a viewport must not alter retained history"
     );
 }

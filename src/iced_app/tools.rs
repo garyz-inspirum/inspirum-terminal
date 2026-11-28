@@ -16,6 +16,10 @@ use iced::widget::{checkbox, slider};
 use ssh_tools::SshField;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Minimum spacing of history snapshots while a pane streams output.
+pub(super) const HISTORY_REFRESH_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(250);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Panel {
     Profiles,
@@ -139,7 +143,7 @@ pub(super) enum Action {
     SyncArm(bool),
     HistoryQuery(String),
     HistoryNext(bool),
-    HistorySelect(usize),
+    HistorySelect(u64, u64, usize),
     HistoryMark,
     HistoryTimestamps(bool),
     HistoryFold(u64),
@@ -244,6 +248,16 @@ pub(super) struct State {
     pub report_path: String,
     pub errors: crate::support::SanitizedErrorHistory,
     pub load_errors: Vec<String>,
+    /// Per-pane count of PTY Wakeups (output), bumped beside `display_dirty`.
+    pub history_output_generation: BTreeMap<u64, u64>,
+    /// Per-pane output generation and time of the last history snapshot.
+    pub history_snapshot_seen: BTreeMap<u64, (u64, std::time::Instant)>,
+    /// Number of history snapshots taken (test hook for the frame path).
+    #[cfg(test)]
+    pub history_refresh_count: u64,
+    /// Test seam: snapshot source for panes without a live terminal.
+    #[cfg(test)]
+    pub history_test_source: BTreeMap<u64, terminal_core::HistorySnapshot>,
 }
 impl State {
     pub fn load(path: &std::path::Path) -> Self {
@@ -326,8 +340,29 @@ impl State {
             report_path: String::new(),
             errors: Default::default(),
             load_errors,
+            history_output_generation: BTreeMap::new(),
+            history_snapshot_seen: BTreeMap::new(),
+            #[cfg(test)]
+            history_refresh_count: 0,
+            #[cfg(test)]
+            history_test_source: BTreeMap::new(),
         }
     }
+}
+impl State {
+    /// The pane's grid was reflowed or resized: snapshot coordinates taken
+    /// before this point are stale even if the child prints nothing.
+    pub(super) fn mark_history_layout_changed(&mut self, id: u64) {
+        let generation = self.history_output_generation.entry(id).or_default();
+        *generation = generation.wrapping_add(1);
+    }
+}
+/// Status shown when a snapshot cleared marks whose line identity was lost.
+pub(super) fn history_marks_cleared_status(count: u64) -> String {
+    let noun = if count == 1 { "mark" } else { "marks" };
+    format!(
+        "{count} history {noun} cleared: line identity could not be verified after a history refresh."
+    )
 }
 impl Drop for State {
     fn drop(&mut self) {
@@ -431,17 +466,80 @@ impl App {
     fn workspace_id(tab: &Workspace) -> u64 {
         tab.id
     }
+    /// Unconditional snapshot of the focused pane (panel open, Mark, Find open).
     pub(super) fn history_refresh(&mut self) {
+        self.history_refresh_at(std::time::Instant::now());
+    }
+    fn history_refresh_at(&mut self, now: std::time::Instant) {
         if let Some(tab) = self.tabs.get_mut(self.active)
             && let Some(pane) = tab.panes.get_mut(tab.focus)
-            && let Some(terminal) = &pane.terminal
         {
-            self.tools.history_owner = Some(pane.id);
+            let generation = self
+                .tools
+                .history_output_generation
+                .get(&pane.id)
+                .copied()
+                .unwrap_or(0);
             self.tools
-                .histories
-                .entry(pane.id)
-                .or_default()
-                .update_snapshot(terminal.history_lines());
+                .history_snapshot_seen
+                .insert(pane.id, (generation, now));
+            #[cfg(test)]
+            {
+                self.tools.history_refresh_count += 1;
+            }
+            let snapshot = pane
+                .terminal
+                .as_ref()
+                .map(|terminal| terminal.history_lines());
+            #[cfg(test)]
+            let snapshot =
+                snapshot.or_else(|| self.tools.history_test_source.get(&pane.id).cloned());
+            if let Some(snapshot) = snapshot {
+                self.tools.history_owner = Some(pane.id);
+                let state = self.tools.histories.entry(pane.id).or_default();
+                let dropped_before = state.dropped_marks();
+                state.update_lines(snapshot);
+                let dropped = state.dropped_marks().saturating_sub(dropped_before);
+                if dropped > 0 {
+                    self.status = history_marks_cleared_status(dropped);
+                }
+            }
+        }
+    }
+    /// Refresh the focused pane's snapshot only when it produced output since
+    /// the last snapshot. With `throttle`, at most one refresh per
+    /// `HISTORY_REFRESH_INTERVAL`; returns true when a stale snapshot was
+    /// deferred so the caller can schedule a trailing refresh.
+    pub(super) fn history_refresh_if_stale(
+        &mut self,
+        now: std::time::Instant,
+        throttle: bool,
+    ) -> bool {
+        let Some(id) = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.panes.get(tab.focus))
+            .map(|pane| pane.id)
+        else {
+            return false;
+        };
+        let current = self
+            .tools
+            .history_output_generation
+            .get(&id)
+            .copied()
+            .unwrap_or(0);
+        match self.tools.history_snapshot_seen.get(&id).copied() {
+            Some((seen, _)) if seen == current => false,
+            Some((_, at))
+                if throttle && now.saturating_duration_since(at) < HISTORY_REFRESH_INTERVAL =>
+            {
+                true
+            }
+            _ => {
+                self.history_refresh_at(now);
+                false
+            }
         }
     }
     fn history_jump(&mut self) -> Task<Message> {
@@ -457,7 +555,7 @@ impl App {
             && let Some(pane) = tab.panes.get_mut(tab.focus)
             && let Some(terminal) = &mut pane.terminal
         {
-            terminal.scroll_to_history_index(hit.line_number.saturating_sub(1));
+            terminal.scroll_to_history_index(hit.grid_row);
             return self.defer_terminal_refresh(id);
         }
         Task::none()
@@ -888,12 +986,14 @@ impl App {
                 .into();
             }
             Action::HistoryQuery(q) => {
+                self.history_refresh_if_stale(std::time::Instant::now(), false);
                 if let Some(id) = self.tools.history_owner {
                     self.tools.histories.entry(id).or_default().set_query(q);
                 }
                 return self.history_jump();
             }
             Action::HistoryNext(forward) => {
+                self.history_refresh_if_stale(std::time::Instant::now(), false);
                 if let Some(s) = self
                     .tools
                     .history_owner
@@ -907,13 +1007,26 @@ impl App {
                 }
                 return self.history_jump();
             }
-            Action::HistorySelect(index) => {
-                if let Some(s) = self
+            Action::HistorySelect(owner, line_id, column) => {
+                // The button carries its rendered identity. The displayed list
+                // may already have changed, so never re-resolve an old index.
+                if self.tools.history_owner != Some(owner) || !self.focused_pane_matches(owner) {
+                    self.status = "That match belongs to a different pane.".into();
+                    return Task::none();
+                }
+                self.history_refresh_if_stale(std::time::Instant::now(), false);
+                if self.tools.history_owner != Some(owner) || !self.focused_pane_matches(owner) {
+                    self.status = "That match belongs to a different pane.".into();
+                    return Task::none();
+                }
+                let found = self
                     .tools
-                    .history_owner
-                    .and_then(|id| self.tools.histories.get_mut(&id))
-                {
-                    s.select_hit(index);
+                    .histories
+                    .get_mut(&owner)
+                    .is_some_and(|s| s.select_hit_at(line_id, column));
+                if !found {
+                    self.status = "That match is no longer in the retained history.".into();
+                    return Task::none();
                 }
                 return self.history_jump();
             }
@@ -1208,6 +1321,12 @@ impl App {
         self.tools.tab_labels.retain(|id, _| tabs.contains(id));
         self.tools.selected_tabs.retain(|id| tabs.contains(id));
         self.tools.histories.retain(|id, _| ids.contains(id));
+        self.tools
+            .history_output_generation
+            .retain(|id, _| ids.contains(id));
+        self.tools
+            .history_snapshot_seen
+            .retain(|id, _| ids.contains(id));
         self.tools.logs.retain(|id, _| ids.contains(id));
         self.tools.log_pending.retain(|id| ids.contains(id));
         self.tools.sync.set_armed(false);
@@ -1252,14 +1371,18 @@ impl App {
         }
         Task::batch(tasks)
     }
-    pub(super) fn refresh_visible_history(&mut self) {
+    /// Returns true when a throttled refresh is still owed (trailing edge).
+    pub(super) fn refresh_visible_history(&mut self, now: std::time::Instant) -> bool {
         // The History inspector and the Find strip share one snapshot. A
         // visible strip follows the focused pane the same way the panel does.
+        // Only panes with new output since their last snapshot are re-read,
+        // and streaming output is throttled to one snapshot per interval.
         if self.find_open
             || (matches!(self.dialog, Some(Dialog::Tools)) && self.tools.panel == Panel::History)
         {
-            self.history_refresh();
+            return self.history_refresh_if_stale(now, true);
         }
+        false
     }
     pub(super) fn invalidate_terminal_displays(&mut self) {
         for tab in &mut self.tabs {
@@ -1534,21 +1657,14 @@ impl App {
         .into()
     }
     fn history_tool_view(&self) -> Element<'_, Message> {
-        let state = self
-            .tools
-            .history_owner
-            .and_then(|id| self.tools.histories.get(&id));
+        let owner = self.tools.history_owner;
+        let state = owner.and_then(|id| self.tools.histories.get(&id));
         let mut results = column![].spacing(4);
-        if let Some(state) = state {
-            for (index, hit) in state
-                .hits()
-                .iter()
-                .enumerate()
-                .take(self.tools.history_visible)
-            {
+        if let (Some(owner), Some(state)) = (owner, state) {
+            for hit in state.hits().iter().take(self.tools.history_visible) {
                 results = results.push(act(
                     format!("{}:{} {}", hit.line_number, hit.column, hit.preview),
-                    Action::HistorySelect(index),
+                    Action::HistorySelect(owner, hit.line_id, hit.column),
                 ));
             }
         }
