@@ -93,8 +93,8 @@ its last 200 presentation rows even when the retained terminal buffer is much la
 
 Search is bounded to 500 displayed matches per active tab. Tests cover ASCII,
 Unicode/CJK, combining-character and emoji queries, deterministic mark/truncation
-behavior, bounded folding, navigation wrapping, and a 50,000-line retained-history
-regression.
+behavior, bounded folding, navigation wrapping, and a full-pane retained-history regression (the
+10,000-line default scrollback plus a screen).
 
 
 ## Terminal appearance and interaction preferences
