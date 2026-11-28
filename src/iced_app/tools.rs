@@ -741,11 +741,7 @@ impl App {
                 let value = if matches!(action, Action::ConfigClear) {
                     None
                 } else {
-                    self.tools
-                        .config_draft
-                        .as_ref()
-                        .map(|s| s.trim().to_owned())
-                        .filter(|s| !s.is_empty())
+                    Some(self.tools.config_draft.clone().unwrap_or_default())
                 };
                 let settings = StartupSettings {
                     ssh_config: value,
@@ -1413,14 +1409,16 @@ impl App {
                 act("Replace from file…", Action::ReplaceProfiles)
             ]
             .spacing(6),
-            text(format!("Unattended SSH config source: {}", if self.ssh_config.is_some() {
-                "CLI --ssh-config"
+            text("SSH config file for tunnel auto-start").size(13),
+            text(format!("Source: {}", if self.ssh_config.is_some() {
+                "CLI"
             } else if self.tools.startup.ssh_config.is_some() {
-                "saved path"
+                "saved file"
             } else { "none" })).size(12),
-            text(format!("Saved SSH config: {}", self.tools.startup.ssh_config.as_deref().unwrap_or("none"))).size(12),
+            text(format!("Saved file: {}", self.tools.startup.ssh_config.as_deref().unwrap_or("none"))).size(12),
             if let Some(draft) = &self.tools.config_draft {
                 column![
+                    text("SSH config file for tunnel auto-start").size(13),
                     text_input("Absolute SSH config file path", draft).on_input(|v| Message::Tool(Action::ConfigInput(v))).size(13),
                     row![act("Save", Action::ConfigSave), act("Clear", Action::ConfigClear), act("Cancel", Action::ConfigCancel)].spacing(6),
                     text("Saved path applies only to unattended tunnel auto-start; manual SSH uses --ssh-config or OpenSSH defaults.").size(12)
@@ -1996,7 +1994,25 @@ mod tests {
         let mut app = App::boot(app.profiles_path.clone(), None);
         assert!(app.tools.startup_load_failed);
         let _ = app.tool_update(Action::StartupNone);
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "{broken");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
+        let _ = app.tool_update(Action::ConfigDraft);
+        let _ = app.tool_update(Action::ConfigInput(config.display().to_string()));
+        let _ = app.tool_update(Action::ConfigSave);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
+        let _ = app.tool_update(Action::ConfigClear);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
+        let _ = app.tool_update(Action::StartupProfile("other".into()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
+    }
+
+    #[test]
+    fn config_save_does_not_treat_blank_draft_as_clear() {
+        let (mut app, _dir) = app();
+        let _ = app.tool_update(Action::ConfigDraft);
+        let _ = app.tool_update(Action::ConfigInput("  ".into()));
+        let _ = app.tool_update(Action::ConfigSave);
+        assert!(app.tools.config_draft.is_some());
+        assert!(!startup::settings_path(&app.profiles_path).exists());
     }
 
     #[test]

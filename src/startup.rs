@@ -61,14 +61,17 @@ impl StartupSettings {
     }
 }
 
-/// Validate the saved path without reading the contents. At launch, recheck
-/// the opened descriptor: replacing a path between Save and launch fails closed.
+/// Validate the saved path. Save and launch also read from one opened
+/// descriptor, so replacing the path after Save fails closed at launch.
 pub fn validate_ssh_config_path(path: &Path) -> Result<()> {
-    ensure!(path.is_absolute(), "SSH config path must be absolute");
+    let value = path.to_str().context("SSH config path must be UTF-8")?;
+    ensure!(!value.trim().is_empty(), "SSH config path is blank");
     ensure!(
-        path.to_string_lossy().len() <= 4096,
-        "SSH config path is too long"
+        !value.chars().any(char::is_control),
+        "SSH config path contains control characters"
     );
+    ensure!(path.is_absolute(), "SSH config path must be absolute");
+    ensure!(value.len() <= 4096, "SSH config path is too long");
     ensure!(
         fs::metadata(path)
             .context("inspect SSH config path")?
@@ -109,6 +112,10 @@ pub fn load_settings(path: &Path) -> Result<StartupSettings> {
 
 pub fn save_settings(path: &Path, settings: &StartupSettings) -> Result<()> {
     settings.validate()?;
+    if let Some(config) = &settings.ssh_config {
+        crate::tunnels::read_config_bytes(Path::new(config))
+            .context("read SSH config before saving startup settings")?;
+    }
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -218,6 +225,90 @@ mod tests {
         fs::write(&path, b"{broken").unwrap();
         assert!(load_settings(&path).is_err());
         assert_eq!(fs::read(path).unwrap(), b"{broken");
+    }
+
+    #[test]
+    fn saved_config_refuses_invalid_contents_without_replacing_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("startup.json");
+        fs::write(&path, "sentinel").unwrap();
+        let config = dir.path().join("config");
+        for bytes in [
+            vec![0xff],
+            b"Include other\n".to_vec(),
+            b"Match all\n".to_vec(),
+            vec![b'x'; 1024 * 1024 + 1],
+        ] {
+            fs::write(&config, bytes).unwrap();
+            let settings = StartupSettings {
+                ssh_config: Some(config.to_str().unwrap().into()),
+                ..Default::default()
+            };
+            assert!(save_settings(&path, &settings).is_err());
+            assert_eq!(fs::read(&path).unwrap(), b"sentinel");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_config_refuses_fifo_and_non_utf8_path() {
+        use std::os::unix::{ffi::OsStringExt, fs::symlink};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("startup.json");
+        let fifo = dir.path().join("fifo");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let settings = StartupSettings {
+            ssh_config: Some(fifo.to_str().unwrap().into()),
+            ..Default::default()
+        };
+        assert!(save_settings(&path, &settings).is_err());
+        let bad = dir.path().join(std::ffi::OsString::from_vec(vec![0xff]));
+        fs::write(&bad, "Host *\n").unwrap();
+        assert!(validate_ssh_config_path(&bad).is_err());
+        let link = dir.path().join("link");
+        symlink(&bad, &link).unwrap();
+        assert!(validate_ssh_config_path(&link).is_ok());
+    }
+
+    #[test]
+    fn saved_config_path_rejects_controls_and_blank_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        for value in [
+            "",
+            "  ",
+            "/tmp/bad\npath",
+            "/tmp/bad\0path",
+            &format!("/{}", "x".repeat(4096)),
+        ] {
+            let settings = StartupSettings {
+                ssh_config: Some(value.into()),
+                ..Default::default()
+            };
+            assert!(save_settings(&dir.path().join("startup.json"), &settings).is_err());
+        }
+    }
+
+    #[test]
+    fn saved_config_keeps_legal_surrounding_spaces_in_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(" config ");
+        fs::write(&config, "Host *\n").unwrap();
+        let path = dir.path().join("startup.json");
+        let settings = StartupSettings {
+            ssh_config: Some(config.to_str().unwrap().into()),
+            ..Default::default()
+        };
+        save_settings(&path, &settings).unwrap();
+        assert_eq!(
+            load_settings(&path).unwrap().ssh_config,
+            settings.ssh_config
+        );
     }
 
     #[test]

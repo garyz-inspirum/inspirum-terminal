@@ -4653,7 +4653,7 @@ to 127.0.0.1 or [::1] (an empty bind or a host name such as localhost is not acc
 off automatic start.";
 const TUNNEL_AUTO_START_REMOTE: &str = "Remote tunnels cannot auto-start: the SSH server can \
 override their bind address. Start remote tunnels manually, or turn off automatic start.";
-const TUNNEL_AUTO_START_NO_SSH_CONFIG: &str = "Not active: no --ssh-config or saved SSH config is set, so this tunnel will not auto-start. Start it manually.";
+const TUNNEL_AUTO_START_NO_SSH_CONFIG: &str = "Not active: set a saved SSH config file or pass --ssh-config to enable tunnel auto-start. Start it manually until then.";
 
 /// Editor note under the auto-start checkbox when neither a CLI nor a saved
 /// SSH config is available for unattended launches.
@@ -4867,6 +4867,11 @@ impl App {
         }
         let mut auto_start = auto_start;
         let mut tools = tools::State::load(&profiles_path);
+        // A broken settings file cannot supply a trusted saved source. An
+        // explicit CLI config remains usable without rewriting that file.
+        if tools.startup_load_failed && ssh_config.is_none() {
+            auto_start = None;
+        }
         if let Some(pass) = auto_start.as_mut() {
             let config = ssh_config.as_deref().or_else(|| {
                 tools
@@ -18355,7 +18360,8 @@ mod tunnel_layout_tests {
             TUNNEL_AUTO_START_LABEL,
             "Automatically start when app opens"
         );
-        assert!(TUNNEL_AUTO_START_NO_SSH_CONFIG.contains("--ssh-config"));
+        assert!(TUNNEL_AUTO_START_NO_SSH_CONFIG.contains("saved SSH config"));
+        assert!(!TUNNEL_AUTO_START_NO_SSH_CONFIG.contains("without --ssh-config"));
     }
 
     #[test]
@@ -18788,6 +18794,79 @@ mod tunnel_layout_tests {
         let (app, _) = App::startup(path, Some(dir.path().join("missing-cli")));
         assert!(app.auto_start.as_ref().unwrap().snapshot.is_none());
         assert!(app.auto_start.as_ref().unwrap().config_error.is_some());
+    }
+
+    #[test]
+    fn startup_snapshot_keeps_original_bytes_across_candidate_launches() {
+        let (dir, path, _) = auto_start_boot_library();
+        let config = dir.path().join("saved");
+        std::fs::write(&config, "Host *\n").unwrap();
+        crate::startup::save_settings(
+            &crate::startup::settings_path(&path),
+            &crate::startup::StartupSettings {
+                ssh_config: Some(config.to_str().unwrap().into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (mut app, _) = App::startup(path, None);
+        let frozen = app
+            .auto_start
+            .as_ref()
+            .unwrap()
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .path()
+            .to_owned();
+        app.auto_start_fake = Some(AutoStartFake::default());
+        let _ = app.update(Message::TunnelAutoStartNext);
+        assert!(app.auto_start.is_some());
+        std::fs::write(&config, "Match all\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&frozen).unwrap(), "Host *\n");
+        drain_auto_start(&mut app);
+        assert_eq!(auto_start_calls(&app), vec![AUTO_START_WEB, AUTO_START_DB]);
+    }
+
+    #[test]
+    fn corrupt_startup_settings_skip_autostart_unless_cli_supplies_config() {
+        let (dir, path, _) = auto_start_boot_library();
+        let settings = crate::startup::settings_path(&path);
+        std::fs::write(&settings, "{broken").unwrap();
+        let (app, _) = App::startup(path.clone(), None);
+        assert!(app.tools.startup_load_failed);
+        assert!(app.auto_start.is_none());
+        let cli = dir.path().join("cli");
+        std::fs::write(&cli, "Host *\n").unwrap();
+        let (app, _) = App::startup(path, Some(cli));
+        assert!(app.tools.startup_load_failed);
+        assert!(app.auto_start.as_ref().unwrap().snapshot.is_some());
+        assert_eq!(std::fs::read_to_string(settings).unwrap(), "{broken");
+    }
+
+    #[test]
+    fn missing_saved_config_reports_error_without_launching() {
+        let (dir, path, _) = auto_start_boot_library();
+        let config = dir.path().join("saved");
+        std::fs::write(&config, "Host *\n").unwrap();
+        crate::startup::save_settings(
+            &crate::startup::settings_path(&path),
+            &crate::startup::StartupSettings {
+                ssh_config: Some(config.to_str().unwrap().into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        std::fs::remove_file(config).unwrap();
+        let (app, _) = App::startup(path, None);
+        assert!(app.tools.startup_load_failed);
+        assert!(app.auto_start.is_none());
+        assert!(
+            app.tools
+                .load_errors
+                .iter()
+                .any(|error| error.contains("Could not load startup preferences"))
+        );
     }
 
     #[test]
