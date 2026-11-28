@@ -571,9 +571,10 @@ mod tests {
                 ..
             }
         ));
-        assert!(rows
-            .iter()
-            .any(|row| matches!(row, HistoryRow::Line(line) if line.id == second)));
+        assert!(
+            rows.iter()
+                .any(|row| matches!(row, HistoryRow::Line(line) if line.id == second))
+        );
     }
 
     #[test]
