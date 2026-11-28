@@ -1892,6 +1892,122 @@ def tunnel_notice_region(save_box, width: int):
     return (left + 6, save_box[1] - 12, max(left + 7, save_box[0] - 80), save_box[3] + 12)
 
 
+# 960x640 auto-start probe (INSPIRUM_GUI_AUTOSTART=1). Typing this bind into
+# opted-in Alpha's "Bind address" and pressing Save is refused with
+# src/iced_app.rs TUNNEL_AUTO_START_UNSAFE: "Cannot auto-start this tunnel.
+# Set the bind address to 127.0.0.1 or [::1] (an empty bind or a host name
+# such as localhost is not accepted), or turn off automatic start." (~180
+# chars at 12 px: two lines left of Cancel/Save in the 840 px dialog).
+AUTOSTART_MIN_NOTICE_BIND = "0.0.0.0"
+# Words of that notice found nowhere else in the dialog (the auto-start help
+# text says "can auto-start", "bind address", "Automatically"; the matcher
+# is case-sensitive and whole-token). Expected: Cannot/empty on line 1,
+# localhost/accepted on line 2.
+AUTOSTART_MIN_NOTICE_WORDS = ("Cannot", "empty", "localhost", "accepted")
+AUTOSTART_MIN_NOTICE_MIN_WORDS = 2
+# Bounded wheel-down steps (xdotool click 5) when a control is off-screen.
+MIN_WINDOW_WHEEL_STEPS = 8
+# A footer button is reachable only when its whole fill is on screen: the
+# 1280x800 Save fill measures 22 rows (671..693); a viewport-clipped one is
+# shorter.
+TUNNEL_FOOTER_BUTTON_MIN_H = 18
+# Two located words are on different wrapped lines when their tops differ by
+# at least this (12 px text, ~16 px line pitch; same-line jitter <= 3 px).
+NOTICE_LINE_MIN_DY = 8
+
+
+def tunnel_dialog_region(width: int, height: int):
+    """Full-height box of the centred Tunnel Settings dialog (x from
+    ``tunnel_dialog_left``; the dialog is centred vertically and can be as
+    tall as the window at 960x640, so y spans the window)."""
+    left, dialog = tunnel_dialog_left(width)
+    return (left, 0, min(width, left + dialog), height)
+
+
+def footer_save_box(path: Path, width: int, height: int, *, image=None):
+    """Box of the footer Save fill found anywhere in the dialog's height, or
+    ``None``. Unlike ``tunnel_save_button`` no heading is needed, so it also
+    works once the outer dialog has scrolled the heading away. Same run
+    rules (right half of the dialog, ending within 60 px of its right edge,
+    at most 120 px wide, >= 8 rows): the primary "Local" kind toggle and the
+    checked auto-start box sit further left. With several row groups the
+    lowest wins (Save is the last row of the dialog)."""
+    image = image or _read_png(path)
+    left, dialog = tunnel_dialog_left(width)
+    right = left + dialog
+    groups: list[list] = []
+    for y in range(0, min(height, image[1])):
+        run = primary_fill_run(path, y, left + dialog // 2, right, image=image)
+        if not (run and run[1] >= right - 60 and run[1] - run[0] <= 120):
+            continue
+        if groups and y - groups[-1][-1][0] <= 2:
+            groups[-1].append((y, run))
+        else:
+            groups.append([(y, run)])
+    groups = [g for g in groups if len(g) >= 8]
+    if not groups:
+        return None
+    hits = groups[-1]
+    ys = [y for y, _run in hits]
+    return (min(r[0] for _y, r in hits), min(ys), max(r[1] for _y, r in hits), max(ys) + 1)
+
+
+def footer_cancel_region(save_box, width: int):
+    """Search box for the quiet "Cancel" button: same footer row as the
+    located Save fill, from the dialog's middle to Save's left edge."""
+    left, dialog = tunnel_dialog_left(width)
+    return (left + dialog // 2, max(0, save_box[1] - 12), save_box[0], save_box[3] + 12)
+
+
+def footer_notice_region(save_box, width: int, height: int):
+    """Search box for a (wrapped) footer notice: left of Cancel on the Save
+    row, tall enough for three 16 px lines centred on it."""
+    left, _dialog = tunnel_dialog_left(width)
+    return (left + 6, max(0, save_box[1] - 36), max(left + 7, save_box[0] - 80),
+            min(height, save_box[3] + 36))
+
+
+def footer_cancel_button(cancel_text_box, save_box):
+    """Button box of the quiet Cancel from its located text interior and the
+    Save fill on the same footer row (one row, centred, same height). At
+    1280x800 text 923..961 sits in the button 909..976."""
+    return (cancel_text_box[0] - FOOTER_CANCEL_TEXT_PAD, save_box[1],
+            cancel_text_box[2] + FOOTER_CANCEL_TEXT_PAD, save_box[3])
+
+
+FOOTER_CANCEL_TEXT_PAD = 14
+
+
+def box_reachable(box, frame, *, min_h: int = 0) -> bool:
+    """``box`` lies wholly inside ``frame`` (x0, y0, x1, y1) and is at least
+    ``min_h`` tall (a viewport-clipped control is shorter)."""
+    if box is None:
+        return False
+    return (frame[0] <= box[0] < box[2] <= frame[2] and frame[1] <= box[1] < box[3] <= frame[3]
+            and box[3] - box[1] >= min_h)
+
+
+def distinct_text_lines(boxes, *, min_dy: int = NOTICE_LINE_MIN_DY) -> int:
+    """Number of text lines the located word ``boxes`` occupy."""
+    tops: list[int] = []
+    for box in sorted(boxes, key=lambda b: b[1]):
+        if not tops or box[1] - tops[-1] >= min_dy:
+            tops.append(box[1])
+    return len(tops)
+
+
+def file_sha256(path: Path) -> str:
+    import hashlib
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def require_file_unchanged(path: Path, before: str, context: str) -> None:
+    """Raise unless ``path`` still hashes to ``before`` (sha256 hex)."""
+    after = file_sha256(path)
+    if after != before:
+        raise RuntimeError(f"{context}: {path.name} changed (sha256 {before[:12]} -> {after[:12]})")
+
+
 def saved_local_forwards(profiles_path: Path, profile_name: str) -> list[str]:
     """``ssh.local_forwards`` of ``profile_name`` as persisted on disk."""
     data = json.loads(profiles_path.read_text(encoding="utf-8"))
@@ -4935,6 +5051,243 @@ async def autostart_precheck(window: str, destination: Path, env: dict[str, str]
     print("PASS auto-start: popup toggle stopped Alpha; both forwards stopped", flush=True)
 
 
+async def autostart_min_window_probe(window: str, destination: Path, env: dict[str, str],
+                                     forward_ports, profiles: Path, *, inherit_ports) -> None:
+    """INSPIRUM_GUI_AUTOSTART=1, right after ``autostart_precheck`` (every
+    forward stopped, no session open): at the 960x640 minimum window the
+    Tunnel Settings dialog keeps Save, Cancel and the auto-start checkbox
+    reachable while a wrapped validation notice grows its footer.
+
+    Gesture: select opted-in Alpha, type AUTOSTART_MIN_NOTICE_BIND into
+    "Bind address", press Save -> TUNNEL_AUTO_START_UNSAFE (two lines).
+    The outer dialog AND the editor card scroll, so a fixed-height row alone
+    proves nothing: each control must be located with its whole box on
+    screen, wheel-scrolling inside the dialog (bounded) when it is not; an
+    unreachable control is a product defect and fails the run. Leaves via
+    Cancel: profile file byte-identical, every listener still refused, the
+    original window size restored.
+    """
+    port_a, port_b = forward_ports
+    label_a, _label_b = POPULATED_LABELS
+    original = window_size(window, env)
+    before_hash = file_sha256(profiles)
+    command("xdotool", "windowsize", window, str(MIN_WINDOW[0]), str(MIN_WINDOW[1]), env=env)
+    await asyncio.sleep(.7)
+    w, h = window_size(window, env)
+    tag = require_min_window((w, h))
+    frame = (0, 0, w, h)
+    dialog = tunnel_dialog_region(w, h)
+    print(f"auto-start min: window {original[0]}x{original[1]} -> {tag}; dialog region {dialog}",
+          flush=True)
+    wheel_steps = 0
+
+    async def wheel(x: int, y: int, what: str) -> None:
+        nonlocal wheel_steps
+        command("xdotool", "mousemove", "--window", window, str(x), str(y),
+                "click", "5", env=env)
+        wheel_steps += 1
+        await asyncio.sleep(.5)
+        print(f"auto-start min: wheel step {wheel_steps} at ({x},{y}) for {what}", flush=True)
+
+    # Over the dialog body's left padding (list card starts 25 px in), so
+    # the OUTER scrollable gets the wheel, not the list or editor card.
+    body_x = dialog[0] + 16
+
+    async def footer(shot: Path, scrolled: Path, what: str):
+        """(frame path, save box, cancel button box, cancel text box) with
+        both buttons wholly on screen; wheel-scrolls the dialog if not."""
+        await asyncio.to_thread(screenshot, window, shot, env)
+        path, steps = shot, 0
+        while True:
+            save = await asyncio.to_thread(footer_save_box, path, w, h)
+            cancel_text = cancel = None
+            if save is not None:
+                try:
+                    cancel_text = await asyncio.to_thread(
+                        locate_visible_label, path, "Cancel", region=footer_cancel_region(save, w),
+                    )
+                    cancel = footer_cancel_button(cancel_text, save)
+                except RuntimeError:
+                    cancel_text = None
+            if (box_reachable(save, frame, min_h=TUNNEL_FOOTER_BUTTON_MIN_H)
+                    and _bounds_inside(save, dialog)
+                    and cancel is not None and box_reachable(cancel, frame)
+                    and _bounds_inside(cancel_text, dialog)):
+                print(f"auto-start min: {what}: Save {save}, Cancel {cancel} (text {cancel_text}) "
+                      f"in {path.name} after {steps} wheel step(s)", flush=True)
+                return path, save, cancel, cancel_text
+            if steps >= MIN_WINDOW_WHEEL_STEPS:
+                raise RuntimeError(
+                    f"PRODUCT: {tag} Tunnel Settings {what}: Save/Cancel not wholly reachable "
+                    f"after {steps} wheel steps (Save fill {save}, Cancel text {cancel_text}, "
+                    f"Cancel button {cancel}, frame {frame}, dialog {dialog}, last {path})"
+                )
+            await wheel(body_x, (save[1] + save[3]) // 2 if save else h // 2, what)
+            steps += 1
+            path = scrolled
+            await asyncio.to_thread(screenshot, window, path, env)
+
+    # 1. Tunnels -> Tunnel Settings..., select Alpha (regions from labels).
+    button_region = (max(0, w - 220), 0, w, 42)
+    tunnels_bounds = await click_label(
+        window, destination / "connected-autostart-min-tunnels-button.png", "Tunnels", env,
+        region=button_region, timeout=15,
+    )
+    popup_region = (max(0, w - 440), tunnels_bounds[1], w, min(h, tunnels_bounds[3] + 420))
+    settings = await locate_rendered_label(
+        window, destination / "connected-autostart-min-popup.png", "Tunnel Settings...",
+        env=env, region=popup_region, timeout=15,
+    )
+    command("xdotool", "mousemove", "--window", window,
+            *map(str, center(settings)), "click", "1", env=env)
+    await asyncio.sleep(.6)
+    heading = await locate_rendered_label(
+        window, destination / "connected-autostart-min-manager.png", "Tunnel Manager",
+        env=env, region=dialog, timeout=15,
+    )
+    await click_label(
+        window, destination / "connected-autostart-min-pre-alpha.png", label_a, env,
+        region=tunnel_list_region(heading, w, h), timeout=15, settle=.8,
+    )
+    listen_label = await locate_editor_label(
+        window, destination / "connected-autostart-min-listen-label.png", "Listen Port",
+        heading, env=env,
+    )
+    selected_shot = destination / "connected-autostart-min-alpha.png"
+    deadline = time.monotonic() + 15 * TIME_SCALE
+    while True:
+        await asyncio.to_thread(screenshot, window, selected_shot, env)
+        try:
+            await asyncio.to_thread(
+                require_editor_selection, selected_shot, port_a, port_b,
+                editor_form_region(w, h), row_region=listen_port_row_region(listen_label, w),
+            )
+            break
+        except RuntimeError:
+            if time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(.5)
+
+    # 2. Make Save reject: a non-loopback bind on the opted-in forward.
+    bind_label = await locate_editor_label(
+        window, destination / "connected-autostart-min-bind-label.png", "Bind address",
+        heading, env=env,
+    )
+    bind_row = editor_value_row_region(bind_label, w)
+    bx = (bind_row[0] + bind_row[2]) // 2
+    by = (bind_label[1] + bind_label[3]) // 2 + TUNNEL_INPUT_CENTRE_DY
+    print(f"auto-start min: Bind address label {bind_label} -> input ({bx},{by})", flush=True)
+    command("xdotool", "mousemove", "--window", window, str(bx), str(by), "click", "1", env=env)
+    await asyncio.sleep(.3)
+    command("xdotool", "key", "--clearmodifiers", "ctrl+a", env=env)
+    command("xdotool", "type", "--clearmodifiers", "--delay", "40",
+            AUTOSTART_MIN_NOTICE_BIND, env=env)
+    await asyncio.sleep(.5)
+    _path, save, _cancel, _text = await footer(
+        destination / "connected-autostart-min-presave.png",
+        destination / "connected-autostart-min-presave-scrolled.png", "before Save",
+    )
+    command("xdotool", "mousemove", "--window", window,
+            *map(str, center(save)), "click", "1", env=env)
+    await asyncio.sleep(1)
+    require_file_unchanged(profiles, before_hash, "refused auto-start Save at 960x640")
+
+    # 3. (b) Save + Cancel wholly on screen with the wrapped notice.
+    notice_path, save, cancel, _cancel_text = await footer(
+        destination / "connected-autostart-min-notice.png",
+        destination / "connected-autostart-min-notice-scrolled.png", "with notice",
+    )
+    footer_steps = wheel_steps
+    # (a) The notice itself: >= 2 of its distinctive words, inside the
+    # dialog, on >= 2 lines (it wrapped).
+    words = {}
+    for region in (footer_notice_region(save, w, h), dialog):
+        for word in AUTOSTART_MIN_NOTICE_WORDS:
+            if word in words:
+                continue
+            try:
+                box = await asyncio.to_thread(locate_visible_label, notice_path, word,
+                                              region=region)
+            except RuntimeError:
+                continue
+            if _bounds_inside(box, dialog):
+                words[word] = box
+        if len(words) >= AUTOSTART_MIN_NOTICE_MIN_WORDS and distinct_text_lines(words.values()) >= 2:
+            break
+    print(f"auto-start min: notice words {words} in {notice_path.name}", flush=True)
+    if len(words) < AUTOSTART_MIN_NOTICE_MIN_WORDS:
+        raise RuntimeError(
+            f"auto-start Save refusal notice not located at {tag}: words {words} of "
+            f"{AUTOSTART_MIN_NOTICE_WORDS} in {notice_path} (footer region "
+            f"{footer_notice_region(save, w, h)}, dialog {dialog})"
+        )
+    if distinct_text_lines(words.values()) < 2:
+        raise RuntimeError(
+            f"auto-start notice did not wrap at {tag} (all located words on one line: {words}); "
+            f"the probe needs a wrapped notice"
+        )
+
+    # (c) The auto-start checkbox label wholly on screen (editor card).
+    form = editor_form_region(w, h)
+    checkbox = None
+    path = notice_path
+    for step in range(MIN_WINDOW_WHEEL_STEPS + 1):
+        if step:
+            await wheel((form[0] + form[2]) // 2, min(h - 40, max(form[1] + 40, by)),
+                        "auto-start checkbox")
+            path = destination / "connected-autostart-min-checkbox-scrolled.png"
+            await asyncio.to_thread(screenshot, window, path, env)
+        try:
+            checkbox = await asyncio.to_thread(
+                locate_visible_label, path, AUTOSTART_CHECKBOX_LABEL, region=form,
+            )
+        except RuntimeError:
+            checkbox = None
+        if checkbox is not None and box_reachable(checkbox, frame) and _bounds_inside(checkbox, dialog):
+            print(f"auto-start min: checkbox label {checkbox} in {path.name} after {step} "
+                  f"wheel step(s)", flush=True)
+            break
+    else:
+        raise RuntimeError(
+            f"PRODUCT: {tag} auto-start checkbox {AUTOSTART_CHECKBOX_LABEL!r} not reachable "
+            f"after {MIN_WINDOW_WHEEL_STEPS} wheel steps over the editor card {form} "
+            f"(last box {checkbox}, last frame {path})"
+        )
+
+    # 4. Leave without saving: the located Cancel (re-located: a wheel over
+    # the editor may have moved the outer dialog too).
+    cancel_path, _save, cancel, _text = await footer(
+        destination / "connected-autostart-min-cancel.png",
+        destination / "connected-autostart-min-cancel-scrolled.png", "before Cancel",
+    )
+    command("xdotool", "mousemove", "--window", window,
+            *map(str, center(cancel)), "click", "1", env=env)
+    await asyncio.sleep(.8)
+    closed = destination / "connected-autostart-min-closed.png"
+    await asyncio.to_thread(screenshot, window, closed, env)
+    changed = await asyncio.to_thread(band_changed_pixels, cancel_path, closed, dialog)
+    print(f"auto-start min: Cancel changed {changed} dialog pixels", flush=True)
+    try:
+        await asyncio.to_thread(require_label_absent, closed, "Tunnel Manager", region=dialog)
+    except LabelVisible as exc:
+        raise RuntimeError(f"Cancel left Tunnel Settings open at {tag} ({closed})") from exc
+    if changed < 10000:
+        raise RuntimeError(f"Cancel did not visibly close Tunnel Settings ({changed} px, {closed})")
+    require_file_unchanged(profiles, before_hash, "auto-start 960x640 probe after Cancel")
+    await forward_refused(port_a, "Alpha after the 960x640 auto-start probe")
+    await forward_refused(port_b, "Bravo after the 960x640 auto-start probe")
+    for port in inherit_ports:
+        await forward_refused(port, "UNEXPECTED_INHERITED_FORWARD: after the 960x640 probe")
+
+    command("xdotool", "windowsize", window, str(original[0]), str(original[1]), env=env)
+    await asyncio.sleep(.7)
+    restored = window_size(window, env)
+    if restored != original:
+        raise RuntimeError(f"window not restored after 960x640 probe: {restored} != {original}")
+    print(f"PASS auto-start: 960x640 Save/Cancel and auto-start checkbox reachable with wrapped "
+          f"notice (wheel steps: {wheel_steps}; footer {footer_steps})", flush=True)
+
+
 async def main() -> int:
     if sys.platform != "linux":
         raise RuntimeError("Linux-only native GUI fixture")
@@ -5107,6 +5460,11 @@ async def main() -> int:
                     await autostart_precheck(
                         window, destination, env, events, forward_ports, profiles,
                         inherit_ports=inherit_ports, ssh_config=ssh_config,
+                    )
+                    # Both forwards stopped, no session open yet.
+                    await autostart_min_window_probe(
+                        window, destination, env, forward_ports, profiles,
+                        inherit_ports=inherit_ports,
                     )
 
                 # Saved sessions are listed in the bottom Session dock panel
