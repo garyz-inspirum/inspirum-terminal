@@ -138,7 +138,7 @@ pub(super) enum Action {
     SyncArm(bool),
     HistoryQuery(String),
     HistoryNext(bool),
-    HistorySelect(usize),
+    HistorySelect(u64, u64, usize),
     HistoryMark,
     HistoryTimestamps(bool),
     HistoryFold(u64),
@@ -948,19 +948,18 @@ impl App {
                 }
                 return self.history_jump();
             }
-            Action::HistorySelect(index) => {
-                // The listed index may predate an eviction or reflow: resolve
-                // the clicked match by identity against a fresh snapshot.
-                let Some((owner, line_id, column)) = self.tools.history_owner.and_then(|id| {
-                    self.tools
-                        .histories
-                        .get(&id)
-                        .and_then(|s| s.hits().get(index))
-                        .map(|hit| (id, hit.line_id, hit.column))
-                }) else {
+            Action::HistorySelect(owner, line_id, column) => {
+                // The button carries its rendered identity. The displayed list
+                // may already have changed, so never re-resolve an old index.
+                if self.tools.history_owner != Some(owner) || !self.focused_pane_matches(owner) {
+                    self.status = "That match belongs to a different pane.".into();
                     return Task::none();
-                };
+                }
                 self.history_refresh_if_stale(std::time::Instant::now(), false);
+                if self.tools.history_owner != Some(owner) || !self.focused_pane_matches(owner) {
+                    self.status = "That match belongs to a different pane.".into();
+                    return Task::none();
+                }
                 let found = self
                     .tools
                     .histories
@@ -1582,21 +1581,14 @@ impl App {
         .into()
     }
     fn history_tool_view(&self) -> Element<'_, Message> {
-        let state = self
-            .tools
-            .history_owner
-            .and_then(|id| self.tools.histories.get(&id));
+        let owner = self.tools.history_owner;
+        let state = owner.and_then(|id| self.tools.histories.get(&id));
         let mut results = column![].spacing(4);
-        if let Some(state) = state {
-            for (index, hit) in state
-                .hits()
-                .iter()
-                .enumerate()
-                .take(self.tools.history_visible)
-            {
+        if let (Some(owner), Some(state)) = (owner, state) {
+            for hit in state.hits().iter().take(self.tools.history_visible) {
                 results = results.push(act(
                     format!("{}:{} {}", hit.line_number, hit.column, hit.preview),
-                    Action::HistorySelect(index),
+                    Action::HistorySelect(owner, hit.line_id, hit.column),
                 ));
             }
         }
