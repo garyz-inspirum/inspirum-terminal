@@ -54,9 +54,10 @@ class SavedSshConfigGui(unittest.TestCase):
         self.assertIn("saved_ssh_config_probe", funcs)
         body = ast.get_source_segment(SOURCE.read_text(), funcs["saved_ssh_config_probe"])
         assert body is not None
-        for token in ("Set SSH config for auto-start…", "Absolute SSH config file path", "Profiles", "Save", "Clear", "Cancel", "forward_echo", "require_inherited_forwards_refused", "request_window_close"):
+        for token in ("Profiles", "Save", "Clear", "Cancel", "forward_echo", "require_inherited_forwards_refused", "request_window_close", "open_saved_ssh_config_editor("):
             self.assertIn(token, body)
-        self.assertNotIn("SSH config file for tunnel auto-start", body)
+        for token in ("SSH config file for tunnel auto-start", "Saved file:", "Set SSH config for auto-start...", "Absolute SSH config file path"):
+            self.assertIn(token, SOURCE.read_text())
         self.assertIn("--ssh-config", body)
         self.assertIn("cwd=local_root", body)
         self.assertNotIn("primary_fill_run", body)  # product's Save is quiet, not primary
@@ -64,6 +65,52 @@ class SavedSshConfigGui(unittest.TestCase):
         self.assertIn("saved_ssh_config_probe(", main)
         self.assertIn("profiles.write_text(json.dumps(fixture_profiles(", main)
         self.assertIn("app = None", main.split("await saved_ssh_config_probe(", 1)[0][-900:])
+
+
+class SavedGuiSection(unittest.IsolatedAsyncioTestCase):
+    async def test_product_labels_locate_editor_with_bounded_ocr(self):
+        # Product frame: the heading and saved row are separate; the old
+        # "Saved SSH config:" label does not exist. Draft stays below them.
+        labels = {
+            "SSH config file for tunnel auto-start": (213, 582, 504, 596),
+            "Saved file:": (213, 631, 290, 644),
+            "Absolute SSH config file path": (225, 692, 435, 703),
+            "Cancel": (355, 726, 405, 738),
+        }
+        seen = []
+
+        async def locate(_window, _path, label, *, env, region, timeout=22):
+            seen.append((label, region, timeout))
+            if label not in labels:
+                raise AssertionError(f"unexpected OCR lookup: {label}")
+            box = labels[label]
+            self.assertLessEqual(region[0], box[0])
+            self.assertLessEqual(region[1], box[1])
+            self.assertGreaterEqual(region[2], box[2])
+            self.assertGreaterEqual(region[3], box[3])
+            return box
+
+        async def click(_window, _path, label, _env, *, region, timeout):
+            self.assertEqual(label, "Set SSH config for auto-start...")
+            self.assertLessEqual(region[1], 653)
+            self.assertGreaterEqual(region[3], 676)
+            self.assertLessEqual(timeout, 20)
+
+        with mock.patch.object(module, "locate_rendered_label", side_effect=locate), \
+             mock.patch.object(module, "click_label", side_effect=click):
+            actions, field = await module.open_saved_ssh_config_editor(
+                "window", Path("/frames"), "save", Path("/fixture/ssh_config"),
+                {}, (200, 34, 1080, 778),
+            )
+        self.assertEqual(field, labels["Absolute SSH config file path"])
+        self.assertTrue(actions[1] > field[3])
+        self.assertEqual([label for label, _, _ in seen], [
+            "SSH config file for tunnel auto-start", "Saved file:",
+            "Absolute SSH config file path", "Cancel",
+        ])
+        self.assertTrue(all(timeout <= 20 for _, _, timeout in seen))
+        self.assertLessEqual(seen[0][2], 5)
+        self.assertLessEqual(seen[1][2], 5)
 
 
 class SavedGuiFirstFrame(unittest.IsolatedAsyncioTestCase):
