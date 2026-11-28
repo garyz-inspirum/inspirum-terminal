@@ -2213,6 +2213,16 @@ const TUNNEL_SETTINGS_WINDOW_MARGIN: f32 = 24.0;
 const TUNNEL_LIST_PANEL_WIDTH: f32 = 300.0;
 /// Card padding around the editor column.
 const TUNNEL_EDITOR_PADDING: f32 = 12.0;
+/// Fixed height of the list + editor row, so the dialog keeps one size
+/// whether a tunnel is selected or not (it is centred, so a content-sized
+/// row moved the heading, the list and the footer on every select/Save).
+/// Sized for the tallest editor measured on screen at the 840 px dialog
+/// (1280x800 and 960x640 both clamp to 840): an idle Local forward with
+/// the auto-start checkbox and its two-line help, card 490 px. The rarer
+/// "Allow non-loopback bind" row scrolls inside the card instead of
+/// growing the dialog. Resulting dialog: ~637 px, inside the 640 px
+/// minimum window height.
+const TUNNEL_EDITOR_ROW_HEIGHT: f32 = 490.0;
 /// Static editor field labels, rendered single-line at 12 px. Test-only:
 /// the editor renders these literals inline; tests pin label-column widths.
 #[cfg(test)]
@@ -10897,9 +10907,10 @@ impl App {
                         .on_toggle(move |value| Message::TunnelAcknowledge(key.clone(), value)),
                 );
             }
-            container(controls)
+            container(scrollable(controls).width(Fill).height(Fill))
                 .padding(12)
                 .width(Fill)
+                .height(Fill)
                 .style(card)
                 .into()
         } else {
@@ -10914,6 +10925,7 @@ impl App {
             )
             .padding(12)
             .width(Fill)
+            .height(Fill)
             .style(card)
             .into()
         };
@@ -10929,7 +10941,9 @@ impl App {
             if self.tunnel_edit.is_some() {
                 action("Save", Message::TunnelSaveEdit).style(primary)
             } else {
-                button(text("Save")).style(quiet)
+                // Same text size and padding as `action`, so the footer
+                // (and the dialog) keeps its height when nothing is selected.
+                button(text("Save").size(13)).padding([3, 10]).style(quiet)
             },
         ]
         .spacing(8)
@@ -10941,7 +10955,9 @@ impl App {
                 action("Refresh", Message::TunnelRefresh).style(quiet),
             ]
             .align_y(iced::Center),
-            row![list_panel, editor].spacing(12).height(Fill),
+            row![list_panel, editor]
+                .spacing(12)
+                .height(TUNNEL_EDITOR_ROW_HEIGHT),
             footer,
         ]
         .spacing(12);

@@ -1745,7 +1745,14 @@ def tunnel_save_button(path: Path, heading_bounds, width: int):
 
 
 def tunnel_notice_region(save_box, width: int):
-    """Footer notice text, left of Cancel/Save on the Save row."""
+    """Footer notice text, left of Cancel/Save on the Save row.
+
+    ``save_box`` comes from the frame BEFORE the Save click while the notice
+    is read AFTER it (editor deselected), so this relies on the centred
+    dialog keeping one height in both states: src/iced_app.rs fixes the
+    list + editor row at TUNNEL_EDITOR_ROW_HEIGHT and gives the disabled
+    Save the enabled one's size. The same holds for the ``heading`` that
+    the edit probe locates once and reuses across select/Save/remove."""
     left, _dialog = tunnel_dialog_left(width)
     return (left + 6, save_box[1] - 12, max(left + 7, save_box[0] - 80), save_box[3] + 12)
 
