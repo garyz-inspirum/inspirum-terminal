@@ -632,6 +632,7 @@ impl Manager {
         let seam = Seam {
             exact: None,
             spawn: &crate::terminal::spawn_tunnel,
+            existing_snapshot: false,
         };
         self.launch_forward(session, kind, spec, config, seam)
     }
@@ -659,8 +660,30 @@ impl Manager {
                 snapshot_dir: &snapshot_dir,
             }),
             spawn: &crate::terminal::spawn_tunnel,
+            existing_snapshot: false,
         };
         self.launch_forward(session, kind, spec, config, seam)
+    }
+
+    /// Use a startup-pass snapshot for both preflight and spawn; the caller
+    /// retains the snapshot until all queued launches have completed.
+    pub fn start_forward_snapshot(
+        &mut self,
+        session: &Session,
+        kind: ForwardKind,
+        spec: &str,
+        snapshot: &Path,
+    ) -> Result<Status> {
+        let snapshot_dir = std::env::temp_dir();
+        let seam = Seam {
+            exact: Some(ExactCheck {
+                query: &crate::terminal::query_effective_config,
+                snapshot_dir: &snapshot_dir,
+            }),
+            spawn: &crate::terminal::spawn_tunnel,
+            existing_snapshot: true,
+        };
+        self.launch_forward(session, kind, spec, Some(snapshot), seam)
     }
 
     /// Shared body of the start variants. `seam.exact` runs strictly before
@@ -736,6 +759,11 @@ impl Manager {
         selected.ssh_args()?;
         let launch_config = match &seam.exact {
             None => TunnelConfig::User(config),
+            Some(exact) if seam.existing_snapshot => {
+                let snapshot = config.ok_or(ConfigSkip::NoExplicitConfig)?;
+                exact.check_snapshot(&selected, kind, spec, snapshot)?;
+                TunnelConfig::User(Some(snapshot))
+            }
             Some(exact) => TunnelConfig::Snapshot(exact.snapshot(&selected, kind, spec, config)?),
         };
         self.failures.remove(&key);
@@ -806,6 +834,7 @@ impl Manager {
 
 /// How [`Manager::launch_forward`] checks and spawns; tests inject fakes.
 struct Seam<'a> {
+    existing_snapshot: bool,
     /// `None` for manual starts: no `ssh -G`, the user configuration as is.
     exact: Option<ExactCheck<'a>>,
     spawn: &'a dyn Fn(&Session, TunnelConfig<'_>) -> Result<TunnelProcess>,
@@ -834,20 +863,69 @@ impl ExactCheck<'_> {
         // only discover by evaluating them (`Match exec` included): skip
         // before invoking ssh at all.
         let config = config.ok_or(ConfigSkip::NoExplicitConfig)?;
-        let bytes = std::fs::read(config).map_err(|_| ConfigSkip::Unreadable)?;
-        let text = std::str::from_utf8(&bytes).map_err(|_| ConfigSkip::Unreadable)?;
-        if uses_include_or_match(text) {
-            return Err(ConfigSkip::IncludeOrMatch.into());
-        }
+        let bytes = read_config_bytes(config)?;
         let snapshot = ConfigSnapshot::write(self.snapshot_dir, &bytes)?;
-        let resolved = (self.query)(&tunnel_launch_args_snapshot(selected, snapshot.path())?)?;
+        self.check_snapshot(selected, kind, spec, snapshot.path())?;
+        Ok(snapshot)
+    }
+
+    fn check_snapshot(
+        &self,
+        selected: &Session,
+        kind: ForwardKind,
+        spec: &str,
+        snapshot: &Path,
+    ) -> Result<()> {
+        let resolved = (self.query)(&tunnel_launch_args_snapshot(selected, snapshot)?)?;
         let effective = parse_effective_forwards(&resolved);
         ensure_unattended(&effective, kind, spec)?;
         if effective.canonicalize_hostname {
             return Err(ConfigSkip::CanonicalizeHostname.into());
         }
-        Ok(snapshot)
+        Ok(())
     }
+}
+
+/// Bound reads from one nonblocking opened descriptor. A replaced FIFO/device
+/// is rejected by fstat before read; symlinks to regular files remain valid.
+pub fn read_config_bytes(path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(if cfg!(any(target_os = "linux", target_os = "android")) {
+        0o4000 // O_NONBLOCK on Linux
+    } else {
+        0x4 // O_NONBLOCK on macOS/BSD
+    });
+    let file = options.open(path).map_err(|_| ConfigSkip::Unreadable)?;
+    if !file
+        .metadata()
+        .map_err(|_| ConfigSkip::Unreadable)?
+        .is_file()
+    {
+        return Err(ConfigSkip::Unreadable.into());
+    }
+    const MAX_CONFIG_BYTES: usize = 1024 * 1024;
+    let mut bytes = Vec::new();
+    file.take((MAX_CONFIG_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ConfigSkip::Unreadable)?;
+    if bytes.len() > MAX_CONFIG_BYTES {
+        return Err(ConfigSkip::Unreadable.into());
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| ConfigSkip::Unreadable)?;
+    if uses_include_or_match(text) {
+        return Err(ConfigSkip::IncludeOrMatch.into());
+    }
+    Ok(bytes)
+}
+
+pub fn snapshot_config(path: &Path) -> Result<ConfigSnapshot> {
+    let bytes = read_config_bytes(path)?;
+    ConfigSnapshot::write(&std::env::temp_dir(), &bytes)
 }
 
 /// Some line's first keyword is `Include` or `Match` (case-insensitive,
@@ -1562,6 +1640,52 @@ mod tests {
         assert!(auto_start_for(&session, ForwardKind::Local, WEB));
     }
 
+    #[test]
+    fn startup_snapshot_reads_once_and_is_unchanged_after_source_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("config");
+        std::fs::write(&source, "Host *\n  ForwardAgent no\n").unwrap();
+        let snapshot = snapshot_config(&source).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(snapshot.path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o077,
+                0
+            );
+        }
+        std::fs::write(&source, "Host *\n  ForwardAgent yes\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(snapshot.path()).unwrap(),
+            "Host *\n  ForwardAgent no\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_reader_rejects_fifo_without_blocking_and_bad_bytes() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("fifo");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(read_config_bytes(&fifo).is_err());
+        let source = dir.path().join("config");
+        std::fs::write(&source, [0xff]).unwrap();
+        assert!(read_config_bytes(&source).is_err());
+        std::fs::write(&source, "Match host *\n").unwrap();
+        assert!(read_config_bytes(&source).is_err());
+    }
+
     /// Forwarding-only `ssh -N` that stays alive without any server: the
     /// ProxyCommand never sends a banner, so no listener is ever bound.
     fn hung_ssh_config(dir: &Path) -> std::path::PathBuf {
@@ -1848,6 +1972,7 @@ clearallforwardings no
         };
         let mut manager = Manager::default();
         let seam = Seam {
+            existing_snapshot: false,
             exact: Some(ExactCheck {
                 query,
                 snapshot_dir,
@@ -2170,6 +2295,7 @@ clearallforwardings no
             anyhow::bail!("fake spawn")
         };
         let seam = Seam {
+            existing_snapshot: false,
             exact: None,
             spawn: &spawn,
         };
@@ -2214,6 +2340,7 @@ localforward [127.0.0.1]:18092 [127.0.0.1]:7\ntunnel false\n"
             anyhow::bail!("spawn must not be reached")
         };
         let seam = Seam {
+            existing_snapshot: false,
             exact: Some(ExactCheck {
                 query: &query,
                 snapshot_dir: snapshot_dir.path(),
@@ -2269,6 +2396,7 @@ localforward [127.0.0.1]:18092 [127.0.0.1]:7\ntunnel false\n"
             crate::terminal::spawn_tunnel(selected, launch)
         };
         let seam = Seam {
+            existing_snapshot: false,
             exact: Some(ExactCheck {
                 query: &query,
                 snapshot_dir: snapshot_dir.path(),
@@ -2462,6 +2590,7 @@ LocalForward 127.0.0.1:18097 127.0.0.1:7\n",
             anyhow::bail!("checked; nothing spawned")
         };
         let seam = Seam {
+            existing_snapshot: false,
             exact: Some(ExactCheck {
                 query: &query,
                 snapshot_dir: snapshot_dir.path(),
@@ -2502,6 +2631,7 @@ LocalForward 127.0.0.1:18097 127.0.0.1:7\n",
         };
         let mut manager = Manager::default();
         let seam = Seam {
+            existing_snapshot: false,
             exact: Some(ExactCheck {
                 query: &crate::terminal::query_effective_config,
                 snapshot_dir: snapshot_dir.path(),
@@ -2523,6 +2653,7 @@ LocalForward 127.0.0.1:18097 127.0.0.1:7\n",
 
         // Manual start (the seam `start_forward` uses): no query, spawn reached.
         let seam = Seam {
+            existing_snapshot: false,
             exact: None,
             spawn: &spawn,
         };

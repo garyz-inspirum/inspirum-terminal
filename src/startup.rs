@@ -29,10 +29,15 @@ pub enum StartupBehavior {
 pub struct StartupSettings {
     #[serde(default)]
     pub behavior: StartupBehavior,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_config: Option<String>,
 }
 
 impl StartupSettings {
     pub fn validate(&self) -> Result<()> {
+        if let Some(path) = &self.ssh_config {
+            validate_ssh_config_path(Path::new(path))?;
+        }
         match &self.behavior {
             StartupBehavior::None => {}
             StartupBehavior::Profile { profile } => {
@@ -54,6 +59,23 @@ impl StartupSettings {
         }
         Ok(())
     }
+}
+
+/// Validate the saved path without reading the contents. At launch, recheck
+/// the opened descriptor: replacing a path between Save and launch fails closed.
+pub fn validate_ssh_config_path(path: &Path) -> Result<()> {
+    ensure!(path.is_absolute(), "SSH config path must be absolute");
+    ensure!(
+        path.to_string_lossy().len() <= 4096,
+        "SSH config path is too long"
+    );
+    ensure!(
+        fs::metadata(path)
+            .context("inspect SSH config path")?
+            .is_file(),
+        "SSH config must be a regular file"
+    );
+    Ok(())
 }
 
 pub fn settings_path(profiles_path: &Path) -> PathBuf {
@@ -130,6 +152,7 @@ mod tests {
             behavior: StartupBehavior::Profile {
                 profile: "4:prodrouter".into(),
             },
+            ssh_config: None,
         };
         save_settings(&path, &settings).unwrap();
         assert_eq!(load_settings(&path).unwrap(), settings);
@@ -145,10 +168,14 @@ mod tests {
         let config = dir.path().join("config");
         fs::write(&config, "Host *\n  ForwardAgent no\n").unwrap();
         let path = dir.path().join("startup.json");
-        let mut settings = StartupSettings::default();
-        settings.ssh_config = Some(config.to_str().unwrap().into());
+        let mut settings = StartupSettings {
+            ssh_config: Some(config.to_str().unwrap().into()),
+            ..Default::default()
+        };
         save_settings(&path, &settings).unwrap();
-        settings.behavior = StartupBehavior::Profile { profile: "prod".into() };
+        settings.behavior = StartupBehavior::Profile {
+            profile: "prod".into(),
+        };
         save_settings(&path, &settings).unwrap();
         assert_eq!(load_settings(&path).unwrap(), settings);
     }
@@ -157,18 +184,28 @@ mod tests {
     fn saved_config_rejects_non_regular_and_relative_paths_without_writing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("startup.json");
-        let settings = StartupSettings { ssh_config: Some("relative".into()), ..Default::default() };
+        let settings = StartupSettings {
+            ssh_config: Some("relative".into()),
+            ..Default::default()
+        };
         assert!(save_settings(&path, &settings).is_err());
         assert!(!path.exists());
-        let settings = StartupSettings { ssh_config: Some(dir.path().to_str().unwrap().into()), ..Default::default() };
+        let settings = StartupSettings {
+            ssh_config: Some(dir.path().to_str().unwrap().into()),
+            ..Default::default()
+        };
         assert!(save_settings(&path, &settings).is_err());
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        {
             use std::os::unix::fs::symlink;
             let config = dir.path().join("config");
             fs::write(&config, "Host *\n").unwrap();
             let link = dir.path().join("link");
             symlink(&config, &link).unwrap();
-            let settings = StartupSettings { ssh_config: Some(link.to_str().unwrap().into()), ..Default::default() };
+            let settings = StartupSettings {
+                ssh_config: Some(link.to_str().unwrap().into()),
+                ..Default::default()
+            };
             save_settings(&path, &settings).unwrap();
             assert_eq!(load_settings(&path).unwrap(), settings);
         }
@@ -189,6 +226,7 @@ mod tests {
             behavior: StartupBehavior::Workspace {
                 path: "/tmp/layout.json".into(),
             },
+            ssh_config: None,
         };
         settings.validate().unwrap();
     }
