@@ -666,8 +666,10 @@ impl Manager {
         self.launch_forward(session, kind, spec, config, seam)
     }
 
-    /// Use a startup-pass snapshot for both preflight and spawn; the caller
-    /// retains the snapshot until all queued launches have completed.
+    /// Use a start-up pass snapshot for both preflight and spawn. The
+    /// spawned process record keeps its own handle, so the file outlives the
+    /// pass until that tunnel is stopped or reaped: spawn returns before ssh
+    /// has necessarily opened `-F <snapshot>`.
     pub fn start_forward_snapshot(
         &mut self,
         session: &Session,
@@ -758,17 +760,15 @@ impl Manager {
             "non-loopback tunnel binds require explicit risk acknowledgement"
         );
         selected.ssh_args()?;
-        let launch_config = match &seam.exact {
-            None => TunnelConfig::User(config),
-            Some(exact) if seam.existing_snapshot.is_some() => {
-                let snapshot = seam
-                    .existing_snapshot
-                    .ok_or(ConfigSkip::NoExplicitConfig)?
-                    .path();
-                exact.check_snapshot(&selected, kind, spec, snapshot)?;
-                TunnelConfig::User(Some(snapshot))
+        let launch_config = match (&seam.exact, seam.existing_snapshot) {
+            (None, _) => TunnelConfig::User(config),
+            (Some(exact), Some(snapshot)) => {
+                exact.check_snapshot(&selected, kind, spec, snapshot.path())?;
+                TunnelConfig::Snapshot(Arc::clone(snapshot))
             }
-            Some(exact) => TunnelConfig::Snapshot(exact.snapshot(&selected, kind, spec, config)?),
+            (Some(exact), None) => {
+                TunnelConfig::Snapshot(Arc::new(exact.snapshot(&selected, kind, spec, config)?))
+            }
         };
         self.failures.remove(&key);
         match (seam.spawn)(&selected, launch_config) {
@@ -838,6 +838,8 @@ impl Manager {
 
 /// How [`Manager::launch_forward`] checks and spawns; tests inject fakes.
 struct Seam<'a> {
+    /// A start-up pass snapshot to check and launch from instead of reading
+    /// `config` again.
     existing_snapshot: Option<&'a Arc<ConfigSnapshot>>,
     /// `None` for manual starts: no `ssh -G`, the user configuration as is.
     exact: Option<ExactCheck<'a>>,
@@ -899,18 +901,20 @@ pub fn read_config_bytes(path: &Path) -> Result<Vec<u8>> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
-    options.custom_flags(if cfg!(any(target_os = "linux", target_os = "android")) {
-        0o4000 // O_NONBLOCK on Linux
-    } else {
-        0x4 // O_NONBLOCK on macOS/BSD
-    });
-    let file = options.open(path).map_err(|_| ConfigSkip::Unreadable)?;
+    options.custom_flags(libc::O_NONBLOCK);
+    let file = options.open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ConfigSkip::MissingOrNotRegular
+        } else {
+            ConfigSkip::Unreadable
+        }
+    })?;
     if !file
         .metadata()
         .map_err(|_| ConfigSkip::Unreadable)?
         .is_file()
     {
-        return Err(ConfigSkip::Unreadable.into());
+        return Err(ConfigSkip::MissingOrNotRegular.into());
     }
     const MAX_CONFIG_BYTES: usize = 1024 * 1024;
     let mut bytes = Vec::new();
@@ -989,8 +993,9 @@ impl std::error::Error for InheritedForwards {}
 /// skipped at start-up and left for a manual start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfigSkip {
-    /// The app runs without `--ssh-config`: OpenSSH would read files the app
-    /// cannot snapshot without evaluating them first.
+    /// Neither `--ssh-config` nor a saved file (Tools → Profiles) selects a
+    /// configuration: OpenSSH would read files the app cannot snapshot
+    /// without evaluating them first.
     NoExplicitConfig,
     /// The configuration has an `Include` or `Match` line.
     IncludeOrMatch,
@@ -1010,8 +1015,8 @@ impl std::fmt::Display for ConfigSkip {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::NoExplicitConfig => {
-                "Auto-start skipped: no explicit SSH configuration was provided. \
-Start this tunnel manually."
+                "Auto-start skipped: no SSH config file is selected. Choose one in Tools → \
+Profiles, or start this tunnel manually."
             }
             Self::IncludeOrMatch => {
                 "Auto-start skipped: this tunnel's OpenSSH configuration uses Include or \

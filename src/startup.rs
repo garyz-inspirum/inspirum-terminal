@@ -61,8 +61,11 @@ impl StartupSettings {
     }
 }
 
-/// Validate the saved path. Save and launch also read from one opened
-/// descriptor, so replacing the path after Save fails closed at launch.
+/// Lexical check of a saved SSH config path: part of decoding the record,
+/// so it never touches the filesystem. Whether the file is usable is
+/// checked when a new path is saved ([`save_settings_checking_config`]) and
+/// again at each start-up pass, which skips unattended tunnels without
+/// changing the record when it is not.
 pub fn validate_ssh_config_path(path: &Path) -> Result<()> {
     let value = path.to_str().context("SSH config path must be UTF-8")?;
     ensure!(!value.trim().is_empty(), "SSH config path is blank");
@@ -72,12 +75,6 @@ pub fn validate_ssh_config_path(path: &Path) -> Result<()> {
     );
     ensure!(path.is_absolute(), "SSH config path must be absolute");
     ensure!(value.len() <= 4096, "SSH config path is too long");
-    ensure!(
-        fs::metadata(path)
-            .context("inspect SSH config path")?
-            .is_file(),
-        "SSH config must be a regular file"
-    );
     Ok(())
 }
 
@@ -110,17 +107,22 @@ pub fn load_settings(path: &Path) -> Result<StartupSettings> {
     Ok(settings)
 }
 
-/// Save a newly chosen SSH config path: its content is checked first.
+/// Save a newly chosen SSH config path: the file is read with the same
+/// checks as a start-up pass (regular file, at most 1 MiB, UTF-8, no
+/// `Include`/`Match`) before anything is written.
 pub fn save_settings_checking_config(path: &Path, settings: &StartupSettings) -> Result<()> {
-    save_settings(path, settings)
-}
-
-pub fn save_settings(path: &Path, settings: &StartupSettings) -> Result<()> {
     settings.validate()?;
     if let Some(config) = &settings.ssh_config {
         crate::tunnels::read_config_bytes(Path::new(config))
             .context("read SSH config before saving startup settings")?;
     }
+    save_settings(path, settings)
+}
+
+/// Write the record after lexical validation only, so behavior changes and
+/// Clear keep working when the saved SSH file has gone missing.
+pub fn save_settings(path: &Path, settings: &StartupSettings) -> Result<()> {
+    settings.validate()?;
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())

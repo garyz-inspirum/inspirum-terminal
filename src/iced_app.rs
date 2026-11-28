@@ -2885,9 +2885,12 @@ struct AutoStartPass {
     /// `tunnels::ConfigSkip` other than `NoExplicitConfig`): one
     /// `"{name}: {notice}"` sentence each. Manual start only.
     skipped_manual: Vec<String>,
-    /// `tunnels::ConfigSkip::NoExplicitConfig` (the app runs without
-    /// `--ssh-config`): names listed under one shared notice.
+    /// `tunnels::ConfigSkip::NoExplicitConfig` (neither `--ssh-config` nor
+    /// a saved file): names listed under one shared notice.
     skipped_no_config: Vec<String>,
+    /// `tunnels::ConfigSkip::StartupSettingsUnreadable` (the startup
+    /// settings record did not load): names under one shared notice.
+    skipped_settings: Vec<String>,
 }
 
 /// Opted-in forwards of every saved profile, in library order, each once.
@@ -2970,6 +2973,13 @@ start manually ({})",
             "{}: {}",
             pass.skipped_no_config.join(", "),
             tunnels::ConfigSkip::NoExplicitConfig
+        ));
+    }
+    if !pass.skipped_settings.is_empty() {
+        sentences.push(format!(
+            "{}: {}",
+            pass.skipped_settings.join(", "),
+            tunnels::ConfigSkip::StartupSettingsUnreadable
         ));
     }
     sentences.extend(pass.skipped_manual.iter().cloned());
@@ -4656,7 +4666,8 @@ to 127.0.0.1 or [::1] (an empty bind or a host name such as localhost is not acc
 off automatic start.";
 const TUNNEL_AUTO_START_REMOTE: &str = "Remote tunnels cannot auto-start: the SSH server can \
 override their bind address. Start remote tunnels manually, or turn off automatic start.";
-const TUNNEL_AUTO_START_NO_SSH_CONFIG: &str = "Not active: set a saved SSH config file or pass --ssh-config to enable tunnel auto-start. Start it manually until then.";
+const TUNNEL_AUTO_START_NO_SSH_CONFIG: &str = "Not active: no SSH config file is selected. \
+Choose one in Tools → Profiles, or start this tunnel manually.";
 
 /// Editor note under the auto-start checkbox when neither a CLI nor a saved
 /// SSH config is available for unattended launches.
@@ -4834,10 +4845,14 @@ impl App {
         // and lowercase the full session library.
         let profile_matches = (0..profiles.len()).collect();
         // A failed load leaves an empty library; never auto-start from it.
-        let auto_start = profiles_writable.then(|| AutoStartPass {
-            queue: auto_start_candidates(&profiles),
-            ..Default::default()
-        });
+        // Without a candidate there is no pass at all, so nothing reads or
+        // copies an SSH config and nothing is left to clean up.
+        let auto_start = profiles_writable
+            .then(|| AutoStartPass {
+                queue: auto_start_candidates(&profiles),
+                ..Default::default()
+            })
+            .filter(|pass| !pass.queue.is_empty());
         let snippets_path = command_palette::snippets_path(&profiles_path);
         let snippets = match command_palette::load_library(&snippets_path) {
             Ok(library) => library,
@@ -4870,12 +4885,14 @@ impl App {
         }
         let mut auto_start = auto_start;
         let mut tools = tools::State::load(&profiles_path);
-        // A broken settings file cannot supply a trusted saved source. An
-        // explicit CLI config remains usable without rewriting that file.
-        if tools.startup_load_failed && ssh_config.is_none() {
-            auto_start = None;
-        }
         if let Some(pass) = auto_start.as_mut() {
+            // An unusable settings record skips every unattended launch,
+            // even with `--ssh-config`; the record is never rewritten here.
+            if tools.startup_load_failed {
+                pass.config_error = Some(tunnels::ConfigSkip::StartupSettingsUnreadable);
+            }
+            // The one read of the source for this pass. `--ssh-config`
+            // overrides the saved file with no fallback when it is unusable.
             let config = ssh_config.as_deref().or_else(|| {
                 tools
                     .startup
@@ -4883,7 +4900,7 @@ impl App {
                     .as_deref()
                     .map(std::path::Path::new)
             });
-            if let Some(config) = config {
+            if let Some(config) = config.filter(|_| pass.config_error.is_none()) {
                 match tunnels::snapshot_config(config) {
                     Ok(snapshot) => pass.snapshot = Some(Arc::new(snapshot)),
                     Err(error) => {
@@ -5141,6 +5158,9 @@ impl App {
                         Err(error) => match error.downcast_ref::<tunnels::ConfigSkip>() {
                             Some(tunnels::ConfigSkip::NoExplicitConfig) => {
                                 pass.skipped_no_config.push(name)
+                            }
+                            Some(tunnels::ConfigSkip::StartupSettingsUnreadable) => {
+                                pass.skipped_settings.push(name)
                             }
                             Some(skip) => pass.skipped_manual.push(format!("{name}: {skip}")),
                             None => pass.failed.push(format!("{name}: {error:#}")),

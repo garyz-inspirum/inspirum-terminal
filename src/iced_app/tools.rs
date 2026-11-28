@@ -747,10 +747,15 @@ impl App {
                     ssh_config: value,
                     ..self.tools.startup.clone()
                 };
-                match startup::save_settings(
-                    &startup::settings_path(&self.profiles_path),
-                    &settings,
-                ) {
+                let path = startup::settings_path(&self.profiles_path);
+                // Only a new path is read; Clear works even when the saved
+                // file is gone.
+                let saved = if settings.ssh_config.is_some() {
+                    startup::save_settings_checking_config(&path, &settings)
+                } else {
+                    startup::save_settings(&path, &settings)
+                };
+                match saved {
                     Ok(()) => {
                         self.tools.startup = settings;
                         self.tools.config_draft = None;

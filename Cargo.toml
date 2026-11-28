@@ -21,6 +21,12 @@ tempfile = "3"
 directories = "6"
 terminal_core = { package = "inspirum-terminal-core", path = "vendor/terminal-core" }
 chrono = "0.4"
+
+[target.'cfg(unix)'.dependencies]
+# Platform O_NONBLOCK for opening the auto-start SSH config without blocking
+# on a FIFO; already in Cargo.lock through other dependencies.
+libc = "0.2.190"
+
 # Enable the Metal/WGPU backend on macOS and retain tiny-skia as a fallback.
 # The third-party notice verifier must pass for this native target before
 # enabling GPU acceleration in distributed builds; never waive license checks.
